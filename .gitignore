@@ -1,0 +1,34 @@
+# OS / editor
+.DS_Store
+.code/
+.idea/
+.vscode/
+.env
+.env.*
+
+# Local data / secrets
+pool/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+
+# Build artifacts
+codex-pool-proxy
+codexpool
+tmp/
+bin/
+dist/
+coverage.out
+
+# Python
+__pycache__/
+*.pyc
+
+# Node / package managers
+node_modules/
+
+# Reference checkout (not part of this repo)
+codex/

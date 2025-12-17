@@ -1,0 +1,21 @@
+services:
+  codex-pool:
+    build: .
+    image: codex-pool:latest
+    ports:
+      - "8989:8989"
+    volumes:
+      - ./pool:/app/pool
+      - ./data:/app/data
+    environment:
+      - POOL_DIR=/app/pool
+      - PROXY_DB_PATH=/app/data/proxy.db
+      - PROXY_LISTEN_ADDR=0.0.0.0:8989
+      - PROXY_MAX_ATTEMPTS=3
+      - PROXY_USAGE_REFRESH_SECONDS=300
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8989/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
