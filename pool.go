@@ -423,6 +423,13 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 	if secondaryUsed == 0 && a.Usage.SecondaryUsed > 0 {
 		secondaryUsed = a.Usage.SecondaryUsed
 	}
+
+	// Apply plan capacity weight: Plus accounts have ~10x less capacity than Pro,
+	// so 10% usage on Plus is equivalent to 100% on Pro.
+	weight := planCapacityWeight(a.PlanType)
+	primaryUsed = math.Min(primaryUsed*weight, 1.0)
+	secondaryUsed = math.Min(secondaryUsed*weight, 1.0)
+
 	headroom := 1.0
 	if primaryUsed > 0 {
 		headroom = math.Min(headroom, 1.0-primaryUsed)
@@ -446,20 +453,32 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		headroom = 0.01
 	}
 
-	// plan/credits bonuses
-	planBonus := 1.0
-	switch a.PlanType {
-	case "pro":
-		planBonus = 1.1
-	case "enterprise":
-		planBonus = 1.2
-	}
+	// credits bonuses
 	creditBonus := 1.0
 	if a.Usage.CreditsUnlimited || a.Usage.HasCredits {
 		creditBonus = 1.1
 	}
 
-	return headroom * planBonus * creditBonus
+	return headroom * creditBonus
+}
+
+// planCapacityWeight returns a multiplier for usage based on plan capacity.
+// Plus accounts have ~10x less capacity than Pro, so their usage is weighted higher.
+func planCapacityWeight(planType string) float64 {
+	switch planType {
+	case "plus":
+		return 10.0 // Plus has ~10x less capacity than Pro
+	case "pro":
+		return 1.0
+	case "team":
+		return 1.0 // Team is similar to Pro
+	case "enterprise":
+		return 0.5 // Enterprise has more capacity
+	case "gemini":
+		return 1.0 // Gemini has its own quota system
+	default:
+		return 1.0
+	}
 }
 
 func (p *poolState) pin(conversationID, accountID string) {

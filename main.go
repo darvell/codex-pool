@@ -237,6 +237,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.serveAccounts(w)
 		return
+	case "/status", "/status/":
+		h.serveStatusPage(w, r)
+		return
 	}
 
 	// Pool user admin routes
