@@ -9,6 +9,7 @@
 # Local data / secrets
 pool/
 data/
+config.toml
 *.db
 *.db-shm
 *.db-wal

@@ -84,12 +84,45 @@ Or add to your shell profile:
 echo 'export CODE_ASSIST_ENDPOINT=http://127.0.0.1:8989' >> ~/.bashrc
 ```
 
+## Pool Users (Multi-User Mode)
+
+Enable multiple users to share the pool without giving them real account credentials.
+
+### Setup
+
+Set these environment variables:
+
+```bash
+export POOL_ADMIN_PASSWORD=your-secret-password
+export POOL_JWT_SECRET=32-character-secret-for-signing-tokens
+```
+
+### Create Users
+
+1. Visit `http://localhost:8989/admin/pool-users` (enter password when prompted)
+2. Click "Create New User"
+3. Enter email and plan type
+4. Share the generated curl commands with the user:
+
+```bash
+# For Codex CLI
+curl http://PROXY:8989/config/codex/TOKEN > ~/.codex/auth.json
+
+# For Gemini CLI
+curl http://PROXY:8989/config/gemini/TOKEN > ~/.gemini/oauth_creds.json
+```
+
+Users still need to configure their CLI to point to the proxy (see setup sections above).
+
 ## Endpoints
 
 - `GET /healthz` — health status, account counts, recent errors
 - `GET /metrics` — Prometheus-style counters
 - `GET /admin/accounts` — debug view of all account states (shows type: codex/gemini)
 - `POST /admin/reload` — reload accounts from disk
+- `GET /admin/pool-users` — manage pool users (password protected)
+- `GET /config/codex/<token>` — download Codex auth.json for pool user
+- `GET /config/gemini/<token>` — download Gemini oauth_creds.json for pool user
 
 ## Environment Variables
 
@@ -101,6 +134,9 @@ echo 'export CODE_ASSIST_ENDPOINT=http://127.0.0.1:8989' >> ~/.bashrc
 | `PROXY_MAX_ATTEMPTS` | `3` | Retry attempts across accounts |
 | `PROXY_DISABLE_REFRESH` | `0` | Set to `1` to disable token refresh |
 | `PROXY_DEBUG` | `0` | Enable debug logging |
+| `POOL_ADMIN_PASSWORD` | (none) | Password for pool user admin UI |
+| `POOL_JWT_SECRET` | (none) | Secret for signing pool user tokens |
+| `POOL_USERS_PATH` | `./data/pool_users.json` | Path to pool users database |
 
 ## File Naming Convention
 

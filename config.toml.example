@@ -1,0 +1,29 @@
+# Codex Pool Proxy Configuration
+# Copy this file to config.toml and customize as needed.
+# Environment variables take precedence over config file values.
+
+# Server settings
+listen_addr = "127.0.0.1:8989"
+pool_dir = "pool"
+db_path = "./data/proxy.db"
+max_attempts = 3
+disable_refresh = false
+debug = false
+
+# Public URL for generated configs and instructions
+# Use this when behind a reverse proxy or using a custom domain
+# Example: "https://proxy.example.com" or "http://192.168.1.100:8989"
+public_url = ""
+
+# Pool Users (Multi-User Mode)
+# Enable this section to allow creating users who can share the pool
+# without access to real account credentials.
+[pool_users]
+# Password for the admin UI at /admin/pool-users
+admin_password = ""
+
+# Secret key for signing pool user tokens (should be 32+ characters)
+jwt_secret = ""
+
+# Where to store pool user data
+storage_path = "./data/pool_users.json"

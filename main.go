@@ -67,19 +67,34 @@ func parseInt64(s string) (int64, error) {
 	return n, err
 }
 
+// Global config file reference for pool users config
+var globalConfigFile *ConfigFile
+
 func buildConfig() config {
+	// Load config.toml if it exists
+	configFile, err := loadConfigFile("config.toml")
+	if err != nil {
+		log.Printf("warning: failed to load config.toml: %v", err)
+	}
+	globalConfigFile = configFile
+
+	var fileCfg ConfigFile
+	if configFile != nil {
+		fileCfg = *configFile
+	}
+
 	cfg := config{}
-	cfg.listenAddr = getenv("PROXY_LISTEN_ADDR", "127.0.0.1:8989")
+	cfg.listenAddr = getConfigString("PROXY_LISTEN_ADDR", fileCfg.ListenAddr, "127.0.0.1:8989")
 	cfg.responsesBase = mustParse(getenv("UPSTREAM_RESPONSES_BASE", "https://chatgpt.com/backend-api/codex"))
 	cfg.whamBase = mustParse(getenv("UPSTREAM_WHAM_BASE", "https://chatgpt.com/backend-api"))
 	cfg.refreshBase = mustParse(getenv("UPSTREAM_REFRESH_BASE", "https://auth.openai.com"))
 	cfg.geminiBase = mustParse(getenv("UPSTREAM_GEMINI_BASE", "https://cloudcode-pa.googleapis.com"))
-	cfg.poolDir = getenv("POOL_DIR", "pool")
+	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
-	cfg.disableRefresh = getenv("PROXY_DISABLE_REFRESH", "0") == "1"
+	cfg.disableRefresh = getConfigBool("PROXY_DISABLE_REFRESH", fileCfg.DisableRefresh, false)
 
-	cfg.debug = getenv("PROXY_DEBUG", "0") == "1"
+	cfg.debug = getConfigBool("PROXY_DEBUG", fileCfg.Debug, false)
 	cfg.logBodies = getenv("PROXY_LOG_BODIES", "0") == "1"
 	cfg.bodyLogLimit = 16 * 1024 // 16 KiB
 	if v := getenv("PROXY_BODY_LOG_LIMIT", ""); v != "" {
@@ -99,13 +114,8 @@ func buildConfig() config {
 			cfg.usageRefresh = time.Duration(n) * time.Second
 		}
 	}
-	cfg.maxAttempts = 3
-	if v := getenv("PROXY_MAX_ATTEMPTS", ""); v != "" {
-		if n, err := parseInt64(v); err == nil && n > 0 {
-			cfg.maxAttempts = int(n)
-		}
-	}
-	cfg.storePath = getenv("PROXY_DB_PATH", "./data/proxy.db")
+	cfg.maxAttempts = getConfigInt("PROXY_MAX_ATTEMPTS", fileCfg.MaxAttempts, 3)
+	cfg.storePath = getConfigString("PROXY_DB_PATH", fileCfg.DBPath, "./data/proxy.db")
 	cfg.retentionDays = 30
 	if v := getenv("PROXY_USAGE_RETENTION_DAYS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n > 0 {
@@ -150,10 +160,24 @@ func main() {
 	}
 	_ = http2.ConfigureTransport(transport)
 
+	// Initialize pool users store if configured
+	var poolUsers *PoolUserStore
+	if getPoolAdminPassword() != "" && getPoolJWTSecret() != "" {
+		poolUsersPath := getPoolUsersPath()
+		var err error
+		poolUsers, err = newPoolUserStore(poolUsersPath)
+		if err != nil {
+			log.Printf("warning: failed to load pool users: %v", err)
+		} else {
+			log.Printf("pool users enabled (%d users)", len(poolUsers.List()))
+		}
+	}
+
 	h := &proxyHandler{
 		cfg:       cfg,
 		transport: transport,
 		pool:      pool,
+		poolUsers: poolUsers,
 		store:     store,
 		metrics:   newMetrics(),
 		recent:    newRecentErrors(50),
@@ -176,6 +200,7 @@ type proxyHandler struct {
 	cfg       config
 	transport *http.Transport
 	pool      *poolState
+	poolUsers *PoolUserStore
 	store     *usageStore
 	metrics   *metrics
 	recent    *recentErrors
@@ -214,9 +239,21 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pool user admin routes
+	if strings.HasPrefix(r.URL.Path, "/admin/pool-users") {
+		h.servePoolUsersAdmin(w, r)
+		return
+	}
+
+	// Config download routes (no auth - token is the auth)
+	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") {
+		h.serveConfigDownload(w, r)
+		return
+	}
+
 	// Fake refresh handler so Codex CLI never needs to hit the real auth server.
 	if strings.HasPrefix(r.URL.Path, "/oauth/token") {
-		h.serveFakeOAuthToken(w)
+		h.serveFakeOAuthToken(w, r)
 		return
 	}
 
@@ -304,7 +341,19 @@ func (h *proxyHandler) reloadAccounts() {
 	}
 }
 
-func (h *proxyHandler) serveFakeOAuthToken(w http.ResponseWriter) {
+func (h *proxyHandler) serveFakeOAuthToken(w http.ResponseWriter, r *http.Request) {
+	// Check if this is a pool user refresh request
+	if r.Method == http.MethodPost && h.poolUsers != nil {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if json.Unmarshal(body, &req) == nil && strings.HasPrefix(req.RefreshToken, "poolrt_") {
+			h.handlePoolUserRefresh(w, req.RefreshToken)
+			return
+		}
+	}
+
 	// Return a syntactically-valid JWT-ish id_token (Codex parses it), but it is not
 	// used for upstream calls because we always overwrite Authorization headers.
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
@@ -316,6 +365,47 @@ func (h *proxyHandler) serveFakeOAuthToken(w http.ResponseWriter) {
 
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"access_token":"pooled","refresh_token":"pooled","id_token":"%s","token_type":"Bearer","expires_in":3600}`, jwt)
+}
+
+func (h *proxyHandler) handlePoolUserRefresh(w http.ResponseWriter, refreshToken string) {
+	// Extract user ID from refresh token: poolrt_<user_id>_<random>
+	parts := strings.Split(refreshToken, "_")
+	if len(parts) < 3 {
+		http.Error(w, "invalid refresh token", http.StatusBadRequest)
+		return
+	}
+	userID := parts[1]
+
+	user := h.poolUsers.Get(userID)
+	if user == nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if user.Disabled {
+		http.Error(w, "user disabled", http.StatusForbidden)
+		return
+	}
+
+	secret := getPoolJWTSecret()
+	if secret == "" {
+		http.Error(w, "JWT secret not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	auth, err := generateCodexAuth(secret, user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"access_token":  auth.Tokens.AccessToken,
+		"refresh_token": auth.Tokens.RefreshToken,
+		"id_token":      auth.Tokens.IDToken,
+		"token_type":    "Bearer",
+		"expires_in":    31536000, // 1 year
+	})
 }
 
 func isUsageRequest(r *http.Request) bool {
@@ -474,6 +564,23 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
+
+	// Check if this is a pool user request
+	if secret := getPoolJWTSecret(); secret != "" {
+		if isPoolUser, userID, _ := isPoolUserToken(secret, r.Header.Get("Authorization")); isPoolUser {
+			// Check if user is disabled
+			if h.poolUsers != nil {
+				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
+					http.Error(w, "pool user disabled", http.StatusForbidden)
+					return
+				}
+			}
+			if h.cfg.debug {
+				log.Printf("[%s] pool user request: user_id=%s", reqID, userID)
+			}
+			// Continue with normal routing - the proxy will use real pooled accounts
+		}
+	}
 
 	targetBase, category, accountType := h.pickUpstream(r.URL.Path)
 	if targetBase == nil {
