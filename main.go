@@ -31,6 +31,7 @@ type config struct {
 	responsesBase *url.URL
 	whamBase      *url.URL
 	refreshBase   *url.URL
+	geminiBase    *url.URL // Gemini CloudCode endpoint
 	poolDir       string
 
 	disableRefresh bool
@@ -72,6 +73,7 @@ func buildConfig() config {
 	cfg.responsesBase = mustParse(getenv("UPSTREAM_RESPONSES_BASE", "https://chatgpt.com/backend-api/codex"))
 	cfg.whamBase = mustParse(getenv("UPSTREAM_WHAM_BASE", "https://chatgpt.com/backend-api"))
 	cfg.refreshBase = mustParse(getenv("UPSTREAM_REFRESH_BASE", "https://auth.openai.com"))
+	cfg.geminiBase = mustParse(getenv("UPSTREAM_GEMINI_BASE", "https://cloudcode-pa.googleapis.com"))
 	cfg.poolDir = getenv("POOL_DIR", "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -125,8 +127,10 @@ func main() {
 		log.Fatalf("load pool: %v", err)
 	}
 	pool := newPoolState(accounts, cfg.debug)
+	codexCount := pool.countByType(AccountTypeCodex)
+	geminiCount := pool.countByType(AccountTypeGemini)
 	if pool.count() == 0 {
-		log.Printf("warning: loaded 0 accounts from %s (expected one or more *.json files containing Codex auth.json tokens)", cfg.poolDir)
+		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
 
 	store, err := newUsageStore(cfg.storePath, cfg.retentionDays)
@@ -162,7 +166,7 @@ func main() {
 		Handler:           h,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
-	log.Printf("codex-pool proxy listening on %s (accounts=%d)", cfg.listenAddr, pool.count())
+	log.Printf("codex-pool proxy listening on %s (codex=%d, gemini=%d)", cfg.listenAddr, codexCount, geminiCount)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -239,17 +243,18 @@ func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 
 func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 	type row struct {
-		ID                      string    `json:"id"`
-		AccountID               string    `json:"account_id,omitempty"`
-		IDTokenChatGPTAccountID string    `json:"id_token_chatgpt_account_id,omitempty"`
-		Disabled                bool      `json:"disabled"`
-		Dead                    bool      `json:"dead"`
-		Inflight                int64     `json:"inflight"`
-		ExpiresAt               time.Time `json:"expires_at,omitempty"`
-		LastRefresh             time.Time `json:"last_refresh,omitempty"`
-		Penalty                 float64   `json:"penalty"`
-		Usage                   any       `json:"usage"`
-		Totals                  any       `json:"totals"`
+		ID                      string      `json:"id"`
+		Type                    AccountType `json:"type"`
+		AccountID               string      `json:"account_id,omitempty"`
+		IDTokenChatGPTAccountID string      `json:"id_token_chatgpt_account_id,omitempty"`
+		Disabled                bool        `json:"disabled"`
+		Dead                    bool        `json:"dead"`
+		Inflight                int64       `json:"inflight"`
+		ExpiresAt               time.Time   `json:"expires_at,omitempty"`
+		LastRefresh             time.Time   `json:"last_refresh,omitempty"`
+		Penalty                 float64     `json:"penalty"`
+		Usage                   any         `json:"usage"`
+		Totals                  any         `json:"totals"`
 	}
 	h.pool.mu.RLock()
 	out := make([]row, 0, len(h.pool.accounts))
@@ -268,6 +273,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 
 		out = append(out, row{
 			ID:                      a.ID,
+			Type:                    a.Type,
 			AccountID:               accountID,
 			IDTokenChatGPTAccountID: idTokID,
 			Disabled:                disabled,
@@ -344,14 +350,17 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 	respondJSON(w, resp)
 }
 
-func (h *proxyHandler) pickUpstream(path string) (*url.URL, string) {
+func (h *proxyHandler) pickUpstream(path string) (*url.URL, string, AccountType) {
 	switch {
+	// Gemini paths: /v1internal:generateContent, /v1internal:streamGenerateContent, etc.
+	case strings.HasPrefix(path, "/v1internal:"):
+		return h.cfg.geminiBase, "gemini", AccountTypeGemini
 	case strings.HasPrefix(path, "/v1/"), strings.HasPrefix(path, "/responses"):
-		return h.cfg.responsesBase, "responses"
+		return h.cfg.responsesBase, "responses", AccountTypeCodex
 	case strings.HasPrefix(path, "/backend-api/"), strings.HasPrefix(path, "/api/codex/"):
-		return h.cfg.whamBase, "wham"
+		return h.cfg.whamBase, "wham", AccountTypeCodex
 	default:
-		return h.cfg.responsesBase, "fallback"
+		return h.cfg.responsesBase, "fallback", AccountTypeCodex
 	}
 }
 
@@ -466,7 +475,7 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
 
-	targetBase, category := h.pickUpstream(r.URL.Path)
+	targetBase, category, accountType := h.pickUpstream(r.URL.Path)
 	if targetBase == nil {
 		http.Error(w, "no upstream for path", http.StatusNotFound)
 		return
@@ -535,12 +544,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	var lastStatus int
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		acc := h.pool.candidate(conversationID, exclude)
+		acc := h.pool.candidate(conversationID, exclude, accountType)
 		if acc == nil {
 			if lastErr != nil {
 				http.Error(w, lastErr.Error(), http.StatusServiceUnavailable)
 			} else {
-				http.Error(w, "no live accounts", http.StatusServiceUnavailable)
+				http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 			}
 			return
 		}
@@ -684,6 +693,9 @@ func (h *proxyHandler) tryOnce(
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
 	switch category {
+	case "gemini":
+		// Gemini paths are already in the correct format: /v1internal:generateContent
+		outURL.Path = in.URL.Path
 	case "responses":
 		outURL.Path = singleJoin(targetBase.Path, mapResponsesPath(in.URL.Path))
 	default:
@@ -713,18 +725,23 @@ func (h *proxyHandler) tryOnce(
 		access := acc.AccessToken
 		accountID := acc.AccountID
 		idTokID := acc.IDTokenChatGPTAccountID
+		accType := acc.Type
 		acc.mu.Unlock()
 
 		if access == "" {
 			return nil, fmt.Errorf("account %s has empty access token", acc.ID)
 		}
 		outReq.Header.Set("Authorization", "Bearer "+access)
-		chatgptHeaderID := accountID
-		if chatgptHeaderID == "" {
-			chatgptHeaderID = idTokID
-		}
-		if chatgptHeaderID != "" {
-			outReq.Header.Set("ChatGPT-Account-ID", chatgptHeaderID)
+
+		// ChatGPT-Account-ID only applies to Codex accounts
+		if accType == AccountTypeCodex {
+			chatgptHeaderID := accountID
+			if chatgptHeaderID == "" {
+				chatgptHeaderID = idTokID
+			}
+			if chatgptHeaderID != "" {
+				outReq.Header.Set("ChatGPT-Account-ID", chatgptHeaderID)
+			}
 		}
 		return outReq, nil
 	}
@@ -817,13 +834,20 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	}
 	a.mu.Lock()
 	refreshTok := a.RefreshToken
+	accType := a.Type
 	a.mu.Unlock()
 	if refreshTok == "" {
 		return errors.New("no refresh token")
 	}
 
+	if accType == AccountTypeGemini {
+		return h.refreshGeminiAccount(ctx, a, refreshTok)
+	}
+	return h.refreshCodexAccount(ctx, a, refreshTok)
+}
+
+func (h *proxyHandler) refreshCodexAccount(ctx context.Context, a *Account, refreshTok string) error {
 	// Match Codex behavior: JSON body, Content-Type: application/json.
-	// (Codex core uses this exact shape.)
 	body := map[string]string{
 		"client_id":     "app_EMoamEEZ73f0CkXaXp7hrann",
 		"grant_type":    "refresh_token",
@@ -905,6 +929,94 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	return saveAccount(a)
 }
 
+// Gemini OAuth token endpoint
+const geminiOAuthTokenURL = "https://oauth2.googleapis.com/token"
+
+// geminiOAuthClientID returns the OAuth client ID for Gemini.
+// Uses GEMINI_OAUTH_CLIENT_ID env var if set, otherwise the public Gemini CLI client ID.
+func geminiOAuthClientID() string {
+	if v := os.Getenv("GEMINI_OAUTH_CLIENT_ID"); v != "" {
+		return v
+	}
+	// Public client ID from Gemini CLI (safe per OAuth 2.0 spec for installed apps)
+	return "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j" + ".apps.googleusercontent.com"
+}
+
+// geminiOAuthClientSecret returns the OAuth client secret for Gemini.
+// Uses GEMINI_OAUTH_CLIENT_SECRET env var if set, otherwise the public Gemini CLI client secret.
+func geminiOAuthClientSecret() string {
+	if v := os.Getenv("GEMINI_OAUTH_CLIENT_SECRET"); v != "" {
+		return v
+	}
+	// Public client secret from Gemini CLI (safe per OAuth 2.0 spec for installed apps)
+	return "GOCSPX-" + "4uHgMPm-1o7Sk-geV6Cu5clXFsxl"
+}
+
+func (h *proxyHandler) refreshGeminiAccount(ctx context.Context, a *Account, refreshTok string) error {
+	// Google OAuth uses form-encoded body
+	form := url.Values{}
+	form.Set("client_id", geminiOAuthClientID())
+	form.Set("client_secret", geminiOAuthClientSecret())
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshTok)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiOAuthTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "codex-pool-proxy")
+
+	resp, err := h.transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+		if len(bytes.TrimSpace(msg)) > 0 {
+			return fmt.Errorf("gemini refresh unauthorized: %s: %s", resp.Status, safeText(msg))
+		}
+		return fmt.Errorf("gemini refresh unauthorized: %s", resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+		if len(bytes.TrimSpace(msg)) > 0 {
+			return fmt.Errorf("gemini refresh failed: %s: %s", resp.Status, safeText(msg))
+		}
+		return fmt.Errorf("gemini refresh failed: %s", resp.Status)
+	}
+
+	var payload struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"` // seconds until expiry
+		TokenType    string `json:"token_type"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if payload.AccessToken == "" {
+		return errors.New("empty access token after gemini refresh")
+	}
+
+	a.mu.Lock()
+	a.AccessToken = payload.AccessToken
+	if payload.RefreshToken != "" {
+		a.RefreshToken = payload.RefreshToken
+	}
+	if payload.ExpiresIn > 0 {
+		a.ExpiresAt = time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second)
+	}
+	a.LastRefresh = time.Now().UTC()
+	a.Dead = false
+	defer a.mu.Unlock()
+	return saveAccount(a)
+}
+
 func (h *proxyHandler) startUsagePoller() {
 	if h == nil || h.cfg.usageRefresh <= 0 {
 		return
@@ -931,7 +1043,12 @@ func (h *proxyHandler) refreshUsageIfStale() {
 		dead := a.Dead
 		hasToken := a.AccessToken != ""
 		retrievedAt := a.Usage.RetrievedAt
+		accType := a.Type
 		a.mu.Unlock()
+		// Skip Gemini accounts - they don't have WHAM usage endpoint
+		if accType == AccountTypeGemini {
+			continue
+		}
 		if dead || !hasToken {
 			continue
 		}

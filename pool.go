@@ -14,9 +14,18 @@ import (
 	"time"
 )
 
+// AccountType distinguishes between different API backends.
+type AccountType string
+
+const (
+	AccountTypeCodex  AccountType = "codex"
+	AccountTypeGemini AccountType = "gemini"
+)
+
 type Account struct {
 	mu sync.Mutex
 
+	Type         AccountType // codex or gemini
 	ID           string
 	File         string
 	Label        string
@@ -132,7 +141,8 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 	a.mu.Unlock()
 }
 
-type AuthJSON struct {
+// CodexAuthJSON is the format for Codex auth.json files.
+type CodexAuthJSON struct {
 	OpenAIKey   *string    `json:"OPENAI_API_KEY"`
 	Tokens      *TokenData `json:"tokens"`
 	LastRefresh *time.Time `json:"last_refresh"`
@@ -143,6 +153,16 @@ type TokenData struct {
 	AccessToken  string  `json:"access_token"`
 	RefreshToken string  `json:"refresh_token"`
 	AccountID    *string `json:"account_id"`
+}
+
+// GeminiAuthJSON is the format for Gemini oauth_creds.json files.
+// Files should be named gemini_*.json in the pool folder.
+type GeminiAuthJSON struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	Scope        string `json:"scope"`
+	ExpiryDate   int64  `json:"expiry_date"` // Unix timestamp in milliseconds
 }
 
 func loadPool(dir string) ([]*Account, error) {
@@ -163,39 +183,85 @@ func loadPool(dir string) ([]*Account, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
-		var aj AuthJSON
-		if err := json.Unmarshal(data, &aj); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", path, err)
+
+		// Detect account type by filename prefix
+		if strings.HasPrefix(e.Name(), "gemini_") {
+			acc, err := loadGeminiAccount(e.Name(), path, data)
+			if err != nil {
+				return nil, err
+			}
+			if acc != nil {
+				accs = append(accs, acc)
+			}
+		} else {
+			acc, err := loadCodexAccount(e.Name(), path, data)
+			if err != nil {
+				return nil, err
+			}
+			if acc != nil {
+				accs = append(accs, acc)
+			}
 		}
-		if aj.Tokens == nil {
-			continue
-		}
-		acc := &Account{
-			ID:           strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())),
-			File:         path,
-			AccessToken:  aj.Tokens.AccessToken,
-			RefreshToken: aj.Tokens.RefreshToken,
-			IDToken:      aj.Tokens.IDToken,
-		}
-		if aj.Tokens.AccountID != nil {
-			acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
-		}
-		claims := parseClaims(aj.Tokens.IDToken)
-		acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
-		if acc.AccountID == "" && acc.IDTokenChatGPTAccountID != "" {
-			acc.AccountID = acc.IDTokenChatGPTAccountID
-		}
-		acc.PlanType = claims.PlanType
-		acc.ExpiresAt = claims.ExpiresAt
-		if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
-			acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
-		}
-		if aj.LastRefresh != nil {
-			acc.LastRefresh = *aj.LastRefresh
-		}
-		accs = append(accs, acc)
 	}
 	return accs, nil
+}
+
+func loadCodexAccount(name, path string, data []byte) (*Account, error) {
+	var aj CodexAuthJSON
+	if err := json.Unmarshal(data, &aj); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if aj.Tokens == nil {
+		return nil, nil
+	}
+	acc := &Account{
+		Type:         AccountTypeCodex,
+		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
+		File:         path,
+		AccessToken:  aj.Tokens.AccessToken,
+		RefreshToken: aj.Tokens.RefreshToken,
+		IDToken:      aj.Tokens.IDToken,
+	}
+	if aj.Tokens.AccountID != nil {
+		acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
+	}
+	claims := parseClaims(aj.Tokens.IDToken)
+	acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
+	if acc.AccountID == "" && acc.IDTokenChatGPTAccountID != "" {
+		acc.AccountID = acc.IDTokenChatGPTAccountID
+	}
+	acc.PlanType = claims.PlanType
+	acc.ExpiresAt = claims.ExpiresAt
+	if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
+		acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
+	}
+	if aj.LastRefresh != nil {
+		acc.LastRefresh = *aj.LastRefresh
+	}
+	return acc, nil
+}
+
+func loadGeminiAccount(name, path string, data []byte) (*Account, error) {
+	var gj GeminiAuthJSON
+	if err := json.Unmarshal(data, &gj); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if gj.AccessToken == "" {
+		return nil, nil
+	}
+	acc := &Account{
+		Type:         AccountTypeGemini,
+		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
+		File:         path,
+		AccessToken:  gj.AccessToken,
+		RefreshToken: gj.RefreshToken,
+		PlanType:     "gemini",
+	}
+	// expiry_date is Unix timestamp in milliseconds
+	if gj.ExpiryDate > 0 {
+		acc.ExpiresAt = time.UnixMilli(gj.ExpiryDate)
+	}
+	return acc, nil
 }
 
 type jwtClaims struct {
@@ -268,7 +334,9 @@ func (p *poolState) count() int {
 	return len(p.accounts)
 }
 
-func (p *poolState) candidate(conversationID string, exclude map[string]bool) *Account {
+// candidate selects the best account, optionally filtering by type.
+// If accountType is empty, all account types are considered.
+func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType) *Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -278,7 +346,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool) *A
 				// pinned excluded; fall through to selection
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
-				ok := !a.Dead && !a.Disabled
+				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType)
 				a.mu.Unlock()
 				if ok {
 					return a
@@ -301,7 +369,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool) *A
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled {
+		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) {
 			a.mu.Unlock()
 			continue
 		}
@@ -318,6 +386,22 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool) *A
 		p.rr++
 	}
 	return best
+}
+
+// countByType returns the number of accounts of a given type (or all if empty).
+func (p *poolState) countByType(accountType AccountType) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if accountType == "" {
+		return len(p.accounts)
+	}
+	count := 0
+	for _, a := range p.accounts {
+		if a.Type == accountType {
+			count++
+		}
+	}
+	return count
 }
 
 func scoreAccount(a *Account, now time.Time) float64 {
@@ -396,6 +480,13 @@ func saveAccount(a *Account) error {
 		return fmt.Errorf("account %s has empty file path", a.ID)
 	}
 
+	if a.Type == AccountTypeGemini {
+		return saveGeminiAccount(a)
+	}
+	return saveCodexAccount(a)
+}
+
+func saveCodexAccount(a *Account) error {
 	// Preserve ALL fields in the original auth.json by modifying only token fields that
 	// refresh updates. If we can't parse the existing file, fail closed to avoid
 	// clobbering user-provided auth.json content.
@@ -435,14 +526,43 @@ func saveAccount(a *Account) error {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
 
-	updated, err := json.MarshalIndent(root, "", "  ")
+	return atomicWriteJSON(a.File, root)
+}
+
+func saveGeminiAccount(a *Account) error {
+	// Preserve existing fields in the file
+	raw, err := os.ReadFile(a.File)
+	if err != nil {
+		return err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return fmt.Errorf("parse %s: %w", a.File, err)
+	}
+
+	// Update token fields
+	if a.AccessToken != "" {
+		root["access_token"] = a.AccessToken
+	}
+	if a.RefreshToken != "" {
+		root["refresh_token"] = a.RefreshToken
+	}
+	if !a.ExpiresAt.IsZero() {
+		root["expiry_date"] = a.ExpiresAt.UnixMilli()
+	}
+
+	return atomicWriteJSON(a.File, root)
+}
+
+func atomicWriteJSON(filePath string, data any) error {
+	updated, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
 
 	// Atomic write: write to temp file then rename.
-	dir := filepath.Dir(a.File)
-	tmp, err := os.CreateTemp(dir, "auth.json.*.tmp")
+	dir := filepath.Dir(filePath)
+	tmp, err := os.CreateTemp(dir, "*.tmp")
 	if err != nil {
 		return err
 	}
@@ -460,7 +580,7 @@ func saveAccount(a *Account) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, a.File)
+	return os.Rename(tmpName, filePath)
 }
 
 // mergeUsage blends a newer usage snapshot with prior data, preserving meaningful

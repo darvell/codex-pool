@@ -28,26 +28,26 @@ func TestPenaltyDecay(t *testing.T) {
 }
 
 func TestCandidateUsesPinUnlessExcluded(t *testing.T) {
-	a1 := &Account{ID: "a1", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
-	a2 := &Account{ID: "a2", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
+	a1 := &Account{ID: "a1", Type: AccountTypeCodex, Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
+	a2 := &Account{ID: "a2", Type: AccountTypeCodex, Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
 	p := newPoolState([]*Account{a1, a2}, true)
 	p.pin("c1", "a1")
 
-	if got := p.candidate("c1", nil); got == nil || got.ID != "a1" {
+	if got := p.candidate("c1", nil, ""); got == nil || got.ID != "a1" {
 		t.Fatalf("expected pinned a1, got %+v", got)
 	}
-	if got := p.candidate("c1", map[string]bool{"a1": true}); got == nil || got.ID != "a2" {
+	if got := p.candidate("c1", map[string]bool{"a1": true}, ""); got == nil || got.ID != "a2" {
 		t.Fatalf("expected a2 when pinned excluded, got %+v", got)
 	}
 }
 
 func TestCandidateSkipsDeadOrDisabled(t *testing.T) {
-	dead := &Account{ID: "dead", Dead: true, Usage: UsageSnapshot{PrimaryUsedPercent: 0.0}}
-	disabled := &Account{ID: "disabled", Disabled: true, Usage: UsageSnapshot{PrimaryUsedPercent: 0.0}}
-	ok := &Account{ID: "ok", Usage: UsageSnapshot{PrimaryUsedPercent: 0.5}}
+	dead := &Account{ID: "dead", Type: AccountTypeCodex, Dead: true, Usage: UsageSnapshot{PrimaryUsedPercent: 0.0}}
+	disabled := &Account{ID: "disabled", Type: AccountTypeCodex, Disabled: true, Usage: UsageSnapshot{PrimaryUsedPercent: 0.0}}
+	ok := &Account{ID: "ok", Type: AccountTypeCodex, Usage: UsageSnapshot{PrimaryUsedPercent: 0.5}}
 	p := newPoolState([]*Account{dead, disabled, ok}, false)
 
-	got := p.candidate("", nil)
+	got := p.candidate("", nil, "")
 	if got == nil || got.ID != "ok" {
 		t.Fatalf("expected ok, got %+v", got)
 	}

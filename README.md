@@ -1,42 +1,38 @@
 # Codex Pool Proxy
 
-Local-only reverse proxy that load-balances Codex/ChatGPT traffic across multiple ChatGPT accounts.
+Local-only reverse proxy that load-balances traffic across multiple accounts for:
+- **Codex CLI** (OpenAI/ChatGPT)
+- **Gemini CLI** (Google)
 
 The proxy:
-- Loads a directory of Codex `auth.json` files (one per account)
-- Picks an account per request (sticky by `conversation_id` when present)
-- **Always overwrites** upstream auth (`Authorization: Bearer …` and `ChatGPT-Account-ID`) based on the selected account
+- Loads credentials from `./pool/` directory
+- Picks an account per request (sticky by conversation when present)
 - Automatically refreshes tokens before they expire
 - Retries failed requests on different accounts
 
-## Setup
+## Codex Setup
 
-### 1. Add auth.json files to the pool
+### 1. Add Codex auth files
 
-Copy your `auth.json` files into `./pool/`:
+Copy your Codex `auth.json` files into `./pool/`:
 
 ```bash
 mkdir -p pool
 cp ~/.codex/auth.json pool/account1.json
-# Add more accounts as needed
 cp /path/to/other/auth.json pool/account2.json
 ```
-
-Each file should have the standard Codex auth format with `tokens.access_token`, `tokens.refresh_token`, and `tokens.id_token`.
 
 ### 2. Run the proxy
 
 ```bash
 go run .
-# or build it
+# or
 go build -o codex-pool && ./codex-pool
 ```
 
-The proxy listens on `127.0.0.1:8989` by default.
-
 ### 3. Configure Codex CLI
 
-Add this to your `~/.codex/config.toml`:
+Add to `~/.codex/config.toml`:
 
 ```toml
 model_provider = "codex-pool"
@@ -49,23 +45,64 @@ wire_api = "responses"
 requires_openai_auth = true
 ```
 
-That's it. Codex will now route all requests through the proxy.
+## Gemini Setup
+
+### 1. Add Gemini auth files
+
+Copy your Gemini OAuth credentials into `./pool/` with `gemini_` prefix:
+
+```bash
+cp ~/.gemini/oauth_creds.json pool/gemini_account1.json
+```
+
+The file format is:
+```json
+{
+  "access_token": "ya29...",
+  "refresh_token": "1//...",
+  "expiry_date": 1234567890000
+}
+```
+
+### 2. Run the proxy
+
+```bash
+go run .
+```
+
+### 3. Configure Gemini CLI
+
+Set the `CODE_ASSIST_ENDPOINT` environment variable:
+
+```bash
+export CODE_ASSIST_ENDPOINT=http://127.0.0.1:8989
+gemini
+```
+
+Or add to your shell profile:
+```bash
+echo 'export CODE_ASSIST_ENDPOINT=http://127.0.0.1:8989' >> ~/.bashrc
+```
 
 ## Endpoints
 
-- `GET /healthz` — health status, account count, recent errors
+- `GET /healthz` — health status, account counts, recent errors
 - `GET /metrics` — Prometheus-style counters
-- `GET /admin/accounts` — debug view of all account states
-- `POST /admin/reload` — reload accounts from disk without restarting
+- `GET /admin/accounts` — debug view of all account states (shows type: codex/gemini)
+- `POST /admin/reload` — reload accounts from disk
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROXY_LISTEN_ADDR` | `127.0.0.1:8989` | Listen address |
-| `POOL_DIR` | `./pool` | Directory containing auth.json files |
+| `POOL_DIR` | `./pool` | Directory containing credential files |
 | `PROXY_DB_PATH` | `./data/proxy.db` | BoltDB path for usage tracking |
 | `PROXY_MAX_ATTEMPTS` | `3` | Retry attempts across accounts |
-| `PROXY_USAGE_REFRESH_SECONDS` | `300` | Usage polling interval |
 | `PROXY_DISABLE_REFRESH` | `0` | Set to `1` to disable token refresh |
 | `PROXY_DEBUG` | `0` | Enable debug logging |
+
+## File Naming Convention
+
+- `*.json` (without `gemini_` prefix) → Codex accounts
+- `gemini_*.json` → Gemini accounts
