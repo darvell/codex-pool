@@ -215,6 +215,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/favicon.ico":
+		http.NotFound(w, r)
+		return
 	case "/healthz":
 		h.serveHealth(w)
 		return
