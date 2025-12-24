@@ -18,11 +18,14 @@
             --gold-glow: rgba(212, 175, 55, 0.15);
             --border-outer: #1a1a1a;
             --border-inner: #252525;
+            --code-bg: #080808;
             --success-green: #27ae60;
             --error-red: #c0392b;
 
+            --panel-gradient: linear-gradient(145deg, #111, #0a0a0a);
             --metallic-gradient: linear-gradient(135deg, #b38b38 0%, #d4af37 50%, #8a7039 100%);
             --inset-shadow: inset 2px 2px 5px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
+            --outset-shadow: 5px 5px 10px rgba(0,0,0,0.5), -1px -1px 1px rgba(255,255,255,0.03);
         }
 
         * { box-sizing: border-box; }
@@ -45,7 +48,7 @@
 
         .container {
             width: 100%;
-            max-width: 900px;
+            max-width: 850px;
             position: relative;
             padding: 40px;
             background: var(--card-bg);
@@ -65,15 +68,22 @@
             opacity: 0.3;
         }
 
-        /* Header */
-        .header {
-            text-align: center;
-            margin-bottom: 40px;
+        .texture-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .content-relative {
+            position: relative;
+            z-index: 1;
         }
 
         .hero-wrapper {
             width: 100%;
-            max-width: 200px;
+            max-width: 220px;
             margin: 0 auto 20px;
             position: relative;
         }
@@ -99,11 +109,11 @@
 
         .hero-label {
             position: absolute;
-            bottom: 12px;
+            bottom: 10px;
             left: 50%;
             transform: translateX(-50%);
             font-family: 'Space Mono', monospace;
-            font-size: 1rem;
+            font-size: 0.9rem;
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.3em;
@@ -121,51 +131,26 @@
             background: rgba(39, 174, 96, 0.15);
             color: var(--success-green);
             border: 1px solid rgba(39, 174, 96, 0.3);
+            margin-bottom: 30px;
         }
 
-        /* Stats */
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-            margin-bottom: 40px;
-        }
-
-        .stat-card {
-            background: #0a0a0a;
-            border: 1px solid #1a1a1a;
-            border-radius: 6px;
-            padding: 20px 15px;
+        .header {
             text-align: center;
-            box-shadow: var(--inset-shadow);
         }
 
-        .stat-value {
-            font-family: 'Cormorant Garamond', serif;
-            font-size: 2rem;
-            font-weight: 400;
-            color: var(--gold-bright);
-            text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
-        }
-
-        .stat-label {
-            font-size: 0.6rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.15em;
-            margin-top: 5px;
-        }
-
-        /* Tabs */
+        /* Main Tabs */
         .tabs {
             display: flex;
             justify-content: center;
             gap: 6px;
-            margin-bottom: 30px;
+            margin-bottom: 40px;
             background: #080808;
             padding: 6px;
             border-radius: 50px;
             box-shadow: var(--inset-shadow);
+            max-width: 580px;
+            margin-left: auto;
+            margin-right: auto;
         }
 
         .tab {
@@ -173,58 +158,101 @@
             font-size: 0.7rem;
             text-transform: uppercase;
             color: #555;
-            padding: 10px 24px;
+            padding: 8px 14px;
             border-radius: 40px;
             transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
             font-weight: 700;
             letter-spacing: 0.5px;
         }
 
-        .tab:hover { color: #999; }
+        .tab svg { width: 16px; height: 16px; fill: currentColor; opacity: 0.7; }
+
         .tab.active {
             color: #000;
             background: var(--metallic-gradient);
-            box-shadow: 0 2px 10px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.4);
+            box-shadow:
+                0 2px 10px rgba(0,0,0,0.5),
+                inset 0 1px 0 rgba(255,255,255,0.4);
+            text-shadow: none;
         }
 
-        .tab-content { display: none; }
-        .tab-content.active { display: block; animation: fadeIn 0.3s ease; }
+        .tab:hover:not(.active) {
+            color: #999;
+        }
+
+        .tab-content { display: none; animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        .tab-content.active { display: block; }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Sub Tabs */
+        .sub-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+
+        .sub-tab {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #555;
+            padding: 6px 14px;
+            border: 1px solid #222;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-radius: 2px;
+            background: linear-gradient(180deg, #151515, #101010);
+        }
+
+        .sub-tab:hover { color: #888; border-color: #333; }
+        .sub-tab.active {
+            border-color: var(--gold-dim);
+            color: var(--gold-bright);
+            background: rgba(212, 175, 55, 0.05);
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+
+        .sub-tab-content { display: none; }
+        .sub-tab-content.active { display: block; animation: fadeIn 0.3s; }
 
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-        /* Sections */
-        .section {
+        /* Installation Section & Code */
+        .install-section {
+            margin-bottom: 2.5rem;
+            padding: 25px;
             background: #0a0a0a;
             border: 1px solid #1a1a1a;
             border-radius: 8px;
-            padding: 25px;
-            margin-bottom: 20px;
             box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
         }
 
-        .section-title {
+        .section-header {
             font-family: 'Cormorant Garamond', serif;
-            font-size: 1.2rem;
+            font-size: 1.3rem;
             color: var(--text-main);
-            margin-bottom: 20px;
+            margin-bottom: 1.2rem;
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
             border-bottom: 1px solid #1a1a1a;
             padding-bottom: 10px;
         }
 
-        .step {
-            margin-bottom: 25px;
-        }
-
-        .step:last-child { margin-bottom: 0; }
+        .section-header svg { width: 20px; height: 20px; fill: var(--gold-bright); }
 
         .step-label {
             font-size: 0.7rem;
             text-transform: uppercase;
             color: var(--gold-dim);
-            margin-bottom: 10px;
+            margin: 1.5rem 0 0.8rem;
             display: flex;
             align-items: center;
             letter-spacing: 1.5px;
@@ -240,33 +268,32 @@
             box-shadow: 0 0 5px var(--gold-dim);
         }
 
-        .code-block {
+        /* Code Blocks */
+        .code-wrapper {
+            position: relative;
             background: #050505;
             border: 1px solid #1a1a1a;
             border-radius: 4px;
-            padding: 15px 20px;
-            font-size: 0.8rem;
-            overflow-x: auto;
-            position: relative;
+            margin-bottom: 1.5rem;
             box-shadow: var(--inset-shadow);
         }
 
-        .code-block pre {
-            margin: 0;
-            white-space: pre-wrap;
-            word-break: break-all;
-            color: #aaa;
+        .code-block {
+            padding: 20px;
+            font-size: 0.85rem;
             line-height: 1.6;
+            color: #aaa;
+            overflow-x: auto;
+            font-family: 'Space Mono', monospace;
         }
 
-        .code-block code {
-            color: #d4d4d4;
-        }
+        pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        code { color: #d4d4d4; }
+        .highlight { color: var(--gold-bright); }
 
         .copy-btn {
             position: absolute;
-            top: 8px;
-            right: 8px;
+            top: 8px; right: 8px;
             background: #111;
             border: 1px solid #333;
             color: #555;
@@ -275,15 +302,105 @@
             padding: 4px 10px;
             cursor: pointer;
             text-transform: uppercase;
+            transition: all 0.2s;
+            width: auto;
+            margin: 0;
             border-radius: 2px;
+            box-shadow: none;
         }
 
         .copy-btn:hover {
             border-color: var(--gold-dim);
             color: var(--gold-bright);
+            box-shadow: 0 0 8px rgba(212, 175, 55, 0.2);
+            transform: none;
+        }
+        .copy-btn.copied { border-color: var(--success-green); color: var(--success-green); }
+
+        /* Stats Styling */
+        .stat-card {
+            background: linear-gradient(145deg, #111, #0c0c0c);
+            border: 1px solid #1a1a1a;
+            padding: 20px;
+            text-align: center;
+            border-radius: 6px;
+            box-shadow: 5px 5px 15px rgba(0,0,0,0.3), -5px -5px 15px rgba(255,255,255,0.01);
+            position: relative;
+            overflow: hidden;
         }
 
-        /* Footer */
+        .stat-card::after {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 2px;
+            background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+            opacity: 0.5;
+        }
+
+        .stat-value {
+            color: var(--text-main);
+            font-size: 2.2rem;
+            font-family: 'Cormorant Garamond', serif;
+            font-weight: 400;
+            margin-bottom: 5px;
+            text-shadow: 0 2px 5px rgba(0,0,0,0.8);
+        }
+
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .progress-track {
+            flex: 1;
+            background: #050505;
+            height: 12px;
+            border-radius: 6px;
+            box-shadow: inset 1px 1px 3px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
+            overflow: hidden;
+            border: 1px solid #1a1a1a;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
+            width: 0%;
+            transition: width 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+            box-shadow: 0 0 10px var(--gold-dim);
+        }
+
+        .table-container {
+            border: 1px solid #1a1a1a;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #0a0a0a;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        table { width: 100%; border-collapse: collapse; }
+
+        th {
+            background: #111;
+            padding: 15px;
+            text-align: left;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+            border-bottom: 1px solid #222;
+        }
+
+        td {
+            padding: 15px;
+            font-size: 0.8rem;
+            border-bottom: 1px solid #151515;
+            color: #ccc;
+        }
+
+        tr:last-child td { border-bottom: none; }
+
         .footer {
             text-align: center;
             margin-top: 30px;
@@ -306,148 +423,277 @@
         /* Responsive */
         @media (max-width: 600px) {
             .container { padding: 25px 20px; }
-            .stats-grid { grid-template-columns: repeat(2, 1fr); }
-            .tabs { flex-wrap: wrap; border-radius: 12px; padding: 10px; }
-            .tab { flex: 1 1 45%; text-align: center; }
+            .hero-wrapper { max-width: 140px; }
+            .tabs {
+                flex-wrap: wrap;
+                gap: 8px;
+                border-radius: 12px;
+                padding: 10px;
+                max-width: 100%;
+            }
+            .tab {
+                flex: 1 1 45%;
+                justify-content: center;
+                padding: 10px 12px;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <div class="hero-wrapper">
-                <img src="/hero.png" alt="AI Pool" class="hero-art">
-                <div class="hero-label">AI Pool</div>
+        <div class="texture-overlay"></div>
+        <div class="content-relative">
+            <div class="header">
+                <div class="hero-wrapper">
+                    <img src="/hero.png" alt="AI Pool" class="hero-art">
+                    <div class="hero-label">AI Pool</div>
+                </div>
+                <span class="status-badge" id="status-badge">Connecting...</span>
             </div>
-            <span class="status-badge">Online</span>
-        </div>
 
-        <div class="stats-grid" id="stats-grid">
-            <div class="stat-card">
-                <div class="stat-value" id="stat-codex">-</div>
-                <div class="stat-label">Codex</div>
+            <div class="tabs">
+                <div class="tab active" data-tab="codex">
+                    <svg viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.0462 6.0462 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944z"/></svg>
+                    Codex
+                </div>
+                <div class="tab" data-tab="claude">
+                    <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93z" fill="currentColor"/></svg>
+                    Claude
+                </div>
+                <div class="tab" data-tab="gemini">
+                    <svg viewBox="0 0 24 24"><path d="M12,2 L14.5,9.5 L22,12 L14.5,14.5 L12,22 L9.5,14.5 L2,12 L9.5,9.5 L12,2" fill="currentColor"/></svg>
+                    Gemini
+                </div>
+                <div class="tab" data-tab="stats">
+                    <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
+                    Status
+                </div>
             </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-claude">-</div>
-                <div class="stat-label">Claude</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-gemini">-</div>
-                <div class="stat-label">Gemini</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="stat-healthy">-</div>
-                <div class="stat-label">Healthy</div>
-            </div>
-        </div>
 
-        <div class="tabs">
-            <div class="tab active" data-tab="codex">Codex</div>
-            <div class="tab" data-tab="claude">Claude</div>
-            <div class="tab" data-tab="gemini">Gemini</div>
-        </div>
+            <!-- CODEX -->
+            <div id="tab-codex" class="tab-content active">
+                <div class="install-section">
+                    <div class="section-header">
+                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
+                        One-Line Setup
+                    </div>
+                    <div class="step-label">Run this command</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('codex-one-liner', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="codex-one-liner"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        Downloads credentials and configures your Codex CLI automatically.
+                    </p>
+                </div>
 
-        <!-- Codex -->
-        <div id="tab-codex" class="tab-content active">
-            <div class="section">
-                <div class="section-title">Codex CLI Setup</div>
+                <div class="sub-tabs">
+                    <div class="sub-tab active" onclick="switchSubTab('codex', 'auto')">Automatic</div>
+                    <div class="sub-tab" onclick="switchSubTab('codex', 'manual')">Manual Setup</div>
+                </div>
 
-                <div class="step">
-                    <div class="step-label">Install</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code>npm install -g @openai/codex</code></pre>
+                <div id="codex-auto" class="sub-tab-content active">
+                    <div class="step-label">Install CLI First</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('codex-install', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="codex-install"># Using NPM
+npm install -g @openai/codex
+
+# Or Homebrew (macOS)
+brew install codex</pre>
+                        </div>
                     </div>
                 </div>
 
-                <div class="step">
+                <div id="codex-manual" class="sub-tab-content">
                     <div class="step-label">Config (~/.codex/config.toml)</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code>model_provider = "openai"
-
-[model_providers.openai]
-name = "OpenAI via Pool"
-base_url = "{{.BaseURL}}/v1"</code></pre>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('codex-config', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="codex-config"></pre>
+                        </div>
                     </div>
-                </div>
 
-                <div class="step">
                     <div class="step-label">Auth (~/.codex/auth.json)</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code># Copy any account's auth.json
-cp pool/ACCOUNT_NAME/auth.json ~/.codex/auth.json</code></pre>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('codex-auth', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="codex-auth"># Copy any account from your pool folder
+cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Claude -->
-        <div id="tab-claude" class="tab-content">
-            <div class="section">
-                <div class="section-title">Claude Code Setup</div>
+            <!-- CLAUDE -->
+            <div id="tab-claude" class="tab-content">
+                <div class="install-section">
+                    <div class="section-header">
+                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
+                        One-Line Setup
+                    </div>
+                    <div class="step-label">Run this command</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('claude-one-liner', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="claude-one-liner"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        Adds ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY to your shell profile.
+                    </p>
+                </div>
 
-                <div class="step">
-                    <div class="step-label">Install</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code>npm install -g @anthropic-ai/claude-code</code></pre>
+                <div class="sub-tabs">
+                    <div class="sub-tab active" onclick="switchSubTab('claude', 'auto')">Automatic</div>
+                    <div class="sub-tab" onclick="switchSubTab('claude', 'manual')">Manual Setup</div>
+                </div>
+
+                <div id="claude-auto" class="sub-tab-content active">
+                    <div class="step-label">Install CLI First</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('claude-install', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="claude-install"># Using NPM
+npm install -g @anthropic-ai/claude-code
+
+# Or Homebrew (macOS)
+brew install claude-code</pre>
+                        </div>
                     </div>
                 </div>
 
-                <div class="step">
+                <div id="claude-manual" class="sub-tab-content">
                     <div class="step-label">Environment Variables</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code>export ANTHROPIC_BASE_URL="{{.BaseURL}}"
-export ANTHROPIC_API_KEY="your-api-key"</code></pre>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="claude-env"></pre>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Gemini -->
-        <div id="tab-gemini" class="tab-content">
-            <div class="section">
-                <div class="section-title">Gemini CLI Setup</div>
+            <!-- GEMINI -->
+            <div id="tab-gemini" class="tab-content">
+                <div class="install-section">
+                    <div class="section-header">
+                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
+                        One-Line Setup
+                    </div>
+                    <div class="step-label">Run this command</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="gemini-one-liner"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        Downloads credentials and configures Gemini CLI endpoint.
+                    </p>
+                </div>
 
-                <div class="step">
-                    <div class="step-label">Install</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code>npm install -g @google/gemini-cli</code></pre>
+                <div class="sub-tabs">
+                    <div class="sub-tab active" onclick="switchSubTab('gemini', 'auto')">Automatic</div>
+                    <div class="sub-tab" onclick="switchSubTab('gemini', 'manual')">Manual Setup</div>
+                </div>
+
+                <div id="gemini-auto" class="sub-tab-content active">
+                    <div class="step-label">Install CLI First</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('gemini-install', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="gemini-install"># Using NPM
+npm install -g @google/gemini-cli
+
+# Or Homebrew (macOS)
+brew install gemini-cli</pre>
+                        </div>
                     </div>
                 </div>
 
-                <div class="step">
+                <div id="gemini-manual" class="sub-tab-content">
                     <div class="step-label">Config (~/.gemini/settings.json)</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code>{
-  "codeAssistEndpoint": "{{.BaseURL}}"
-}</code></pre>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('gemini-config', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="gemini-config"></pre>
+                        </div>
                     </div>
-                </div>
 
-                <div class="step">
                     <div class="step-label">Auth (~/.gemini/oauth_creds.json)</div>
-                    <div class="code-block">
-                        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-                        <pre><code># Copy Gemini account's auth.json
-cp pool/GEMINI_ACCOUNT/auth.json ~/.gemini/oauth_creds.json</code></pre>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="gemini-auth"># Copy Gemini account from your pool folder
+cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="footer">
-            <a href="/status">Status</a>
-            <a href="/admin/accounts">Accounts</a>
+            <!-- STATS -->
+            <div id="tab-stats" class="tab-content">
+                <div class="section-header">
+                    <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
+                    Pool Status
+                </div>
+
+                <div id="stats-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
+                    Loading...
+                </div>
+
+                <div id="stats-content" style="display: none;">
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px;">
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-codex">-</div>
+                            <div class="stat-label">Codex</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-claude">-</div>
+                            <div class="stat-label">Claude</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="stat-gemini">-</div>
+                            <div class="stat-label">Gemini</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" style="color: var(--success-green);" id="stat-healthy">-</div>
+                            <div class="stat-label">Healthy</div>
+                        </div>
+                    </div>
+
+                    <div class="step-label">Accounts</div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Type</th>
+                                    <th>Plan</th>
+                                    <th>Status</th>
+                                    <th style="text-align: right;">Score</th>
+                                </tr>
+                            </thead>
+                            <tbody id="accounts-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="footer">
+                <a href="/status">Full Status</a>
+                <a href="/admin/accounts">API</a>
+            </div>
         </div>
     </div>
 
     <script>
+        const BASE_URL = '{{.BaseURL}}';
+
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
@@ -458,44 +704,127 @@ cp pool/GEMINI_ACCOUNT/auth.json ~/.gemini/oauth_creds.json</code></pre>
             });
         });
 
-        // Copy
-        function copyCode(btn) {
-            const code = btn.parentElement.querySelector('code').textContent;
-            navigator.clipboard.writeText(code).then(() => {
-                const orig = btn.textContent;
-                btn.textContent = 'Copied';
-                btn.style.color = '#27ae60';
-                btn.style.borderColor = '#27ae60';
+        // Sub-Tab switching
+        function switchSubTab(tool, mode) {
+            const container = document.getElementById('tab-' + tool);
+            const tabs = container.querySelectorAll('.sub-tab');
+            tabs.forEach(t => {
+                if (t.innerText.toLowerCase().includes(mode)) t.classList.add('active');
+                else t.classList.remove('active');
+            });
+            container.querySelectorAll('.sub-tab-content').forEach(c => c.classList.remove('active'));
+            document.getElementById(tool + '-' + mode).classList.add('active');
+        }
+
+        // Copy functionality
+        function copyToClipboard(elementId, btn) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btn.textContent;
+                btn.textContent = 'COPIED';
+                btn.classList.add('copied');
                 setTimeout(() => {
-                    btn.textContent = orig;
-                    btn.style.color = '';
-                    btn.style.borderColor = '';
+                    btn.textContent = originalText;
+                    btn.classList.remove('copied');
                 }, 2000);
             });
         }
 
-        // Load stats
+        // Populate config on load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Codex one-liner (local mode uses pool folder directly)
+            document.getElementById('codex-one-liner').textContent =
+`mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'
+model_provider = "codex-pool"
+chatgpt_base_url = "${BASE_URL}"
+
+[model_providers.codex-pool]
+name = "OpenAI via codex-pool proxy"
+base_url = "${BASE_URL}/v1"
+wire_api = "responses"
+requires_openai_auth = true
+EOF
+echo "Config written! Copy an auth.json from your pool folder:"
+echo "  cp pool/ACCOUNT.json ~/.codex/auth.json"`;
+
+            document.getElementById('codex-config').textContent =
+`model_provider = "codex-pool"
+chatgpt_base_url = "${BASE_URL}"
+
+[model_providers.codex-pool]
+name = "OpenAI via codex-pool proxy"
+base_url = "${BASE_URL}/v1"
+wire_api = "responses"
+requires_openai_auth = true`;
+
+            // Claude
+            document.getElementById('claude-one-liner').textContent =
+`# Add to your shell profile
+echo 'export ANTHROPIC_BASE_URL="${BASE_URL}"' >> ~/.bashrc
+echo 'export ANTHROPIC_API_KEY="local-pool"' >> ~/.bashrc
+source ~/.bashrc`;
+
+            document.getElementById('claude-env').textContent =
+`export ANTHROPIC_BASE_URL="${BASE_URL}"
+export ANTHROPIC_API_KEY="local-pool"`;
+
+            // Gemini
+            document.getElementById('gemini-one-liner').textContent =
+`mkdir -p ~/.gemini && echo '{"codeAssistEndpoint": "${BASE_URL}"}' > ~/.gemini/settings.json
+echo "Config written! Copy oauth_creds.json from your pool folder:"
+echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
+
+            document.getElementById('gemini-config').textContent =
+`{
+  "codeAssistEndpoint": "${BASE_URL}"
+}`;
+
+            loadStats();
+        });
+
         async function loadStats() {
             try {
                 const res = await fetch('/admin/accounts');
-                if (!res.ok) return;
+                if (!res.ok) throw new Error('Failed to load');
                 const data = await res.json();
 
+                document.getElementById('status-badge').textContent = 'Online';
+                document.getElementById('stats-loading').style.display = 'none';
+                document.getElementById('stats-content').style.display = 'block';
+
                 let codex = 0, claude = 0, gemini = 0, healthy = 0;
+                const tbody = document.getElementById('accounts-tbody');
+                tbody.innerHTML = '';
+
                 data.accounts.forEach(acc => {
                     if (acc.type === 'codex') codex++;
                     else if (acc.type === 'claude') claude++;
                     else if (acc.type === 'gemini') gemini++;
                     if (acc.status === 'healthy') healthy++;
+
+                    const statusColor = acc.status === 'healthy' ? '#27ae60' : (acc.status === 'degraded' ? '#f39c12' : '#c0392b');
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td style="font-family: monospace; color: #888;">${acc.id.substring(0, 12)}</td>
+                        <td style="text-transform: uppercase;">${acc.type}</td>
+                        <td style="text-transform: uppercase; color: #aaa;">${acc.plan || '-'}</td>
+                        <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
+                        <td style="text-align: right; font-family: monospace;">${acc.score?.toFixed(2) || '-'}</td>
+                    `;
+                    tbody.appendChild(row);
                 });
 
                 document.getElementById('stat-codex').textContent = codex;
                 document.getElementById('stat-claude').textContent = claude;
                 document.getElementById('stat-gemini').textContent = gemini;
                 document.getElementById('stat-healthy').textContent = healthy;
-            } catch (e) {}
+            } catch (e) {
+                document.getElementById('status-badge').textContent = 'Error';
+                document.getElementById('status-badge').style.color = 'var(--error-red)';
+                document.getElementById('status-badge').style.borderColor = 'rgba(192, 57, 43, 0.3)';
+                document.getElementById('status-badge').style.background = 'rgba(192, 57, 43, 0.15)';
+            }
         }
-        loadStats();
     </script>
 </body>
 </html>
