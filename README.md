@@ -10,7 +10,7 @@
 
 ---
 
-A reverse proxy that distributes your AI CLI sessions across multiple accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files.
+A reverse proxy that distributes your Agent (Codex/Claude/Gemini) sessions across multiple accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files.
 
 Works with **Codex CLI**, **Claude Code**, and **Gemini CLI**.
 
@@ -29,7 +29,7 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 **codex-pool** handles it:
 - Distributes sessions across all your accounts for each service
 - Routes to whichever account has capacity
-- Pins conversations to the same account (no context loss)
+- Pins conversations to the same account (ensures standard cached token performance)
 - Auto-refreshes tokens before they expire
 - Tracks usage so you can see who's burning through quota
 
@@ -57,23 +57,30 @@ Share your pool with others using a friend code.
 ### 1. Add your accounts
 
 ```bash
-mkdir -p pool
+mkdir -p pool/codex pool/claude pool/gemini
 
 # Codex accounts
-cp ~/.codex/auth.json pool/work.json
-cp ~/backup/.codex/auth.json pool/personal.json
+cp ~/.codex/auth.json pool/codex/work.json
+cp ~/backup/.codex/auth.json pool/codex/personal.json
 
 # Claude accounts
-cp ~/.claude/credentials.json pool/claude_main.json
+cp ~/.claude/credentials.json pool/claude/main.json
 
 # Gemini accounts
-cp ~/.gemini/oauth_creds.json pool/gemini_main.json
+cp ~/.gemini/oauth_creds.json pool/gemini/main.json
 ```
 
-File naming:
-- `*.json` = Codex
-- `claude_*.json` = Claude
-- `gemini_*.json` = Gemini
+Structure:
+```
+pool/
+├── codex/
+│   ├── work.json
+│   └── personal.json
+├── claude/
+│   └── main.json
+└── gemini/
+    └── main.json
+```
 
 ### 2. Run it
 
@@ -142,17 +149,17 @@ jwt_secret = "32-char-secret-for-jwt-tokens!!"
 
 ## Credential Formats
 
-**Codex** - `pool/*.json`
+**Codex** - `pool/codex/*.json`
 ```json
 {"tokens": {"access_token": "...", "refresh_token": "...", "account_id": "acct_..."}}
 ```
 
-**Claude** - `pool/claude_*.json`
+**Claude** - `pool/claude/*.json`
 ```json
 {"claudeAiOauth": {"accessToken": "...", "refreshToken": "...", "expiresAt": 1234567890000}}
 ```
 
-**Gemini** - `pool/gemini_*.json`
+**Gemini** - `pool/gemini/*.json`
 ```json
 {"access_token": "ya29...", "refresh_token": "1//...", "expiry_date": 1234567890000}
 ```

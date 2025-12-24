@@ -37,11 +37,6 @@ func (p *CodexProvider) Type() AccountType {
 }
 
 func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
-	// Codex is the default - only load if not prefixed for other providers
-	if strings.HasPrefix(name, "gemini_") || strings.HasPrefix(name, "claude_") {
-		return nil, nil
-	}
-
 	var aj CodexAuthJSON
 	if err := json.Unmarshal(data, &aj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)

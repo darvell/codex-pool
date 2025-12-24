@@ -29,11 +29,6 @@ func (p *ClaudeProvider) Type() AccountType {
 }
 
 func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
-	// Only load files with claude_ prefix
-	if !strings.HasPrefix(name, "claude_") {
-		return nil, nil
-	}
-
 	var cj ClaudeAuthJSON
 	if err := json.Unmarshal(data, &cj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)

@@ -32,11 +32,6 @@ func (p *GeminiProvider) Type() AccountType {
 }
 
 func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
-	// Only load files with gemini_ prefix
-	if !strings.HasPrefix(name, "gemini_") {
-		return nil, nil
-	}
-
 	var gj GeminiAuthJSON
 	if err := json.Unmarshal(data, &gj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)

@@ -281,32 +281,49 @@ type ClaudeOAuthData struct {
 
 func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	var accs []*Account
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read pool dir: %w", err)
+
+	// Load accounts from provider subdirectories: pool/codex/, pool/claude/, pool/gemini/
+	providerDirs := map[string]AccountType{
+		"codex":  AccountTypeCodex,
+		"claude": AccountTypeClaude,
+		"gemini": AccountTypeGemini,
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+
+	for subdir, accountType := range providerDirs {
+		providerDir := filepath.Join(dir, subdir)
+		entries, err := os.ReadDir(providerDir)
+		if os.IsNotExist(err) {
+			continue // Skip if provider directory doesn't exist
 		}
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
+			return nil, fmt.Errorf("read pool dir %s: %w", providerDir, err)
 		}
 
-		// Use ProviderRegistry to load account based on filename prefix
-		acc, err := registry.LoadAccount(e.Name(), path, data)
-		if err != nil {
-			return nil, err
+		provider := registry.ForType(accountType)
+		if provider == nil {
+			continue
 		}
-		if acc != nil {
-			accs = append(accs, acc)
+
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			path := filepath.Join(providerDir, e.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", path, err)
+			}
+
+			acc, err := provider.LoadAccount(e.Name(), path, data)
+			if err != nil {
+				return nil, err
+			}
+			if acc != nil {
+				accs = append(accs, acc)
+			}
 		}
 	}
+
 	return accs, nil
 }
 
