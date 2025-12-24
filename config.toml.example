@@ -15,6 +15,11 @@ debug = false
 # Example: "https://proxy.example.com" or "http://192.168.1.100:8989"
 public_url = ""
 
+# Friend Code Access
+# Enable a self-service landing page at / where users with this code
+# can generate their own credentials.
+friend_code = ""
+
 # Pool Users (Multi-User Mode)
 # Enable this section to allow creating users who can share the pool
 # without access to real account credentials.

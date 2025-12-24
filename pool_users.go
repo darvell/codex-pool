@@ -106,6 +106,17 @@ func (s *PoolUserStore) List() []*PoolUser {
 	return out
 }
 
+func (s *PoolUserStore) GetByEmail(email string) *PoolUser {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.users {
+		if u.Email == email {
+			return u
+		}
+	}
+	return nil
+}
+
 func (s *PoolUserStore) Disable(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -192,18 +203,37 @@ func isPoolUserToken(secret, authHeader string) (bool, string, error) {
 		return false, "", nil // Not a valid pool user token
 	}
 
-	// Check issuer
-	if iss, ok := claims["iss"].(string); !ok || iss != "codex-pool-proxy" {
+	// Check issuer - accept OpenAI (Codex), Google (Gemini), and Anthropic (Claude)
+	if iss, ok := claims["iss"].(string); ok {
+		validIssuers := map[string]bool{
+			"https://auth.openai.com":    true, // Codex
+			"https://accounts.google.com": true, // Gemini
+			"https://auth.anthropic.com":  true, // Claude
+		}
+		if !validIssuers[iss] {
+			return false, "", nil
+		}
+	} else {
 		return false, "", nil
 	}
 
-	// Extract user ID from sub claim
-	if sub, ok := claims["sub"].(string); ok && strings.HasPrefix(sub, "pool_user:") {
-		userID := strings.TrimPrefix(sub, "pool_user:")
-		return true, userID, nil
+	// Extract user ID from sub claim (pool|<user_id>)
+	if sub, ok := claims["sub"].(string); ok {
+		if strings.HasPrefix(sub, "pool|") {
+			userID := strings.TrimPrefix(sub, "pool|")
+			return true, userID, nil
+		}
 	}
 
 	return false, "", nil
+}
+
+// hashUserIP creates a non-reversible ID from an IP address using SHA256.
+// The salt ensures IDs are unique to this pool instance.
+func hashUserIP(ip, salt string) string {
+	h := sha256.New()
+	h.Write([]byte(salt + "|" + ip))
+	return hex.EncodeToString(h.Sum(nil))[:16] // 16 char hex ID
 }
 
 // PoolUserGeminiAuth matches the Gemini oauth_creds.json format for pool users.
@@ -220,18 +250,47 @@ type PoolUserGeminiAuth struct {
 // generateCodexAuth creates the auth.json content for a pool user.
 func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 	now := time.Now()
-	exp := now.Add(365 * 24 * time.Hour).Unix() // 1 year
+	exp := now.Add(10 * 365 * 24 * time.Hour).Unix() // 10 years
 
-	accountID := "pool_" + user.ID[:8]
+	// Generate a UUID-like account ID to match OpenAI's format
+	accountID := fmt.Sprintf("%s-%s-%s-%s-%s",
+		user.ID[:8],
+		randomHex(2),
+		randomHex(2),
+		randomHex(2),
+		randomHex(6))
 
-	claims := map[string]any{
-		"exp": exp,
-		"iat": now.Unix(),
-		"iss": "codex-pool-proxy",
-		"sub": "pool_user:" + user.ID,
+	// Generate unique IDs
+	jtiID := fmt.Sprintf("%s-%s-%s-%s-%s", randomHex(4), randomHex(2), randomHex(2), randomHex(2), randomHex(6))
+	sessionID := "authsess_pool" + randomHex(12)
+	chatgptUserID := "user-pool-" + user.ID[:8]
+	chatgptAccountUserID := chatgptUserID + "__" + accountID
+
+	// ID token claims - match OpenAI's format closely
+	idTokenClaims := map[string]any{
+		"exp":            exp,
+		"iat":            now.Unix(),
+		"nbf":            now.Unix(),
+		"iss":            "https://auth.openai.com",
+		"sub":            "pool|" + user.ID,
+		"aud":            []string{"app_EMoamEEZ73f0CkXaXp7hrann"},
+		"jti":            jtiID,
+		"client_id":      "app_EMoamEEZ73f0CkXaXp7hrann",
+		"session_id":     sessionID,
+		"email":          user.Email,
+		"email_verified": true,
+		"scp":            []string{"openid", "profile", "email", "offline_access"},
+		"pwd_auth_time":  now.UnixMilli(),
 		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_account_id": accountID,
-			"chatgpt_plan_type":  user.PlanType,
+			"chatgpt_account_id":         accountID,
+			"chatgpt_account_user_id":    chatgptAccountUserID,
+			"chatgpt_compute_residency":  "no_constraint",
+			"chatgpt_plan_type":          user.PlanType,
+			"chatgpt_user_id":            chatgptUserID,
+			"user_id":                    chatgptUserID,
+		},
+		"https://api.openai.com/mfa": map[string]any{
+			"required": "no",
 		},
 		"https://api.openai.com/profile": map[string]any{
 			"email":          user.Email,
@@ -239,20 +298,38 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 		},
 	}
 
-	idToken, err := signJWT(secret, claims)
+	idToken, err := signJWT(secret, idTokenClaims)
 	if err != nil {
 		return nil, err
 	}
 
+	// Access token claims - similar but different aud
 	accessClaims := map[string]any{
-		"exp": exp,
-		"iat": now.Unix(),
-		"iss": "codex-pool-proxy",
-		"sub": "pool_user:" + user.ID,
-		"aud": []string{"https://api.openai.com/v1"},
+		"exp":            exp,
+		"iat":            now.Unix(),
+		"nbf":            now.Unix(),
+		"iss":            "https://auth.openai.com",
+		"sub":            "pool|" + user.ID,
+		"aud":            []string{"https://api.openai.com/v1"},
+		"jti":            randomHex(8) + "-" + randomHex(4) + "-" + randomHex(4) + "-" + randomHex(4) + "-" + randomHex(12),
+		"client_id":      "app_EMoamEEZ73f0CkXaXp7hrann",
+		"session_id":     sessionID,
+		"scp":            []string{"openid", "profile", "email", "offline_access"},
+		"pwd_auth_time":  now.UnixMilli(),
 		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_account_id": accountID,
-			"chatgpt_plan_type":  user.PlanType,
+			"chatgpt_account_id":         accountID,
+			"chatgpt_account_user_id":    chatgptAccountUserID,
+			"chatgpt_compute_residency":  "no_constraint",
+			"chatgpt_plan_type":          user.PlanType,
+			"chatgpt_user_id":            chatgptUserID,
+			"user_id":                    chatgptUserID,
+		},
+		"https://api.openai.com/mfa": map[string]any{
+			"required": "no",
+		},
+		"https://api.openai.com/profile": map[string]any{
+			"email":          user.Email,
+			"email_verified": true,
 		},
 	}
 	accessToken, err := signJWT(secret, accessClaims)
@@ -270,6 +347,7 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 			RefreshToken: refreshToken,
 			AccountID:    &accountID,
 		},
+		LastRefresh: &now, // Required by Codex CLI - must be non-null
 	}, nil
 }
 
@@ -282,8 +360,8 @@ func generateGeminiAuth(secret string, user *PoolUser) (*PoolUserGeminiAuth, err
 	claims := map[string]any{
 		"exp":            exp,
 		"iat":            now.Unix(),
-		"iss":            "codex-pool-proxy",
-		"sub":            "pool_user:" + user.ID,
+		"iss":            "https://accounts.google.com",
+		"sub":            "pool|" + user.ID,
 		"email":          user.Email,
 		"email_verified": true,
 	}
@@ -353,4 +431,42 @@ func getPublicURL() string {
 		return strings.TrimSuffix(globalConfigFile.PublicURL, "/")
 	}
 	return ""
+}
+
+// PoolUserClaudeAuth matches the Claude Code credentials format for pool users.
+type PoolUserClaudeAuth struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	Email        string `json:"email"`
+}
+
+// generateClaudeAuth creates the credentials JSON content for a Claude Code pool user.
+func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, error) {
+	now := time.Now()
+	exp := now.Add(365 * 24 * time.Hour).Unix() // 1 year
+
+	claims := map[string]any{
+		"exp":            exp,
+		"iat":            now.Unix(),
+		"iss":            "https://auth.anthropic.com",
+		"sub":            "pool|" + user.ID,
+		"email":          user.Email,
+		"email_verified": true,
+	}
+
+	// Generate access token (mimics sk-ant-oat format but with pool JWT)
+	accessToken, err := signJWT(secret, claims)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
+
+	return &PoolUserClaudeAuth{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		IDToken:      "", // Claude doesn't use ID token
+		Email:        user.Email,
+	}, nil
 }

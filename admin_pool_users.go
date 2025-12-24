@@ -156,6 +156,9 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 	case strings.HasPrefix(path, "/config/gemini/"):
 		configType = "gemini"
 		token = strings.TrimPrefix(path, "/config/gemini/")
+	case strings.HasPrefix(path, "/config/claude/"):
+		configType = "claude"
+		token = strings.TrimPrefix(path, "/config/claude/")
 	default:
 		http.NotFound(w, r)
 		return
@@ -195,6 +198,13 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 		json.NewEncoder(w).Encode(auth)
 	case "gemini":
 		auth, err := generateGeminiAuth(secret, user)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(auth)
+	case "claude":
+		auth, err := generateClaudeAuth(secret, user)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

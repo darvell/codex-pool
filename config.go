@@ -15,8 +15,33 @@ type ConfigFile struct {
 	DisableRefresh bool   `toml:"disable_refresh"`
 	Debug          bool   `toml:"debug"`
 	PublicURL      string `toml:"public_url"`
+	FriendCode     string `toml:"friend_code"`
+	FriendName     string `toml:"friend_name"`
+	FriendTagline  string `toml:"friend_tagline"`
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
+}
+
+// getFriendName returns the configured friend name for the landing page.
+func getFriendName() string {
+	if v := os.Getenv("FRIEND_NAME"); v != "" {
+		return v
+	}
+	if globalConfigFile != nil && globalConfigFile.FriendName != "" {
+		return globalConfigFile.FriendName
+	}
+	return "PP" // default
+}
+
+// getFriendTagline returns the configured tagline for the landing page.
+func getFriendTagline() string {
+	if v := os.Getenv("FRIEND_TAGLINE"); v != "" {
+		return v
+	}
+	if globalConfigFile != nil && globalConfigFile.FriendTagline != "" {
+		return globalConfigFile.FriendTagline
+	}
+	return "For the few who know, the pool awaits. Unlimited resources. Zero friction."
 }
 
 // PoolUsersConfig is the [pool_users] section.

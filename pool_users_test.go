@@ -10,8 +10,8 @@ func TestSignAndValidateJWT(t *testing.T) {
 	secret := "test-secret-key-12345678901234567890"
 	claims := map[string]any{
 		"exp": time.Now().Add(1 * time.Hour).Unix(),
-		"iss": "codex-pool-proxy",
-		"sub": "pool_user:test123",
+		"iss": "https://auth.openai.com",
+		"sub": "pool|test123",
 	}
 
 	token, err := signJWT(secret, claims)
@@ -25,18 +25,18 @@ func TestSignAndValidateJWT(t *testing.T) {
 		t.Fatalf("validatePoolUserJWT failed: %v", err)
 	}
 
-	if validated["iss"] != "codex-pool-proxy" {
-		t.Errorf("expected iss=codex-pool-proxy, got %v", validated["iss"])
+	if validated["iss"] != "https://auth.openai.com" {
+		t.Errorf("expected iss=https://auth.openai.com, got %v", validated["iss"])
 	}
-	if validated["sub"] != "pool_user:test123" {
-		t.Errorf("expected sub=pool_user:test123, got %v", validated["sub"])
+	if validated["sub"] != "pool|test123" {
+		t.Errorf("expected sub=pool|test123, got %v", validated["sub"])
 	}
 }
 
 func TestValidateJWTWrongSecret(t *testing.T) {
 	claims := map[string]any{
 		"exp": time.Now().Add(1 * time.Hour).Unix(),
-		"iss": "codex-pool-proxy",
+		"iss": "https://auth.openai.com",
 	}
 
 	token, _ := signJWT("secret1", claims)
@@ -50,7 +50,7 @@ func TestValidateExpiredJWT(t *testing.T) {
 	secret := "test-secret"
 	claims := map[string]any{
 		"exp": time.Now().Add(-1 * time.Hour).Unix(), // Expired
-		"iss": "codex-pool-proxy",
+		"iss": "https://auth.openai.com",
 	}
 
 	token, _ := signJWT(secret, claims)
@@ -64,8 +64,8 @@ func TestIsPoolUserToken(t *testing.T) {
 	secret := "test-secret-key"
 	claims := map[string]any{
 		"exp": time.Now().Add(1 * time.Hour).Unix(),
-		"iss": "codex-pool-proxy",
-		"sub": "pool_user:abc123",
+		"iss": "https://auth.openai.com",
+		"sub": "pool|abc123",
 	}
 
 	token, _ := signJWT(secret, claims)
@@ -87,8 +87,8 @@ func TestIsPoolUserTokenWrongIssuer(t *testing.T) {
 	secret := "test-secret-key"
 	claims := map[string]any{
 		"exp": time.Now().Add(1 * time.Hour).Unix(),
-		"iss": "https://auth.openai.com", // Real OpenAI issuer
-		"sub": "pool_user:abc123",
+		"iss": "https://example.com", // Wrong issuer (not https://auth.openai.com)
+		"sub": "pool|abc123",
 	}
 
 	token, _ := signJWT(secret, claims)
@@ -135,8 +135,8 @@ func TestGenerateCodexAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("access token validation failed: %v", err)
 	}
-	if claims["iss"] != "codex-pool-proxy" {
-		t.Errorf("expected iss=codex-pool-proxy, got %v", claims["iss"])
+	if claims["iss"] != "https://auth.openai.com" {
+		t.Errorf("expected iss=https://auth.openai.com, got %v", claims["iss"])
 	}
 
 	// Check JSON serialization
@@ -177,10 +177,91 @@ func TestGenerateGeminiAuth(t *testing.T) {
 		t.Error("expiry_date is 0")
 	}
 
+	// Verify the token uses Google issuer
+	claims, err := validatePoolUserJWT(secret, auth.AccessToken)
+	if err != nil {
+		t.Fatalf("access token validation failed: %v", err)
+	}
+	if claims["iss"] != "https://accounts.google.com" {
+		t.Errorf("expected iss=https://accounts.google.com, got %v", claims["iss"])
+	}
+
 	// Check JSON serialization
 	data, err := json.MarshalIndent(auth, "", "  ")
 	if err != nil {
 		t.Fatalf("JSON marshal failed: %v", err)
 	}
 	t.Logf("Generated oauth_creds.json:\n%s", string(data))
+}
+
+func TestLooksLikeProviderCredential(t *testing.T) {
+	tests := []struct {
+		name         string
+		authHeader   string
+		wantIsValid  bool
+		wantProvider AccountType
+	}{
+		{
+			name:         "Claude API key",
+			authHeader:   "Bearer sk-ant-api03-abc123xyz",
+			wantIsValid:  true,
+			wantProvider: AccountTypeClaude,
+		},
+		{
+			name:         "Claude OAuth token",
+			authHeader:   "Bearer sk-ant-oat01-abc123xyz",
+			wantIsValid:  true,
+			wantProvider: AccountTypeClaude,
+		},
+		{
+			name:         "OpenAI project key",
+			authHeader:   "Bearer sk-proj-abc123xyz",
+			wantIsValid:  true,
+			wantProvider: AccountTypeCodex,
+		},
+		{
+			name:         "OpenAI legacy key",
+			authHeader:   "Bearer sk-abc123xyz",
+			wantIsValid:  true,
+			wantProvider: AccountTypeCodex,
+		},
+		{
+			name:         "Google OAuth token",
+			authHeader:   "Bearer ya29.abc123xyz",
+			wantIsValid:  true,
+			wantProvider: AccountTypeGemini,
+		},
+		{
+			name:        "Empty header",
+			authHeader:  "",
+			wantIsValid: false,
+		},
+		{
+			name:        "No Bearer prefix",
+			authHeader:  "sk-ant-api03-abc123",
+			wantIsValid: false,
+		},
+		{
+			name:        "Random JWT (pool user token)",
+			authHeader:  "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJwb29sfGFiYzEyMyJ9.signature",
+			wantIsValid: false,
+		},
+		{
+			name:        "Unknown token format",
+			authHeader:  "Bearer some-random-token",
+			wantIsValid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIsValid, gotProvider := looksLikeProviderCredential(tt.authHeader)
+			if gotIsValid != tt.wantIsValid {
+				t.Errorf("looksLikeProviderCredential() isValid = %v, want %v", gotIsValid, tt.wantIsValid)
+			}
+			if gotIsValid && gotProvider != tt.wantProvider {
+				t.Errorf("looksLikeProviderCredential() provider = %v, want %v", gotProvider, tt.wantProvider)
+			}
+		})
+	}
 }

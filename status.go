@@ -11,13 +11,39 @@ import (
 
 // StatusData contains all the data for the status page.
 type StatusData struct {
-	GeneratedAt time.Time
-	Uptime      time.Duration
-	TotalCount  int
-	CodexCount  int
-	GeminiCount int
-	PoolUsers   int
-	Accounts    []AccountStatus
+	GeneratedAt       time.Time
+	Uptime            time.Duration
+	TotalCount        int
+	CodexCount        int
+	GeminiCount       int
+	ClaudeCount       int
+	PoolUsers         int
+	Accounts          []AccountStatus
+	TokenAnalytics    *TokenAnalytics
+}
+
+// TokenAnalytics contains capacity estimation data for the status page.
+type TokenAnalytics struct {
+	PlanCapacities []PlanCapacityView
+	TotalSamples   int64
+	ModelInfo      string
+}
+
+// PlanCapacityView is a display-friendly view of plan capacity.
+type PlanCapacityView struct {
+	PlanType              string
+	SampleCount           int64
+	Confidence            string
+	TotalInputTokens      int64
+	TotalOutputTokens     int64
+	TotalCachedTokens     int64
+	TotalReasoningTokens  int64
+	TotalBillableTokens   int64
+	OutputMultiplier      float64
+	EffectivePerPrimaryPct   int64
+	EffectivePerSecondaryPct int64
+	EstimatedPrimaryCapacity   string // e.g., "~2.5M tokens"
+	EstimatedSecondaryCapacity string
 }
 
 // AccountStatus shows the status of a single account.
@@ -59,10 +85,13 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 	for _, a := range h.pool.accounts {
 		a.mu.Lock()
 
-		if a.Type == AccountTypeCodex {
+		switch a.Type {
+		case AccountTypeCodex:
 			data.CodexCount++
-		} else if a.Type == AccountTypeGemini {
+		case AccountTypeGemini:
 			data.GeminiCount++
+		case AccountTypeClaude:
+			data.ClaudeCount++
 		}
 
 		primaryUsed := a.Usage.PrimaryUsedPercent
@@ -74,16 +103,9 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 			secondaryUsed = a.Usage.SecondaryUsed
 		}
 
-		// Apply plan weight for effective usage
-		weight := planCapacityWeight(a.PlanType)
-		effectivePrimary := primaryUsed * weight
-		effectiveSecondary := secondaryUsed * weight
-		if effectivePrimary > 1.0 {
-			effectivePrimary = 1.0
-		}
-		if effectiveSecondary > 1.0 {
-			effectiveSecondary = 1.0
-		}
+		// Effective usage is now just the raw usage (no capacity weighting)
+		effectivePrimary := primaryUsed
+		effectiveSecondary := secondaryUsed
 
 		status := AccountStatus{
 			ID:                 a.ID,
@@ -136,6 +158,11 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 		return data.Accounts[i].Score > data.Accounts[j].Score
 	})
 
+	// Load token analytics
+	if h.store != nil {
+		data.TokenAnalytics = h.loadTokenAnalytics()
+	}
+
 	// Check Accept header for JSON
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
@@ -182,6 +209,80 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%.1fh", d.Hours())
 	}
 	return fmt.Sprintf("%.1fd", d.Hours()/24)
+}
+
+func (h *proxyHandler) loadTokenAnalytics() *TokenAnalytics {
+	caps, err := h.store.loadAllPlanCapacity()
+	if err != nil || len(caps) == 0 {
+		return nil
+	}
+
+	analytics := &TokenAnalytics{
+		ModelInfo: "effective = input + (cached × 0.1) + (output × mult) + (reasoning × mult)",
+	}
+
+	for planType, cap := range caps {
+		analytics.TotalSamples += cap.SampleCount
+
+		confidence := "low"
+		if cap.SampleCount >= 20 {
+			confidence = "high"
+		} else if cap.SampleCount >= 5 {
+			confidence = "medium"
+		}
+
+		mult := cap.OutputMultiplier
+		if mult == 0 {
+			mult = 4.0
+		}
+
+		view := PlanCapacityView{
+			PlanType:                 planType,
+			SampleCount:              cap.SampleCount,
+			Confidence:               confidence,
+			TotalInputTokens:         cap.TotalInputTokens,
+			TotalOutputTokens:        cap.TotalOutputTokens,
+			TotalCachedTokens:        cap.TotalCachedTokens,
+			TotalReasoningTokens:     cap.TotalReasoningTokens,
+			TotalBillableTokens:      cap.TotalTokens,
+			OutputMultiplier:         mult,
+			EffectivePerPrimaryPct:   int64(cap.EffectivePerPrimaryPct),
+			EffectivePerSecondaryPct: int64(cap.EffectivePerSecondaryPct),
+		}
+
+		// Format capacity estimates
+		if cap.EffectivePerPrimaryPct > 0 {
+			total := int64(cap.EffectivePerPrimaryPct * 100)
+			view.EstimatedPrimaryCapacity = formatTokenCount(total)
+		}
+		if cap.EffectivePerSecondaryPct > 0 {
+			total := int64(cap.EffectivePerSecondaryPct * 100)
+			view.EstimatedSecondaryCapacity = formatTokenCount(total)
+		}
+
+		analytics.PlanCapacities = append(analytics.PlanCapacities, view)
+	}
+
+	// Sort by plan type
+	sort.Slice(analytics.PlanCapacities, func(i, j int) bool {
+		order := map[string]int{"team": 0, "pro": 1, "plus": 2, "gemini": 3}
+		return order[analytics.PlanCapacities[i].PlanType] < order[analytics.PlanCapacities[j].PlanType]
+	})
+
+	return analytics
+}
+
+func formatTokenCount(n int64) string {
+	if n >= 1_000_000_000 {
+		return fmt.Sprintf("~%.1fB", float64(n)/1_000_000_000)
+	}
+	if n >= 1_000_000 {
+		return fmt.Sprintf("~%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("~%.0fK", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 const statusHTML = `<!DOCTYPE html>
@@ -257,6 +358,7 @@ const statusHTML = `<!DOCTYPE html>
         .tag-plus { background: #1f6feb; color: #fff; }
         .tag-team { background: #8957e5; color: #fff; }
         .tag-gemini { background: #ea4335; color: #fff; }
+        .tag-claude { background: #cc785c; color: #fff; }
         .tag-codex { background: #10a37f; color: #fff; }
         .tag-disabled { background: #6e7681; color: #fff; }
         .tag-dead { background: #f85149; color: #fff; }
@@ -285,6 +387,12 @@ const statusHTML = `<!DOCTYPE html>
             <div class="stat-value">{{.GeminiCount}}</div>
             <div class="stat-label">Gemini</div>
         </div>
+        {{if .ClaudeCount}}
+        <div class="stat">
+            <div class="stat-value">{{.ClaudeCount}}</div>
+            <div class="stat-label">Claude</div>
+        </div>
+        {{end}}
         {{if .PoolUsers}}
         <div class="stat">
             <div class="stat-value">{{.PoolUsers}}</div>
@@ -315,21 +423,24 @@ const statusHTML = `<!DOCTYPE html>
             <td>
                 {{if eq .Type "codex"}}<span class="tag tag-codex">codex</span>{{end}}
                 {{if eq .Type "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+                {{if eq .Type "claude"}}<span class="tag tag-claude">claude</span>{{end}}
             </td>
             <td>
                 {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
                 {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
                 {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
+                {{if eq .PlanType "max"}}<span class="tag tag-claude">max</span>{{end}}
                 {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+                {{if eq .PlanType "claude"}}<span class="tag tag-claude">claude</span>{{end}}
             </td>
             <td class="usage-cell">
                 {{bar .EffectivePrimary}}{{pct .PrimaryUsed}}
-                {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}<span class="effective">(→{{pct .EffectivePrimary}})</span>{{end}}{{end}}
+                {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}{{if ne .PlanType "claude"}}{{if ne .PlanType "max"}}<span class="effective">(→{{pct .EffectivePrimary}})</span>{{end}}{{end}}{{end}}{{end}}
                 {{if .PrimaryResetIn}}<br><small>resets in {{.PrimaryResetIn}}</small>{{end}}
             </td>
             <td class="usage-cell">
                 {{bar .EffectiveSecondary}}{{pct .SecondaryUsed}}
-                {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}<span class="effective">(→{{pct .EffectiveSecondary}})</span>{{end}}{{end}}
+                {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}{{if ne .PlanType "claude"}}{{if ne .PlanType "max"}}<span class="effective">(→{{pct .EffectiveSecondary}})</span>{{end}}{{end}}{{end}}{{end}}
                 {{if .SecondaryResetIn}}<br><small>resets in {{.SecondaryResetIn}}</small>{{end}}
             </td>
             <td>
@@ -344,11 +455,62 @@ const statusHTML = `<!DOCTYPE html>
         {{end}}
     </table>
 
+    {{if .TokenAnalytics}}
+    <h2 style="color: #58a6ff; margin-top: 30px;">📊 Capacity Analysis</h2>
+    <p style="color: #8b949e; font-size: 13px; margin-bottom: 15px;">
+        Estimating capacity from <strong>{{.TokenAnalytics.TotalSamples}}</strong> samples.
+        Formula: <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">{{.TokenAnalytics.ModelInfo}}</code>
+    </p>
+
+    {{if .TokenAnalytics.PlanCapacities}}
+    <table style="margin-bottom: 20px;">
+        <tr>
+            <th>Plan</th>
+            <th>Samples</th>
+            <th>Confidence</th>
+            <th>Input Tokens</th>
+            <th>Output Tokens</th>
+            <th>Cached</th>
+            <th>Reasoning</th>
+            <th>Output Mult</th>
+            <th>5h Capacity</th>
+            <th>7d Capacity</th>
+        </tr>
+        {{range .TokenAnalytics.PlanCapacities}}
+        <tr>
+            <td>
+                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
+                {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
+                {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
+                {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+            </td>
+            <td>{{.SampleCount}}</td>
+            <td>
+                {{if eq .Confidence "high"}}<span style="color: #3fb950;">●</span> high{{end}}
+                {{if eq .Confidence "medium"}}<span style="color: #d29922;">●</span> medium{{end}}
+                {{if eq .Confidence "low"}}<span style="color: #8b949e;">●</span> low{{end}}
+            </td>
+            <td>{{.TotalInputTokens}}</td>
+            <td>{{.TotalOutputTokens}}</td>
+            <td>{{.TotalCachedTokens}}</td>
+            <td>{{.TotalReasoningTokens}}</td>
+            <td>{{printf "%.1fx" .OutputMultiplier}}</td>
+            <td>{{if .EstimatedPrimaryCapacity}}{{.EstimatedPrimaryCapacity}}{{else}}—{{end}}</td>
+            <td>{{if .EstimatedSecondaryCapacity}}{{.EstimatedSecondaryCapacity}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+    </table>
+    {{else}}
+    <p style="color: #8b949e;">No capacity data collected yet. Use the pool to gather samples.</p>
+    {{end}}
+    {{end}}
+
     <p style="margin-top: 20px; color: #8b949e; font-size: 12px;">
         <strong>Note:</strong> Plus accounts have ~10x less capacity than Pro.
         "Effective" usage shows the weighted value used for load balancing.
         <br>
         <a href="/admin/accounts">Raw account data</a> ·
+        <a href="/admin/tokens">Token analytics API</a> ·
         <a href="/healthz">Health check</a> ·
         <a href="/metrics">Prometheus metrics</a>
     </p>

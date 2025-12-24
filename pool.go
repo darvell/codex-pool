@@ -20,12 +20,13 @@ type AccountType string
 const (
 	AccountTypeCodex  AccountType = "codex"
 	AccountTypeGemini AccountType = "gemini"
+	AccountTypeClaude AccountType = "claude"
 )
 
 type Account struct {
 	mu sync.Mutex
 
-	Type         AccountType // codex or gemini
+	Type         AccountType // codex, gemini, or claude
 	ID           string
 	File         string
 	Label        string
@@ -92,6 +93,49 @@ func readUsedPercent(rl map[string]interface{}, key string) float64 {
 	return 0
 }
 
+// applyRateLimitsFromTokenCount updates account usage from Codex token_count rate_limits.
+// Format: {primary: {used_percent: 26.5, ...}, secondary: {used_percent: 14.5, ...}}
+func (a *Account) applyRateLimitsFromTokenCount(rl map[string]any) {
+	if a == nil || rl == nil {
+		return
+	}
+	var primaryPct, secondaryPct float64
+	if primary, ok := rl["primary"].(map[string]any); ok {
+		if up, ok := primary["used_percent"]; ok {
+			switch t := up.(type) {
+			case float64:
+				primaryPct = t / 100.0
+			case int:
+				primaryPct = float64(t) / 100.0
+			}
+		}
+	}
+	if secondary, ok := rl["secondary"].(map[string]any); ok {
+		if up, ok := secondary["used_percent"]; ok {
+			switch t := up.(type) {
+			case float64:
+				secondaryPct = t / 100.0
+			case int:
+				secondaryPct = float64(t) / 100.0
+			}
+		}
+	}
+	if primaryPct == 0 && secondaryPct == 0 {
+		return
+	}
+	newSnap := UsageSnapshot{
+		PrimaryUsed:          primaryPct,
+		SecondaryUsed:        secondaryPct,
+		PrimaryUsedPercent:   primaryPct,
+		SecondaryUsedPercent: secondaryPct,
+		RetrievedAt:          time.Now(),
+		Source:               "token_count",
+	}
+	a.mu.Lock()
+	a.Usage = mergeUsage(a.Usage, newSnap)
+	a.mu.Unlock()
+}
+
 // UsageSnapshot captures Codex usage headroom and optional credit info.
 // PrimaryUsed/SecondaryUsed are kept for backward compatibility; values are 0-1.
 type UsageSnapshot struct {
@@ -114,21 +158,60 @@ type UsageSnapshot struct {
 type RequestUsage struct {
 	Timestamp         time.Time
 	AccountID         string
+	PlanType          string
 	UserID            string
 	PromptCacheKey    string
 	RequestID         string
 	InputTokens       int64
 	CachedInputTokens int64
 	OutputTokens      int64
+	ReasoningTokens   int64
 	BillableTokens    int64
+	// Rate limit snapshot after this request
+	PrimaryUsedPct   float64
+	SecondaryUsedPct float64
 }
 
-// AccountUsage stores simple aggregates for an account.
+// AccountUsage stores aggregates for an account with time windows.
 type AccountUsage struct {
-	TotalInputTokens    int64
-	TotalCachedTokens   int64
-	TotalOutputTokens   int64
-	TotalBillableTokens int64
+	TotalInputTokens    int64 `json:"total_input_tokens"`
+	TotalCachedTokens   int64 `json:"total_cached_tokens"`
+	TotalOutputTokens   int64 `json:"total_output_tokens"`
+	TotalReasoningTokens int64 `json:"total_reasoning_tokens"`
+	TotalBillableTokens int64 `json:"total_billable_tokens"`
+	RequestCount        int64 `json:"request_count"`
+	// For calculating tokens-per-percent
+	LastPrimaryPct   float64   `json:"last_primary_pct"`
+	LastSecondaryPct float64   `json:"last_secondary_pct"`
+	LastUpdated      time.Time `json:"last_updated"`
+}
+
+// TokenCapacity tracks tokens-per-percent for capacity analysis.
+type TokenCapacity struct {
+	PlanType               string  `json:"plan_type"`
+	SampleCount            int64   `json:"sample_count"`
+	TotalTokens            int64   `json:"total_tokens"`
+	TotalPrimaryPctDelta   float64 `json:"total_primary_pct_delta"`
+	TotalSecondaryPctDelta float64 `json:"total_secondary_pct_delta"`
+
+	// Raw token type totals for weighted estimation
+	TotalInputTokens     int64 `json:"total_input_tokens"`
+	TotalCachedTokens    int64 `json:"total_cached_tokens"`
+	TotalOutputTokens    int64 `json:"total_output_tokens"`
+	TotalReasoningTokens int64 `json:"total_reasoning_tokens"`
+
+	// Derived: raw billable tokens per 1% of quota
+	TokensPerPrimaryPct   float64 `json:"tokens_per_primary_pct,omitempty"`
+	TokensPerSecondaryPct float64 `json:"tokens_per_secondary_pct,omitempty"`
+
+	// Derived: weighted effective tokens per 1% (accounts for token cost differences)
+	// Formula: effective = input + (cached * 0.1) + (output * OutputMultiplier) + (reasoning * ReasoningMultiplier)
+	EffectivePerPrimaryPct   float64 `json:"effective_per_primary_pct,omitempty"`
+	EffectivePerSecondaryPct float64 `json:"effective_per_secondary_pct,omitempty"`
+
+	// Estimated multipliers (refined over time with more data)
+	OutputMultiplier    float64 `json:"output_multiplier,omitempty"`    // How much more output costs vs input (typically 3-5x)
+	ReasoningMultiplier float64 `json:"reasoning_multiplier,omitempty"` // How much reasoning costs vs input
 }
 
 // applyRequestUsage increments aggregate counters for the account.
@@ -137,7 +220,16 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 	a.Totals.TotalInputTokens += u.InputTokens
 	a.Totals.TotalCachedTokens += u.CachedInputTokens
 	a.Totals.TotalOutputTokens += u.OutputTokens
+	a.Totals.TotalReasoningTokens += u.ReasoningTokens
 	a.Totals.TotalBillableTokens += u.BillableTokens
+	a.Totals.RequestCount++
+	if u.PrimaryUsedPct > 0 {
+		a.Totals.LastPrimaryPct = u.PrimaryUsedPct
+	}
+	if u.SecondaryUsedPct > 0 {
+		a.Totals.LastSecondaryPct = u.SecondaryUsedPct
+	}
+	a.Totals.LastUpdated = u.Timestamp
 	a.mu.Unlock()
 }
 
@@ -165,7 +257,29 @@ type GeminiAuthJSON struct {
 	ExpiryDate   int64  `json:"expiry_date"` // Unix timestamp in milliseconds
 }
 
-func loadPool(dir string) ([]*Account, error) {
+// ClaudeAuthJSON is the format for Claude auth files.
+// Files should be named claude_*.json in the pool folder.
+// Supports both API key format and OAuth format (from Claude Code).
+type ClaudeAuthJSON struct {
+	// API key format
+	APIKey   string `json:"api_key,omitempty"`
+	PlanType string `json:"plan_type,omitempty"` // optional: pro, max, etc.
+
+	// OAuth format (from Claude Code keychain)
+	ClaudeAiOauth *ClaudeOAuthData `json:"claudeAiOauth,omitempty"`
+}
+
+// ClaudeOAuthData is the OAuth token structure from Claude Code.
+type ClaudeOAuthData struct {
+	AccessToken      string   `json:"accessToken"`
+	RefreshToken     string   `json:"refreshToken"`
+	ExpiresAt        int64    `json:"expiresAt"` // Unix timestamp in milliseconds
+	Scopes           []string `json:"scopes"`
+	SubscriptionType string   `json:"subscriptionType"` // pro, max, etc.
+	RateLimitTier    string   `json:"rateLimitTier"`
+}
+
+func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	var accs []*Account
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -184,85 +298,22 @@ func loadPool(dir string) ([]*Account, error) {
 			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
 
-		// Detect account type by filename prefix
-		if strings.HasPrefix(e.Name(), "gemini_") {
-			acc, err := loadGeminiAccount(e.Name(), path, data)
-			if err != nil {
-				return nil, err
-			}
-			if acc != nil {
-				accs = append(accs, acc)
-			}
-		} else {
-			acc, err := loadCodexAccount(e.Name(), path, data)
-			if err != nil {
-				return nil, err
-			}
-			if acc != nil {
-				accs = append(accs, acc)
-			}
+		// Use ProviderRegistry to load account based on filename prefix
+		acc, err := registry.LoadAccount(e.Name(), path, data)
+		if err != nil {
+			return nil, err
+		}
+		if acc != nil {
+			accs = append(accs, acc)
 		}
 	}
 	return accs, nil
 }
 
-func loadCodexAccount(name, path string, data []byte) (*Account, error) {
-	var aj CodexAuthJSON
-	if err := json.Unmarshal(data, &aj); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if aj.Tokens == nil {
-		return nil, nil
-	}
-	acc := &Account{
-		Type:         AccountTypeCodex,
-		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
-		File:         path,
-		AccessToken:  aj.Tokens.AccessToken,
-		RefreshToken: aj.Tokens.RefreshToken,
-		IDToken:      aj.Tokens.IDToken,
-	}
-	if aj.Tokens.AccountID != nil {
-		acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
-	}
-	claims := parseClaims(aj.Tokens.IDToken)
-	acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
-	if acc.AccountID == "" && acc.IDTokenChatGPTAccountID != "" {
-		acc.AccountID = acc.IDTokenChatGPTAccountID
-	}
-	acc.PlanType = claims.PlanType
-	acc.ExpiresAt = claims.ExpiresAt
-	if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
-		acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
-	}
-	if aj.LastRefresh != nil {
-		acc.LastRefresh = *aj.LastRefresh
-	}
-	return acc, nil
-}
-
-func loadGeminiAccount(name, path string, data []byte) (*Account, error) {
-	var gj GeminiAuthJSON
-	if err := json.Unmarshal(data, &gj); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if gj.AccessToken == "" {
-		return nil, nil
-	}
-	acc := &Account{
-		Type:         AccountTypeGemini,
-		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
-		File:         path,
-		AccessToken:  gj.AccessToken,
-		RefreshToken: gj.RefreshToken,
-		PlanType:     "gemini",
-	}
-	// expiry_date is Unix timestamp in milliseconds
-	if gj.ExpiryDate > 0 {
-		acc.ExpiresAt = time.UnixMilli(gj.ExpiryDate)
-	}
-	return acc, nil
-}
+// Note: Individual account loading functions are now in the provider files:
+// - provider_codex.go: CodexProvider.LoadAccount
+// - provider_claude.go: ClaudeProvider.LoadAccount
+// - provider_gemini.go: GeminiProvider.LoadAccount
 
 type jwtClaims struct {
 	ExpiresAt        time.Time
@@ -340,6 +391,8 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	now := time.Now()
+
 	if conversationID != "" {
 		if id, ok := p.convPin[conversationID]; ok {
 			if exclude != nil && exclude[id] {
@@ -347,6 +400,27 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
 				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType)
+				// Don't use pinned account if it's overloaded (>70% weekly usage)
+				// This prevents conversation pinning from hammering one account
+				secondaryUsed := a.Usage.SecondaryUsedPercent
+				if secondaryUsed == 0 {
+					secondaryUsed = a.Usage.SecondaryUsed
+				}
+				if secondaryUsed > 0.60 {
+					ok = false
+					if p.debug {
+						log.Printf("unpinning conversation %s from overloaded account %s (%.0f%% weekly)",
+							conversationID, id, secondaryUsed*100)
+					}
+				}
+				// Also unpin if token is expired - don't wait for a failed request
+				if ok && a.ExpiresAt.Before(now) {
+					ok = false
+					if p.debug {
+						log.Printf("unpinning conversation %s from expired account %s",
+							conversationID, id)
+					}
+				}
 				a.mu.Unlock()
 				if ok {
 					return a
@@ -357,7 +431,6 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 
 	var best *Account
 	bestScore := math.Inf(-1)
-	now := time.Now()
 	n := len(p.accounts)
 	if n == 0 {
 		return nil
@@ -424,28 +497,27 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		secondaryUsed = a.Usage.SecondaryUsed
 	}
 
-	// Apply plan capacity weight: Plus accounts have ~10x less capacity than Pro,
-	// so 10% usage on Plus is equivalent to 100% on Pro.
-	weight := planCapacityWeight(a.PlanType)
-	primaryUsed = math.Min(primaryUsed*weight, 1.0)
-	secondaryUsed = math.Min(secondaryUsed*weight, 1.0)
+	// Calculate headroom primarily based on weekly (secondary) usage.
+	// Weekly is the real capacity constraint - 5hr resets frequently.
+	headroom := 1.0 - secondaryUsed
 
-	headroom := 1.0
-	if primaryUsed > 0 {
-		headroom = math.Min(headroom, 1.0-primaryUsed)
+	// 5hr usage only penalizes when getting critically high (>80%)
+	// to avoid immediate rate limits
+	if primaryUsed > 0.8 {
+		primaryPenalty := (primaryUsed - 0.8) * 2.0 // Scales 0.8->1.0 to 0->0.4 penalty
+		headroom -= primaryPenalty
 	}
-	if secondaryUsed > 0 {
-		headroom = math.Min(headroom, 1.0-secondaryUsed)
-	}
-	// expiry risk
+
+	// expiry risk - be gentle since access tokens often outlive ID token expiry.
+	// Accounts that truly fail will get marked dead via 401/403 handling.
 	if !a.ExpiresAt.IsZero() {
 		ttl := a.ExpiresAt.Sub(now).Minutes()
 		if ttl < 0 {
-			headroom -= 1
+			headroom -= 0.3 // Expired but may still work - mild penalty
 		} else if ttl < 30 {
-			headroom -= 0.5
-		} else if ttl < 60 {
 			headroom -= 0.2
+		} else if ttl < 60 {
+			headroom -= 0.1
 		}
 	}
 	headroom -= a.Penalty
@@ -453,27 +525,35 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		headroom = 0.01
 	}
 
+	// Plan preference: Drain Plus accounts first (until 80% used), then fall back to Pro/Team.
+	planPreference := planPreferenceMultiplier(a.PlanType, secondaryUsed)
+
 	// credits bonuses
 	creditBonus := 1.0
 	if a.Usage.CreditsUnlimited || a.Usage.HasCredits {
 		creditBonus = 1.1
 	}
 
-	return headroom * creditBonus
+	return headroom * planPreference * creditBonus
 }
 
-// planCapacityWeight returns a multiplier for usage based on plan capacity.
-// Plus accounts have ~10x less capacity than Pro, so their usage is weighted higher.
-func planCapacityWeight(planType string) float64 {
+// planPreferenceMultiplier returns a multiplier that affects account selection preference.
+// We drain Plus accounts first (until 80% used), then fall back to Pro/Team.
+// Higher value = more preferred.
+func planPreferenceMultiplier(planType string, secondaryUsedPct float64) float64 {
 	switch planType {
 	case "plus":
-		return 10.0 // Plus has ~10x less capacity than Pro
+		// Drain Plus first - prefer until 80% used
+		if secondaryUsedPct < 0.8 {
+			return 1.4 // Highest preference when has capacity
+		}
+		return 0.8 // Deprioritize when nearly full
 	case "pro":
-		return 1.0
+		return 1.0 // Normal preference - save for when Plus is drained
 	case "team":
-		return 1.0 // Team is similar to Pro
+		return 1.0 // Same as Pro
 	case "enterprise":
-		return 0.5 // Enterprise has more capacity
+		return 1.1 // Slight preference for enterprise
 	case "gemini":
 		return 1.0 // Gemini has its own quota system
 	default:
@@ -488,6 +568,15 @@ func (p *poolState) pin(conversationID, accountID string) {
 	p.mu.Lock()
 	p.convPin[conversationID] = accountID
 	p.mu.Unlock()
+}
+
+// allAccounts returns a copy of all accounts for stats/reporting.
+func (p *poolState) allAccounts() []*Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*Account, len(p.accounts))
+	copy(out, p.accounts)
+	return out
 }
 
 // saveAccount persists the account back to its auth.json file.
@@ -708,6 +797,122 @@ func max(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+// UsagePoolStats contains aggregate stats about the pool for the usage endpoint.
+type UsagePoolStats struct {
+	TotalCount       int            `json:"total_count"`
+	HealthyCount     int            `json:"healthy_count"`
+	DeadCount        int            `json:"dead_count"`
+	CodexCount       int            `json:"codex_count"`
+	GeminiCount      int            `json:"gemini_count"`
+	ClaudeCount      int            `json:"claude_count"`
+	AvgPrimaryUsed   float64        `json:"avg_primary_used"`
+	AvgSecondaryUsed float64        `json:"avg_secondary_used"`
+	MinSecondaryUsed float64        `json:"min_secondary_used"`
+	MaxSecondaryUsed float64        `json:"max_secondary_used"`
+	Accounts         []AccountBrief `json:"accounts"`
+}
+
+// AccountBrief is a summary of an account for the usage endpoint.
+type AccountBrief struct {
+	ID           string  `json:"id"`
+	Type         string  `json:"type"`
+	Plan         string  `json:"plan"`
+	Status       string  `json:"status"` // "healthy", "dead", "disabled"
+	PrimaryPct   int     `json:"primary_pct"`
+	SecondaryPct int     `json:"secondary_pct"`
+	Score        float64 `json:"score"`
+}
+
+// getPoolStats returns aggregate stats about the pool.
+func (p *poolState) getPoolStats() UsagePoolStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	now := time.Now()
+	stats := UsagePoolStats{
+		TotalCount:       len(p.accounts),
+		MinSecondaryUsed: 1.0,
+	}
+
+	var totalP, totalS float64
+	var healthyCount int
+
+	for _, a := range p.accounts {
+		a.mu.Lock()
+
+		// Count by type
+		switch a.Type {
+		case AccountTypeCodex:
+			stats.CodexCount++
+		case AccountTypeGemini:
+			stats.GeminiCount++
+		case AccountTypeClaude:
+			stats.ClaudeCount++
+		}
+
+		// Determine status
+		status := "healthy"
+		if a.Dead {
+			status = "dead"
+			stats.DeadCount++
+		} else if a.Disabled {
+			status = "disabled"
+		} else {
+			stats.HealthyCount++
+		}
+
+		// Get usage
+		primaryUsed := a.Usage.PrimaryUsedPercent
+		if primaryUsed == 0 {
+			primaryUsed = a.Usage.PrimaryUsed
+		}
+		secondaryUsed := a.Usage.SecondaryUsedPercent
+		if secondaryUsed == 0 {
+			secondaryUsed = a.Usage.SecondaryUsed
+		}
+
+		// Track min/max for healthy accounts
+		if !a.Dead && !a.Disabled {
+			healthyCount++
+			totalP += primaryUsed
+			totalS += secondaryUsed
+			if secondaryUsed < stats.MinSecondaryUsed {
+				stats.MinSecondaryUsed = secondaryUsed
+			}
+			if secondaryUsed > stats.MaxSecondaryUsed {
+				stats.MaxSecondaryUsed = secondaryUsed
+			}
+		}
+
+		score := 0.0
+		if !a.Dead && !a.Disabled {
+			score = scoreAccountLocked(a, now)
+		}
+
+		stats.Accounts = append(stats.Accounts, AccountBrief{
+			ID:           a.ID,
+			Type:         string(a.Type),
+			Plan:         a.PlanType,
+			Status:       status,
+			PrimaryPct:   int(primaryUsed * 100),
+			SecondaryPct: int(secondaryUsed * 100),
+			Score:        score,
+		})
+
+		a.mu.Unlock()
+	}
+
+	if healthyCount > 0 {
+		stats.AvgPrimaryUsed = totalP / float64(healthyCount)
+		stats.AvgSecondaryUsed = totalS / float64(healthyCount)
+	}
+	if stats.MinSecondaryUsed > stats.MaxSecondaryUsed {
+		stats.MinSecondaryUsed = 0
+	}
+
+	return stats
 }
 
 // decayPenalty slowly reduces penalties over time to avoid permanent punishment.

@@ -16,10 +16,10 @@ func TestBuildWhamUsageURLKeepsBackendAPI(t *testing.T) {
 	}
 }
 
-func TestUpdateUsageFromHeadersCodex(t *testing.T) {
-	acc := &Account{}
-	h := &proxyHandler{}
-	h.updateUsageFromHeaders(acc, mapToHeader(map[string]string{
+func TestCodexProviderParseUsageHeaders(t *testing.T) {
+	acc := &Account{Type: AccountTypeCodex}
+	provider := &CodexProvider{}
+	provider.ParseUsageHeaders(acc, mapToHeader(map[string]string{
 		"X-Codex-Primary-Used-Percent":   "25",
 		"X-Codex-Secondary-Used-Percent": "50",
 		"X-Codex-Primary-Window-Minutes": "300",

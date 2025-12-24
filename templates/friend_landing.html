@@ -1,0 +1,1597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Friends of {{.FriendName}} - AI Pool</title>
+
+    <!-- OpenGraph / Rich Link Preview -->
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Friends of {{.FriendName}}">
+    <meta property="og:description" content="For those who are friends, unlimited pooled AI resources await.">
+    <meta property="og:image" content="https://codex.ppflix.net/og-image.png">
+    <meta property="og:url" content="https://codex.ppflix.net">
+    <meta property="og:site_name" content="AI Pool">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Friends of {{.FriendName}}">
+    <meta name="twitter:description" content="For those who are friends, unlimited pooled AI resources await.">
+    <meta name="twitter:image" content="https://codex.ppflix.net/og-image.png">
+
+    <!-- Theme Color -->
+    <meta name="theme-color" content="#0a0a0a">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #050505;
+            --card-bg: #0e0e0e;
+            --text-main: #e0e0e0;
+            --text-muted: #666;
+            --gold-dim: #8a7039;
+            --gold-bright: #d4af37;
+            --gold-glow: rgba(212, 175, 55, 0.15);
+            --border-outer: #1a1a1a;
+            --border-inner: #252525;
+            --code-bg: #080808;
+            --success-green: #27ae60;
+            --error-red: #c0392b;
+            
+            --panel-gradient: linear-gradient(145deg, #111, #0a0a0a);
+            --metallic-gradient: linear-gradient(135deg, #b38b38 0%, #d4af37 50%, #8a7039 100%);
+            --inset-shadow: inset 2px 2px 5px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
+            --outset-shadow: 5px 5px 10px rgba(0,0,0,0.5), -1px -1px 1px rgba(255,255,255,0.03);
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 50% 0%, rgba(30,30,30,1) 0%, transparent 60%),
+                url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E");
+            color: var(--text-main);
+            font-family: 'Space Mono', monospace;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* The Monolith Container */
+        .container {
+            width: 100%;
+            max-width: 850px;
+            position: relative;
+            padding: 40px;
+            background: var(--card-bg);
+            border-radius: 4px;
+            box-shadow: 
+                0 0 0 1px #1a1a1a, /* Inner subtle border */
+                0 20px 50px rgba(0,0,0,0.8), /* Deep shadow */
+                0 0 100px rgba(0,0,0,0.5); /* Ambient shadow */
+            overflow: hidden;
+        }
+
+        /* Metallic Bezel Effect */
+        .container::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+            opacity: 0.3;
+        }
+        .container::after {
+            content: "";
+            position: absolute;
+            bottom: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, #333, transparent);
+            opacity: 0.5;
+        }
+
+        /* Subtle Noise Texture on Card */
+        .texture-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .content-relative {
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Embossed Corner Badge */
+        .friend-badge {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            font-family: 'Cormorant Garamond', serif;
+            font-size: 0.9rem;
+            font-style: italic;
+            color: var(--gold-dim);
+            text-shadow: 1px 1px 0 rgba(0,0,0,0.8), -1px -1px 0 rgba(255,255,255,0.05);
+            letter-spacing: 0.05em;
+            z-index: 10;
+        }
+        .friend-badge span {
+            background: var(--metallic-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 500;
+        }
+
+        /* Hero Art - Centered */
+        .hero-wrapper {
+            width: 100%;
+            max-width: 280px;
+            margin: 0 auto 25px;
+            position: relative;
+        }
+
+        .hero-wrapper .hero-label {
+            position: absolute;
+            bottom: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-family: 'Space Mono', monospace;
+            font-size: 1.1rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.3em;
+            color: var(--gold-bright);
+            text-shadow: 0 2px 8px rgba(0,0,0,0.9), 0 0 20px rgba(0,0,0,0.8);
+            z-index: 5;
+        }
+
+        /* Glow behind hero */
+        .hero-wrapper::before {
+            content: "";
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 120px; height: 120px;
+            transform: translate(-50%, -50%);
+            background: radial-gradient(circle, var(--gold-glow) 0%, transparent 70%);
+            filter: blur(20px);
+            z-index: -1;
+        }
+
+        .hero-art {
+            width: 100%;
+            height: auto;
+            display: block;
+            opacity: 0.95;
+            filter: contrast(1.1) drop-shadow(0 10px 20px rgba(0,0,0,0.5));
+            transition: transform 0.5s ease;
+        }
+        .hero-art:hover {
+            transform: scale(1.02);
+        }
+
+        /* Success hero */
+        .success-wrapper {
+            width: 100%;
+            max-width: 220px;
+            margin: 0 auto 20px;
+            position: relative;
+            animation: heroReveal 1s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        .success-wrapper .hero-label {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-family: 'Space Mono', monospace;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.3em;
+            color: var(--gold-bright);
+            text-shadow: 0 2px 8px rgba(0,0,0,0.9), 0 0 20px rgba(0,0,0,0.8);
+            z-index: 5;
+        }
+        .success-hero {
+            width: 100%;
+            height: auto;
+            display: block;
+            filter: drop-shadow(0 0 30px var(--gold-glow));
+        }
+
+        @keyframes heroReveal {
+            from { opacity: 0; transform: translateY(20px) scale(0.95); filter: blur(10px); }
+            to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+        }
+
+        /* Typography */
+        h1 {
+            font-family: 'Cormorant Garamond', serif;
+            font-weight: 300;
+            font-size: 2.2rem;
+            text-align: center;
+            margin: 0 0 0.3rem 0;
+            color: var(--text-main);
+            letter-spacing: -0.02em;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        h1 span {
+            color: var(--gold-bright);
+            font-style: italic;
+            font-family: 'Cormorant Garamond', serif;
+            font-weight: 400;
+            background: var(--metallic-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .product-mark {
+            font-family: 'Space Mono', monospace;
+            font-size: 0.65rem;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 0.3em;
+            color: var(--gold-dim);
+            margin: 0 auto 1.5rem;
+            padding: 0;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #aaa;
+            font-family: 'Cormorant Garamond', serif;
+            font-size: 1.15rem;
+            font-style: italic;
+            margin-bottom: 2rem;
+            line-height: 1.5;
+            max-width: 420px;
+            margin-left: auto;
+            margin-right: auto;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+        }
+
+        /* Inputs & Form - Skeuomorphic "Slots" */
+        .input-group {
+            margin-bottom: 1.5rem;
+            position: relative;
+            max-width: 420px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        input {
+            width: 100%;
+            background: #050505;
+            border: none;
+            color: var(--gold-bright);
+            font-family: 'Space Mono', monospace;
+            font-size: 1.2rem;
+            padding: 16px 20px;
+            text-align: center;
+            border-radius: 6px;
+            box-shadow: var(--inset-shadow);
+            transition: all 0.3s ease;
+            box-sizing: border-box;
+            border-bottom: 1px solid transparent;
+        }
+
+        input::placeholder {
+            color: #333;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        input:focus { 
+            outline: none; 
+            box-shadow: inset 1px 1px 3px rgba(0,0,0,1), inset -1px -1px 1px rgba(255,255,255,0.05), 0 0 15px rgba(212, 175, 55, 0.1);
+            color: #fff;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+        }
+
+        /* Luxury Button */
+        button {
+            display: block;
+            width: 100%;
+            max-width: 420px;
+            margin: 2rem auto 0;
+            background: linear-gradient(180deg, #2a2a2a, #1a1a1a);
+            color: #888;
+            border: 1px solid #333;
+            padding: 16px;
+            font-family: 'Space Mono', monospace;
+            font-weight: 700;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            cursor: pointer;
+            border-radius: 4px;
+            box-shadow: 
+                0 4px 6px rgba(0,0,0,0.5), 
+                inset 0 1px 0 rgba(255,255,255,0.05);
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        button:hover {
+            color: var(--gold-bright);
+            border-color: var(--gold-dim);
+            box-shadow: 
+                0 6px 12px rgba(0,0,0,0.6), 
+                inset 0 1px 0 rgba(255,255,255,0.1),
+                0 0 15px var(--gold-glow);
+            transform: translateY(-1px);
+        }
+
+        button:active {
+            transform: translateY(1px);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.8);
+            background: #111;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Success State */
+        .success-content { display: none; }
+        .success-content.visible { display: block; animation: fadeIn 0.8s ease; }
+        
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .welcome-msg {
+            text-align: center;
+            margin-bottom: 1.5rem;
+            color: var(--gold-bright);
+            font-family: 'Cormorant Garamond', serif;
+            font-size: 1.3rem;
+            font-style: italic;
+            text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
+        }
+
+        /* Main Tabs - Physical Switches */
+        .tabs {
+            display: flex;
+            justify-content: center;
+            gap: 6px;
+            margin-bottom: 40px;
+            background: #080808;
+            padding: 6px;
+            border-radius: 50px;
+            box-shadow: var(--inset-shadow);
+            max-width: 580px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .tab {
+            cursor: pointer;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: #555;
+            padding: 8px 14px;
+            border-radius: 40px;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .tab svg { width: 16px; height: 16px; fill: currentColor; opacity: 0.7; }
+
+        .tab.active { 
+            color: #000;
+            background: var(--metallic-gradient);
+            box-shadow: 
+                0 2px 10px rgba(0,0,0,0.5),
+                inset 0 1px 0 rgba(255,255,255,0.4);
+            text-shadow: none;
+        }
+        
+        .tab:hover:not(.active) {
+            color: #999;
+        }
+
+        .tab-content { display: none; animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        .tab-content.active { display: block; }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Sub Tabs */
+        .sub-tabs {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 25px;
+        }
+
+        .sub-tab {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #555;
+            padding: 6px 14px;
+            border: 1px solid #222;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-radius: 2px;
+            background: linear-gradient(180deg, #151515, #101010);
+        }
+
+        .sub-tab:hover { color: #888; border-color: #333; }
+        .sub-tab.active {
+            border-color: var(--gold-dim);
+            color: var(--gold-bright);
+            background: rgba(212, 175, 55, 0.05);
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        }
+
+        .sub-tab-content { display: none; }
+        .sub-tab-content.active { display: block; animation: fadeIn 0.3s; }
+
+        /* Installation Section & Code */
+        .install-section {
+            margin-bottom: 2.5rem;
+            padding: 25px;
+            background: #0a0a0a;
+            border: 1px solid #1a1a1a;
+            border-radius: 8px;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+        }
+        
+        .section-header {
+            font-family: 'Cormorant Garamond', serif;
+            font-size: 1.3rem;
+            color: var(--text-main);
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-bottom: 1px solid #1a1a1a;
+            padding-bottom: 10px;
+        }
+        
+        .section-header svg { width: 20px; height: 20px; fill: var(--gold-bright); }
+
+        .step-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: var(--gold-dim);
+            margin: 1.5rem 0 0.8rem;
+            display: flex;
+            align-items: center;
+            letter-spacing: 1.5px;
+        }
+        
+        .step-label::before {
+            content: "";
+            display: inline-block;
+            width: 8px; height: 8px;
+            background: var(--gold-dim);
+            margin-right: 10px;
+            border-radius: 50%;
+            box-shadow: 0 0 5px var(--gold-dim);
+        }
+
+        /* Code Blocks */
+        .code-wrapper {
+            position: relative;
+            background: #050505;
+            border: 1px solid #1a1a1a;
+            border-radius: 4px;
+            margin-bottom: 1.5rem;
+            box-shadow: var(--inset-shadow);
+        }
+
+        .code-block {
+            padding: 20px;
+            font-size: 0.85rem;
+            line-height: 1.6;
+            color: #aaa;
+            overflow-x: auto;
+            font-family: 'Space Mono', monospace;
+        }
+        
+        pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        code { color: #d4d4d4; }
+        .highlight { color: var(--gold-bright); }
+
+        .copy-btn {
+            position: absolute;
+            top: 8px; right: 8px;
+            background: #111;
+            border: 1px solid #333;
+            color: #555;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.6rem;
+            padding: 4px 10px;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 0.2s;
+            width: auto;
+            margin: 0;
+            border-radius: 2px;
+            box-shadow: none;
+        }
+
+        .copy-btn:hover { 
+            border-color: var(--gold-dim); 
+            color: var(--gold-bright);
+            box-shadow: 0 0 8px rgba(212, 175, 55, 0.2);
+            transform: none;
+        }
+        .copy-btn.copied { border-color: var(--success-green); color: var(--success-green); }
+
+        .error {
+            color: var(--error-red);
+            font-size: 0.9rem;
+            text-align: center;
+            margin-bottom: 2rem;
+            display: none;
+            padding: 12px;
+            border: 1px solid rgba(192, 57, 43, 0.3);
+            background: rgba(192, 57, 43, 0.05);
+            border-radius: 4px;
+        }
+        
+        .reset-link {
+            text-align: center;
+            margin-top: 4rem;
+            opacity: 0.5;
+            transition: opacity 0.3s;
+        }
+        .reset-link:hover { opacity: 1; }
+        .reset-link a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.8rem;
+            border-bottom: 1px dotted #444;
+            padding-bottom: 2px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        /* Stats Styling */
+        .stat-card {
+            background: linear-gradient(145deg, #111, #0c0c0c);
+            border: 1px solid #1a1a1a;
+            padding: 20px;
+            text-align: center;
+            border-radius: 6px;
+            box-shadow: 5px 5px 15px rgba(0,0,0,0.3), -5px -5px 15px rgba(255,255,255,0.01);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .stat-card::after {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 2px;
+            background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
+            opacity: 0.5;
+        }
+
+        .stat-value {
+            color: var(--text-main);
+            font-size: 2.2rem;
+            font-family: 'Cormorant Garamond', serif;
+            font-weight: 400;
+            margin-bottom: 5px;
+            text-shadow: 0 2px 5px rgba(0,0,0,0.8);
+        }
+        
+        .stat-label {
+            color: var(--text-muted);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .progress-track {
+            flex: 1;
+            background: #050505;
+            height: 12px;
+            border-radius: 6px;
+            box-shadow: inset 1px 1px 3px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
+            overflow: hidden;
+            border: 1px solid #1a1a1a;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
+            width: 0%;
+            transition: width 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+            box-shadow: 0 0 10px var(--gold-dim);
+        }
+
+        .table-container {
+            border: 1px solid #1a1a1a;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #0a0a0a;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        table { width: 100%; border-collapse: collapse; }
+        
+        th {
+            background: #111;
+            padding: 15px;
+            text-align: left;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+            border-bottom: 1px solid #222;
+        }
+        
+        td {
+            padding: 15px;
+            font-size: 0.8rem;
+            border-bottom: 1px solid #151515;
+            color: #ccc;
+        }
+        
+        tr:last-child td { border-bottom: none; }
+        
+        /* Responsive */
+        @media (max-width: 600px) {
+            .container { padding: 25px 20px; }
+            .friend-badge {
+                position: static;
+                text-align: center;
+                margin-bottom: 15px;
+            }
+            .hero-wrapper, .success-wrapper {
+                max-width: 140px;
+            }
+            h1 { font-size: 1.8rem; }
+            .tabs {
+                flex-wrap: wrap;
+                gap: 8px;
+                border-radius: 12px;
+                padding: 10px;
+                max-width: 100%;
+            }
+            .tab {
+                flex: 1 1 45%;
+                justify-content: center;
+                padding: 10px 12px;
+            }
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="texture-overlay"></div>
+        <div class="friend-badge">Friends of <span>{{.FriendName}}</span></div>
+        <div class="content-relative">
+
+            <div id="error-msg" class="error"></div>
+
+            <!-- Login Section -->
+            <div id="login-section">
+                <div class="hero-wrapper" id="login-hero">
+                    <img src="/hero.png" alt="AI Pool" class="hero-art">
+                    <div class="hero-label">AI Pool</div>
+                </div>
+                <p class="subtitle">{{.Tagline}}</p>
+
+                <form id="access-form">
+                    <div class="input-group">
+                        <input type="text" id="friend_code" name="friend_code" required placeholder="Enter Friend Code" autocomplete="off">
+                    </div>
+
+                    <div class="input-group">
+                        <input type="email" id="user_email" name="user_email" placeholder="Email Address (Optional)">
+                    </div>
+
+                    <button type="submit" id="submit-btn">Verify</button>
+                </form>
+            </div>
+
+            <!-- Success Section -->
+            <div id="success-section" class="success-content">
+                <div class="success-wrapper">
+                    <img src="/hero.png" alt="Access Granted" class="success-hero">
+                    <div class="hero-label">AI Pool</div>
+                </div>
+
+                <div class="tabs">
+                    <div class="tab active" data-tab="codex">
+                        <!-- Codex Icon -->
+                        <svg viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.0462 6.0462 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4069-.6666zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2298V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4533l-.142.0805L8.704 5.4596a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l3.8556-2.2088 3.8556 2.2088v4.4162l-3.8556 2.2188-3.8556-2.2188z"/></svg>
+                        Codex
+                    </div>
+                    <div class="tab" data-tab="claude">
+                        <!-- Claude Icon -->
+                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="currentColor"/></svg>
+                        Claude
+                    </div>
+                    <div class="tab" data-tab="gemini">
+                        <!-- Gemini Icon -->
+                        <svg viewBox="0 0 24 24"><path d="M12,2 L14.5,9.5 L22,12 L14.5,14.5 L12,22 L9.5,14.5 L2,12 L9.5,9.5 L12,2 M6,12 L8,18 L14,12 L8,6 L6,12" fill="currentColor"/></svg>
+                        Gemini
+                    </div>
+                    <div class="tab" data-tab="stats">
+                        <!-- Stats Icon -->
+                        <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
+                        Analytics
+                    </div>
+                </div>
+
+                <!-- CODEX -->
+                <div id="tab-codex" class="tab-content active">
+                    <div class="install-section">
+                        <div class="section-header">
+                            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l2.5-1.25L12 8.5l-2.5 1.25L12 11zm0 2.5l-5-2.5-5 2.5L12 22l10-8.5-5-2.5-5 2.5z" fill="currentColor"/></svg>
+                            Step 1: Install CLI
+                        </div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('codex-install', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="codex-install"># Using NPM (All Platforms)
+npm install -g @openai/codex
+
+# Using Homebrew (macOS)
+brew install codex</pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="sub-tabs">
+                        <div class="sub-tab active" onclick="switchSubTab('codex', 'auto')">Automatic Config</div>
+                        <div class="sub-tab" onclick="switchSubTab('codex', 'manual')">Manual Config</div>
+                    </div>
+
+                    <!-- Codex Auto -->
+                    <div id="codex-auto" class="sub-tab-content active">
+                        <div class="step-label">One-Liner Execution</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('cmd-one-liner', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="cmd-one-liner"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                            Automatically retrieves auth token and configures local environment.
+                        </p>
+                    </div>
+
+                    <!-- Codex Manual -->
+                    <div id="codex-manual" class="sub-tab-content">
+                        <div class="step-label">01 // Auth Credentials</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.codex/auth.json</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('code-auth-json', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="code-auth-json"></pre>
+                            </div>
+                        </div>
+
+                        <div class="step-label">02 // Configuration</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.codex/config.toml</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('cmd-connect', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="cmd-connect"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GEMINI -->
+                <div id="tab-gemini" class="tab-content">
+                    <div class="install-section">
+                        <div class="section-header">
+                            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l2.5-1.25L12 8.5l-2.5 1.25L12 11zm0 2.5l-5-2.5-5 2.5L12 22l10-8.5-5-2.5-5 2.5z" fill="currentColor"/></svg>
+                            Step 1: Install CLI
+                        </div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-install', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-install"># Using NPM (All Platforms)
+npm install -g @google/gemini-cli
+
+# Using Homebrew (macOS)
+brew install gemini-cli</pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="sub-tabs">
+                        <div class="sub-tab active" onclick="switchSubTab('gemini', 'auto')">Automatic Config</div>
+                        <div class="sub-tab" onclick="switchSubTab('gemini', 'manual')">Manual Config</div>
+                    </div>
+
+                    <!-- Gemini Auto -->
+                    <div id="gemini-auto" class="sub-tab-content active">
+                        <div class="step-label">One-Liner Execution</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-one-liner"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                            Automatically retrieves OAuth token and configures endpoint settings.
+                        </p>
+                    </div>
+
+                    <!-- Gemini Manual -->
+                    <div id="gemini-manual" class="sub-tab-content">
+                        <div class="step-label">01 // Auth Credentials</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/oauth_creds.json</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-auth-json', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-auth-json"></pre>
+                            </div>
+                        </div>
+
+                        <div class="step-label">02 // Configuration</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-connect', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-connect"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- CLAUDE -->
+                <div id="tab-claude" class="tab-content">
+                    <div class="install-section">
+                        <div class="section-header">
+                            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l2.5-1.25L12 8.5l-2.5 1.25L12 11zm0 2.5l-5-2.5-5 2.5L12 22l10-8.5-5-2.5-5 2.5z" fill="currentColor"/></svg>
+                            Step 1: Install CLI
+                        </div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-install', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-install"># Using NPM (All Platforms)
+npm install -g @anthropic-ai/claude-code
+
+# Using Homebrew (macOS)
+brew install claude-code</pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="sub-tabs">
+                        <div class="sub-tab active" onclick="switchSubTab('claude', 'auto')">Automatic Config</div>
+                        <div class="sub-tab" onclick="switchSubTab('claude', 'manual')">Manual Config</div>
+                    </div>
+
+                    <!-- Claude Auto -->
+                    <div id="claude-auto" class="sub-tab-content active">
+                        <div class="step-label">One-Liner Execution</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-one-liner', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-one-liner"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                            Sets ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY for pool access.
+                        </p>
+                    </div>
+
+                    <!-- Claude Manual -->
+                    <div id="claude-manual" class="sub-tab-content">
+                        <div class="step-label">01 // Environment Variables</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-env"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STATS -->
+                <div id="tab-stats" class="tab-content">
+                    <div class="section-header">
+                        <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
+                        Pool Analytics
+                    </div>
+                    <div id="stats-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
+                        Connecting to matrix...
+                    </div>
+                    <div id="stats-content" style="display: none;">
+                        <!-- Aggregate Summary -->
+                        <div class="stats-summary" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 30px;">
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-total-accounts">-</div>
+                                <div class="stat-label">Codex Accounts</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" style="color: var(--success-green);" id="stat-active-accounts">-</div>
+                                <div class="stat-label">Active</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" style="color: #e0e0e0;" id="stat-pool-users">-</div>
+                                <div class="stat-label">Pool Users</div>
+                            </div>
+                        </div>
+
+                        <!-- Token Usage Summary -->
+                        <div class="step-label">Token Usage</div>
+                        <div class="stats-summary" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px;">
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-input-tokens" style="font-size: 1.6rem;">-</div>
+                                <div class="stat-label">Input</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-output-tokens" style="font-size: 1.6rem;">-</div>
+                                <div class="stat-label">Output</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-cached-tokens" style="font-size: 1.6rem; color: var(--gold-bright);">-</div>
+                                <div class="stat-label">Cached</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-billable-tokens" style="font-size: 1.6rem;">-</div>
+                                <div class="stat-label">Billable</div>
+                            </div>
+                        </div>
+
+                        <!-- Capacity Analysis -->
+                        <div id="capacity-section" style="display: none;">
+                            <div class="step-label">Capacity Analysis</div>
+                            <div style="margin-bottom: 20px; background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a;">
+                                <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0;">
+                                    <span id="capacity-samples">0</span> samples collected.
+                                    Formula: <code style="background: #151515; padding: 2px 6px; border-radius: 3px; color: var(--gold-dim);" id="capacity-formula"></code>
+                                </p>
+                                <div id="capacity-plans"></div>
+                            </div>
+                        </div>
+
+                        <!-- Usage Bars -->
+                        <div class="step-label">Rate Limit Windows</div>
+                        <div style="margin-bottom: 30px; background: #0c0c0c; padding: 20px; border-radius: 6px; border: 1px solid #1a1a1a;">
+                            <div style="display: flex; align-items: center; margin-bottom: 15px;">
+                                <span style="width: 90px; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">5hr Window</span>
+                                <div class="progress-track">
+                                    <div id="bar-primary" class="progress-bar"></div>
+                                </div>
+                                <span id="pct-primary" style="width: 50px; text-align: right; color: var(--text-main); font-size: 0.8rem; font-family: monospace;">0%</span>
+                            </div>
+                            <div style="display: flex; align-items: center; margin-bottom: 15px;">
+                                <span style="width: 90px; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">Weekly</span>
+                                <div class="progress-track">
+                                    <div id="bar-secondary" class="progress-bar" style="background: linear-gradient(90deg, #3498db, #9b59b6);"></div>
+                                </div>
+                                <span id="pct-secondary" style="width: 50px; text-align: right; color: var(--text-main); font-size: 0.8rem; font-family: monospace;">0%</span>
+                            </div>
+                            <div style="display: flex; align-items: center;">
+                                <span style="width: 90px; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">Week Cycle</span>
+                                <div class="progress-track">
+                                    <div id="bar-week-elapsed" class="progress-bar" style="background: linear-gradient(90deg, #2c3e50, #444);"></div>
+                                </div>
+                                <span id="pct-week-elapsed" style="width: 50px; text-align: right; color: var(--text-muted); font-size: 0.8rem; font-family: monospace;">0%</span>
+                            </div>
+                        </div>
+
+                        <!-- Daily Usage Chart -->
+                        <div class="step-label">Daily Usage (30 days)</div>
+                        <div id="usage-chart-container" style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-bottom: 30px;">
+                            <div id="usage-chart" style="height: 120px; display: flex; align-items: flex-end; gap: 2px;">
+                                <div style="color: var(--text-muted); font-style: italic;">Loading chart...</div>
+                            </div>
+                            <div id="chart-legend" style="display: flex; gap: 15px; margin-top: 10px; flex-wrap: wrap; font-size: 0.7rem;"></div>
+                        </div>
+
+                        <!-- Account Table -->
+                        <div class="step-label">Codex Accounts</div>
+                        <div class="table-container">
+                            <div style="overflow-x: auto;">
+                                <table id="accounts-table">
+                                    <thead>
+                                        <tr>
+                                            <th>ID</th>
+                                            <th>Plan</th>
+                                            <th>Status</th>
+                                            <th style="text-align: right;">5hr</th>
+                                            <th style="text-align: right;">Week</th>
+                                            <th style="text-align: right;">Tokens</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="accounts-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Gemini Accounts -->
+                        <div class="step-label" style="margin-top: 40px;">Gemini Accounts</div>
+                        <div id="gemini-section">
+                            <div id="gemini-empty" style="color: var(--text-muted); font-style: italic; padding: 20px; text-align: center;">No Gemini accounts configured</div>
+                            <div id="gemini-content" style="display: none;">
+                                <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-bottom: 15px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">Gemini Usage</span>
+                                        <span id="gemini-usage-pct" style="font-family: 'Space Mono', monospace; color: var(--text-main); font-size: 0.9rem;">-</span>
+                                    </div>
+                                </div>
+                                <div class="table-container">
+                                    <div style="overflow-x: auto;">
+                                        <table id="gemini-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>ID</th>
+                                                    <th>Status</th>
+                                                    <th style="text-align: right;">Tokens</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="gemini-tbody"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Pool Users Section -->
+                        <div class="step-label" style="margin-top: 40px;">Pool Users</div>
+                        <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-bottom: 20px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">Your ID</span>
+                                <span id="your-user-id" style="font-family: 'Space Mono', monospace; color: var(--gold-bright); font-size: 0.9rem;">Loading...</span>
+                            </div>
+                        </div>
+
+                        <div id="users-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
+                            Loading user data...
+                        </div>
+                        <div id="users-content" style="display: none;">
+                            <div class="table-container">
+                                <div style="overflow-x: auto;">
+                                    <table id="users-table">
+                                        <thead>
+                                            <tr>
+                                                <th>#</th>
+                                                <th>User ID</th>
+                                                <th style="text-align: right;">Tokens</th>
+                                                <th style="text-align: right;">Requests</th>
+                                                <th style="text-align: right;">Last Seen</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="users-tbody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <p style="color: var(--text-muted); font-size: 0.7rem; margin-top: 15px; font-style: italic;">
+                                User IDs are hashed and cannot be reversed to identify actual users.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="reset-link">
+                    <a onclick="terminateSession()" style="cursor: pointer;">Terminate Session</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.getAttribute('data-tab')).classList.add('active');
+            });
+        });
+
+        // Sub-Tab switching
+        function switchSubTab(tool, mode) {
+            const container = document.getElementById('tab-' + tool);
+            const tabs = container.querySelectorAll('.sub-tab');
+            tabs.forEach(t => {
+                if (t.innerText.toLowerCase().includes(mode)) t.classList.add('active');
+                else t.classList.remove('active');
+            });
+            container.querySelectorAll('.sub-tab-content').forEach(c => c.classList.remove('active'));
+            document.getElementById(tool + '-' + mode).classList.add('active');
+        }
+
+        // Copy functionality
+        function copyToClipboard(elementId, btn) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btn.textContent;
+                btn.textContent = 'COPIED';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        }
+
+        // Check for saved friend code on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const savedCode = localStorage.getItem('friendCode');
+            const savedToken = localStorage.getItem('downloadToken');
+            const savedPublicUrl = localStorage.getItem('publicUrl');
+
+            if (savedCode && savedToken && savedPublicUrl) {
+                // Auto-login with saved credentials
+                window.friendCode = savedCode;
+                setupSuccessState(savedPublicUrl, savedToken);
+            }
+        });
+
+        function setupSuccessState(publicUrl, downloadToken) {
+            const loginSec = document.getElementById('login-section');
+            const successSec = document.getElementById('success-section');
+            const heroWrapper = document.getElementById('login-hero');
+
+            // Populate Codex
+            const codexScriptUrl = `${publicUrl}/setup/codex/${downloadToken}`;
+            document.getElementById('cmd-one-liner').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+            document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
+chatgpt_base_url = "${publicUrl}"
+
+[model_providers.codex-pool]
+name = "OpenAI via codex-pool proxy"
+base_url = "${publicUrl}/v1"
+wire_api = "responses"
+requires_openai_auth = true`;
+
+            // Populate Gemini
+            const geminiScriptUrl = `${publicUrl}/setup/gemini/${downloadToken}`;
+            document.getElementById('gemini-one-liner').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
+            document.getElementById('gemini-connect').textContent = `{
+  "codeAssistEndpoint": "${publicUrl}"
+}`;
+
+            // Populate Claude - note: claude_api_key comes from API response
+            const claudeScriptUrl = `${publicUrl}/setup/claude/${downloadToken}`;
+            document.getElementById('claude-one-liner').textContent = `curl -sL "${claudeScriptUrl}" | bash`;
+            // claude-env will be populated after login with the API key
+
+            // Show success state
+            loginSec.style.display = 'none';
+            heroWrapper.style.display = 'none';
+            successSec.classList.add('visible');
+            loadStats();
+        }
+
+        // Form submission
+        document.getElementById('access-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const btn = document.getElementById('submit-btn');
+            const errorDiv = document.getElementById('error-msg');
+            const loginSec = document.getElementById('login-section');
+            const successSec = document.getElementById('success-section');
+            const heroWrapper = document.getElementById('login-hero');
+
+            btn.disabled = true;
+            btn.innerHTML = 'Authenticating...';
+            errorDiv.style.display = 'none';
+
+            const formData = new FormData(this);
+            const data = Object.fromEntries(formData.entries());
+
+            try {
+                const response = await fetch('/api/friend/claim', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) throw new Error(result.error || 'Authentication Failed');
+
+                // Save credentials to localStorage
+                localStorage.setItem('friendCode', data.friend_code);
+                localStorage.setItem('downloadToken', result.download_token);
+                localStorage.setItem('publicUrl', result.public_url);
+
+                window.friendCode = data.friend_code;
+
+                // Populate and show auth JSON (only on fresh login)
+                document.getElementById('code-auth-json').textContent = result.auth_json;
+                document.getElementById('gemini-auth-json').textContent = result.gemini_auth_json;
+
+                // Populate Codex
+                const codexScriptUrl = `${result.public_url}/setup/codex/${result.download_token}`;
+                document.getElementById('cmd-one-liner').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+
+                document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
+chatgpt_base_url = "${result.public_url}"
+
+[model_providers.codex-pool]
+name = "OpenAI via codex-pool proxy"
+base_url = "${result.public_url}/v1"
+wire_api = "responses"
+requires_openai_auth = true`;
+
+                // Populate Gemini
+                const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
+                document.getElementById('gemini-one-liner').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
+
+                document.getElementById('gemini-connect').textContent = `{
+  "codeAssistEndpoint": "${result.public_url}"
+}`;
+
+                // Populate Claude
+                const claudeApiKey = result.claude_api_key || '';
+                const claudeScriptUrl = `${result.public_url}/setup/claude/${result.download_token}`;
+                document.getElementById('claude-one-liner').textContent = `curl -sL "${claudeScriptUrl}" | bash`;
+                document.getElementById('claude-env').textContent = `export ANTHROPIC_BASE_URL="${result.public_url}"
+export ANTHROPIC_API_KEY="${claudeApiKey}"`;
+
+                // Transition with animation
+                loginSec.style.opacity = '0';
+                heroWrapper.style.opacity = '0';
+
+                setTimeout(() => {
+                    loginSec.style.display = 'none';
+                    heroWrapper.style.display = 'none';
+                    successSec.classList.add('visible');
+                    loadStats();
+                }, 500);
+
+            } catch (err) {
+                errorDiv.textContent = err.message;
+                errorDiv.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Initialize Session';
+            }
+        });
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/pool/stats?code=' + encodeURIComponent(window.friendCode));
+                if (!response.ok) throw new Error('Failed to load stats');
+                const stats = await response.json();
+
+                document.getElementById('stats-loading').style.display = 'none';
+                document.getElementById('stats-content').style.display = 'block';
+
+                // Filter to codex accounts only
+                const codexAccounts = stats.accounts.filter(a => a.type === 'codex');
+                const activeCodex = codexAccounts.filter(a => a.status === 'healthy').length;
+
+                document.getElementById('stat-total-accounts').textContent = codexAccounts.length;
+                document.getElementById('stat-active-accounts').textContent = activeCodex;
+                document.getElementById('stat-pool-users').textContent = stats.total_pool_users;
+
+                // Token usage stats
+                const agg = stats.aggregate || {};
+                document.getElementById('stat-input-tokens').textContent = formatNumber(agg.total_input_tokens || 0);
+                document.getElementById('stat-output-tokens').textContent = formatNumber(agg.total_output_tokens || 0);
+                document.getElementById('stat-cached-tokens').textContent = formatNumber(agg.total_cached_tokens || 0);
+                document.getElementById('stat-billable-tokens').textContent = formatNumber(agg.total_billable_tokens || 0);
+
+                // Capacity analysis
+                if (stats.capacity_analysis && stats.capacity_analysis.total_samples > 0) {
+                    document.getElementById('capacity-section').style.display = 'block';
+                    document.getElementById('capacity-samples').textContent = stats.capacity_analysis.total_samples;
+                    document.getElementById('capacity-formula').textContent = stats.capacity_analysis.model_formula;
+
+                    const plansDiv = document.getElementById('capacity-plans');
+                    plansDiv.innerHTML = '';
+                    const planOrder = ['team', 'pro', 'plus'];
+                    const sortedPlans = Object.entries(stats.capacity_analysis.plans || {}).sort((a, b) => {
+                        return planOrder.indexOf(a[0]) - planOrder.indexOf(b[0]);
+                    });
+
+                    for (const [plan, info] of sortedPlans) {
+                        const confColor = info.confidence === 'high' ? '#27ae60' : (info.confidence === 'medium' ? '#f39c12' : '#888');
+                        const cap5h = info.estimated_5h_capacity > 0 ? formatNumber(info.estimated_5h_capacity) : '—';
+                        const cap7d = info.estimated_7d_capacity > 0 ? formatNumber(info.estimated_7d_capacity) : '—';
+                        plansDiv.innerHTML += `
+                            <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1a1a1a;">
+                                <span style="text-transform: uppercase; font-weight: bold; color: #aaa;">${plan}</span>
+                                <span style="color: ${confColor};">● ${info.confidence}</span>
+                                <span style="color: var(--text-muted);">${info.sample_count} samples</span>
+                                <span style="color: var(--gold-bright);">5h: ${cap5h}</span>
+                                <span style="color: #9b59b6;">7d: ${cap7d}</span>
+                                <span style="color: #888;">${info.output_multiplier.toFixed(1)}× out</span>
+                            </div>
+                        `;
+                    }
+                }
+
+                // Calculate averages for codex accounts (exclude dead and 0% accounts)
+                let primarySum = 0, primaryCount = 0;
+                let secondarySum = 0, secondaryCount = 0;
+                for (const acc of codexAccounts) {
+                    if (acc.status !== 'dead') {
+                        if (acc.primary_window_used_pct > 0) {
+                            primarySum += acc.primary_window_used_pct;
+                            primaryCount++;
+                        }
+                        if (acc.secondary_window_used_pct > 0) {
+                            secondarySum += acc.secondary_window_used_pct;
+                            secondaryCount++;
+                        }
+                    }
+                }
+                const primaryPct = primaryCount > 0 ? Math.min(primarySum / primaryCount, 100) : 0;
+                const secondaryPct = secondaryCount > 0 ? Math.min(secondarySum / secondaryCount, 100) : 0;
+
+                // Calculate average week elapsed from reset times
+                let weekElapsedSum = 0, weekElapsedCount = 0;
+                for (const acc of codexAccounts) {
+                    if (acc.status !== 'dead' && acc.secondary_reset_minutes > 0) {
+                        const elapsed = (10080 - acc.secondary_reset_minutes) / 10080 * 100;
+                        weekElapsedSum += elapsed;
+                        weekElapsedCount++;
+                    }
+                }
+                const weekElapsedPct = weekElapsedCount > 0 ? weekElapsedSum / weekElapsedCount : 0;
+
+                document.getElementById('bar-primary').style.width = primaryPct + '%';
+                document.getElementById('bar-secondary').style.width = secondaryPct + '%';
+                document.getElementById('bar-week-elapsed').style.width = weekElapsedPct + '%';
+                document.getElementById('pct-primary').textContent = primaryPct.toFixed(0) + '%';
+                document.getElementById('pct-secondary').textContent = secondaryPct.toFixed(0) + '%';
+                document.getElementById('pct-week-elapsed').textContent = weekElapsedPct.toFixed(0) + '%';
+
+                const tbody = document.getElementById('accounts-tbody');
+                tbody.innerHTML = '';
+                for (const acc of codexAccounts) {
+                    const statusColor = acc.status === 'healthy' ? '#27ae60' : (acc.status === 'degraded' ? '#f39c12' : '#c0392b');
+                    const pri5hrReset = acc.primary_reset_minutes > 0 ? formatDuration(acc.primary_reset_minutes) : '-';
+                    const weekReset = acc.secondary_reset_minutes > 0 ? formatDuration(acc.secondary_reset_minutes) : '-';
+                    const tokens = acc.total_billable_tokens > 0 ? formatNumber(acc.total_billable_tokens) : '0';
+
+                    // Calculate if usage is outpacing the cycle
+                    // 5hr window = 300 minutes, weekly = 10080 minutes
+                    const pri5hrElapsed = acc.primary_reset_minutes > 0 ? (300 - acc.primary_reset_minutes) / 300 * 100 : 0;
+                    const weekElapsed = acc.secondary_reset_minutes > 0 ? (10080 - acc.secondary_reset_minutes) / 10080 * 100 : 0;
+
+                    // If usage % > elapsed %, we're over-using
+                    const priOveruse = acc.primary_window_used_pct - pri5hrElapsed;
+                    const weekOveruse = acc.secondary_window_used_pct - weekElapsed;
+
+                    // Color: green if under pace, yellow if slightly over, red if way over
+                    const getPaceColor = (overuse) => {
+                        if (overuse <= 0) return '#27ae60'; // Under pace - green
+                        if (overuse < 20) return '#f39c12'; // Slightly over - yellow
+                        return '#c0392b'; // Way over - red
+                    };
+                    const priColor = acc.primary_window_used_pct > 0 ? getPaceColor(priOveruse) : 'inherit';
+                    const weekColor = acc.secondary_window_used_pct > 0 ? getPaceColor(weekOveruse) : 'inherit';
+
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td style="font-family: monospace; color: #888;">${acc.id}</td>
+                        <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type}</td>
+                        <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
+                        <td style="text-align: right; font-family: monospace; color: ${priColor};">${acc.primary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
+                        <td style="text-align: right; font-family: monospace; color: ${weekColor};">${acc.secondary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
+                        <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${tokens}</td>
+                    `;
+                    tbody.appendChild(row);
+                }
+
+                // Populate Gemini accounts
+                const geminiAccounts = stats.accounts.filter(a => a.type === 'gemini');
+                if (geminiAccounts.length > 0) {
+                    document.getElementById('gemini-empty').style.display = 'none';
+                    document.getElementById('gemini-content').style.display = 'block';
+
+                    // Calculate total tokens for Gemini
+                    let geminiTotalTokens = 0;
+                    geminiAccounts.forEach(acc => geminiTotalTokens += acc.total_billable_tokens);
+                    document.getElementById('gemini-usage-pct').textContent = formatNumber(geminiTotalTokens) + ' tokens';
+
+                    const geminiTbody = document.getElementById('gemini-tbody');
+                    geminiTbody.innerHTML = '';
+                    for (const acc of geminiAccounts) {
+                        const statusColor = acc.status === 'healthy' ? '#27ae60' : (acc.status === 'degraded' ? '#f39c12' : '#c0392b');
+                        const tokens = acc.total_billable_tokens > 0 ? formatNumber(acc.total_billable_tokens) : '0';
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td style="font-family: monospace; color: #888;">${acc.id}</td>
+                            <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
+                            <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${tokens}</td>
+                        `;
+                        geminiTbody.appendChild(row);
+                    }
+                }
+
+                // Load users data and chart (now part of stats tab)
+                loadUsers();
+                loadDailyChart();
+            } catch (err) {
+                document.getElementById('stats-loading').textContent = 'Unable to synchronize with pool statistics.';
+            }
+        }
+
+        async function loadUsers() {
+            try {
+                // Get current user's ID
+                const whoamiRes = await fetch('/api/pool/whoami');
+                if (whoamiRes.ok) {
+                    const whoami = await whoamiRes.json();
+                    document.getElementById('your-user-id').textContent = whoami.user_id;
+                    window.currentUserId = whoami.user_id;
+                }
+
+                // Get all users
+                const usersRes = await fetch('/api/pool/users');
+                if (!usersRes.ok) throw new Error('Failed to load users');
+                const data = await usersRes.json();
+
+                document.getElementById('users-loading').style.display = 'none';
+                document.getElementById('users-content').style.display = 'block';
+
+                const tbody = document.getElementById('users-tbody');
+                tbody.innerHTML = '';
+
+                if (!data.users || data.users.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 40px;">No usage data yet. Start using the pool to appear here!</td></tr>';
+                    return;
+                }
+
+                data.users.forEach((user, index) => {
+                    const isCurrentUser = user.user_id === window.currentUserId;
+                    const rowStyle = isCurrentUser ? 'background: rgba(212, 175, 55, 0.1);' : '';
+                    const idStyle = isCurrentUser ? 'color: var(--gold-bright); font-weight: bold;' : 'color: #888;';
+                    const lastSeen = user.last_seen ? formatRelativeTime(user.last_seen) : '-';
+
+                    const row = document.createElement('tr');
+                    row.style.cssText = rowStyle;
+                    row.innerHTML = `
+                        <td style="font-family: monospace; color: var(--text-muted);">${index + 1}</td>
+                        <td style="font-family: monospace; ${idStyle}">${user.user_id}${isCurrentUser ? ' (you)' : ''}</td>
+                        <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${formatNumber(user.total_billable_tokens)}</td>
+                        <td style="text-align: right; font-family: monospace;">${user.request_count}</td>
+                        <td style="text-align: right; color: var(--text-muted); font-size: 0.75rem;">${lastSeen}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            } catch (err) {
+                document.getElementById('users-loading').textContent = 'Unable to load user data.';
+            }
+        }
+
+        function formatRelativeTime(isoString) {
+            const date = new Date(isoString);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+
+            if (diffMins < 1) return 'just now';
+            if (diffMins < 60) return diffMins + 'm ago';
+            if (diffHours < 24) return diffHours + 'h ago';
+            if (diffDays < 7) return diffDays + 'd ago';
+            return date.toLocaleDateString();
+        }
+
+        function formatDuration(minutes) {
+            if (minutes < 60) return minutes + 'm';
+            const hours = Math.floor(minutes / 60);
+            const mins = minutes % 60;
+            if (hours < 24) return hours + 'h' + (mins > 0 ? mins + 'm' : '');
+            const days = Math.floor(hours / 24);
+            const remHours = hours % 24;
+            return days + 'd' + (remHours > 0 ? remHours + 'h' : '');
+        }
+
+        function formatNumber(n) {
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return n.toString();
+        }
+
+        async function loadDailyChart() {
+            try {
+                const res = await fetch('/api/pool/daily-breakdown');
+                if (!res.ok) return;
+                const data = await res.json();
+
+                const chart = document.getElementById('usage-chart');
+                const legend = document.getElementById('chart-legend');
+
+                if (!data.days || data.days.length === 0) {
+                    chart.innerHTML = '<div style="color: var(--text-muted);">No usage data available</div>';
+                    return;
+                }
+
+                // Take last 30 days
+                const days = data.days.slice(-30);
+                const maxTotal = Math.max(...days.map(d => d.total), 1);
+
+                // Surface colors
+                const surfaceColors = {
+                    cli: '#e74c3c',
+                    vscode: '#3498db',
+                    web: '#9b59b6',
+                    exec: '#f39c12',
+                    sdk: '#1abc9c',
+                    slack: '#e91e63',
+                    github_turn: '#00bcd4',
+                    github_code_review: '#8bc34a'
+                };
+
+                // Build bars
+                chart.innerHTML = '';
+                days.forEach((day, i) => {
+                    const barContainer = document.createElement('div');
+                    barContainer.style.cssText = 'flex: 1; display: flex; flex-direction: column; justify-content: flex-end; min-width: 8px; position: relative;';
+
+                    // Stacked segments
+                    const surfaces = Object.entries(day.surfaces || {}).filter(([k, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+                    let totalHeight = 0;
+
+                    surfaces.forEach(([surface, val]) => {
+                        const segHeight = (val / maxTotal) * 100;
+                        const seg = document.createElement('div');
+                        seg.style.cssText = `height: ${segHeight}px; background: ${surfaceColors[surface] || '#666'}; width: 100%;`;
+                        seg.title = `${day.date}: ${surface} ${val.toFixed(1)}%`;
+                        barContainer.appendChild(seg);
+                        totalHeight += segHeight;
+                    });
+
+                    // Date label for first, middle, last
+                    if (i === 0 || i === days.length - 1 || i === Math.floor(days.length / 2)) {
+                        const label = document.createElement('div');
+                        label.style.cssText = 'position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%); font-size: 0.6rem; color: var(--text-muted); white-space: nowrap;';
+                        label.textContent = day.date.slice(5); // MM-DD
+                        barContainer.appendChild(label);
+                    }
+
+                    chart.appendChild(barContainer);
+                });
+
+                // Build legend
+                const usedSurfaces = new Set();
+                days.forEach(d => Object.keys(d.surfaces || {}).forEach(s => {
+                    if (d.surfaces[s] > 0) usedSurfaces.add(s);
+                }));
+
+                legend.innerHTML = '';
+                usedSurfaces.forEach(surface => {
+                    const item = document.createElement('div');
+                    item.style.cssText = 'display: flex; align-items: center; gap: 4px;';
+                    item.innerHTML = `<div style="width: 10px; height: 10px; background: ${surfaceColors[surface] || '#666'}; border-radius: 2px;"></div><span style="color: var(--text-muted);">${surface}</span>`;
+                    legend.appendChild(item);
+                });
+
+            } catch (err) {
+                document.getElementById('usage-chart').innerHTML = '<div style="color: var(--text-muted);">Chart unavailable</div>';
+            }
+        }
+
+        function terminateSession() {
+            localStorage.removeItem('friendCode');
+            localStorage.removeItem('downloadToken');
+            localStorage.removeItem('publicUrl');
+            window.location.reload();
+        }
+    </script>
+</body>
+</html>

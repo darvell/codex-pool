@@ -5,6 +5,15 @@
 .vscode/
 .env
 .env.*
+.air.toml
+.conductor/
+.claude/
+
+# Testing / automation
+.playwright-mcp/
+
+# Local notes (deployment docs, personal notes)
+.localnotes/
 
 # Local data / secrets
 pool/
@@ -17,7 +26,12 @@ config.toml
 *.log
 
 # Build artifacts
+codex-pool
 codex-pool-proxy
+codex-pool-linux
+codex-pool-linux-*
+codex-pool-proxy-linux
+codex-pool-proxy-linux-*
 codexpool
 tmp/
 bin/
