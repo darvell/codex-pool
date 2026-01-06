@@ -176,6 +176,9 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Generate Gemini API key for API key mode (bypasses OAuth)
+	geminiAPIKey := generateGeminiAPIKey(secret, newUser)
+
 	publicURL := h.getEffectivePublicURL(r)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -184,6 +187,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		"download_token":    newUser.Token,
 		"auth_json":         string(authJSONBytes),
 		"gemini_auth_json":  string(geminiJSONBytes),
+		"gemini_api_key":    geminiAPIKey, // API key for Gemini CLI API key mode
 		"claude_api_key":    claudeAuthData.AccessToken, // JWT token to use as API key
 	})
 }
@@ -277,44 +281,94 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
+
+	// Validate token and get user to generate credentials
+	if h.poolUsers == nil {
+		http.Error(w, "pool users not configured", http.StatusServiceUnavailable)
+		return
+	}
+	user := h.poolUsers.GetByToken(token)
+	if user == nil {
+		http.Error(w, "invalid token", http.StatusNotFound)
+		return
+	}
+	if user.Disabled {
+		http.Error(w, "user disabled", http.StatusForbidden)
+		return
+	}
+
+	// Generate pool OAuth credentials for this user
+	secret := getPoolJWTSecret()
+	if secret == "" {
+		http.Error(w, "JWT secret not configured", http.StatusServiceUnavailable)
+		return
+	}
+	geminiAuth, err := generateGeminiAuth(secret, user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	publicURL := h.getEffectivePublicURL(r)
 
+	// Script sets env vars to bypass Google OAuth validation and route through proxy
+	// Uses GOOGLE_GENAI_USE_GCA + GOOGLE_CLOUD_ACCESS_TOKEN to skip getTokenInfo() check
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
-TOKEN="%s"
 BASE_URL="%s"
-AUTH_DIR="$HOME/.gemini"
-SETTINGS_FILE="$AUTH_DIR/settings.json"
-CREDS_FILE="$AUTH_DIR/oauth_creds.json"
+POOL_TOKEN="%s"
 
-echo "Initializing Gemini Pool setup..."
-mkdir -p "$AUTH_DIR"
+echo "Configuring Gemini CLI for pool access..."
+echo ""
 
-echo "1. Fetching credentials..."
-curl -sL "$BASE_URL/config/gemini/$TOKEN" -o "$CREDS_FILE"
-chmod 600 "$CREDS_FILE"
+# Add env vars to shell profile
+add_to_profile() {
+    for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if [ -f "$profile" ]; then
+            # Remove old Gemini-related env vars
+            grep -v "GEMINI_API_KEY=" "$profile" 2>/dev/null | \
+            grep -v "GOOGLE_GEMINI_BASE_URL=" 2>/dev/null | \
+            grep -v "CODE_ASSIST_ENDPOINT=" 2>/dev/null | \
+            grep -v "GOOGLE_GENAI_USE_GCA=" 2>/dev/null | \
+            grep -v "GOOGLE_CLOUD_ACCESS_TOKEN=" 2>/dev/null > "$profile.tmp" || true
+            mv "$profile.tmp" "$profile"
 
-echo "2. Updating configuration..."
-# Create settings.json if it doesn't exist or is empty
-if [ ! -s "$SETTINGS_FILE" ]; then
-    echo "{\"codeAssistEndpoint\": \"$BASE_URL\"}" > "$SETTINGS_FILE"
-    echo "Created $SETTINGS_FILE"
-else
-    # Simple check if endpoint is already set
-    if grep -q "codeAssistEndpoint" "$SETTINGS_FILE"; then
-        echo "Settings file already has an endpoint configuration. Please verify $SETTINGS_FILE manually."
-    else
-        echo "Appending configuration (Note: JSON parsing in bash is fragile, manual verification recommended)..."
-        # Naive JSON insertion (assuming ends with })
-        # Actually, safely replacing the whole file is risky if user has other settings.
-        # Let's just warn for now or do a simple overwrite if they agree, but for 'auto' we want low friction.
-        # We'll stick to a safe overwrite if it's just a 1-key file, or warn.
-        echo "Warning: $SETTINGS_FILE exists. Please manually ensure 'codeAssistEndpoint' is set to '$BASE_URL'."
-    fi
-fi
+            # Add pool configuration
+            cat >> "$profile" << 'ENVEOF'
 
+# Gemini Pool Configuration
+export CODE_ASSIST_ENDPOINT="%s"
+export GOOGLE_GENAI_USE_GCA=1
+export GOOGLE_CLOUD_ACCESS_TOKEN="%s"
+ENVEOF
+            echo "✓ Added Gemini pool config to $(basename $profile)"
+            return
+        fi
+    done
+
+    # Fallback: create .zshrc
+    cat >> "$HOME/.zshrc" << 'ENVEOF'
+
+# Gemini Pool Configuration
+export CODE_ASSIST_ENDPOINT="%s"
+export GOOGLE_GENAI_USE_GCA=1
+export GOOGLE_CLOUD_ACCESS_TOKEN="%s"
+ENVEOF
+    echo "✓ Created ~/.zshrc with Gemini pool config"
+}
+
+add_to_profile
+
+echo ""
 echo "Setup complete!"
-`, token, publicURL)
+echo ""
+echo "Gemini CLI will use the pool proxy at: $BASE_URL"
+echo "No Google login required - validation is bypassed."
+echo ""
+echo "Run 'source ~/.zshrc' or start a new terminal, then run 'gemini'."
+`, publicURL, geminiAuth.AccessToken,
+		publicURL, geminiAuth.AccessToken,
+		publicURL, geminiAuth.AccessToken)
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
@@ -359,36 +413,108 @@ func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Req
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 BASE_URL="%s"
-API_KEY="%s"
+OAUTH_TOKEN="%s"
 
 echo "Configuring Claude Code for pool access..."
 echo ""
 
-# Add environment variables to shell profiles
-PROFILE_FILES=("$HOME/.bashrc" "$HOME/.zshrc")
+mkdir -p "$HOME/.claude"
+SETTINGS_FILE="$HOME/.claude/settings.json"
+CLAUDE_JSON="$HOME/.claude.json"
 
-for PROFILE in "${PROFILE_FILES[@]}"; do
-    if [ -f "$PROFILE" ]; then
-        # Remove old Claude pool config if present
-        sed -i.bak '/# Claude Code Pool/,+2d' "$PROFILE" 2>/dev/null || true
-
-        # Add new config
-        echo "" >> "$PROFILE"
-        echo "# Claude Code Pool" >> "$PROFILE"
-        echo "export ANTHROPIC_BASE_URL=\"$BASE_URL\"" >> "$PROFILE"
-        echo "export ANTHROPIC_API_KEY=\"$API_KEY\"" >> "$PROFILE"
-        echo "✓ Configured $PROFILE"
+# Update settings.json with env vars
+update_settings() {
+    if command -v node &> /dev/null; then
+        node << 'NODE_SCRIPT'
+const fs = require('fs');
+const path = require('path');
+const file = path.join(process.env.HOME, '.claude', 'settings.json');
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+settings.env = settings.env || {};
+settings.env.ANTHROPIC_BASE_URL = '%s';
+settings.env.CLAUDE_CODE_OAUTH_TOKEN = '%s';
+fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
+console.log('✓ Updated settings.json (node)');
+NODE_SCRIPT
+    elif command -v python3 &> /dev/null; then
+        python3 << 'PYTHON_SCRIPT'
+import json, os
+file = os.path.expanduser("~/.claude/settings.json")
+try:
+    with open(file) as f: settings = json.load(f)
+except: settings = {}
+settings.setdefault('env', {})
+settings['env']['ANTHROPIC_BASE_URL'] = '%s'
+settings['env']['CLAUDE_CODE_OAUTH_TOKEN'] = '%s'
+with open(file, 'w') as f: json.dump(settings, f, indent=2); f.write('\n')
+print("✓ Updated settings.json (python)")
+PYTHON_SCRIPT
+    else
+        [ -f "$SETTINGS_FILE" ] && cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+        cat > "$SETTINGS_FILE" << 'EOF'
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "%s",
+    "CLAUDE_CODE_OAUTH_TOKEN": "%s"
+  }
+}
+EOF
+        echo "✓ Created settings.json (bash fallback)"
     fi
-done
+}
+
+# Update ~/.claude.json with hasCompletedOnboarding
+update_claude_json() {
+    if command -v node &> /dev/null; then
+        node << 'NODE_SCRIPT'
+const fs = require('fs');
+const path = require('path');
+const file = path.join(process.env.HOME, '.claude.json');
+let config = {};
+try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+config.hasCompletedOnboarding = true;
+fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
+console.log('✓ Updated .claude.json (node)');
+NODE_SCRIPT
+    elif command -v python3 &> /dev/null; then
+        python3 << 'PYTHON_SCRIPT'
+import json, os
+file = os.path.expanduser("~/.claude.json")
+try:
+    with open(file) as f: config = json.load(f)
+except: config = {}
+config['hasCompletedOnboarding'] = True
+with open(file, 'w') as f: json.dump(config, f, indent=2); f.write('\n')
+print("✓ Updated .claude.json (python)")
+PYTHON_SCRIPT
+    else
+        [ -f "$CLAUDE_JSON" ] && cp "$CLAUDE_JSON" "$CLAUDE_JSON.bak"
+        if [ -f "$CLAUDE_JSON" ]; then
+            # Try to preserve existing content (basic append)
+            tmp=$(mktemp)
+            cat "$CLAUDE_JSON" | sed 's/}$/,"hasCompletedOnboarding":true}/' > "$tmp"
+            mv "$tmp" "$CLAUDE_JSON"
+        else
+            echo '{"hasCompletedOnboarding":true}' > "$CLAUDE_JSON"
+        fi
+        echo "✓ Updated .claude.json (bash fallback)"
+    fi
+}
+
+update_settings
+update_claude_json
 
 echo ""
 echo "Setup complete!"
 echo ""
-echo "To use immediately in this terminal, run:"
-echo "  source ~/.bashrc  # or ~/.zshrc"
+echo "Claude Code will now use the pool proxy at: $BASE_URL"
 echo ""
-echo "Then start Claude Code with: claude"
-`, publicURL, claudeAuth.AccessToken)
+echo "Start Claude Code with: claude"
+`, publicURL, claudeAuth.AccessToken,
+		publicURL, claudeAuth.AccessToken, // node
+		publicURL, claudeAuth.AccessToken, // python
+		publicURL, claudeAuth.AccessToken) // bash fallback
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
@@ -502,6 +628,8 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		accType := "codex"
 		if acc.Type == AccountTypeGemini {
 			accType = "gemini"
+		} else if acc.Type == AccountTypeClaude {
+			accType = "claude"
 		}
 
 		cacheHitRate := float64(0)
@@ -627,17 +755,38 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
-// handleWhoami returns the current user's ID based on their JWT or hashed IP.
+// handleWhoami returns the current user's ID based on their JWT, Claude pool token, or hashed IP.
 func (h *proxyHandler) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	var userID string
 	var userType string
+	authHeader := r.Header.Get("Authorization")
+	secret := getPoolJWTSecret()
 
-	if secret := getPoolJWTSecret(); secret != "" {
-		if isPoolUser, uid, _ := isPoolUserToken(secret, r.Header.Get("Authorization")); isPoolUser {
+	// Check for Claude pool tokens first (sk-ant-api-pool-*)
+	if secret != "" {
+		if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
 			userID = uid
 			userType = "pool_user"
 		}
 	}
+
+	// Check for JWT-based pool tokens (Codex, Gemini)
+	if userID == "" && secret != "" {
+		if isPoolUser, uid, _ := isPoolUserToken(secret, authHeader); isPoolUser {
+			userID = uid
+			userType = "pool_user"
+		}
+	}
+
+	// Check for Gemini OAuth pool tokens (ya29.pool-*)
+	if userID == "" && secret != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if isPoolToken, uid := isGeminiOAuthPoolToken(secret, token); isPoolToken {
+			userID = uid
+			userType = "pool_user"
+		}
+	}
+
 	if userID == "" {
 		ip := getClientIP(r)
 		salt := h.cfg.friendCode

@@ -838,8 +838,8 @@ brew install gemini-cli</pre>
 
                     <!-- Gemini Manual -->
                     <div id="gemini-manual" class="sub-tab-content">
-                        <div class="step-label">01 // Auth Credentials</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/oauth_creds.json</code></p>
+                        <div class="step-label">01 // Configuration</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code> + environment variable</p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('gemini-auth-json', this)">Copy</button>
                             <div class="code-block">
@@ -847,7 +847,7 @@ brew install gemini-cli</pre>
                             </div>
                         </div>
 
-                        <div class="step-label">02 // Configuration</div>
+                        <div class="step-label">02 // Settings Only</div>
                         <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('gemini-connect', this)">Copy</button>
@@ -892,13 +892,29 @@ brew install claude-code</pre>
                             </div>
                         </div>
                         <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
-                            Sets ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY for pool access.
+                            Sets ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN, and skips onboarding.
                         </p>
                     </div>
 
                     <!-- Claude Manual -->
                     <div id="claude-manual" class="sub-tab-content">
-                        <div class="step-label">01 // Environment Variables</div>
+                        <div class="step-label">01 // Settings Configuration</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.claude/settings.json</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-settings-json', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-settings-json"></pre>
+                            </div>
+                        </div>
+                        <div class="step-label">02 // Skip Onboarding</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.claude.json</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-json', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-json">{"hasCompletedOnboarding": true}</pre>
+                            </div>
+                        </div>
+                        <div class="step-label">Alternative: Shell Environment</div>
                         <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
@@ -1023,6 +1039,36 @@ brew install claude-code</pre>
                             </div>
                         </div>
 
+                        <!-- Claude Accounts -->
+                        <div class="step-label" style="margin-top: 40px;">Claude Accounts</div>
+                        <div id="claude-section">
+                            <div id="claude-empty" style="color: var(--text-muted); font-style: italic; padding: 20px; text-align: center;">No Claude accounts configured</div>
+                            <div id="claude-content" style="display: none;">
+                                <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-bottom: 15px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">5hr / 7day Usage</span>
+                                        <span id="claude-usage-pct" style="font-family: 'Space Mono', monospace; color: var(--text-main); font-size: 0.9rem;">-</span>
+                                    </div>
+                                </div>
+                                <div class="table-container">
+                                    <div style="overflow-x: auto;">
+                                        <table id="claude-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>ID</th>
+                                                    <th>Plan</th>
+                                                    <th>Status</th>
+                                                    <th style="text-align: right;">5hr</th>
+                                                    <th style="text-align: right;">7day</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="claude-tbody"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Gemini Accounts -->
                         <div class="step-label" style="margin-top: 40px;">Gemini Accounts</div>
                         <div id="gemini-section">
@@ -1132,26 +1178,52 @@ brew install claude-code</pre>
         }
 
         // Check for saved friend code on page load
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', async function() {
             const savedCode = localStorage.getItem('friendCode');
             const savedToken = localStorage.getItem('downloadToken');
             const savedPublicUrl = localStorage.getItem('publicUrl');
 
             if (savedCode && savedToken && savedPublicUrl) {
-                // Auto-login with saved credentials
+                // Auto-login with saved credentials - fetch fresh auth data
                 window.friendCode = savedCode;
-                setupSuccessState(savedPublicUrl, savedToken);
+                await setupSuccessState(savedPublicUrl, savedToken, savedCode);
             }
         });
 
-        function setupSuccessState(publicUrl, downloadToken) {
+        async function setupSuccessState(publicUrl, downloadToken, friendCode) {
             const loginSec = document.getElementById('login-section');
             const successSec = document.getElementById('success-section');
             const heroWrapper = document.getElementById('login-hero');
 
+            // Fetch fresh auth data for returning users
+            let authJson = '# Loading...';
+            let geminiAuthJson = '# Loading...';
+            let geminiApiKey = '';
+            let claudeApiKey = '';
+
+            if (friendCode) {
+                try {
+                    const response = await fetch('/api/friend/claim', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ friend_code: friendCode })
+                    });
+                    if (response.ok) {
+                        const result = await response.json();
+                        authJson = result.auth_json || '# Unable to fetch';
+                        geminiAuthJson = result.gemini_auth_json || '# Unable to fetch';
+                        geminiApiKey = result.gemini_api_key || '';
+                        claudeApiKey = result.claude_api_key || '';
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch auth data:', e);
+                }
+            }
+
             // Populate Codex
             const codexScriptUrl = `${publicUrl}/setup/codex/${downloadToken}`;
             document.getElementById('cmd-one-liner').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+            document.getElementById('code-auth-json').textContent = authJson;
             document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
 chatgpt_base_url = "${publicUrl}"
 
@@ -1161,17 +1233,58 @@ base_url = "${publicUrl}/v1"
 wire_api = "responses"
 requires_openai_auth = true`;
 
-            // Populate Gemini
+            // Populate Gemini (API key mode - bypasses OAuth)
             const geminiScriptUrl = `${publicUrl}/setup/gemini/${downloadToken}`;
             document.getElementById('gemini-one-liner').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
-            document.getElementById('gemini-connect').textContent = `{
-  "codeAssistEndpoint": "${publicUrl}"
-}`;
+            if (geminiApiKey) {
+                document.getElementById('gemini-auth-json').textContent = `# 1. Save API key to ~/.gemini/api_key:
+echo "${geminiApiKey}" > ~/.gemini/api_key
+chmod 600 ~/.gemini/api_key
 
-            // Populate Claude - note: claude_api_key comes from API response
+# 2. Add to ~/.zshrc (or ~/.bashrc):
+export GEMINI_API_KEY=$(cat ~/.gemini/api_key 2>/dev/null)
+export GOOGLE_GEMINI_BASE_URL="${publicUrl}"
+
+# 3. Settings file (~/.gemini/settings.json):
+{
+  "codeAssistEndpoint": "${publicUrl}",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "useExternal": true
+    }
+  }
+}`;
+                document.getElementById('gemini-connect').textContent = `{
+  "codeAssistEndpoint": "${publicUrl}",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "useExternal": true
+    }
+  }
+}`;
+            } else {
+                document.getElementById('gemini-auth-json').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('gemini-connect').textContent = `# Run the one-liner above to configure automatically`;
+            }
+
+            // Populate Claude
             const claudeScriptUrl = `${publicUrl}/setup/claude/${downloadToken}`;
             document.getElementById('claude-one-liner').textContent = `curl -sL "${claudeScriptUrl}" | bash`;
-            // claude-env will be populated after login with the API key
+            if (claudeApiKey) {
+                document.getElementById('claude-settings-json').textContent = `{
+  "env": {
+    "ANTHROPIC_BASE_URL": "${publicUrl}",
+    "CLAUDE_CODE_OAUTH_TOKEN": "${claudeApiKey}"
+  }
+}`;
+                document.getElementById('claude-env').textContent = `export ANTHROPIC_BASE_URL="${publicUrl}"
+export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
+            } else {
+                document.getElementById('claude-settings-json').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('claude-env').textContent = `# Run the one-liner above to configure automatically`;
+            }
 
             // Show success state
             loginSec.style.display = 'none';
@@ -1217,7 +1330,6 @@ requires_openai_auth = true`;
 
                 // Populate and show auth JSON (only on fresh login)
                 document.getElementById('code-auth-json').textContent = result.auth_json;
-                document.getElementById('gemini-auth-json').textContent = result.gemini_auth_json;
 
                 // Populate Codex
                 const codexScriptUrl = `${result.public_url}/setup/codex/${result.download_token}`;
@@ -1232,20 +1344,52 @@ base_url = "${result.public_url}/v1"
 wire_api = "responses"
 requires_openai_auth = true`;
 
-                // Populate Gemini
+                // Populate Gemini (API key mode - bypasses OAuth)
+                const geminiApiKey = result.gemini_api_key || '';
                 const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
                 document.getElementById('gemini-one-liner').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
 
+                document.getElementById('gemini-auth-json').textContent = `# 1. Save API key to ~/.gemini/api_key:
+echo "${geminiApiKey}" > ~/.gemini/api_key
+chmod 600 ~/.gemini/api_key
+
+# 2. Add to ~/.zshrc (or ~/.bashrc):
+export GEMINI_API_KEY=$(cat ~/.gemini/api_key 2>/dev/null)
+export GOOGLE_GEMINI_BASE_URL="${result.public_url}"
+
+# 3. Settings file (~/.gemini/settings.json):
+{
+  "codeAssistEndpoint": "${result.public_url}",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "useExternal": true
+    }
+  }
+}`;
+
                 document.getElementById('gemini-connect').textContent = `{
-  "codeAssistEndpoint": "${result.public_url}"
+  "codeAssistEndpoint": "${result.public_url}",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "useExternal": true
+    }
+  }
 }`;
 
                 // Populate Claude
                 const claudeApiKey = result.claude_api_key || '';
                 const claudeScriptUrl = `${result.public_url}/setup/claude/${result.download_token}`;
                 document.getElementById('claude-one-liner').textContent = `curl -sL "${claudeScriptUrl}" | bash`;
+                document.getElementById('claude-settings-json').textContent = `{
+  "env": {
+    "ANTHROPIC_BASE_URL": "${result.public_url}",
+    "CLAUDE_CODE_OAUTH_TOKEN": "${claudeApiKey}"
+  }
+}`;
                 document.getElementById('claude-env').textContent = `export ANTHROPIC_BASE_URL="${result.public_url}"
-export ANTHROPIC_API_KEY="${claudeApiKey}"`;
+export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
 
                 // Transition with animation
                 loginSec.style.opacity = '0';
@@ -1392,6 +1536,41 @@ export ANTHROPIC_API_KEY="${claudeApiKey}"`;
                         <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${tokens}</td>
                     `;
                     tbody.appendChild(row);
+                }
+
+                // Populate Claude accounts
+                const claudeAccounts = stats.accounts.filter(a => a.type === 'claude');
+                if (claudeAccounts.length > 0) {
+                    document.getElementById('claude-empty').style.display = 'none';
+                    document.getElementById('claude-content').style.display = 'block';
+
+                    // Calculate average usage for Claude
+                    let claude5hrSum = 0, claude7daySum = 0, claudeHealthy = 0;
+                    claudeAccounts.forEach(acc => {
+                        if (acc.status === 'healthy') {
+                            claude5hrSum += acc.primary_window_used_pct;
+                            claude7daySum += acc.secondary_window_used_pct;
+                            claudeHealthy++;
+                        }
+                    });
+                    const avg5hr = claudeHealthy > 0 ? (claude5hrSum / claudeHealthy).toFixed(0) : 0;
+                    const avg7day = claudeHealthy > 0 ? (claude7daySum / claudeHealthy).toFixed(0) : 0;
+                    document.getElementById('claude-usage-pct').textContent = avg5hr + '% / ' + avg7day + '%';
+
+                    const claudeTbody = document.getElementById('claude-tbody');
+                    claudeTbody.innerHTML = '';
+                    for (const acc of claudeAccounts) {
+                        const statusColor = acc.status === 'healthy' ? '#27ae60' : (acc.status === 'degraded' ? '#f39c12' : '#c0392b');
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td style="font-family: monospace; color: #888;">${acc.id}</td>
+                            <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type || 'pro'}</td>
+                            <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
+                            <td style="text-align: right; font-family: monospace;">${acc.primary_window_used_pct.toFixed(0)}%</td>
+                            <td style="text-align: right; font-family: monospace;">${acc.secondary_window_used_pct.toFixed(0)}%</td>
+                        `;
+                        claudeTbody.appendChild(row);
+                    }
                 }
 
                 // Populate Gemini accounts
