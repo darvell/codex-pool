@@ -151,6 +151,13 @@ func signJWT(secret string, claims map[string]any) (string, error) {
 	return signingInput + "." + signature, nil
 }
 
+// hmacSign creates an HMAC-SHA256 signature for arbitrary data.
+func hmacSign(secret string, data []byte) []byte {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write(data)
+	return h.Sum(nil)
+}
+
 // validatePoolUserJWT checks if a JWT was signed with our secret and returns the claims.
 func validatePoolUserJWT(secret, token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
@@ -352,6 +359,8 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 }
 
 // generateGeminiAuth creates the oauth_creds.json content for a pool user.
+// Note: We use Google-like token formats (ya29.* and 1//*) so the Gemini CLI
+// doesn't reject them during local validation. The pool validates these tokens.
 func generateGeminiAuth(secret string, user *PoolUser) (*PoolUserGeminiAuth, error) {
 	now := time.Now()
 	exp := now.Add(365 * 24 * time.Hour).Unix() // 1 year
@@ -366,17 +375,24 @@ func generateGeminiAuth(secret string, user *PoolUser) (*PoolUserGeminiAuth, err
 		"email_verified": true,
 	}
 
+	// Create a JWT for id_token (this is expected to be a JWT)
 	idToken, err := signJWT(secret, claims)
 	if err != nil {
 		return nil, err
 	}
 
-	accessToken, err := signJWT(secret, claims)
-	if err != nil {
-		return nil, err
-	}
+	// Create a Google-like access token (ya29.pool-<base64 payload>)
+	// This format passes Gemini CLI's local validation while being verifiable by our pool
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"user_id": user.ID,
+		"exp":     exp,
+		"iat":     now.Unix(),
+	})
+	sig := hmacSign(secret, payloadBytes)
+	accessToken := fmt.Sprintf("ya29.pool-%s_%s", base64.RawURLEncoding.EncodeToString(payloadBytes), base64.RawURLEncoding.EncodeToString(sig))
 
-	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
+	// Use a Google-like refresh token format
+	refreshToken := fmt.Sprintf("1//pool_%s_%s", user.ID, randomHex(16))
 
 	return &PoolUserGeminiAuth{
 		AccessToken:  accessToken,
@@ -386,6 +402,97 @@ func generateGeminiAuth(secret string, user *PoolUser) (*PoolUserGeminiAuth, err
 		Scope:        "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
 		TokenType:    "Bearer",
 	}, nil
+}
+
+// generateGeminiAPIKey creates a pool API key for Gemini CLI in API key mode.
+// Format: AIzaSy-pool-<user_id>.<timestamp>.<signature>
+// This bypasses OAuth completely and lets Gemini CLI work with our proxy.
+func generateGeminiAPIKey(secret string, user *PoolUser) string {
+	timestamp := time.Now().Unix()
+	payload := fmt.Sprintf("%s.%d", user.ID, timestamp)
+	sig := hmacSign(secret, []byte(payload))
+	return fmt.Sprintf("AIzaSy-pool-%s.%d.%s", user.ID, timestamp, base64.RawURLEncoding.EncodeToString(sig)[:16])
+}
+
+// isGeminiOAuthPoolToken checks if a Bearer token is a pool-generated Gemini OAuth token.
+// Returns (isPoolToken, userID).
+// Pool tokens have format: ya29.pool-<base64 payload>_<base64 signature>
+func isGeminiOAuthPoolToken(secret, token string) (bool, string) {
+	if secret == "" || !strings.HasPrefix(token, "ya29.pool-") {
+		return false, ""
+	}
+
+	// Extract parts: ya29.pool-<payload>_<signature>
+	rest := strings.TrimPrefix(token, "ya29.pool-")
+	parts := strings.Split(rest, "_")
+	if len(parts) != 2 {
+		return false, ""
+	}
+
+	payloadB64 := parts[0]
+	sigB64 := parts[1]
+
+	// Decode payload
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+	if err != nil {
+		return false, ""
+	}
+
+	// Verify signature
+	expectedSig := hmacSign(secret, payloadBytes)
+	providedSig, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil {
+		return false, ""
+	}
+
+	if !hmac.Equal(expectedSig, providedSig) {
+		return false, ""
+	}
+
+	// Extract user_id from payload
+	var payload struct {
+		UserID string `json:"user_id"`
+		Exp    int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return false, ""
+	}
+
+	// Check expiry
+	if payload.Exp > 0 && payload.Exp < time.Now().Unix() {
+		return false, "" // Expired
+	}
+
+	return true, payload.UserID
+}
+
+// isPoolGeminiAPIKey checks if an API key is a pool-generated Gemini key.
+// Returns (isPoolKey, userID, error).
+func isPoolGeminiAPIKey(secret, apiKey string) (bool, string, error) {
+	if secret == "" || !strings.HasPrefix(apiKey, "AIzaSy-pool-") {
+		return false, "", nil
+	}
+
+	// Extract parts: AIzaSy-pool-<user_id>.<timestamp>.<signature>
+	rest := strings.TrimPrefix(apiKey, "AIzaSy-pool-")
+	parts := strings.Split(rest, ".")
+	if len(parts) != 3 {
+		return false, "", nil
+	}
+
+	userID := parts[0]
+	timestampStr := parts[1]
+	providedSig := parts[2]
+
+	// Verify signature
+	payload := fmt.Sprintf("%s.%s", userID, timestampStr)
+	expectedSig := base64.RawURLEncoding.EncodeToString(hmacSign(secret, []byte(payload)))[:16]
+
+	if providedSig != expectedSig {
+		return false, "", nil
+	}
+
+	return true, userID, nil
 }
 
 // getPoolAdminPassword returns the admin password from config or env.
@@ -442,24 +549,12 @@ type PoolUserClaudeAuth struct {
 }
 
 // generateClaudeAuth creates the credentials JSON content for a Claude Code pool user.
+// Uses a fake sk-ant-api-pool-* format that looks like a real Claude API key but
+// contains an embedded user ID and signature for pool authentication.
 func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, error) {
-	now := time.Now()
-	exp := now.Add(365 * 24 * time.Hour).Unix() // 1 year
-
-	claims := map[string]any{
-		"exp":            exp,
-		"iat":            now.Unix(),
-		"iss":            "https://auth.anthropic.com",
-		"sub":            "pool|" + user.ID,
-		"email":          user.Email,
-		"email_verified": true,
-	}
-
-	// Generate access token (mimics sk-ant-oat format but with pool JWT)
-	accessToken, err := signJWT(secret, claims)
-	if err != nil {
-		return nil, err
-	}
+	// Generate a fake sk-ant-api key with embedded pool user info
+	// Format: sk-ant-api-pool-<base64(userID:timestamp:signature)>
+	accessToken := generateClaudePoolToken(secret, user.ID)
 
 	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
 
@@ -469,4 +564,54 @@ func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, err
 		IDToken:      "", // Claude doesn't use ID token
 		Email:        user.Email,
 	}, nil
+}
+
+// ClaudePoolTokenPrefix is the prefix for pool-generated Claude tokens.
+// These look like real sk-ant-api keys but have "pool" marker for detection.
+const ClaudePoolTokenPrefix = "sk-ant-api-pool-"
+
+// generateClaudePoolToken creates a fake Claude API key with embedded pool user info.
+// Format: sk-ant-api-pool-<base64url(userID.timestamp.signature)>
+func generateClaudePoolToken(secret, userID string) string {
+	now := time.Now().Unix()
+	// Create payload: userID.timestamp
+	payload := fmt.Sprintf("%s.%d", userID, now)
+	// Sign it
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(payload))
+	sig := hex.EncodeToString(h.Sum(nil))[:16] // 16 char signature
+	// Combine and encode
+	data := fmt.Sprintf("%s.%s", payload, sig)
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(data))
+	return ClaudePoolTokenPrefix + encoded
+}
+
+// parseClaudePoolToken extracts the user ID from a pool-generated Claude token.
+// Returns (userID, isValid).
+func parseClaudePoolToken(secret, token string) (string, bool) {
+	if !strings.HasPrefix(token, ClaudePoolTokenPrefix) {
+		return "", false
+	}
+	encoded := strings.TrimPrefix(token, ClaudePoolTokenPrefix)
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", false
+	}
+	// Parse: userID.timestamp.signature
+	parts := strings.Split(string(data), ".")
+	if len(parts) != 3 {
+		return "", false
+	}
+	userID := parts[0]
+	timestamp := parts[1]
+	providedSig := parts[2]
+	// Verify signature
+	payload := fmt.Sprintf("%s.%s", userID, timestamp)
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(payload))
+	expectedSig := hex.EncodeToString(h.Sum(nil))[:16]
+	if !hmac.Equal([]byte(expectedSig), []byte(providedSig)) {
+		return "", false
+	}
+	return userID, true
 }

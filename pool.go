@@ -238,6 +238,7 @@ type CodexAuthJSON struct {
 	OpenAIKey   *string    `json:"OPENAI_API_KEY"`
 	Tokens      *TokenData `json:"tokens"`
 	LastRefresh *time.Time `json:"last_refresh"`
+	Dead        bool       `json:"dead"`
 }
 
 type TokenData struct {
@@ -254,7 +255,9 @@ type GeminiAuthJSON struct {
 	RefreshToken string `json:"refresh_token"`
 	TokenType    string `json:"token_type"`
 	Scope        string `json:"scope"`
-	ExpiryDate   int64  `json:"expiry_date"` // Unix timestamp in milliseconds
+	ExpiryDate   int64  `json:"expiry_date"`   // Unix timestamp in milliseconds
+	PlanType     string `json:"plan_type"`     // e.g., "ultra", "gemini"
+	LastRefresh  string `json:"last_refresh"`  // RFC3339 timestamp of last refresh attempt
 }
 
 // ClaudeAuthJSON is the format for Claude auth files.
@@ -559,6 +562,12 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 // Higher value = more preferred.
 func planPreferenceMultiplier(planType string, secondaryUsedPct float64) float64 {
 	switch planType {
+	case "ultra":
+		// Ultra has ~10x capacity of other plans - strongly prefer
+		if secondaryUsedPct < 0.9 {
+			return 5.0 // Very high preference - use this account first
+		}
+		return 2.0 // Still prefer even when nearly full
 	case "plus":
 		// Drain Plus first - prefer until 80% used
 		if secondaryUsedPct < 0.8 {
@@ -605,10 +614,14 @@ func saveAccount(a *Account) error {
 		return fmt.Errorf("account %s has empty file path", a.ID)
 	}
 
-	if a.Type == AccountTypeGemini {
+	switch a.Type {
+	case AccountTypeGemini:
 		return saveGeminiAccount(a)
+	case AccountTypeClaude:
+		return saveClaudeAccount(a)
+	default:
+		return saveCodexAccount(a)
 	}
-	return saveCodexAccount(a)
 }
 
 func saveCodexAccount(a *Account) error {
@@ -651,6 +664,13 @@ func saveCodexAccount(a *Account) error {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
 
+	// Persist dead flag so accounts stay dead across restarts
+	if a.Dead {
+		root["dead"] = true
+	} else {
+		delete(root, "dead")
+	}
+
 	return atomicWriteJSON(a.File, root)
 }
 
@@ -674,6 +694,9 @@ func saveGeminiAccount(a *Account) error {
 	}
 	if !a.ExpiresAt.IsZero() {
 		root["expiry_date"] = a.ExpiresAt.UnixMilli()
+	}
+	if !a.LastRefresh.IsZero() {
+		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
 
 	return atomicWriteJSON(a.File, root)
@@ -765,14 +788,24 @@ func (p *poolState) getLocked(id string) *Account {
 
 // averageUsage produces a synthetic usage payload across all alive accounts.
 func (p *poolState) averageUsage() UsageSnapshot {
+	return p.averageUsageByType("")
+}
+
+// averageUsageByType produces a synthetic usage payload for accounts of a specific type.
+// If accountType is empty, averages across all accounts.
+func (p *poolState) averageUsageByType(accountType AccountType) UsageSnapshot {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	var totalP, totalS float64
 	var totalPW, totalSW float64
 	var nP, nS float64
 	var n float64
+	var latestPrimaryReset, latestSecondaryReset time.Time
 	for _, a := range p.accounts {
 		if a.Dead {
+			continue
+		}
+		if accountType != "" && a.Type != accountType {
 			continue
 		}
 		usedP := a.Usage.PrimaryUsedPercent
@@ -794,6 +827,13 @@ func (p *poolState) averageUsage() UsageSnapshot {
 			totalSW += float64(a.Usage.SecondaryWindowMinutes)
 			nS += 1
 		}
+		// Track latest reset times
+		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(latestPrimaryReset) {
+			latestPrimaryReset = a.Usage.PrimaryResetAt
+		}
+		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(latestSecondaryReset) {
+			latestSecondaryReset = a.Usage.SecondaryResetAt
+		}
 	}
 	if n == 0 {
 		return UsageSnapshot{}
@@ -805,6 +845,8 @@ func (p *poolState) averageUsage() UsageSnapshot {
 		SecondaryUsedPercent:   totalS / n,
 		PrimaryWindowMinutes:   int(totalPW / max(1, nP)),
 		SecondaryWindowMinutes: int(totalSW / max(1, nS)),
+		PrimaryResetAt:         latestPrimaryReset,
+		SecondaryResetAt:       latestSecondaryReset,
 		RetrievedAt:            time.Now(),
 	}
 }
@@ -829,6 +871,47 @@ type UsagePoolStats struct {
 	MinSecondaryUsed float64        `json:"min_secondary_used"`
 	MaxSecondaryUsed float64        `json:"max_secondary_used"`
 	Accounts         []AccountBrief `json:"accounts"`
+	// Provider-specific usage summaries
+	Providers *ProviderUsageSummary `json:"providers,omitempty"`
+}
+
+// ProviderUsageSummary contains usage summaries for each provider type.
+type ProviderUsageSummary struct {
+	Codex  *CodexUsageSummary  `json:"codex,omitempty"`
+	Claude *ClaudeUsageSummary `json:"claude,omitempty"`
+	Gemini *GeminiUsageSummary `json:"gemini,omitempty"`
+}
+
+// CodexUsageSummary contains Codex-specific usage info.
+type CodexUsageSummary struct {
+	HealthyCount int              `json:"healthy_count"`
+	TotalCount   int              `json:"total_count"`
+	FiveHour     UsageWindowStats `json:"five_hour"`  // Primary window
+	Weekly       UsageWindowStats `json:"weekly"`     // Secondary window
+}
+
+// ClaudeUsageSummary contains Claude-specific usage info.
+type ClaudeUsageSummary struct {
+	HealthyCount int              `json:"healthy_count"`
+	TotalCount   int              `json:"total_count"`
+	Tokens       UsageWindowStats `json:"tokens"`   // Token rate limit
+	Requests     UsageWindowStats `json:"requests"` // Request rate limit
+}
+
+// GeminiUsageSummary contains Gemini-specific usage info.
+type GeminiUsageSummary struct {
+	HealthyCount int              `json:"healthy_count"`
+	TotalCount   int              `json:"total_count"`
+	Daily        UsageWindowStats `json:"daily"` // Daily usage
+}
+
+// UsageWindowStats contains stats for a usage window.
+type UsageWindowStats struct {
+	AvgUsedPct   float64   `json:"avg_used_pct"`
+	MinUsedPct   float64   `json:"min_used_pct"`
+	MaxUsedPct   float64   `json:"max_used_pct"`
+	NextResetAt  time.Time `json:"next_reset_at,omitempty"`
+	WindowName   string    `json:"window_name,omitempty"` // e.g., "5 hours", "7 days", "24 hours"
 }
 
 // AccountBrief is a summary of an account for the usage endpoint.
@@ -840,6 +923,9 @@ type AccountBrief struct {
 	PrimaryPct   int     `json:"primary_pct"`
 	SecondaryPct int     `json:"secondary_pct"`
 	Score        float64 `json:"score"`
+	// Provider-specific labels for the percentages
+	PrimaryLabel   string `json:"primary_label,omitempty"`   // e.g., "5hr tokens", "daily"
+	SecondaryLabel string `json:"secondary_label,omitempty"` // e.g., "weekly", "requests"
 }
 
 // getPoolStats returns aggregate stats about the pool.
@@ -855,6 +941,18 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 
 	var totalP, totalS float64
 	var healthyCount int
+
+	// Provider-specific tracking
+	type providerStats struct {
+		total, healthy                     int
+		primarySum, secondarySum           float64
+		primaryMin, primaryMax             float64
+		secondaryMin, secondaryMax         float64
+		nextPrimaryReset, nextSecondaryReset time.Time
+	}
+	codexStats := providerStats{primaryMin: 1.0, secondaryMin: 1.0}
+	claudeStats := providerStats{primaryMin: 1.0, secondaryMin: 1.0}
+	geminiStats := providerStats{primaryMin: 1.0, secondaryMin: 1.0}
 
 	for _, a := range p.accounts {
 		a.mu.Lock()
@@ -890,8 +988,10 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			secondaryUsed = a.Usage.SecondaryUsed
 		}
 
+		isHealthy := !a.Dead && !a.Disabled
+
 		// Track min/max for healthy accounts
-		if !a.Dead && !a.Disabled {
+		if isHealthy {
 			healthyCount++
 			totalP += primaryUsed
 			totalS += secondaryUsed
@@ -903,19 +1003,73 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			}
 		}
 
+		// Track provider-specific stats
+		var ps *providerStats
+		switch a.Type {
+		case AccountTypeCodex:
+			ps = &codexStats
+		case AccountTypeClaude:
+			ps = &claudeStats
+		case AccountTypeGemini:
+			ps = &geminiStats
+		}
+		if ps != nil {
+			ps.total++
+			if isHealthy {
+				ps.healthy++
+				ps.primarySum += primaryUsed
+				ps.secondarySum += secondaryUsed
+				if primaryUsed < ps.primaryMin {
+					ps.primaryMin = primaryUsed
+				}
+				if primaryUsed > ps.primaryMax {
+					ps.primaryMax = primaryUsed
+				}
+				if secondaryUsed < ps.secondaryMin {
+					ps.secondaryMin = secondaryUsed
+				}
+				if secondaryUsed > ps.secondaryMax {
+					ps.secondaryMax = secondaryUsed
+				}
+				// Track earliest reset times
+				if !a.Usage.PrimaryResetAt.IsZero() && (ps.nextPrimaryReset.IsZero() || a.Usage.PrimaryResetAt.Before(ps.nextPrimaryReset)) {
+					ps.nextPrimaryReset = a.Usage.PrimaryResetAt
+				}
+				if !a.Usage.SecondaryResetAt.IsZero() && (ps.nextSecondaryReset.IsZero() || a.Usage.SecondaryResetAt.Before(ps.nextSecondaryReset)) {
+					ps.nextSecondaryReset = a.Usage.SecondaryResetAt
+				}
+			}
+		}
+
 		score := 0.0
-		if !a.Dead && !a.Disabled {
+		if isHealthy {
 			score = scoreAccountLocked(a, now)
 		}
 
+		// Provider-specific labels
+		var primaryLabel, secondaryLabel string
+		switch a.Type {
+		case AccountTypeCodex:
+			primaryLabel = "5hr"
+			secondaryLabel = "weekly"
+		case AccountTypeClaude:
+			primaryLabel = "tokens"
+			secondaryLabel = "requests"
+		case AccountTypeGemini:
+			primaryLabel = "daily"
+			secondaryLabel = ""
+		}
+
 		stats.Accounts = append(stats.Accounts, AccountBrief{
-			ID:           a.ID,
-			Type:         string(a.Type),
-			Plan:         a.PlanType,
-			Status:       status,
-			PrimaryPct:   int(primaryUsed * 100),
-			SecondaryPct: int(secondaryUsed * 100),
-			Score:        score,
+			ID:             a.ID,
+			Type:           string(a.Type),
+			Plan:           a.PlanType,
+			Status:         status,
+			PrimaryPct:     int(primaryUsed * 100),
+			SecondaryPct:   int(secondaryUsed * 100),
+			Score:          score,
+			PrimaryLabel:   primaryLabel,
+			SecondaryLabel: secondaryLabel,
 		})
 
 		a.mu.Unlock()
@@ -927,6 +1081,71 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 	}
 	if stats.MinSecondaryUsed > stats.MaxSecondaryUsed {
 		stats.MinSecondaryUsed = 0
+	}
+
+	// Build provider-specific summaries
+	stats.Providers = &ProviderUsageSummary{}
+
+	if codexStats.total > 0 {
+		stats.Providers.Codex = &CodexUsageSummary{
+			TotalCount:   codexStats.total,
+			HealthyCount: codexStats.healthy,
+			FiveHour: UsageWindowStats{
+				WindowName: "5 hours",
+				MinUsedPct: codexStats.primaryMin * 100,
+				MaxUsedPct: codexStats.primaryMax * 100,
+				NextResetAt: codexStats.nextPrimaryReset,
+			},
+			Weekly: UsageWindowStats{
+				WindowName: "7 days",
+				MinUsedPct: codexStats.secondaryMin * 100,
+				MaxUsedPct: codexStats.secondaryMax * 100,
+				NextResetAt: codexStats.nextSecondaryReset,
+			},
+		}
+		if codexStats.healthy > 0 {
+			stats.Providers.Codex.FiveHour.AvgUsedPct = (codexStats.primarySum / float64(codexStats.healthy)) * 100
+			stats.Providers.Codex.Weekly.AvgUsedPct = (codexStats.secondarySum / float64(codexStats.healthy)) * 100
+		}
+	}
+
+	if claudeStats.total > 0 {
+		stats.Providers.Claude = &ClaudeUsageSummary{
+			TotalCount:   claudeStats.total,
+			HealthyCount: claudeStats.healthy,
+			Tokens: UsageWindowStats{
+				WindowName: "tokens",
+				MinUsedPct: claudeStats.primaryMin * 100,
+				MaxUsedPct: claudeStats.primaryMax * 100,
+				NextResetAt: claudeStats.nextPrimaryReset,
+			},
+			Requests: UsageWindowStats{
+				WindowName: "requests",
+				MinUsedPct: claudeStats.secondaryMin * 100,
+				MaxUsedPct: claudeStats.secondaryMax * 100,
+				NextResetAt: claudeStats.nextSecondaryReset,
+			},
+		}
+		if claudeStats.healthy > 0 {
+			stats.Providers.Claude.Tokens.AvgUsedPct = (claudeStats.primarySum / float64(claudeStats.healthy)) * 100
+			stats.Providers.Claude.Requests.AvgUsedPct = (claudeStats.secondarySum / float64(claudeStats.healthy)) * 100
+		}
+	}
+
+	if geminiStats.total > 0 {
+		stats.Providers.Gemini = &GeminiUsageSummary{
+			TotalCount:   geminiStats.total,
+			HealthyCount: geminiStats.healthy,
+			Daily: UsageWindowStats{
+				WindowName: "24 hours",
+				MinUsedPct: geminiStats.primaryMin * 100,
+				MaxUsedPct: geminiStats.primaryMax * 100,
+				NextResetAt: geminiStats.nextPrimaryReset,
+			},
+		}
+		if geminiStats.healthy > 0 {
+			stats.Providers.Gemini.Daily.AvgUsedPct = (geminiStats.primarySum / float64(geminiStats.healthy)) * 100
+		}
 	}
 
 	return stats

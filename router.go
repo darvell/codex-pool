@@ -73,6 +73,19 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Account resurrect: /admin/accounts/:id/resurrect
+	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && strings.HasSuffix(r.URL.Path, "/resurrect") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Extract account ID from path
+		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
+		accountID := strings.TrimSuffix(path, "/resurrect")
+		h.resurrectAccount(w, accountID)
+		return
+	}
+
 	// Friend landing page with code
 	if strings.HasPrefix(r.URL.Path, "/friend/") {
 		h.serveFriendLanding(w, r)
@@ -105,6 +118,12 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Claude account admin routes
+	if strings.HasPrefix(r.URL.Path, "/admin/claude") {
+		h.serveClaudeAdmin(w, r)
+		return
+	}
+
 	// Config download routes (no auth - token is the auth)
 	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") {
 		h.serveConfigDownload(w, r)
@@ -121,6 +140,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isUsageRequest(r) {
 		h.refreshUsageIfStale()
 		h.handleAggregatedUsage(w, reqID)
+		return
+	}
+
+	// Claude-specific endpoints - return pool info instead of individual account info
+	if isClaudeProfileRequest(r) {
+		h.handleClaudeProfile(w, r)
+		return
+	}
+	if isClaudeUsageRequest(r) {
+		h.handleClaudeUsage(w, r)
 		return
 	}
 

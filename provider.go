@@ -31,7 +31,8 @@ type Provider interface {
 	ParseUsageHeaders(acc *Account, headers http.Header)
 
 	// UpstreamURL returns the base URL for this provider.
-	UpstreamURL() *url.URL
+	// The path is provided so providers can route different paths to different upstreams.
+	UpstreamURL(path string) *url.URL
 
 	// MatchesPath returns true if this provider handles the given request path.
 	MatchesPath(path string) bool
@@ -50,8 +51,11 @@ type ProviderRegistry struct {
 }
 
 // NewProviderRegistry creates a registry with all configured providers.
+// Order matters for path matching: more specific patterns must come first.
+// Claude (/v1/messages) must be checked before Codex (/v1/) to avoid false matches.
 func NewProviderRegistry(codex *CodexProvider, claude *ClaudeProvider, gemini *GeminiProvider) *ProviderRegistry {
-	providers := []Provider{codex, claude, gemini}
+	// Order: Gemini (unique paths), Claude (specific /v1/messages), Codex (broad /v1/)
+	providers := []Provider{gemini, claude, codex}
 	byType := make(map[AccountType]Provider)
 	for _, p := range providers {
 		byType[p.Type()] = p

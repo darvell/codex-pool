@@ -68,6 +68,7 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if aj.LastRefresh != nil {
 		acc.LastRefresh = *aj.LastRefresh
 	}
+	acc.Dead = aj.Dead
 	return acc, nil
 }
 
@@ -318,7 +319,7 @@ func (p *CodexProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 	acc.Usage = mergeUsage(acc.Usage, snap)
 }
 
-func (p *CodexProvider) UpstreamURL() *url.URL {
+func (p *CodexProvider) UpstreamURL(path string) *url.URL {
 	return p.responsesBase
 }
 

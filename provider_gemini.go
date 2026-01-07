@@ -17,13 +17,15 @@ import (
 
 // GeminiProvider handles Google Gemini accounts.
 type GeminiProvider struct {
-	geminiBase *url.URL
+	geminiBase    *url.URL // OAuth/Code Assist endpoint (cloudcode-pa.googleapis.com)
+	geminiAPIBase *url.URL // API key mode endpoint (generativelanguage.googleapis.com)
 }
 
 // NewGeminiProvider creates a new Gemini provider.
-func NewGeminiProvider(geminiBase *url.URL) *GeminiProvider {
+func NewGeminiProvider(geminiBase, geminiAPIBase *url.URL) *GeminiProvider {
 	return &GeminiProvider{
-		geminiBase: geminiBase,
+		geminiBase:    geminiBase,
+		geminiAPIBase: geminiAPIBase,
 	}
 }
 
@@ -39,17 +41,29 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	if gj.AccessToken == "" {
 		return nil, nil
 	}
+	planType := gj.PlanType
+	if planType == "" {
+		planType = "gemini" // default
+	}
 	acc := &Account{
 		Type:         AccountTypeGemini,
 		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
 		File:         path,
 		AccessToken:  gj.AccessToken,
 		RefreshToken: gj.RefreshToken,
-		PlanType:     "gemini",
+		PlanType:     planType,
 	}
 	// expiry_date is Unix timestamp in milliseconds
 	if gj.ExpiryDate > 0 {
 		acc.ExpiresAt = time.UnixMilli(gj.ExpiryDate)
+	}
+	// Load last_refresh from disk to preserve refresh rate limiting across restarts
+	if gj.LastRefresh != "" {
+		if t, err := time.Parse(time.RFC3339Nano, gj.LastRefresh); err == nil {
+			acc.LastRefresh = t
+		} else if t, err := time.Parse(time.RFC3339, gj.LastRefresh); err == nil {
+			acc.LastRefresh = t
+		}
 	}
 	return acc, nil
 }
@@ -183,17 +197,24 @@ func (p *GeminiProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 	// This is a no-op for now
 }
 
-func (p *GeminiProvider) UpstreamURL() *url.URL {
+func (p *GeminiProvider) UpstreamURL(path string) *url.URL {
+	// API key mode (/v1beta/) uses the standard Gemini API with OAuth Bearer auth
+	// The generativelanguage.googleapis.com endpoint accepts OAuth tokens with cloud-platform scope
+	if strings.HasPrefix(path, "/v1beta/") {
+		return p.geminiAPIBase
+	}
+	// OAuth/Code Assist mode (/v1internal:) uses cloudcode-pa.googleapis.com
 	return p.geminiBase
 }
 
 func (p *GeminiProvider) MatchesPath(path string) bool {
-	// Gemini paths: /v1internal:generateContent, /v1internal:streamGenerateContent, etc.
-	return strings.HasPrefix(path, "/v1internal:")
+	// Code Assist paths: /v1internal:generateContent, /v1internal:streamGenerateContent
+	// API Key mode paths: /v1beta/models/{model}:generateContent, /v1beta/models/{model}:streamGenerateContent
+	return strings.HasPrefix(path, "/v1internal:") || strings.HasPrefix(path, "/v1beta/")
 }
 
 func (p *GeminiProvider) NormalizePath(path string) string {
-	// Gemini paths are already in the correct format
+	// Paths are used as-is - each endpoint type gets routed to its matching upstream
 	return path
 }
 

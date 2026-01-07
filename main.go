@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,7 +29,8 @@ type config struct {
 	responsesBase *url.URL
 	whamBase      *url.URL
 	refreshBase   *url.URL
-	geminiBase    *url.URL // Gemini CloudCode endpoint
+	geminiBase    *url.URL // Gemini CloudCode endpoint (for OAuth/Code Assist mode)
+	geminiAPIBase *url.URL // Gemini API endpoint (for API key mode)
 	claudeBase    *url.URL // Claude API endpoint
 	poolDir       string
 
@@ -90,6 +92,7 @@ func buildConfig() config {
 	cfg.whamBase = mustParse(getenv("UPSTREAM_WHAM_BASE", "https://chatgpt.com/backend-api"))
 	cfg.refreshBase = mustParse(getenv("UPSTREAM_REFRESH_BASE", "https://auth.openai.com"))
 	cfg.geminiBase = mustParse(getenv("UPSTREAM_GEMINI_BASE", "https://cloudcode-pa.googleapis.com"))
+	cfg.geminiAPIBase = mustParse(getenv("UPSTREAM_GEMINI_API_BASE", "https://generativelanguage.googleapis.com"))
 	cfg.claudeBase = mustParse(getenv("UPSTREAM_CLAUDE_BASE", "https://api.anthropic.com"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
@@ -152,7 +155,7 @@ func main() {
 	// Create provider registry
 	codexProvider := NewCodexProvider(cfg.responsesBase, cfg.whamBase, cfg.refreshBase)
 	claudeProvider := NewClaudeProvider(cfg.claudeBase)
-	geminiProvider := NewGeminiProvider(cfg.geminiBase)
+	geminiProvider := NewGeminiProvider(cfg.geminiBase, cfg.geminiAPIBase)
 	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
@@ -162,6 +165,7 @@ func main() {
 	}
 	pool := newPoolState(accounts, cfg.debug)
 	codexCount := pool.countByType(AccountTypeCodex)
+	claudeCount := pool.countByType(AccountTypeClaude)
 	geminiCount := pool.countByType(AccountTypeGemini)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
@@ -234,8 +238,8 @@ func main() {
 		log.Printf("warning: failed to configure HTTP/2 server: %v", err)
 	}
 
-	log.Printf("codex-pool proxy listening on %s (codex=%d, gemini=%d, request_timeout=%v, stream_timeout=%v)",
-		cfg.listenAddr, codexCount, geminiCount, cfg.requestTimeout, cfg.streamTimeout)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, request_timeout=%v, stream_timeout=%v)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, cfg.requestTimeout, cfg.streamTimeout)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -252,18 +256,37 @@ type proxyHandler struct {
 	recent    *recentErrors
 	inflight  int64
 	startTime time.Time
+
+	// Rate limiting for token refresh operations
+	refreshMu       sync.Mutex
+	lastRefreshTime time.Time
 }
 
 // Note: ServeHTTP is now in router.go
 // Note: Handler functions (serveHealth, serveAccounts, etc.) are now in handlers.go
 
-func (h *proxyHandler) pickUpstream(path string) (Provider, *url.URL) {
+func (h *proxyHandler) pickUpstream(path string, headers http.Header) (Provider, *url.URL) {
+	// Check headers first - Anthropic requests have X-Api-Key or anthropic-* headers
+	if headers.Get("X-Api-Key") != "" {
+		// X-Api-Key is used by Anthropic Claude API
+		provider := h.registry.ForType(AccountTypeClaude)
+		return provider, provider.UpstreamURL(path)
+	}
+	// Check for any anthropic-* headers (version, beta, etc.)
+	for key := range headers {
+		if strings.HasPrefix(strings.ToLower(key), "anthropic-") {
+			provider := h.registry.ForType(AccountTypeClaude)
+			return provider, provider.UpstreamURL(path)
+		}
+	}
+
+	// Fall back to path-based routing
 	provider := h.registry.ForPath(path)
 	if provider == nil {
 		// Fallback to Codex provider
 		provider = h.registry.ForType(AccountTypeCodex)
 	}
-	return provider, provider.UpstreamURL()
+	return provider, provider.UpstreamURL(path)
 }
 
 func mapResponsesPath(in string) string {
@@ -312,7 +335,8 @@ func extractConversationIDFromJSON(blob []byte) string {
 	if err := json.Unmarshal(blob, &obj); err != nil {
 		return ""
 	}
-	for _, key := range []string{"conversation_id", "conversation", "prompt_cache_key"} {
+	// Check top-level keys (includes session_id for Gemini)
+	for _, key := range []string{"conversation_id", "conversation", "prompt_cache_key", "session_id"} {
 		if v, ok := obj[key].(string); ok && v != "" {
 			return v
 		}
@@ -320,7 +344,7 @@ func extractConversationIDFromJSON(blob []byte) string {
 	// Some variants may tuck metadata under a sub-object.
 	for _, containerKey := range []string{"metadata", "meta"} {
 		if sub, ok := obj[containerKey].(map[string]any); ok {
-			for _, key := range []string{"conversation_id", "conversation", "prompt_cache_key"} {
+			for _, key := range []string{"conversation_id", "conversation", "prompt_cache_key", "session_id"} {
 				if v, ok := sub[key].(string); ok && v != "" {
 					return v
 				}
@@ -378,10 +402,57 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	start := time.Now()
 	authHeader := r.Header.Get("Authorization")
 
-	// Determine user ID - either from pool JWT or hashed IP
+	// Determine user ID - either from pool JWT, Claude pool token, or hashed IP
 	var userID string
 	var userType string // "pool_user", "passthrough", or "anonymous"
-	if secret := getPoolJWTSecret(); secret != "" {
+	secret := getPoolJWTSecret()
+
+	// Check for Claude pool tokens first (sk-ant-api-pool-*)
+	if secret != "" {
+		if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
+			userID = uid
+			userType = "pool_user"
+			// Check if user is disabled
+			if h.poolUsers != nil {
+				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
+					http.Error(w, "pool user disabled", http.StatusForbidden)
+					return
+				}
+			}
+			if h.cfg.debug {
+				log.Printf("[%s] claude pool user request: user_id=%s", reqID, userID)
+			}
+		}
+	}
+
+	// Check for Gemini API key pool tokens (AIzaSy-pool-*)
+	if userID == "" && secret != "" {
+		// Check x-goog-api-key header (Gemini API key mode)
+		geminiAPIKey := r.Header.Get("x-goog-api-key")
+		if geminiAPIKey == "" {
+			// Also check query parameter
+			geminiAPIKey = r.URL.Query().Get("key")
+		}
+		if geminiAPIKey != "" {
+			if isPoolKey, uid, _ := isPoolGeminiAPIKey(secret, geminiAPIKey); isPoolKey {
+				userID = uid
+				userType = "pool_user"
+				// Check if user is disabled
+				if h.poolUsers != nil {
+					if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
+						http.Error(w, "pool user disabled", http.StatusForbidden)
+						return
+					}
+				}
+				if h.cfg.debug {
+					log.Printf("[%s] gemini api key pool user request: user_id=%s", reqID, userID)
+				}
+			}
+		}
+	}
+
+	// Check for JWT-based pool tokens (Codex, Gemini OAuth)
+	if userID == "" && secret != "" {
 		if isPoolUser, uid, _ := isPoolUserToken(secret, authHeader); isPoolUser {
 			userID = uid
 			userType = "pool_user"
@@ -394,6 +465,25 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			if h.cfg.debug {
 				log.Printf("[%s] pool user request: user_id=%s", reqID, userID)
+			}
+		}
+	}
+
+	// Check for Gemini OAuth pool tokens (ya29.pool-*)
+	if userID == "" && secret != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if isPoolToken, uid := isGeminiOAuthPoolToken(secret, token); isPoolToken {
+			userID = uid
+			userType = "pool_user"
+			// Check if user is disabled
+			if h.poolUsers != nil {
+				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
+					http.Error(w, "pool user disabled", http.StatusForbidden)
+					return
+				}
+			}
+			if h.cfg.debug {
+				log.Printf("[%s] gemini oauth pool user request: user_id=%s", reqID, userID)
 			}
 		}
 	}
@@ -423,7 +513,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// Store userType in request context for whoami endpoint
 	_ = userType
 
-	provider, targetBase := h.pickUpstream(r.URL.Path)
+	provider, targetBase := h.pickUpstream(r.URL.Path, r.Header)
 	if provider == nil || targetBase == nil {
 		http.Error(w, "no upstream for path", http.StatusNotFound)
 		return
@@ -496,6 +586,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if attempts <= 0 {
 		attempts = 1
 	}
+	// Try at least all accounts of this type, up to configured max
+	if n := h.pool.countByType(accountType); n > attempts {
+		attempts = n
+	}
+	// But don't exceed total pool size
 	if n := h.pool.count(); n > 0 && attempts > n {
 		attempts = n
 	}
@@ -546,14 +641,19 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					if h.cfg.debug {
 						log.Printf("[%s] marking account %s as dead (401/403, refresh failed or unavailable)", reqID, acc.ID)
 					}
-				} else {
-					// Refresh worked but still got 401/403 - add penalty but don't mark dead yet
-					acc.Penalty += 0.5
-					if h.cfg.debug {
-						log.Printf("[%s] account %s got 401/403 after successful refresh, adding penalty (not marking dead)", reqID, acc.ID)
+					acc.mu.Unlock()
+					if err := saveAccount(acc); err != nil {
+						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 					}
+				} else {
+					// Refresh was rate-limited or not needed but we still got 401/403
+					// Add heavy penalty so this account drops below working ones
+					acc.Penalty += 10.0
+					if h.cfg.debug {
+						log.Printf("[%s] account %s got 401/403, adding heavy penalty (not marking dead)", reqID, acc.ID)
+					}
+					acc.mu.Unlock()
 				}
-				acc.mu.Unlock()
 			} else {
 				acc.mu.Lock()
 				acc.Penalty += 0.3
@@ -705,6 +805,12 @@ func looksLikeProviderCredential(authHeader string) (bool, AccountType) {
 		return false, ""
 	}
 
+	// Pool-generated Claude tokens: sk-ant-api-pool-* should NOT be passed through
+	// These are fake API keys that identify pool users
+	if strings.HasPrefix(token, ClaudePoolTokenPrefix) {
+		return false, ""
+	}
+
 	// Claude/Anthropic API keys: sk-ant-api* or sk-ant-oat* (OAuth tokens)
 	if strings.HasPrefix(token, "sk-ant-") {
 		return true, AccountTypeClaude
@@ -716,11 +822,26 @@ func looksLikeProviderCredential(authHeader string) (bool, AccountType) {
 	}
 
 	// Google OAuth tokens typically start with ya29. (access tokens)
-	if strings.HasPrefix(token, "ya29.") {
+	// But NOT pool tokens which are ya29.pool-*
+	if strings.HasPrefix(token, "ya29.") && !strings.HasPrefix(token, "ya29.pool-") {
 		return true, AccountTypeGemini
 	}
 
 	return false, ""
+}
+
+// isClaudePoolToken checks if the auth header contains a pool-generated Claude token.
+// Returns (isPoolToken, userID) if valid.
+func isClaudePoolToken(secret, authHeader string) (bool, string) {
+	if secret == "" {
+		return false, ""
+	}
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return false, ""
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	userID, valid := parseClaudePoolToken(secret, token)
+	return valid, userID
 }
 
 // proxyPassthrough handles requests where the user provides their own credentials.
@@ -728,15 +849,15 @@ func looksLikeProviderCredential(authHeader string) (bool, AccountType) {
 func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, reqID string, providerType AccountType, start time.Time) {
 	provider := h.registry.ForType(providerType)
 	if provider == nil {
-		// Fallback: try to detect from path
-		provider, _ = h.pickUpstream(r.URL.Path)
+		// Fallback: try to detect from path and headers
+		provider, _ = h.pickUpstream(r.URL.Path, r.Header)
 	}
 	if provider == nil {
 		http.Error(w, "unknown provider", http.StatusBadRequest)
 		return
 	}
 
-	targetBase := provider.UpstreamURL()
+	targetBase := provider.UpstreamURL(r.URL.Path)
 	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.logBodies, h.cfg.bodyLogLimit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -747,6 +868,16 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		log.Printf("[%s] passthrough %s %s provider=%s content-type=%q body_bytes=%d",
 			reqID, r.Method, r.URL.Path, providerType,
 			r.Header.Get("Content-Type"), len(bodyBytes))
+		// Debug: log all headers for Claude passthrough
+		if providerType == AccountTypeClaude {
+			var hdrs []string
+			for k, v := range r.Header {
+				if strings.HasPrefix(strings.ToLower(k), "anthropic") {
+					hdrs = append(hdrs, fmt.Sprintf("%s=%s", k, v[0]))
+				}
+			}
+			log.Printf("[%s] passthrough claude anthropic headers: %v", reqID, hdrs)
+		}
 	}
 	if h.cfg.logBodies && len(bodySample) > 0 {
 		log.Printf("[%s] passthrough request body sample (%d bytes): %s", reqID, len(bodySample), safeText(bodySample))
@@ -808,6 +939,22 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 
 	if h.cfg.debug {
 		log.Printf("[%s] passthrough -> %s %s", reqID, outReq.Method, outReq.URL.String())
+	}
+
+	// Full dump for Claude passthrough requests
+	if providerType == AccountTypeClaude {
+		log.Printf("[%s] === CLAUDE PASSTHROUGH FULL DUMP ===", reqID)
+		log.Printf("[%s] URL: %s", reqID, outReq.URL.String())
+		for k, v := range outReq.Header {
+			for _, val := range v {
+				if len(val) > 100 {
+					log.Printf("[%s] Header %s: %s...(truncated)", reqID, k, val[:100])
+				} else {
+					log.Printf("[%s] Header %s: %s", reqID, k, val)
+				}
+			}
+		}
+		log.Printf("[%s] === END DUMP ===", reqID)
 	}
 
 	resp, err := h.transport.RoundTrip(outReq)
@@ -874,6 +1021,13 @@ func (h *proxyHandler) tryOnce(
 	// Use provider's NormalizePath method for path handling
 	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(in.URL.Path))
 
+	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
+	if provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
+		q := outURL.Query()
+		q.Set("beta", "true")
+		outURL.RawQuery = q.Encode()
+	}
+
 	buildReq := func() (*http.Request, error) {
 		var body io.Reader
 		if len(bodyBytes) > 0 {
@@ -891,6 +1045,7 @@ func (h *proxyHandler) tryOnce(
 		// Always overwrite client-provided auth; the proxy is the single source of truth.
 		outReq.Header.Del("Authorization")
 		outReq.Header.Del("ChatGPT-Account-ID")
+		outReq.Header.Del("X-Api-Key") // Remove Claude API key from client (might be pool token)
 
 		// Remove Cloudflare/proxy headers that would cause issues with OpenAI's Cloudflare
 		outReq.Header.Del("Cdn-Loop")
@@ -902,6 +1057,8 @@ func (h *proxyHandler) tryOnce(
 		outReq.Header.Del("X-Forwarded-For")
 		outReq.Header.Del("X-Forwarded-Proto")
 		outReq.Header.Del("X-Real-Ip")
+		// Remove Gemini API key header (we use Bearer auth for pool accounts)
+		outReq.Header.Del("x-goog-api-key")
 
 		acc.mu.Lock()
 		access := acc.AccessToken
@@ -913,6 +1070,22 @@ func (h *proxyHandler) tryOnce(
 
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
+
+		// Debug: log outgoing headers for Claude OAuth
+		if h.cfg.debug && provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
+			var hdrs []string
+			for k, v := range outReq.Header {
+				if strings.HasPrefix(strings.ToLower(k), "anthropic") || strings.HasPrefix(strings.ToLower(k), "x-stainless") || strings.ToLower(k) == "authorization" {
+					val := v[0]
+					if len(val) > 30 {
+						val = val[:30]
+					}
+					hdrs = append(hdrs, fmt.Sprintf("%s=%s", k, val))
+				}
+			}
+			log.Printf("[%s] claude oauth outgoing headers: %v", reqID, hdrs)
+		}
+
 		// Keep the original User-Agent from the client - don't override it
 		return outReq, nil
 	}
@@ -978,10 +1151,24 @@ func (h *proxyHandler) tryOnce(
 				// Refresh succeeded - if we still get 401/403 after refresh,
 				// the account is truly dead (fresh token still rejected)
 			} else {
-				// Refresh failed - mark that we couldn't recover
-				refreshFailed = true
+				errStr := err.Error()
+				// If refresh token is permanently invalid, mark account as dead immediately
+				if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+					acc.mu.Lock()
+					acc.Dead = true
+					acc.Penalty += 100.0
+					acc.mu.Unlock()
+					log.Printf("[%s] marking account %s as dead: refresh token revoked/invalid", reqID, acc.ID)
+					if err := saveAccount(acc); err != nil {
+						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+					}
+					refreshFailed = true
+				} else if !strings.Contains(errStr, "rate limited") {
+					// Other non-rate-limited failures also count as refresh failed
+					refreshFailed = true
+				}
 				if h.cfg.debug {
-					log.Printf("[%s] refresh failed for %s: %v", reqID, acc.ID, err)
+					log.Printf("[%s] refresh failed for %s: %v (refreshFailed=%v)", reqID, acc.ID, err, refreshFailed)
 				}
 			}
 		} else {
@@ -1016,29 +1203,78 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 		return false
 	}
 	now := time.Now()
-	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now.Add(5*time.Minute)) {
+
+	// Per-account rate limiting: don't refresh too frequently
+	// This prevents hammering the OAuth endpoint when refresh tokens are invalid
+	if !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) < refreshPerAccountInterval {
+		return false
+	}
+
+	// Only refresh if token is ACTUALLY expired (not "about to expire")
+	// This is more conservative - we only refresh when we know the token won't work
+	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
 		return true
 	}
-	if a.ExpiresAt.IsZero() && !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) > 6*time.Hour {
+	// If no expiry time known, refresh after 12 hours since last refresh
+	if a.ExpiresAt.IsZero() && !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) > 12*time.Hour {
 		return true
 	}
 	return false
 }
 
+// refreshMinInterval is the minimum time between ANY refresh attempts globally
+const refreshMinInterval = 5 * time.Second
+
+// refreshPerAccountInterval is the minimum time between refresh attempts for a single account
+// This is persisted to disk and survives restarts, preventing hammering OAuth endpoints
+// 15 minutes balances between preventing hammering and allowing recovery from expired tokens
+const refreshPerAccountInterval = 15 * time.Minute
+
 func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	if a == nil {
 		return errors.New("nil account")
 	}
+
+	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
+	sinceLastRefresh := time.Since(a.LastRefresh)
+	if !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
+		a.mu.Unlock()
+		return fmt.Errorf("account refresh rate limited (%s), wait %v", a.ID, refreshPerAccountInterval-sinceLastRefresh)
+	}
 	accType := a.Type
 	a.mu.Unlock()
+
+	// Global rate limit - max 1 refresh globally every 5 seconds
+	h.refreshMu.Lock()
+	elapsed := time.Since(h.lastRefreshTime)
+	if elapsed < refreshMinInterval {
+		h.refreshMu.Unlock()
+		return fmt.Errorf("refresh rate limited, wait %v", refreshMinInterval-elapsed)
+	}
+	h.lastRefreshTime = time.Now()
+	h.refreshMu.Unlock()
 
 	// Use the provider's RefreshToken method
 	provider := h.registry.ForType(accType)
 	if provider == nil {
 		return fmt.Errorf("no provider for account type %s", accType)
 	}
-	return provider.RefreshToken(ctx, a, h.transport)
+	err := provider.RefreshToken(ctx, a, h.transport)
+
+	// On FAILED refresh, still update LastRefresh and save to prevent retrying for 1 hour
+	// Successful refreshes already update LastRefresh in the provider
+	if err != nil {
+		a.mu.Lock()
+		a.LastRefresh = time.Now().UTC()
+		a.mu.Unlock()
+		// Save to disk so rate limiting persists across restarts
+		if saveErr := saveAccount(a); saveErr != nil {
+			log.Printf("warning: failed to save account %s after refresh failure: %v", a.ID, saveErr)
+		}
+	}
+
+	return err
 }
 
 // Note: Account refresh logic is now in the provider files:

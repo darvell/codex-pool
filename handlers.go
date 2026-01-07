@@ -93,6 +93,28 @@ func (h *proxyHandler) reloadAccounts() {
 	}
 }
 
+// resurrectAccount marks a dead account as alive and resets its penalty.
+func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string) {
+	h.pool.mu.Lock()
+	defer h.pool.mu.Unlock()
+
+	for _, a := range h.pool.accounts {
+		if a.ID == accountID {
+			a.mu.Lock()
+			wasDead := a.Dead
+			a.Dead = false
+			a.Penalty = 0
+			a.mu.Unlock()
+			log.Printf("resurrected account %s (was_dead=%v)", accountID, wasDead)
+			w.WriteHeader(http.StatusOK)
+			respondJSON(w, map[string]any{"status": "ok", "account": accountID, "was_dead": wasDead})
+			return
+		}
+	}
+
+	http.Error(w, "account not found", http.StatusNotFound)
+}
+
 // serveTokenCapacity returns token tracking and capacity analysis data.
 func (h *proxyHandler) serveTokenCapacity(w http.ResponseWriter) {
 	// Collect in-memory account totals
@@ -257,6 +279,92 @@ func isUsageRequest(r *http.Request) bool {
 		strings.HasPrefix(r.URL.Path, "/api/codex/usage")
 }
 
+// isClaudeProfileRequest checks if this is a Claude CLI profile request
+func isClaudeProfileRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	return r.URL.Path == "/api/claude_cli_profile" ||
+		r.URL.Path == "/api/oauth/profile" ||
+		r.URL.Path == "/api/oauth/claude_cli/client_data"
+}
+
+// isClaudeUsageRequest checks if this is a Claude usage request
+func isClaudeUsageRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	return r.URL.Path == "/api/oauth/usage"
+}
+
+// handleClaudeProfile returns pool info for Claude CLI profile requests
+func (h *proxyHandler) handleClaudeProfile(w http.ResponseWriter, r *http.Request) {
+	stats := h.pool.getPoolStats()
+
+	// Return a profile that indicates this is a pooled account
+	resp := map[string]any{
+		"email":             "pool@codex-pool.local",
+		"email_verified":    true,
+		"name":              "Codex Pool",
+		"subscription_type": "max",
+		"plan_type":         "max",
+		"is_pooled":         true,
+		"pool_stats": map[string]any{
+			"total_accounts":   stats.TotalCount,
+			"healthy_accounts": stats.HealthyCount,
+			"claude_accounts":  stats.ClaudeCount,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	respondJSON(w, resp)
+}
+
+// handleClaudeUsage returns blended usage from all Claude accounts
+func (h *proxyHandler) handleClaudeUsage(w http.ResponseWriter, r *http.Request) {
+	h.refreshUsageIfStale()
+
+	// Get average usage across all Claude accounts
+	snap := h.pool.averageUsageByType(AccountTypeClaude)
+	stats := h.pool.getPoolStats()
+
+	// Format response like Claude's /api/oauth/usage endpoint
+	now := time.Now()
+	fiveHourReset := now.Add(5 * time.Hour)
+	sevenDayReset := now.Add(7 * 24 * time.Hour)
+
+	if !snap.PrimaryResetAt.IsZero() {
+		fiveHourReset = snap.PrimaryResetAt
+	}
+	if !snap.SecondaryResetAt.IsZero() {
+		sevenDayReset = snap.SecondaryResetAt
+	}
+
+	resp := map[string]any{
+		"five_hour": map[string]any{
+			"utilization": snap.PrimaryUsedPercent * 100,
+			"resets_at":   fiveHourReset.Format(time.RFC3339),
+		},
+		"seven_day": map[string]any{
+			"utilization": snap.SecondaryUsedPercent * 100,
+			"resets_at":   sevenDayReset.Format(time.RFC3339),
+		},
+		"extra_usage": map[string]any{
+			"is_enabled": false,
+		},
+		// Pool-specific info
+		"is_pooled": true,
+		"pool": map[string]any{
+			"total_accounts":   stats.TotalCount,
+			"healthy_accounts": stats.HealthyCount,
+			"claude_accounts":  stats.ClaudeCount,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	respondJSON(w, resp)
+}
+
 func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string) {
 	snap := h.pool.averageUsage()
 	poolStats := h.pool.getPoolStats()
@@ -286,11 +394,13 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 			"dead_accounts":     poolStats.DeadCount,
 			"codex_accounts":    poolStats.CodexCount,
 			"gemini_accounts":   poolStats.GeminiCount,
+			"claude_accounts":   poolStats.ClaudeCount,
 			"avg_primary_pct":   int(poolStats.AvgPrimaryUsed * 100),
 			"avg_secondary_pct": int(poolStats.AvgSecondaryUsed * 100),
 			"min_secondary_pct": int(poolStats.MinSecondaryUsed * 100),
 			"max_secondary_pct": int(poolStats.MaxSecondaryUsed * 100),
 			"accounts":          poolStats.Accounts,
+			"providers":         poolStats.Providers,
 		},
 	}
 	if h.cfg.debug {
