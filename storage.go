@@ -314,10 +314,11 @@ func (s *usageStore) updatePlanCapacity(tx *bbolt.Tx, sample CapacitySample) {
 		float64(cap.TotalOutputTokens)*outputMult +
 		float64(cap.TotalReasoningTokens)*reasoningMult
 
-	if cap.TotalPrimaryPctDelta > 0.01 {
+	// Only update if totalEffective is positive (prevents corrupted data from past negative billable tokens)
+	if cap.TotalPrimaryPctDelta > 0.01 && totalEffective > 0 {
 		cap.EffectivePerPrimaryPct = totalEffective / cap.TotalPrimaryPctDelta
 	}
-	if cap.TotalSecondaryPctDelta > 0.01 {
+	if cap.TotalSecondaryPctDelta > 0.01 && totalEffective > 0 {
 		cap.EffectivePerSecondaryPct = totalEffective / cap.TotalSecondaryPctDelta
 	}
 

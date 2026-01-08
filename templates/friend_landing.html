@@ -1561,13 +1561,16 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
                     claudeTbody.innerHTML = '';
                     for (const acc of claudeAccounts) {
                         const statusColor = acc.status === 'healthy' ? '#27ae60' : (acc.status === 'degraded' ? '#f39c12' : '#c0392b');
+                        // Add reset time formatting (same as Codex accounts)
+                        const pri5hrReset = acc.primary_reset_minutes > 0 ? formatDuration(acc.primary_reset_minutes) : '-';
+                        const weekReset = acc.secondary_reset_minutes > 0 ? formatDuration(acc.secondary_reset_minutes) : '-';
                         const row = document.createElement('tr');
                         row.innerHTML = `
                             <td style="font-family: monospace; color: #888;">${acc.id}</td>
                             <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type || 'pro'}</td>
                             <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
-                            <td style="text-align: right; font-family: monospace;">${acc.primary_window_used_pct.toFixed(0)}%</td>
-                            <td style="text-align: right; font-family: monospace;">${acc.secondary_window_used_pct.toFixed(0)}%</td>
+                            <td style="text-align: right; font-family: monospace;">${acc.primary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
+                            <td style="text-align: right; font-family: monospace;">${acc.secondary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
                         `;
                         claudeTbody.appendChild(row);
                     }

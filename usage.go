@@ -6,6 +6,15 @@ import (
 	"time"
 )
 
+// clampNonNegative ensures a value is never negative.
+// This prevents issues where CachedInputTokens > InputTokens produces negative billable tokens.
+func clampNonNegative(n int64) int64 {
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // parseTokenCountEvent extracts usage from Codex token_count SSE events.
 // Format: {type: "token_count", info: {last_token_usage: {...}, total_token_usage: {...}}, rate_limits: {...}}
 func parseTokenCountEvent(obj map[string]any) *RequestUsage {
@@ -32,7 +41,8 @@ func parseTokenCountEvent(obj map[string]any) *RequestUsage {
 	ru.ReasoningTokens = readInt64(usageMap, "reasoning_output_tokens")
 
 	// Calculate billable tokens (input - cached + output)
-	ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
+	// Clamp to non-negative since cached can exceed input in some cases
+	ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens)
 
 	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
 		return nil
@@ -81,7 +91,7 @@ func parseRequestUsage(obj map[string]any) *RequestUsage {
 	ru.ReasoningTokens = readInt64(usageMap, "reasoning_output_tokens")
 	ru.BillableTokens = readInt64(usageMap, "billable_tokens")
 	if ru.BillableTokens == 0 {
-		ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
+		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens)
 	}
 	if ru.InputTokens == 0 && ru.OutputTokens == 0 && ru.BillableTokens == 0 {
 		return nil
@@ -127,8 +137,8 @@ func parseResponseUsage(obj map[string]any) *RequestUsage {
 		ru.ReasoningTokens = readInt64(details, "reasoning_tokens")
 	}
 
-	// Calculate billable tokens
-	ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
+	// Calculate billable tokens (clamped to non-negative)
+	ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens)
 
 	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
 		return nil
@@ -203,8 +213,8 @@ func parseGeminiUsage(obj map[string]any) *RequestUsage {
 	ru.OutputTokens = readInt64(usageMap, "candidatesTokenCount")
 	ru.CachedInputTokens = readInt64(usageMap, "cachedContentTokenCount")
 
-	// Calculate billable tokens (same formula)
-	ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
+	// Calculate billable tokens (clamped to non-negative)
+	ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens)
 
 	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
 		return nil

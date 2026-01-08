@@ -157,7 +157,8 @@ func (p *ClaudeProvider) ParseUsage(obj map[string]any) *RequestUsage {
 		if ru.InputTokens == 0 {
 			return nil
 		}
-		ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens
+		// Clamp to non-negative since cached can exceed input in Claude's API
+		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens)
 		return ru
 	}
 

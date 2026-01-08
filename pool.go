@@ -433,6 +433,18 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 							conversationID, id, secondaryUsed*100)
 					}
 				}
+				// Also unpin if primary usage is at/above 95% (hard limit)
+				primaryUsed := a.Usage.PrimaryUsedPercent
+				if primaryUsed == 0 {
+					primaryUsed = a.Usage.PrimaryUsed
+				}
+				if ok && primaryUsed >= 0.95 {
+					ok = false
+					if p.debug {
+						log.Printf("unpinning conversation %s from account %s (%.0f%% primary >= 95%%)",
+							conversationID, id, primaryUsed*100)
+					}
+				}
 				// Also unpin if token is expired - don't wait for a failed request
 				if ok && a.ExpiresAt.Before(now) {
 					ok = false
@@ -464,6 +476,30 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		a.mu.Lock()
 		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) {
 			a.mu.Unlock()
+			continue
+		}
+		// Hard exclusion: accounts with >=95% primary (5hr) usage should never be selected
+		primaryUsed := a.Usage.PrimaryUsedPercent
+		if primaryUsed == 0 {
+			primaryUsed = a.Usage.PrimaryUsed
+		}
+		if primaryUsed >= 0.95 {
+			a.mu.Unlock()
+			if p.debug {
+				log.Printf("excluding account %s: primary usage %.1f%% >= 95%%", a.ID, primaryUsed*100)
+			}
+			continue
+		}
+		// Hard exclusion: accounts at >=99% weekly usage are completely unusable
+		secondaryUsed := a.Usage.SecondaryUsedPercent
+		if secondaryUsed == 0 {
+			secondaryUsed = a.Usage.SecondaryUsed
+		}
+		if secondaryUsed >= 0.99 {
+			a.mu.Unlock()
+			if p.debug {
+				log.Printf("excluding account %s: weekly usage %.1f%% >= 99%%", a.ID, secondaryUsed*100)
+			}
 			continue
 		}
 		score := scoreAccountLocked(a, now)
@@ -517,9 +553,52 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		secondaryUsed = a.Usage.SecondaryUsed
 	}
 
-	// Calculate headroom primarily based on weekly (secondary) usage.
-	// Weekly is the real capacity constraint - 5hr resets frequently.
+	// Calculate pace-adjusted headroom based on weekly (secondary) usage.
+	// An account at 51% with 1.5 days left is under-pace and should be preferred
+	// over an account at 2% with 7 days left (which needs to last longer).
 	headroom := 1.0 - secondaryUsed
+
+	// Adjust headroom based on pace (usage vs time elapsed)
+	if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
+		timeRemaining := a.Usage.SecondaryResetAt.Sub(now).Minutes()
+		totalWindow := 10080.0 // 7 days in minutes
+		timeElapsedPct := 1.0 - (timeRemaining / totalWindow)
+		if timeElapsedPct > 0.05 { // Only adjust if meaningful time has elapsed
+			paceRatio := secondaryUsed / timeElapsedPct
+			// paceRatio < 1.0 means under-pace (good), > 1.0 means over-pace (bad)
+			if paceRatio > 0.01 && paceRatio < 10.0 { // Sanity bounds
+				// Boost under-pace accounts, penalize over-pace accounts
+				// e.g., 51% used / 78% elapsed = 0.65 pace → multiply headroom by 1.54x
+				// e.g., 20% used / 10% elapsed = 2.0 pace → multiply headroom by 0.5x
+				paceAdjustment := 1.0 / paceRatio
+				// Cap the adjustment to avoid extreme values
+				if paceAdjustment > 2.0 {
+					paceAdjustment = 2.0
+				} else if paceAdjustment < 0.3 {
+					paceAdjustment = 0.3
+				}
+				headroom *= paceAdjustment
+			}
+		}
+	}
+
+	// 5hr window pace adjustment - prefer accounts under-pace on primary too
+	primaryPaceBonus := 0.0
+	if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
+		timeRemaining := a.Usage.PrimaryResetAt.Sub(now).Minutes()
+		totalWindow := 300.0 // 5 hours in minutes
+		timeElapsedPct := 1.0 - (timeRemaining / totalWindow)
+		if timeElapsedPct > 0.1 && primaryUsed > 0.01 { // Only if meaningful time elapsed and some usage
+			paceRatio := primaryUsed / timeElapsedPct
+			if paceRatio > 0.01 && paceRatio < 10.0 {
+				// Under-pace on 5hr = can absorb more short-term load
+				if paceRatio < 0.8 {
+					primaryPaceBonus = 0.1 * (1.0 - paceRatio) // Small bonus for under-pace
+				}
+			}
+		}
+	}
+	headroom += primaryPaceBonus
 
 	// 5hr usage only penalizes when getting critically high (>80%)
 	// to avoid immediate rate limits
