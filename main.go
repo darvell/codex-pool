@@ -45,6 +45,7 @@ type config struct {
 	storePath      string
 	retentionDays  int
 	friendCode     string
+	adminToken     string
 	requestTimeout time.Duration // Timeout for non-streaming requests (0 = no timeout)
 	streamTimeout  time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
 }
@@ -122,6 +123,7 @@ func buildConfig() config {
 	cfg.maxAttempts = getConfigInt("PROXY_MAX_ATTEMPTS", fileCfg.MaxAttempts, 3)
 	cfg.storePath = getConfigString("PROXY_DB_PATH", fileCfg.DBPath, "./data/proxy.db")
 	cfg.friendCode = getConfigString("FRIEND_CODE", fileCfg.FriendCode, "")
+	cfg.adminToken = getConfigString("ADMIN_TOKEN", fileCfg.AdminToken, "")
 	cfg.retentionDays = 30
 	if v := getenv("PROXY_USAGE_RETENTION_DAYS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n > 0 {
@@ -177,7 +179,7 @@ func main() {
 	}
 	defer store.Close()
 
-	transport := &http.Transport{
+	standardTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -190,12 +192,15 @@ func main() {
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   50,
 	}
-	_ = http2.ConfigureTransport(transport)
+	_ = http2.ConfigureTransport(standardTransport)
+
+	// Use hybrid transport: rustls fingerprint for Cloudflare-protected hosts, standard for others
+	transport := newRustlsHybridTransport(standardTransport)
 
 	// Initialize pool users store if configured
 	var poolUsers *PoolUserStore
-	// Pool users require a JWT secret. Admin password is optional if friend code is used.
-	if (getPoolAdminPassword() != "" || cfg.friendCode != "") && getPoolJWTSecret() != "" {
+	// Pool users require a JWT secret. Admin token or friend code provides access control.
+	if (cfg.adminToken != "" || cfg.friendCode != "") && getPoolJWTSecret() != "" {
 		poolUsersPath := getPoolUsersPath()
 		var err error
 		poolUsers, err = newPoolUserStore(poolUsersPath)
@@ -230,9 +235,9 @@ func main() {
 	http2Srv := &http2.Server{
 		MaxConcurrentStreams:         250,
 		IdleTimeout:                  5 * time.Minute,
-		MaxUploadBufferPerConnection: 1 << 20,       // 1MB
-		MaxUploadBufferPerStream:     1 << 20,       // 1MB
-		MaxReadFrameSize:             1 << 20,       // 1MB
+		MaxUploadBufferPerConnection: 1 << 20, // 1MB
+		MaxUploadBufferPerStream:     1 << 20, // 1MB
+		MaxReadFrameSize:             1 << 20, // 1MB
 	}
 	if err := http2.ConfigureServer(srv, http2Srv); err != nil {
 		log.Printf("warning: failed to configure HTTP/2 server: %v", err)
@@ -247,7 +252,7 @@ func main() {
 
 type proxyHandler struct {
 	cfg       config
-	transport *http.Transport
+	transport http.RoundTripper
 	pool      *poolState
 	poolUsers *PoolUserStore
 	registry  *ProviderRegistry
@@ -260,6 +265,13 @@ type proxyHandler struct {
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
 	lastRefreshTime time.Time
+	refreshCallsMu  sync.Mutex
+	refreshCalls    map[string]*refreshCall
+}
+
+type refreshCall struct {
+	done chan struct{}
+	err  error
 }
 
 // Note: ServeHTTP is now in router.go
@@ -629,13 +641,20 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 		lastStatus = resp.StatusCode
 
+		if resp.StatusCode == http.StatusTooManyRequests {
+			h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
+			acc.mu.Lock()
+			acc.Penalty += 1.0
+			acc.mu.Unlock()
+		}
+
 		if isRetryableStatus(resp.StatusCode) {
 			// Mark account health and try another one.
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				acc.mu.Lock()
-				// Only mark as dead if we couldn't refresh (no refresh token or refresh failed)
-				// If refresh succeeded but we still got 401/403, just add penalty - might be transient
-				if refreshFailed {
+				// Codex accounts: only mark dead from usage endpoint failures, not proxy failures
+				// Other accounts: mark dead if refresh failed
+				if refreshFailed && acc.Type != AccountTypeCodex {
 					acc.Dead = true
 					acc.Penalty += 1.0
 					if h.cfg.debug {
@@ -646,7 +665,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 					}
 				} else {
-					// Refresh was rate-limited or not needed but we still got 401/403
+					// Codex: never mark dead from proxy, only from usage tracking
+					// Others: refresh was rate-limited or not needed
 					// Add heavy penalty so this account drops below working ones
 					acc.Penalty += 10.0
 					if h.cfg.debug {
@@ -659,9 +679,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				acc.Penalty += 0.3
 				acc.mu.Unlock()
 			}
-			lastErr = fmt.Errorf("upstream %s", resp.Status)
-			h.recent.add(lastErr.Error())
+			// Read error body to include in error message
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			resp.Body.Close()
+			errBody = bodyForInspection(nil, errBody)
+			if len(errBody) > 0 {
+				lastErr = fmt.Errorf("upstream %s: %s", resp.Status, string(errBody))
+			} else {
+				lastErr = fmt.Errorf("upstream %s", resp.Status)
+			}
+			h.recent.add(lastErr.Error())
 			if h.cfg.debug {
 				log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 			}
@@ -750,23 +777,25 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			h.updateUsageFromBody(acc, respSample)
 		}
 
-		// Success: pin conversation if possible (if request didn't include it, try to learn from response).
-		if conversationID == "" && len(respSample) > 0 {
-			conversationID = extractConversationIDFromSSE(respSample)
-		}
-		if conversationID != "" {
-			h.pool.pin(conversationID, acc.ID)
-		}
-		acc.mu.Lock()
-		acc.LastUsed = time.Now()
-		// Successful request - decay penalty faster (proves account works)
-		if acc.Penalty > 0 {
-			acc.Penalty *= 0.5
-			if acc.Penalty < 0.01 {
-				acc.Penalty = 0
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Success: pin conversation if possible (if request didn't include it, try to learn from response).
+			if conversationID == "" && len(respSample) > 0 {
+				conversationID = extractConversationIDFromSSE(respSample)
 			}
+			if conversationID != "" {
+				h.pool.pin(conversationID, acc.ID)
+			}
+			acc.mu.Lock()
+			acc.LastUsed = time.Now()
+			// Successful request - decay penalty faster (proves account works)
+			if acc.Penalty > 0 {
+				acc.Penalty *= 0.5
+				if acc.Penalty < 0.01 {
+					acc.Penalty = 0
+				}
+			}
+			acc.mu.Unlock()
 		}
-		acc.mu.Unlock()
 
 		h.metrics.inc(strconv.Itoa(resp.StatusCode), acc.ID)
 
@@ -788,10 +817,64 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 }
 
 func isRetryableStatus(code int) bool {
-	if code == http.StatusUnauthorized || code == http.StatusForbidden || code == http.StatusTooManyRequests {
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
 		return true
 	}
 	return code >= 500 && code <= 599
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "rate limited") || strings.Contains(msg, "too many requests") || strings.Contains(msg, "429")
+}
+
+func parseRetryAfter(h http.Header) (time.Duration, bool) {
+	if h == nil {
+		return 0, false
+	}
+	val := strings.TrimSpace(h.Get("Retry-After"))
+	if val == "" {
+		return 0, false
+	}
+	if secs, err := strconv.ParseInt(val, 10, 64); err == nil {
+		if secs <= 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if when, err := http.ParseTime(val); err == nil {
+		wait := time.Until(when)
+		if wait <= 0 {
+			return 0, false
+		}
+		return wait, true
+	}
+	return 0, false
+}
+
+func (h *proxyHandler) applyRateLimit(a *Account, hdr http.Header, fallback time.Duration) time.Duration {
+	if a == nil {
+		return 0
+	}
+	wait, ok := parseRetryAfter(hdr)
+	if !ok {
+		wait = fallback
+	}
+	until := time.Now().Add(wait)
+	if wait <= 0 {
+		return 0
+	}
+
+	a.mu.Lock()
+
+	if a.RateLimitUntil.Before(until) {
+		a.RateLimitUntil = until
+	}
+	a.mu.Unlock()
+	return wait
 }
 
 // looksLikeProviderCredential checks if a token looks like a real provider credential
@@ -1009,8 +1092,13 @@ func (h *proxyHandler) tryOnce(
 	refreshFailed := false // Track if refresh was attempted but failed
 
 	if !h.cfg.disableRefresh && h.needsRefresh(acc) {
-		if err := h.refreshAccount(ctx, acc); err != nil && h.cfg.debug {
-			log.Printf("[%s] refresh %s failed: %v (continuing with existing token)", reqID, acc.ID, err)
+		if err := h.refreshAccount(ctx, acc); err != nil {
+			if isRateLimitError(err) {
+				h.applyRateLimit(acc, nil, defaultRateLimitBackoff)
+			}
+			if h.cfg.debug {
+				log.Printf("[%s] refresh %s failed: %v (continuing with existing token)", reqID, acc.ID, err)
+			}
 		}
 	}
 
@@ -1152,8 +1240,10 @@ func (h *proxyHandler) tryOnce(
 				// the account is truly dead (fresh token still rejected)
 			} else {
 				errStr := err.Error()
-				// If refresh token is permanently invalid, mark account as dead immediately
-				if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+				if isRateLimitError(err) {
+					h.applyRateLimit(acc, nil, defaultRateLimitBackoff)
+				} else if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+					// If refresh token is permanently invalid, mark account as dead immediately
 					acc.mu.Lock()
 					acc.Dead = true
 					acc.Penalty += 100.0
@@ -1230,11 +1320,40 @@ const refreshMinInterval = 5 * time.Second
 // 15 minutes balances between preventing hammering and allowing recovery from expired tokens
 const refreshPerAccountInterval = 15 * time.Minute
 
+const defaultRateLimitBackoff = 30 * time.Second
+
 func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	if a == nil {
 		return errors.New("nil account")
 	}
+	key := fmt.Sprintf("%s:%s", a.Type, a.ID)
 
+	h.refreshCallsMu.Lock()
+	if h.refreshCalls == nil {
+		h.refreshCalls = map[string]*refreshCall{}
+	}
+	if existing, ok := h.refreshCalls[key]; ok {
+		h.refreshCallsMu.Unlock()
+		<-existing.done
+		return existing.err
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	h.refreshCalls[key] = call
+	h.refreshCallsMu.Unlock()
+
+	defer func() {
+		h.refreshCallsMu.Lock()
+		delete(h.refreshCalls, key)
+		h.refreshCallsMu.Unlock()
+		close(call.done)
+	}()
+
+	err := h.refreshAccountOnce(ctx, a)
+	call.err = err
+	return err
+}
+
+func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error {
 	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
 	sinceLastRefresh := time.Since(a.LastRefresh)

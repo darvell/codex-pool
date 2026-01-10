@@ -49,6 +49,7 @@ type Account struct {
 	LastPenalty             time.Time
 	Dead                    bool
 	LastUsed                time.Time
+	RateLimitUntil          time.Time
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -174,12 +175,12 @@ type RequestUsage struct {
 
 // AccountUsage stores aggregates for an account with time windows.
 type AccountUsage struct {
-	TotalInputTokens    int64 `json:"total_input_tokens"`
-	TotalCachedTokens   int64 `json:"total_cached_tokens"`
-	TotalOutputTokens   int64 `json:"total_output_tokens"`
+	TotalInputTokens     int64 `json:"total_input_tokens"`
+	TotalCachedTokens    int64 `json:"total_cached_tokens"`
+	TotalOutputTokens    int64 `json:"total_output_tokens"`
 	TotalReasoningTokens int64 `json:"total_reasoning_tokens"`
-	TotalBillableTokens int64 `json:"total_billable_tokens"`
-	RequestCount        int64 `json:"request_count"`
+	TotalBillableTokens  int64 `json:"total_billable_tokens"`
+	RequestCount         int64 `json:"request_count"`
 	// For calculating tokens-per-percent
 	LastPrimaryPct   float64   `json:"last_primary_pct"`
 	LastSecondaryPct float64   `json:"last_secondary_pct"`
@@ -255,9 +256,9 @@ type GeminiAuthJSON struct {
 	RefreshToken string `json:"refresh_token"`
 	TokenType    string `json:"token_type"`
 	Scope        string `json:"scope"`
-	ExpiryDate   int64  `json:"expiry_date"`   // Unix timestamp in milliseconds
-	PlanType     string `json:"plan_type"`     // e.g., "ultra", "gemini"
-	LastRefresh  string `json:"last_refresh"`  // RFC3339 timestamp of last refresh attempt
+	ExpiryDate   int64  `json:"expiry_date"`  // Unix timestamp in milliseconds
+	PlanType     string `json:"plan_type"`    // e.g., "ultra", "gemini"
+	LastRefresh  string `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
 }
 
 // ClaudeAuthJSON is the format for Claude auth files.
@@ -420,6 +421,13 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
 				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType)
+				if ok && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+					ok = false
+					if p.debug {
+						log.Printf("unpinning conversation %s from rate-limited account %s (until %s)",
+							conversationID, id, a.RateLimitUntil.Format(time.RFC3339))
+					}
+				}
 				// Don't use pinned account if it's overloaded (>70% weekly usage)
 				// This prevents conversation pinning from hammering one account
 				secondaryUsed := a.Usage.SecondaryUsedPercent
@@ -476,6 +484,13 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		a.mu.Lock()
 		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) {
 			a.mu.Unlock()
+			continue
+		}
+		if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+			a.mu.Unlock()
+			if p.debug {
+				log.Printf("skipping account %s: rate limited until %s", a.ID, a.RateLimitUntil.Format(time.RFC3339))
+			}
 			continue
 		}
 		// Hard exclusion: accounts with >=95% primary (5hr) usage should never be selected
@@ -553,48 +568,57 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		secondaryUsed = a.Usage.SecondaryUsed
 	}
 
-	// Calculate pace-adjusted headroom based on weekly (secondary) usage.
-	// An account at 51% with 1.5 days left is under-pace and should be preferred
-	// over an account at 2% with 7 days left (which needs to last longer).
+	// Calculate headroom based on weekly (secondary) usage with drain urgency.
+	// Key insight: an account at 51% with 1.5 days left can sustain 33%/day burn rate,
+	// while an account at 4% with 7 days left can only sustain 14%/day to last the week.
+	// We should prefer accounts that need draining (high urgency, available capacity).
 	headroom := 1.0 - secondaryUsed
 
-	// Adjust headroom based on pace (usage vs time elapsed)
+	// Calculate drain urgency based on time until reset
+	// Accounts closer to reset should be used more aggressively
 	if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
-		timeRemaining := a.Usage.SecondaryResetAt.Sub(now).Minutes()
-		totalWindow := 10080.0 // 7 days in minutes
-		timeElapsedPct := 1.0 - (timeRemaining / totalWindow)
-		if timeElapsedPct > 0.05 { // Only adjust if meaningful time has elapsed
-			paceRatio := secondaryUsed / timeElapsedPct
-			// paceRatio < 1.0 means under-pace (good), > 1.0 means over-pace (bad)
-			if paceRatio > 0.01 && paceRatio < 10.0 { // Sanity bounds
-				// Boost under-pace accounts, penalize over-pace accounts
-				// e.g., 51% used / 78% elapsed = 0.65 pace → multiply headroom by 1.54x
-				// e.g., 20% used / 10% elapsed = 2.0 pace → multiply headroom by 0.5x
-				paceAdjustment := 1.0 / paceRatio
-				// Cap the adjustment to avoid extreme values
-				if paceAdjustment > 2.0 {
-					paceAdjustment = 2.0
-				} else if paceAdjustment < 0.3 {
-					paceAdjustment = 0.3
-				}
-				headroom *= paceAdjustment
+		hoursRemaining := a.Usage.SecondaryResetAt.Sub(now).Hours()
+		totalHours := 168.0 // 7 days
+
+		// Available burn rate = remaining capacity / time remaining
+		// e.g., 49% remaining / 37 hours = 1.32%/hour available
+		// e.g., 96% remaining / 165 hours = 0.58%/hour available
+		// The first can sustain 2.3x more load right now!
+
+		if hoursRemaining > 1 && hoursRemaining < totalHours {
+			// Calculate sustainable burn rate (% per hour)
+			sustainableBurnRate := headroom / hoursRemaining
+
+			// Baseline burn rate is 100% / 168 hours = 0.595%/hour
+			baselineBurnRate := 1.0 / totalHours
+
+			// Ratio of sustainable to baseline: >1 means we can use more than average
+			burnRateRatio := sustainableBurnRate / baselineBurnRate
+
+			// Apply as multiplier to headroom, capped to reasonable range
+			if burnRateRatio > 3.0 {
+				burnRateRatio = 3.0
+			} else if burnRateRatio < 0.3 {
+				burnRateRatio = 0.3
 			}
+			headroom *= burnRateRatio
 		}
 	}
 
-	// 5hr window pace adjustment - prefer accounts under-pace on primary too
+	// 5hr window: bonus for accounts with more short-term capacity
 	primaryPaceBonus := 0.0
 	if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
-		timeRemaining := a.Usage.PrimaryResetAt.Sub(now).Minutes()
-		totalWindow := 300.0 // 5 hours in minutes
-		timeElapsedPct := 1.0 - (timeRemaining / totalWindow)
-		if timeElapsedPct > 0.1 && primaryUsed > 0.01 { // Only if meaningful time elapsed and some usage
-			paceRatio := primaryUsed / timeElapsedPct
-			if paceRatio > 0.01 && paceRatio < 10.0 {
-				// Under-pace on 5hr = can absorb more short-term load
-				if paceRatio < 0.8 {
-					primaryPaceBonus = 0.1 * (1.0 - paceRatio) // Small bonus for under-pace
-				}
+		hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
+		primaryHeadroom := 1.0 - primaryUsed
+		if hoursRemaining > 0.1 && hoursRemaining < 5.0 && primaryHeadroom > 0.1 {
+			// Sustainable burn rate for 5hr window
+			sustainableBurnRate := primaryHeadroom / hoursRemaining
+			baselineBurnRate := 1.0 / 5.0 // 20%/hour baseline
+			burnRateRatio := sustainableBurnRate / baselineBurnRate
+			if burnRateRatio > 1.5 {
+				primaryPaceBonus = 0.15 // Significant bonus for high 5hr capacity
+			} else if burnRateRatio > 1.0 {
+				primaryPaceBonus = 0.05 // Small bonus
 			}
 		}
 	}
@@ -965,8 +989,8 @@ type ProviderUsageSummary struct {
 type CodexUsageSummary struct {
 	HealthyCount int              `json:"healthy_count"`
 	TotalCount   int              `json:"total_count"`
-	FiveHour     UsageWindowStats `json:"five_hour"`  // Primary window
-	Weekly       UsageWindowStats `json:"weekly"`     // Secondary window
+	FiveHour     UsageWindowStats `json:"five_hour"` // Primary window
+	Weekly       UsageWindowStats `json:"weekly"`    // Secondary window
 }
 
 // ClaudeUsageSummary contains Claude-specific usage info.
@@ -986,11 +1010,11 @@ type GeminiUsageSummary struct {
 
 // UsageWindowStats contains stats for a usage window.
 type UsageWindowStats struct {
-	AvgUsedPct   float64   `json:"avg_used_pct"`
-	MinUsedPct   float64   `json:"min_used_pct"`
-	MaxUsedPct   float64   `json:"max_used_pct"`
-	NextResetAt  time.Time `json:"next_reset_at,omitempty"`
-	WindowName   string    `json:"window_name,omitempty"` // e.g., "5 hours", "7 days", "24 hours"
+	AvgUsedPct  float64   `json:"avg_used_pct"`
+	MinUsedPct  float64   `json:"min_used_pct"`
+	MaxUsedPct  float64   `json:"max_used_pct"`
+	NextResetAt time.Time `json:"next_reset_at,omitempty"`
+	WindowName  string    `json:"window_name,omitempty"` // e.g., "5 hours", "7 days", "24 hours"
 }
 
 // AccountBrief is a summary of an account for the usage endpoint.
@@ -1023,10 +1047,10 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 
 	// Provider-specific tracking
 	type providerStats struct {
-		total, healthy                     int
-		primarySum, secondarySum           float64
-		primaryMin, primaryMax             float64
-		secondaryMin, secondaryMax         float64
+		total, healthy                       int
+		primarySum, secondarySum             float64
+		primaryMin, primaryMax               float64
+		secondaryMin, secondaryMax           float64
 		nextPrimaryReset, nextSecondaryReset time.Time
 	}
 	codexStats := providerStats{primaryMin: 1.0, secondaryMin: 1.0}
@@ -1170,15 +1194,15 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			TotalCount:   codexStats.total,
 			HealthyCount: codexStats.healthy,
 			FiveHour: UsageWindowStats{
-				WindowName: "5 hours",
-				MinUsedPct: codexStats.primaryMin * 100,
-				MaxUsedPct: codexStats.primaryMax * 100,
+				WindowName:  "5 hours",
+				MinUsedPct:  codexStats.primaryMin * 100,
+				MaxUsedPct:  codexStats.primaryMax * 100,
 				NextResetAt: codexStats.nextPrimaryReset,
 			},
 			Weekly: UsageWindowStats{
-				WindowName: "7 days",
-				MinUsedPct: codexStats.secondaryMin * 100,
-				MaxUsedPct: codexStats.secondaryMax * 100,
+				WindowName:  "7 days",
+				MinUsedPct:  codexStats.secondaryMin * 100,
+				MaxUsedPct:  codexStats.secondaryMax * 100,
 				NextResetAt: codexStats.nextSecondaryReset,
 			},
 		}
@@ -1193,15 +1217,15 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			TotalCount:   claudeStats.total,
 			HealthyCount: claudeStats.healthy,
 			Tokens: UsageWindowStats{
-				WindowName: "tokens",
-				MinUsedPct: claudeStats.primaryMin * 100,
-				MaxUsedPct: claudeStats.primaryMax * 100,
+				WindowName:  "tokens",
+				MinUsedPct:  claudeStats.primaryMin * 100,
+				MaxUsedPct:  claudeStats.primaryMax * 100,
 				NextResetAt: claudeStats.nextPrimaryReset,
 			},
 			Requests: UsageWindowStats{
-				WindowName: "requests",
-				MinUsedPct: claudeStats.secondaryMin * 100,
-				MaxUsedPct: claudeStats.secondaryMax * 100,
+				WindowName:  "requests",
+				MinUsedPct:  claudeStats.secondaryMin * 100,
+				MaxUsedPct:  claudeStats.secondaryMax * 100,
 				NextResetAt: claudeStats.nextSecondaryReset,
 			},
 		}
@@ -1216,9 +1240,9 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			TotalCount:   geminiStats.total,
 			HealthyCount: geminiStats.healthy,
 			Daily: UsageWindowStats{
-				WindowName: "24 hours",
-				MinUsedPct: geminiStats.primaryMin * 100,
-				MaxUsedPct: geminiStats.primaryMax * 100,
+				WindowName:  "24 hours",
+				MinUsedPct:  geminiStats.primaryMin * 100,
+				MaxUsedPct:  geminiStats.primaryMax * 100,
 				NextResetAt: geminiStats.nextPrimaryReset,
 			},
 		}

@@ -42,9 +42,13 @@ func (h *proxyHandler) refreshUsageIfStale() {
 		hasToken := a.AccessToken != ""
 		retrievedAt := a.Usage.RetrievedAt
 		accType := a.Type
+		rateLimitUntil := a.RateLimitUntil
 		a.mu.Unlock()
 
 		if dead || !hasToken {
+			continue
+		}
+		if !rateLimitUntil.IsZero() && rateLimitUntil.After(now) {
 			continue
 		}
 
@@ -52,6 +56,10 @@ func (h *proxyHandler) refreshUsageIfStale() {
 		if accType == AccountTypeGemini {
 			if !h.cfg.disableRefresh && h.needsRefresh(a) {
 				if err := h.refreshAccount(context.Background(), a); err != nil {
+					if isRateLimitError(err) {
+						h.applyRateLimit(a, nil, defaultRateLimitBackoff)
+						continue
+					}
 					log.Printf("proactive refresh for %s failed: %v", a.ID, err)
 				} else {
 					a.mu.Lock()
@@ -72,6 +80,10 @@ func (h *proxyHandler) refreshUsageIfStale() {
 			// Proactive refresh for OAuth tokens
 			if !h.cfg.disableRefresh && h.needsRefresh(a) {
 				if err := h.refreshAccount(context.Background(), a); err != nil {
+					if isRateLimitError(err) {
+						h.applyRateLimit(a, nil, defaultRateLimitBackoff)
+						continue
+					}
 					log.Printf("proactive refresh for %s failed: %v", a.ID, err)
 				} else {
 					a.mu.Lock()
@@ -112,6 +124,10 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 			errStr := err.Error()
 			if h.cfg.debug {
 				log.Printf("proactive refresh for %s failed: %v", a.ID, errStr)
+			}
+			if isRateLimitError(err) {
+				h.applyRateLimit(a, nil, defaultRateLimitBackoff)
+				return nil
 			}
 			// If refresh token is permanently invalid, mark account as dead
 			if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
@@ -166,6 +182,11 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		h.applyRateLimit(a, resp.Header, defaultRateLimitBackoff)
+		return nil
+	}
+
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// Got 401/403 - force a refresh attempt to recover (bypass needsRefresh check)
 		a.mu.Lock()
@@ -181,21 +202,26 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 					return err
 				}
 				defer resp.Body.Close()
-				// If still 401/403 after successful refresh, account is truly dead
+				if resp.StatusCode == http.StatusTooManyRequests {
+					h.applyRateLimit(a, resp.Header, defaultRateLimitBackoff)
+					return nil
+				}
+				// If still 401/403 after successful refresh, add penalty but don't mark dead
+				// Account is only dead if refresh itself fails
 				if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 					a.mu.Lock()
-					a.Dead = true
-					a.Penalty += 100.0
+					a.Penalty += 5.0
 					a.mu.Unlock()
-					log.Printf("marking account %s as dead: usage 401/403 after successful refresh", a.ID)
-					if err := saveAccount(a); err != nil {
-						log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
-					}
+					log.Printf("account %s usage 401/403 after successful refresh, adding penalty (not marking dead)", a.ID)
 					return fmt.Errorf("usage unauthorized after refresh: %s", resp.Status)
 				}
 			} else {
 				// Refresh failed - check if it's a permanent failure
 				errStr := err.Error()
+				if isRateLimitError(err) {
+					h.applyRateLimit(a, nil, defaultRateLimitBackoff)
+					return nil
+				}
 				if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
 					a.mu.Lock()
 					a.Dead = true
@@ -310,6 +336,11 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		h.applyRateLimit(a, resp.Header, defaultRateLimitBackoff)
+		return nil
+	}
+
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// Try refresh once
 		refreshAttempted := false
@@ -329,6 +360,9 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 					return err
 				}
 				defer resp.Body.Close()
+			} else if isRateLimitError(err) {
+				h.applyRateLimit(a, nil, defaultRateLimitBackoff)
+				return nil
 			}
 		}
 
