@@ -305,6 +305,8 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	// Only OAuth tokens can use the usage endpoint
 	a.mu.Lock()
 	access := a.AccessToken
+	prevPrimaryResetAt := a.Usage.PrimaryResetAt
+	prevSecondaryResetAt := a.Usage.SecondaryResetAt
 	a.mu.Unlock()
 
 	if !strings.HasPrefix(access, "sk-ant-oat") {
@@ -433,6 +435,16 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		snap.PrimaryUsedPercent = payload.FiveHour.Utilization / 100.0
 		if t, err := time.Parse(time.RFC3339, payload.FiveHour.ResetsAt); err == nil {
 			snap.PrimaryResetAt = t
+		} else if !prevPrimaryResetAt.IsZero() {
+			// Some accounts return resets_at=null when utilization=0; infer the next reset from
+			// the last known reset so the dashboard doesn't show "-".
+			elapsed := now.Sub(prevPrimaryResetAt)
+			if elapsed < 0 {
+				snap.PrimaryResetAt = prevPrimaryResetAt
+			} else {
+				cycles := int64(elapsed / (5 * time.Hour))
+				snap.PrimaryResetAt = prevPrimaryResetAt.Add(time.Duration(cycles+1) * (5 * time.Hour))
+			}
 		}
 	}
 
@@ -441,6 +453,14 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		snap.SecondaryUsedPercent = payload.SevenDay.Utilization / 100.0
 		if t, err := time.Parse(time.RFC3339, payload.SevenDay.ResetsAt); err == nil {
 			snap.SecondaryResetAt = t
+		} else if !prevSecondaryResetAt.IsZero() {
+			elapsed := now.Sub(prevSecondaryResetAt)
+			if elapsed < 0 {
+				snap.SecondaryResetAt = prevSecondaryResetAt
+			} else {
+				cycles := int64(elapsed / (7 * 24 * time.Hour))
+				snap.SecondaryResetAt = prevSecondaryResetAt.Add(time.Duration(cycles+1) * (7 * 24 * time.Hour))
+			}
 		}
 	}
 
