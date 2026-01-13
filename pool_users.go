@@ -213,7 +213,7 @@ func isPoolUserToken(secret, authHeader string) (bool, string, error) {
 	// Check issuer - accept OpenAI (Codex), Google (Gemini), and Anthropic (Claude)
 	if iss, ok := claims["iss"].(string); ok {
 		validIssuers := map[string]bool{
-			"https://auth.openai.com":    true, // Codex
+			"https://auth.openai.com":     true, // Codex
 			"https://accounts.google.com": true, // Gemini
 			"https://auth.anthropic.com":  true, // Claude
 		}
@@ -289,12 +289,12 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 		"scp":            []string{"openid", "profile", "email", "offline_access"},
 		"pwd_auth_time":  now.UnixMilli(),
 		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_account_id":         accountID,
-			"chatgpt_account_user_id":    chatgptAccountUserID,
-			"chatgpt_compute_residency":  "no_constraint",
-			"chatgpt_plan_type":          user.PlanType,
-			"chatgpt_user_id":            chatgptUserID,
-			"user_id":                    chatgptUserID,
+			"chatgpt_account_id":        accountID,
+			"chatgpt_account_user_id":   chatgptAccountUserID,
+			"chatgpt_compute_residency": "no_constraint",
+			"chatgpt_plan_type":         user.PlanType,
+			"chatgpt_user_id":           chatgptUserID,
+			"user_id":                   chatgptUserID,
 		},
 		"https://api.openai.com/mfa": map[string]any{
 			"required": "no",
@@ -312,24 +312,24 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 
 	// Access token claims - similar but different aud
 	accessClaims := map[string]any{
-		"exp":            exp,
-		"iat":            now.Unix(),
-		"nbf":            now.Unix(),
-		"iss":            "https://auth.openai.com",
-		"sub":            "pool|" + user.ID,
-		"aud":            []string{"https://api.openai.com/v1"},
-		"jti":            randomHex(8) + "-" + randomHex(4) + "-" + randomHex(4) + "-" + randomHex(4) + "-" + randomHex(12),
-		"client_id":      "app_EMoamEEZ73f0CkXaXp7hrann",
-		"session_id":     sessionID,
-		"scp":            []string{"openid", "profile", "email", "offline_access"},
-		"pwd_auth_time":  now.UnixMilli(),
+		"exp":           exp,
+		"iat":           now.Unix(),
+		"nbf":           now.Unix(),
+		"iss":           "https://auth.openai.com",
+		"sub":           "pool|" + user.ID,
+		"aud":           []string{"https://api.openai.com/v1"},
+		"jti":           randomHex(8) + "-" + randomHex(4) + "-" + randomHex(4) + "-" + randomHex(4) + "-" + randomHex(12),
+		"client_id":     "app_EMoamEEZ73f0CkXaXp7hrann",
+		"session_id":    sessionID,
+		"scp":           []string{"openid", "profile", "email", "offline_access"},
+		"pwd_auth_time": now.UnixMilli(),
 		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_account_id":         accountID,
-			"chatgpt_account_user_id":    chatgptAccountUserID,
-			"chatgpt_compute_residency":  "no_constraint",
-			"chatgpt_plan_type":          user.PlanType,
-			"chatgpt_user_id":            chatgptUserID,
-			"user_id":                    chatgptUserID,
+			"chatgpt_account_id":        accountID,
+			"chatgpt_account_user_id":   chatgptAccountUserID,
+			"chatgpt_compute_residency": "no_constraint",
+			"chatgpt_plan_type":         user.PlanType,
+			"chatgpt_user_id":           chatgptUserID,
+			"user_id":                   chatgptUserID,
 		},
 		"https://api.openai.com/mfa": map[string]any{
 			"required": "no",
@@ -493,17 +493,6 @@ func isPoolGeminiAPIKey(secret, apiKey string) (bool, string, error) {
 	}
 
 	return true, userID, nil
-}
-
-// getPoolAdminPassword returns the admin password from config or env.
-func getPoolAdminPassword() string {
-	if v := os.Getenv("POOL_ADMIN_PASSWORD"); v != "" {
-		return v
-	}
-	if globalConfigFile != nil && globalConfigFile.PoolUsers.AdminPassword != "" {
-		return globalConfigFile.PoolUsers.AdminPassword
-	}
-	return ""
 }
 
 // getPoolJWTSecret returns the JWT signing secret from config or env.

@@ -177,13 +177,20 @@ func TestGenerateGeminiAuth(t *testing.T) {
 		t.Error("expiry_date is 0")
 	}
 
-	// Verify the token uses Google issuer
-	claims, err := validatePoolUserJWT(secret, auth.AccessToken)
+	// Verify ID token is a pool-signed JWT with Google issuer.
+	claims, err := validatePoolUserJWT(secret, auth.IDToken)
 	if err != nil {
-		t.Fatalf("access token validation failed: %v", err)
+		t.Fatalf("id token validation failed: %v", err)
 	}
 	if claims["iss"] != "https://accounts.google.com" {
 		t.Errorf("expected iss=https://accounts.google.com, got %v", claims["iss"])
+	}
+
+	// Verify access token is a pool-generated Google-like token accepted by Gemini CLI.
+	if ok, uid := isGeminiOAuthPoolToken(secret, auth.AccessToken); !ok {
+		t.Fatalf("access token validation failed: not a pool token")
+	} else if uid != user.ID {
+		t.Fatalf("access token validation failed: expected user %q, got %q", user.ID, uid)
 	}
 
 	// Check JSON serialization

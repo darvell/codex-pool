@@ -6,6 +6,59 @@ import (
 	"strings"
 )
 
+// checkAdminAuth verifies the admin token from header or query param.
+// Returns true if authorized, false if not (and sends 401 response).
+func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if h.cfg.adminToken == "" {
+		// No admin token configured - deny all admin access
+		http.Error(w, "admin access disabled", http.StatusForbidden)
+		return false
+	}
+
+	// Check header first, then query param
+	token := r.Header.Get("X-Admin-Token")
+	if token == "" {
+		token = r.URL.Query().Get("admin_token")
+	}
+
+	if token != h.cfg.adminToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// checkAdminOrFriendAuth verifies either the admin token or the friend code.
+// This is used for "pool stats" endpoints that are intended to be accessible in friend mode
+// (with the friend code) while still allowing admin access when configured.
+func (h *proxyHandler) checkAdminOrFriendAuth(w http.ResponseWriter, r *http.Request) bool {
+	// If nothing is configured, treat as an open/local deployment.
+	if h.cfg.adminToken == "" && h.cfg.friendCode == "" {
+		return true
+	}
+
+	// Admin token (header first, then query param)
+	if h.cfg.adminToken != "" {
+		headerToken := r.Header.Get("X-Admin-Token")
+		queryToken := r.URL.Query().Get("admin_token")
+		if headerToken == h.cfg.adminToken || queryToken == h.cfg.adminToken {
+			return true
+		}
+	}
+
+	// Friend code (query param or header)
+	if h.cfg.friendCode != "" {
+		queryCode := r.URL.Query().Get("code")
+		headerCode := r.Header.Get("X-Friend-Code")
+		if queryCode == h.cfg.friendCode || headerCode == h.cfg.friendCode {
+			return true
+		}
+	}
+
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
 // ServeHTTP routes incoming requests to the appropriate handler.
 func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID := randomID()
@@ -34,9 +87,15 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleWhoami(w, r)
 		return
 	case "/api/pool/users":
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
 		h.handlePoolUsers(w, r)
 		return
 	case "/api/pool/daily-breakdown":
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
 		h.handleDailyBreakdown(w, r)
 		return
 	case "/favicon.ico":
@@ -46,9 +105,15 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveHealth(w)
 		return
 	case "/metrics":
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
 		h.metrics.serve(w, r)
 		return
 	case "/admin/reload":
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -58,6 +123,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 		return
 	case "/admin/accounts":
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -65,6 +133,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveAccounts(w)
 		return
 	case "/admin/tokens":
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -75,6 +146,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Account resurrect: /admin/accounts/:id/resurrect
 	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && strings.HasSuffix(r.URL.Path, "/resurrect") {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -114,12 +188,21 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Pool user admin routes
 	if strings.HasPrefix(r.URL.Path, "/admin/pool-users") {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
 		h.servePoolUsersAdmin(w, r)
 		return
 	}
 
 	// Claude account admin routes
+	// Note: /admin/claude/callback skips auth (OAuth redirect from Anthropic)
 	if strings.HasPrefix(r.URL.Path, "/admin/claude") {
+		if r.URL.Path != "/admin/claude/callback" {
+			if !h.checkAdminAuth(w, r) {
+				return
+			}
+		}
 		h.serveClaudeAdmin(w, r)
 		return
 	}

@@ -96,7 +96,7 @@ func geminiOAuthClientSecret() string {
 	return "GOCSPX-" + "4uHgMPm-1o7Sk-geV6Cu5clXFsxl"
 }
 
-func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transport *http.Transport) error {
+func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
 	acc.mu.Unlock()

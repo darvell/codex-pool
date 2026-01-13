@@ -21,7 +21,7 @@ type Provider interface {
 
 	// RefreshToken refreshes the access token.
 	// Returns nil if refresh is not supported or not needed.
-	RefreshToken(ctx context.Context, acc *Account, transport *http.Transport) error
+	RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error
 
 	// ParseUsage extracts usage from an SSE event (provider-specific format).
 	// Returns nil if the event doesn't contain usage data.

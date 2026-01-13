@@ -15,11 +15,8 @@ import (
 func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	respondJSON(w, map[string]any{
-		"ok":             true,
-		"uptime_seconds": int(time.Since(h.startTime).Seconds()),
-		"accounts":       h.pool.count(),
-		"inflight":       atomic.LoadInt64(&h.inflight),
-		"recent_errors":  h.recent.snapshot(),
+		"status": "ok",
+		"uptime": formatDuration(time.Since(h.startTime)),
 	})
 }
 
@@ -37,6 +34,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		LastRefresh             time.Time   `json:"last_refresh,omitempty"`
 		Penalty                 float64     `json:"penalty"`
 		Score                   float64     `json:"score"`
+		IsPrimary               bool        `json:"is_primary"`
 		Usage                   any         `json:"usage"`
 		Totals                  any         `json:"totals"`
 	}
@@ -76,6 +74,20 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		})
 	}
 	h.pool.mu.RUnlock()
+
+	// Mark highest-scoring non-dead account per type as primary
+	highestScore := make(map[AccountType]float64)
+	highestIdx := make(map[AccountType]int)
+	for i, r := range out {
+		if !r.Dead && !r.Disabled && r.Score > highestScore[r.Type] {
+			highestScore[r.Type] = r.Score
+			highestIdx[r.Type] = i
+		}
+	}
+	for _, idx := range highestIdx {
+		out[idx].IsPrimary = true
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	respondJSON(w, out)
 }

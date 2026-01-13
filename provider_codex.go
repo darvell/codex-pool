@@ -84,7 +84,7 @@ func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	}
 }
 
-func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport *http.Transport) error {
+func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
 	acc.mu.Unlock()
@@ -387,4 +387,3 @@ type codexJWTClaims struct {
 	ChatGPTAccountID string
 	PlanType         string
 }
-

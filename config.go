@@ -18,6 +18,7 @@ type ConfigFile struct {
 	FriendCode     string `toml:"friend_code"`
 	FriendName     string `toml:"friend_name"`
 	FriendTagline  string `toml:"friend_tagline"`
+	AdminToken     string `toml:"admin_token"`
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
 }
@@ -46,9 +47,8 @@ func getFriendTagline() string {
 
 // PoolUsersConfig is the [pool_users] section.
 type PoolUsersConfig struct {
-	AdminPassword string `toml:"admin_password"`
-	JWTSecret     string `toml:"jwt_secret"`
-	StoragePath   string `toml:"storage_path"`
+	JWTSecret   string `toml:"jwt_secret"`
+	StoragePath string `toml:"storage_path"`
 }
 
 // loadConfigFile loads config.toml if it exists.

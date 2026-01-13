@@ -2,30 +2,14 @@ package main
 
 import (
 	"encoding/json"
-	"html/template"
 	"net/http"
 	"strings"
 	"time"
 )
 
-// Pool user admin handlers
+// Pool user admin handlers - JSON API only
 
-func (h *proxyHandler) checkPoolAdminAuth(w http.ResponseWriter, r *http.Request) bool {
-	password := getPoolAdminPassword()
-	if password == "" {
-		http.Error(w, "pool user admin not configured (set POOL_ADMIN_PASSWORD)", http.StatusServiceUnavailable)
-		return false
-	}
-
-	user, pass, ok := r.BasicAuth()
-	if !ok || (user != "admin" && user != "") || pass != password {
-		w.Header().Set("WWW-Authenticate", `Basic realm="Pool Admin"`)
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return false
-	}
-	return true
-}
-
+// servePoolUsersAdmin routes pool user admin requests (auth already checked by router)
 func (h *proxyHandler) servePoolUsersAdmin(w http.ResponseWriter, r *http.Request) {
 	if h.poolUsers == nil {
 		http.Error(w, "pool users not configured", http.StatusServiceUnavailable)
@@ -39,55 +23,75 @@ func (h *proxyHandler) servePoolUsersAdmin(w http.ResponseWriter, r *http.Reques
 
 	switch {
 	case path == "/" && r.Method == http.MethodGet:
-		if !h.checkPoolAdminAuth(w, r) {
-			return
-		}
-		h.servePoolUsersList(w, r)
-	case path == "/create" && r.Method == http.MethodGet:
-		if !h.checkPoolAdminAuth(w, r) {
-			return
-		}
-		h.servePoolUsersCreateForm(w, r)
-	case path == "/create" && r.Method == http.MethodPost:
-		if !h.checkPoolAdminAuth(w, r) {
-			return
-		}
+		h.handlePoolUsersList(w, r)
+
+	case path == "/" && r.Method == http.MethodPost:
 		h.handlePoolUsersCreate(w, r)
-	case strings.HasPrefix(path, "/") && strings.HasSuffix(path, "/disable") && r.Method == http.MethodPost:
-		if !h.checkPoolAdminAuth(w, r) {
-			return
-		}
+
+	case strings.HasPrefix(path, "/") && r.Method == http.MethodDelete:
+		id := strings.TrimPrefix(path, "/")
+		id = strings.TrimSuffix(id, "/")
+		h.handlePoolUserDelete(w, r, id)
+
+	// Support POST with /disable suffix for backwards compatibility
+	case strings.HasSuffix(path, "/disable") && r.Method == http.MethodPost:
 		id := strings.TrimPrefix(path, "/")
 		id = strings.TrimSuffix(id, "/disable")
-		h.handlePoolUserDisable(w, r, id)
+		h.handlePoolUserDelete(w, r, id)
+
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (h *proxyHandler) servePoolUsersList(w http.ResponseWriter, r *http.Request) {
+// GET /admin/pool-users - list all pool users
+func (h *proxyHandler) handlePoolUsersList(w http.ResponseWriter, r *http.Request) {
 	users := h.poolUsers.List()
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl := template.Must(template.New("list").Parse(poolUsersListHTML))
-	tmpl.Execute(w, map[string]any{
-		"Users": users,
+
+	type userInfo struct {
+		ID        string    `json:"id"`
+		Email     string    `json:"email"`
+		PlanType  string    `json:"plan_type"`
+		CreatedAt time.Time `json:"created_at"`
+		Disabled  bool      `json:"disabled"`
+	}
+
+	var result []userInfo
+	for _, u := range users {
+		result = append(result, userInfo{
+			ID:        u.ID,
+			Email:     u.Email,
+			PlanType:  u.PlanType,
+			CreatedAt: u.CreatedAt,
+			Disabled:  u.Disabled,
+		})
+	}
+
+	respondJSON(w, map[string]any{
+		"users": result,
+		"count": len(result),
 	})
 }
 
-func (h *proxyHandler) servePoolUsersCreateForm(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl := template.Must(template.New("create").Parse(poolUsersCreateHTML))
-	tmpl.Execute(w, nil)
-}
-
+// POST /admin/pool-users - create a new pool user
 func (h *proxyHandler) handlePoolUsersCreate(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	var req struct {
+		Email    string `json:"email"`
+		PlanType string `json:"plan_type"`
 	}
 
-	email := strings.TrimSpace(r.FormValue("email"))
-	planType := r.FormValue("plan_type")
+	if r.Header.Get("Content-Type") == "application/json" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		req.Email = r.FormValue("email")
+		req.PlanType = r.FormValue("plan_type")
+	}
+
+	email := strings.TrimSpace(req.Email)
+	planType := req.PlanType
 	if planType == "" {
 		planType = "pro"
 	}
@@ -110,31 +114,35 @@ func (h *proxyHandler) handlePoolUsersCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Generate the setup page
-	baseURL := getPublicURL()
-	if baseURL == "" {
-		host := r.Host
-		if host == "" {
-			host = "PROXY_HOST:8989"
-		}
-		baseURL = "http://" + host
-	}
+	baseURL := h.getEffectivePublicURL(r)
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl := template.Must(template.New("created").Parse(poolUsersCreatedHTML))
-	tmpl.Execute(w, map[string]any{
-		"User":    user,
-		"BaseURL": baseURL,
-		"Token":   user.Token,
+	respondJSON(w, map[string]any{
+		"user": map[string]any{
+			"id":         user.ID,
+			"email":      user.Email,
+			"plan_type":  user.PlanType,
+			"created_at": user.CreatedAt,
+		},
+		"token": user.Token,
+		"setup": map[string]string{
+			"codex_config":  baseURL + "/config/codex/" + user.Token,
+			"gemini_config": baseURL + "/config/gemini/" + user.Token,
+			"claude_config": baseURL + "/config/claude/" + user.Token,
+		},
 	})
 }
 
-func (h *proxyHandler) handlePoolUserDisable(w http.ResponseWriter, r *http.Request, id string) {
+// DELETE /admin/pool-users/:id - disable/delete a pool user
+func (h *proxyHandler) handlePoolUserDelete(w http.ResponseWriter, r *http.Request, id string) {
 	if err := h.poolUsers.Disable(id); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	http.Redirect(w, r, "/admin/pool-users", http.StatusSeeOther)
+
+	respondJSON(w, map[string]any{
+		"success": true,
+		"id":      id,
+	})
 }
 
 // Config download endpoints (no auth - token IS the auth)
@@ -212,135 +220,3 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 		json.NewEncoder(w).Encode(auth)
 	}
 }
-
-// HTML Templates
-
-const poolUsersListHTML = `<!DOCTYPE html>
-<html>
-<head>
-    <title>Pool Users</title>
-    <style>
-        body { font-family: monospace; margin: 20px; background: #1a1a1a; color: #e0e0e0; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #444; padding: 8px; text-align: left; }
-        th { background: #2a2a2a; }
-        tr:nth-child(even) { background: #222; }
-        a { color: #6af; }
-        .btn { background: #444; color: #fff; border: none; padding: 5px 10px; cursor: pointer; }
-        .btn:hover { background: #555; }
-        .disabled { color: #f66; }
-    </style>
-</head>
-<body>
-    <h1>Pool Users</h1>
-    <p><a href="/admin/pool-users/create">+ Create New User</a></p>
-    <table>
-        <tr>
-            <th>Email</th>
-            <th>Plan</th>
-            <th>Created</th>
-            <th>Status</th>
-            <th>Actions</th>
-        </tr>
-        {{range .Users}}
-        <tr>
-            <td>{{.Email}}</td>
-            <td>{{.PlanType}}</td>
-            <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
-            <td>{{if .Disabled}}<span class="disabled">Disabled</span>{{else}}Active{{end}}</td>
-            <td>
-                {{if not .Disabled}}
-                <form method="POST" action="/admin/pool-users/{{.ID}}/disable" style="display:inline">
-                    <button class="btn" type="submit">Disable</button>
-                </form>
-                {{end}}
-            </td>
-        </tr>
-        {{else}}
-        <tr><td colspan="5">No users yet</td></tr>
-        {{end}}
-    </table>
-</body>
-</html>`
-
-const poolUsersCreateHTML = `<!DOCTYPE html>
-<html>
-<head>
-    <title>Create Pool User</title>
-    <style>
-        body { font-family: monospace; margin: 20px; background: #1a1a1a; color: #e0e0e0; }
-        input, select { padding: 8px; margin: 5px 0; background: #2a2a2a; color: #e0e0e0; border: 1px solid #444; }
-        button { background: #4a4; color: #fff; border: none; padding: 10px 20px; cursor: pointer; margin-top: 10px; }
-        button:hover { background: #5b5; }
-        a { color: #6af; }
-        label { display: block; margin-top: 10px; }
-    </style>
-</head>
-<body>
-    <h1>Create Pool User</h1>
-    <p><a href="/admin/pool-users">&larr; Back to list</a></p>
-    <form method="POST">
-        <label>Email:
-            <input type="email" name="email" required placeholder="user@example.com" style="width: 300px;">
-        </label>
-        <label>Plan Type (Codex):
-            <select name="plan_type">
-                <option value="pro">Pro</option>
-                <option value="team">Team</option>
-                <option value="plus">Plus</option>
-            </select>
-        </label>
-        <br>
-        <button type="submit">Create User</button>
-    </form>
-</body>
-</html>`
-
-const poolUsersCreatedHTML = `<!DOCTYPE html>
-<html>
-<head>
-    <title>User Created</title>
-    <style>
-        body { font-family: monospace; margin: 20px; background: #1a1a1a; color: #e0e0e0; }
-        pre { background: #2a2a2a; padding: 15px; overflow-x: auto; border: 1px solid #444; }
-        code { color: #8f8; }
-        h2 { color: #6af; border-bottom: 1px solid #444; padding-bottom: 10px; }
-        a { color: #6af; }
-        .section { margin: 20px 0; padding: 15px; background: #222; border-radius: 5px; }
-    </style>
-</head>
-<body>
-    <h1>User Created: {{.User.Email}}</h1>
-    <p><a href="/admin/pool-users">&larr; Back to list</a></p>
-
-    <div class="section">
-        <h2>Codex CLI Setup</h2>
-        <p>1. Download auth file:</p>
-        <pre><code>curl {{.BaseURL}}/config/codex/{{.Token}} > ~/.codex/auth.json</code></pre>
-
-        <p>2. Add to <code>~/.codex/config.toml</code>:</p>
-        <pre><code>model_provider = "codex-pool"
-chatgpt_base_url = "{{.BaseURL}}/backend-api"
-
-[model_providers.codex-pool]
-name = "OpenAI via codex-pool proxy"
-base_url = "{{.BaseURL}}/v1"
-wire_api = "responses"
-requires_openai_auth = true</code></pre>
-    </div>
-
-    <div class="section">
-        <h2>Gemini CLI Setup</h2>
-        <p>1. Download auth file:</p>
-        <pre><code>curl {{.BaseURL}}/config/gemini/{{.Token}} > ~/.gemini/oauth_creds.json</code></pre>
-
-        <p>2. Set endpoint (add to <code>~/.bashrc</code> or <code>~/.zshrc</code>):</p>
-        <pre><code>export CODE_ASSIST_ENDPOINT={{.BaseURL}}</code></pre>
-
-        <p>Or create <code>~/.gemini/settings.json</code>:</p>
-        <pre><code>{
-  "codeAssistEndpoint": "{{.BaseURL}}"
-}</code></pre>
-    </div>
-</body>
-</html>`

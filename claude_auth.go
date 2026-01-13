@@ -20,9 +20,9 @@ import (
 // Based on the opencode project's auth implementation.
 
 const (
-	ClaudeOAuthClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	ClaudeOAuthRedirectURI = "https://console.anthropic.com/oauth/code/callback"
-	ClaudeOAuthTokenURL    = "https://console.anthropic.com/v1/oauth/token"
+	ClaudeOAuthClientID     = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	ClaudeOAuthRedirectURI  = "https://console.anthropic.com/oauth/code/callback"
+	ClaudeOAuthTokenURL     = "https://console.anthropic.com/v1/oauth/token"
 	ClaudeOAuthAuthorizeURL = "https://claude.ai/oauth/authorize"
 )
 

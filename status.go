@@ -11,15 +11,15 @@ import (
 
 // StatusData contains all the data for the status page.
 type StatusData struct {
-	GeneratedAt       time.Time
-	Uptime            time.Duration
-	TotalCount        int
-	CodexCount        int
-	GeminiCount       int
-	ClaudeCount       int
-	PoolUsers         int
-	Accounts          []AccountStatus
-	TokenAnalytics    *TokenAnalytics
+	GeneratedAt    time.Time
+	Uptime         time.Duration
+	TotalCount     int
+	CodexCount     int
+	GeminiCount    int
+	ClaudeCount    int
+	PoolUsers      int
+	Accounts       []AccountStatus
+	TokenAnalytics *TokenAnalytics
 }
 
 // TokenAnalytics contains capacity estimation data for the status page.
@@ -31,17 +31,17 @@ type TokenAnalytics struct {
 
 // PlanCapacityView is a display-friendly view of plan capacity.
 type PlanCapacityView struct {
-	PlanType              string
-	SampleCount           int64
-	Confidence            string
-	TotalInputTokens      int64
-	TotalOutputTokens     int64
-	TotalCachedTokens     int64
-	TotalReasoningTokens  int64
-	TotalBillableTokens   int64
-	OutputMultiplier      float64
-	EffectivePerPrimaryPct   int64
-	EffectivePerSecondaryPct int64
+	PlanType                   string
+	SampleCount                int64
+	Confidence                 string
+	TotalInputTokens           int64
+	TotalOutputTokens          int64
+	TotalCachedTokens          int64
+	TotalReasoningTokens       int64
+	TotalBillableTokens        int64
+	OutputMultiplier           float64
+	EffectivePerPrimaryPct     int64
+	EffectivePerSecondaryPct   int64
 	EstimatedPrimaryCapacity   string // e.g., "~2.5M tokens"
 	EstimatedSecondaryCapacity string
 }
@@ -65,7 +65,6 @@ type AccountStatus struct {
 	Inflight           int64
 	TotalTokens        int64
 }
-
 
 func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 	h.pool.mu.RLock()

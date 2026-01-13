@@ -1029,6 +1029,7 @@ brew install claude-code</pre>
                                             <th>ID</th>
                                             <th>Plan</th>
                                             <th>Status</th>
+                                            <th style="text-align: right;">Score</th>
                                             <th style="text-align: right;">5hr</th>
                                             <th style="text-align: right;">Week</th>
                                             <th style="text-align: right;">Tokens</th>
@@ -1058,6 +1059,7 @@ brew install claude-code</pre>
                                                     <th>ID</th>
                                                     <th>Plan</th>
                                                     <th>Status</th>
+                                                    <th style="text-align: right;">Score</th>
                                                     <th style="text-align: right;">5hr</th>
                                                     <th style="text-align: right;">7day</th>
                                                 </tr>
@@ -1175,6 +1177,17 @@ brew install claude-code</pre>
                     btn.classList.remove('copied');
                 }, 2000);
             });
+        }
+
+        // Wrap fetch() and attach the friend code header when available.
+        async function poolFetch(url, options = {}) {
+            const opts = options || {};
+            const headers = new Headers(opts.headers || {});
+            if (window.friendCode) {
+                headers.set('X-Friend-Code', window.friendCode);
+            }
+            opts.headers = headers;
+            return fetch(url, opts);
         }
 
         // Check for saved friend code on page load
@@ -1412,7 +1425,7 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
 
         async function loadStats() {
             try {
-                const response = await fetch('/api/pool/stats?code=' + encodeURIComponent(window.friendCode));
+                const response = await poolFetch('/api/pool/stats');
                 if (!response.ok) throw new Error('Failed to load stats');
                 const stats = await response.json();
 
@@ -1526,11 +1539,19 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
                     const priColor = acc.primary_window_used_pct > 0 ? getPaceColor(priOveruse) : 'inherit';
                     const weekColor = acc.secondary_window_used_pct > 0 ? getPaceColor(weekOveruse) : 'inherit';
 
+                    // Format score and highlight primary account
+                    const scoreDisplay = acc.score > 0 ? acc.score.toFixed(2) : '-';
+                    const scoreColor = acc.is_primary ? 'var(--gold-bright)' : (acc.score > 0.5 ? '#27ae60' : '#888');
+                    const rowStyle = acc.is_primary ? 'background: rgba(212, 175, 55, 0.1);' : '';
+                    const primaryBadge = acc.is_primary ? ' <span style="color: var(--gold-bright); font-size: 0.6rem;">★</span>' : '';
+
                     const row = document.createElement('tr');
+                    row.style.cssText = rowStyle;
                     row.innerHTML = `
-                        <td style="font-family: monospace; color: #888;">${acc.id}</td>
+                        <td style="font-family: monospace; color: #888;">${acc.id}${primaryBadge}</td>
                         <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type}</td>
                         <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
+                        <td style="text-align: right; font-family: monospace; color: ${scoreColor}; font-weight: ${acc.is_primary ? 'bold' : 'normal'};">${scoreDisplay}</td>
                         <td style="text-align: right; font-family: monospace; color: ${priColor};">${acc.primary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
                         <td style="text-align: right; font-family: monospace; color: ${weekColor};">${acc.secondary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
                         <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${tokens}</td>
@@ -1564,11 +1585,20 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
                         // Add reset time formatting (same as Codex accounts)
                         const pri5hrReset = acc.primary_reset_minutes > 0 ? formatDuration(acc.primary_reset_minutes) : '-';
                         const weekReset = acc.secondary_reset_minutes > 0 ? formatDuration(acc.secondary_reset_minutes) : '-';
+
+                        // Format score and highlight primary account
+                        const scoreDisplay = acc.score > 0 ? acc.score.toFixed(2) : '-';
+                        const scoreColor = acc.is_primary ? 'var(--gold-bright)' : (acc.score > 0.5 ? '#27ae60' : '#888');
+                        const rowStyle = acc.is_primary ? 'background: rgba(212, 175, 55, 0.1);' : '';
+                        const primaryBadge = acc.is_primary ? ' <span style="color: var(--gold-bright); font-size: 0.6rem;">★</span>' : '';
+
                         const row = document.createElement('tr');
+                        row.style.cssText = rowStyle;
                         row.innerHTML = `
-                            <td style="font-family: monospace; color: #888;">${acc.id}</td>
+                            <td style="font-family: monospace; color: #888;">${acc.id}${primaryBadge}</td>
                             <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type || 'pro'}</td>
                             <td style="color: ${statusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
+                            <td style="text-align: right; font-family: monospace; color: ${scoreColor}; font-weight: ${acc.is_primary ? 'bold' : 'normal'};">${scoreDisplay}</td>
                             <td style="text-align: right; font-family: monospace;">${acc.primary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
                             <td style="text-align: right; font-family: monospace;">${acc.secondary_window_used_pct.toFixed(0)}% <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
                         `;
@@ -1613,7 +1643,7 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
         async function loadUsers() {
             try {
                 // Get current user's ID
-                const whoamiRes = await fetch('/api/pool/whoami');
+                const whoamiRes = await poolFetch('/api/pool/whoami');
                 if (whoamiRes.ok) {
                     const whoami = await whoamiRes.json();
                     document.getElementById('your-user-id').textContent = whoami.user_id;
@@ -1621,7 +1651,7 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
                 }
 
                 // Get all users
-                const usersRes = await fetch('/api/pool/users');
+                const usersRes = await poolFetch('/api/pool/users');
                 if (!usersRes.ok) throw new Error('Failed to load users');
                 const data = await usersRes.json();
 
@@ -1691,7 +1721,7 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
 
         async function loadDailyChart() {
             try {
-                const res = await fetch('/api/pool/daily-breakdown');
+                const res = await poolFetch('/api/pool/daily-breakdown');
                 if (!res.ok) return;
                 const data = await res.json();
 

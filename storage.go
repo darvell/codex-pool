@@ -439,15 +439,15 @@ func (s *usageStore) loadAllPlanCapacity() (map[string]TokenCapacity, error) {
 
 // CapacityEstimate provides an estimate of remaining capacity for a plan.
 type CapacityEstimate struct {
-	PlanType              string  `json:"plan_type"`
-	SampleCount           int64   `json:"sample_count"`
-	ConfidenceLevel       string  `json:"confidence"` // "low", "medium", "high"
-	EstimatedTotalPrimary int64   `json:"estimated_total_primary"`   // Total effective tokens per 5hr window
-	EstimatedTotalSecondary int64 `json:"estimated_total_secondary"` // Total effective tokens per 7d window
-	OutputMultiplier      float64 `json:"output_multiplier"`
-	ReasoningMultiplier   float64 `json:"reasoning_multiplier"`
-	CachedMultiplier      float64 `json:"cached_multiplier"` // Always 0.1
-	Notes                 string  `json:"notes,omitempty"`
+	PlanType                string  `json:"plan_type"`
+	SampleCount             int64   `json:"sample_count"`
+	ConfidenceLevel         string  `json:"confidence"`                // "low", "medium", "high"
+	EstimatedTotalPrimary   int64   `json:"estimated_total_primary"`   // Total effective tokens per 5hr window
+	EstimatedTotalSecondary int64   `json:"estimated_total_secondary"` // Total effective tokens per 7d window
+	OutputMultiplier        float64 `json:"output_multiplier"`
+	ReasoningMultiplier     float64 `json:"reasoning_multiplier"`
+	CachedMultiplier        float64 `json:"cached_multiplier"` // Always 0.1
+	Notes                   string  `json:"notes,omitempty"`
 }
 
 // EstimateCapacity returns capacity estimates for all tracked plan types.

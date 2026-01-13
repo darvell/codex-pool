@@ -183,12 +183,12 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"public_url":        publicURL,
-		"download_token":    newUser.Token,
-		"auth_json":         string(authJSONBytes),
-		"gemini_auth_json":  string(geminiJSONBytes),
-		"gemini_api_key":    geminiAPIKey, // API key for Gemini CLI API key mode
-		"claude_api_key":    claudeAuthData.AccessToken, // JWT token to use as API key
+		"public_url":       publicURL,
+		"download_token":   newUser.Token,
+		"auth_json":        string(authJSONBytes),
+		"gemini_auth_json": string(geminiJSONBytes),
+		"gemini_api_key":   geminiAPIKey,               // API key for Gemini CLI API key mode
+		"claude_api_key":   claudeAuthData.AccessToken, // JWT token to use as API key
 	})
 }
 
@@ -207,7 +207,11 @@ func (h *proxyHandler) getEffectivePublicURL(r *http.Request) string {
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://%s", scheme, r.Host)
+	host := r.Host
+	if host == "" {
+		host = "localhost:8989"
+	}
+	return fmt.Sprintf("%s://%s", scheme, host)
 }
 
 func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +221,7 @@ func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	publicURL := h.getEffectivePublicURL(r)
-	
+
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 TOKEN="%s"
@@ -528,13 +532,13 @@ func hashAccountID(id string) string {
 
 // PoolStats represents anonymized pool statistics
 type PoolStats struct {
-	TotalAccounts    int              `json:"total_accounts"`
-	ActiveAccounts   int              `json:"active_accounts"`
-	TotalPoolUsers   int              `json:"total_pool_users"`
-	Accounts         []AccountStats   `json:"accounts"`
-	AggregateUsage   AggregateStats   `json:"aggregate"`
+	TotalAccounts    int               `json:"total_accounts"`
+	ActiveAccounts   int               `json:"active_accounts"`
+	TotalPoolUsers   int               `json:"total_pool_users"`
+	Accounts         []AccountStats    `json:"accounts"`
+	AggregateUsage   AggregateStats    `json:"aggregate"`
 	CapacityAnalysis *CapacityAnalysis `json:"capacity_analysis,omitempty"`
-	GeneratedAt      time.Time        `json:"generated_at"`
+	GeneratedAt      time.Time         `json:"generated_at"`
 }
 
 type AccountStats struct {
@@ -554,36 +558,38 @@ type AccountStats struct {
 	CacheHitRate          float64 `json:"cache_hit_rate_pct"`
 	CreditsBalance        float64 `json:"credits_balance,omitempty"`
 	HasCredits            bool    `json:"has_credits"`
+	Score                 float64 `json:"score"`
+	IsPrimary             bool    `json:"is_primary"` // highest score for this provider type
 }
 
 type AggregateStats struct {
-	TotalInputTokens    int64   `json:"total_input_tokens"`
-	TotalCachedTokens   int64   `json:"total_cached_tokens"`
-	TotalOutputTokens   int64   `json:"total_output_tokens"`
-	TotalReasoningTokens int64  `json:"total_reasoning_tokens"`
-	TotalBillableTokens int64   `json:"total_billable_tokens"`
-	AvgPrimaryUsed      float64 `json:"avg_primary_window_used_pct"`
-	AvgSecondaryUsed    float64 `json:"avg_secondary_window_used_pct"`
-	OverallCacheHitRate float64 `json:"overall_cache_hit_rate_pct"`
+	TotalInputTokens     int64   `json:"total_input_tokens"`
+	TotalCachedTokens    int64   `json:"total_cached_tokens"`
+	TotalOutputTokens    int64   `json:"total_output_tokens"`
+	TotalReasoningTokens int64   `json:"total_reasoning_tokens"`
+	TotalBillableTokens  int64   `json:"total_billable_tokens"`
+	AvgPrimaryUsed       float64 `json:"avg_primary_window_used_pct"`
+	AvgSecondaryUsed     float64 `json:"avg_secondary_window_used_pct"`
+	OverallCacheHitRate  float64 `json:"overall_cache_hit_rate_pct"`
 }
 
 // CapacityAnalysis contains token capacity estimation data for the stats API.
 type CapacityAnalysis struct {
-	TotalSamples    int64                       `json:"total_samples"`
-	Plans           map[string]PlanCapacityInfo `json:"plans"`
-	ModelFormula    string                      `json:"model_formula"`
+	TotalSamples int64                       `json:"total_samples"`
+	Plans        map[string]PlanCapacityInfo `json:"plans"`
+	ModelFormula string                      `json:"model_formula"`
 }
 
 type PlanCapacityInfo struct {
-	SampleCount              int64   `json:"sample_count"`
-	Confidence               string  `json:"confidence"`
-	TotalInputTokens         int64   `json:"total_input_tokens"`
-	TotalOutputTokens        int64   `json:"total_output_tokens"`
-	TotalCachedTokens        int64   `json:"total_cached_tokens"`
-	TotalReasoningTokens     int64   `json:"total_reasoning_tokens"`
-	OutputMultiplier         float64 `json:"output_multiplier"`
-	EstimatedPrimaryCapacity int64   `json:"estimated_5h_capacity"`
-	EstimatedSecondaryCapacity int64 `json:"estimated_7d_capacity"`
+	SampleCount                int64   `json:"sample_count"`
+	Confidence                 string  `json:"confidence"`
+	TotalInputTokens           int64   `json:"total_input_tokens"`
+	TotalOutputTokens          int64   `json:"total_output_tokens"`
+	TotalCachedTokens          int64   `json:"total_cached_tokens"`
+	TotalReasoningTokens       int64   `json:"total_reasoning_tokens"`
+	OutputMultiplier           float64 `json:"output_multiplier"`
+	EstimatedPrimaryCapacity   int64   `json:"estimated_5h_capacity"`
+	EstimatedSecondaryCapacity int64   `json:"estimated_7d_capacity"`
 }
 
 func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
@@ -652,6 +658,12 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Calculate score while we have the lock
+		score := float64(0)
+		if !acc.Dead && !acc.Disabled {
+			score = scoreAccountLocked(acc, stats.GeneratedAt)
+		}
+
 		as := AccountStats{
 			ID:                    hashAccountID(acc.ID),
 			Type:                  accType,
@@ -669,6 +681,7 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			CacheHitRate:          cacheHitRate,
 			HasCredits:            acc.Usage.HasCredits,
 			CreditsBalance:        acc.Usage.CreditsBalance,
+			Score:                 score,
 		}
 
 		totalInput += acc.Totals.TotalInputTokens
@@ -681,6 +694,19 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 
 		acc.mu.Unlock()
 		stats.Accounts = append(stats.Accounts, as)
+	}
+
+	// Mark the highest-scoring account per provider type as primary
+	highestScore := make(map[string]float64)
+	highestIdx := make(map[string]int)
+	for i, as := range stats.Accounts {
+		if as.Status != "dead" && as.Score > highestScore[as.Type] {
+			highestScore[as.Type] = as.Score
+			highestIdx[as.Type] = i
+		}
+	}
+	for _, idx := range highestIdx {
+		stats.Accounts[idx].IsPrimary = true
 	}
 
 	stats.ActiveAccounts = activeCount
@@ -736,14 +762,14 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 					estSecondary = int64(cap.EffectivePerSecondaryPct * 100)
 				}
 				analysis.Plans[planType] = PlanCapacityInfo{
-					SampleCount:              cap.SampleCount,
-					Confidence:               confidence,
-					TotalInputTokens:         cap.TotalInputTokens,
-					TotalOutputTokens:        cap.TotalOutputTokens,
-					TotalCachedTokens:        cap.TotalCachedTokens,
-					TotalReasoningTokens:     cap.TotalReasoningTokens,
-					OutputMultiplier:         mult,
-					EstimatedPrimaryCapacity: estPrimary,
+					SampleCount:                cap.SampleCount,
+					Confidence:                 confidence,
+					TotalInputTokens:           cap.TotalInputTokens,
+					TotalOutputTokens:          cap.TotalOutputTokens,
+					TotalCachedTokens:          cap.TotalCachedTokens,
+					TotalReasoningTokens:       cap.TotalReasoningTokens,
+					OutputMultiplier:           mult,
+					EstimatedPrimaryCapacity:   estPrimary,
 					EstimatedSecondaryCapacity: estSecondary,
 				}
 			}
@@ -847,9 +873,9 @@ func (h *proxyHandler) handlePoolUsers(w http.ResponseWriter, r *http.Request) {
 // handleDailyBreakdown returns combined daily token usage from all accounts.
 func (h *proxyHandler) handleDailyBreakdown(w http.ResponseWriter, r *http.Request) {
 	type DayUsage struct {
-		Date    string             `json:"date"`
+		Date     string             `json:"date"`
 		Surfaces map[string]float64 `json:"surfaces"`
-		Total   float64            `json:"total"`
+		Total    float64            `json:"total"`
 	}
 
 	// Aggregate daily data from all accounts
@@ -896,8 +922,8 @@ func (h *proxyHandler) handleDailyBreakdown(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"days":           result,
-		"account_count":  len(accounts),
+		"days":          result,
+		"account_count": len(accounts),
 	})
 }
 

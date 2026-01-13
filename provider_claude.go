@@ -113,7 +113,7 @@ func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	}
 }
 
-func (p *ClaudeProvider) RefreshToken(ctx context.Context, acc *Account, transport *http.Transport) error {
+func (p *ClaudeProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
 	// Only OAuth tokens (not API keys) can be refreshed
 	if !strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
 		// API keys don't need refresh
