@@ -178,6 +178,10 @@ func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 	// and anthropic-ratelimit-unified-{type}-reset (Unix seconds)
 	unifiedTypes := []string{"primary", "secondary", "tokens", "requests"}
 	foundUnified := false
+	foundPrimaryUsage := false
+	foundPrimaryReset := false
+	foundSecondaryUsage := false
+	foundSecondaryReset := false
 
 	for _, ut := range unifiedTypes {
 		utilization := headers.Get("anthropic-ratelimit-unified-" + ut + "-utilization")
@@ -191,9 +195,11 @@ func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 				if ut == "primary" || ut == "tokens" {
 					snap.PrimaryUsedPercent = normalized
 					snap.PrimaryUsed = normalized
+					foundPrimaryUsage = true
 				} else if ut == "secondary" || ut == "requests" {
 					snap.SecondaryUsedPercent = normalized
 					snap.SecondaryUsed = normalized
+					foundSecondaryUsage = true
 				}
 			}
 		}
@@ -203,8 +209,10 @@ func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 				resetTime := time.Unix(resetSec, 0)
 				if ut == "primary" || ut == "tokens" {
 					snap.PrimaryResetAt = resetTime
+					foundPrimaryReset = true
 				} else if ut == "secondary" || ut == "requests" {
 					snap.SecondaryResetAt = resetTime
+					foundSecondaryReset = true
 				}
 			}
 		}
@@ -216,53 +224,60 @@ func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 		foundUnified = true
 	}
 
-	// Fall back to legacy anthropic-ratelimit-* headers
-	if !foundUnified {
+	// Fall back to legacy anthropic-ratelimit-* headers, but allow partial fallback even when
+	// some unified headers are present (some responses only include request headers).
+	if !foundUnified || !foundPrimaryUsage || !foundPrimaryReset {
 		tokensLimit := headers.Get("anthropic-ratelimit-tokens-limit")
 		tokensRemaining := headers.Get("anthropic-ratelimit-tokens-remaining")
 
 		// Parse token limits
-		if tokensLimit != "" && tokensRemaining != "" {
+		if !foundPrimaryUsage && tokensLimit != "" && tokensRemaining != "" {
 			limit, err1 := strconv.ParseInt(tokensLimit, 10, 64)
 			remaining, err2 := strconv.ParseInt(tokensRemaining, 10, 64)
 			if err1 == nil && err2 == nil && limit > 0 {
 				used := float64(limit-remaining) / float64(limit)
 				snap.PrimaryUsedPercent = used
 				snap.PrimaryUsed = used
+				foundPrimaryUsage = true
 			}
 		}
 
 		// Parse token reset time
-		if v := headers.Get("anthropic-ratelimit-tokens-reset"); v != "" {
+		if !foundPrimaryReset {
+			v := headers.Get("anthropic-ratelimit-tokens-reset")
 			if t, err := time.Parse(time.RFC3339, v); err == nil {
 				snap.PrimaryResetAt = t
+				foundPrimaryReset = true
 			}
 		}
+	}
 
+	if !foundUnified || !foundSecondaryUsage || !foundSecondaryReset {
 		// Parse request limits as secondary usage
 		reqLimit := headers.Get("anthropic-ratelimit-requests-limit")
 		reqRemaining := headers.Get("anthropic-ratelimit-requests-remaining")
-		if reqLimit != "" && reqRemaining != "" {
+		if !foundSecondaryUsage && reqLimit != "" && reqRemaining != "" {
 			limit, err1 := strconv.ParseInt(reqLimit, 10, 64)
 			remaining, err2 := strconv.ParseInt(reqRemaining, 10, 64)
 			if err1 == nil && err2 == nil && limit > 0 {
 				used := float64(limit-remaining) / float64(limit)
 				snap.SecondaryUsedPercent = used
 				snap.SecondaryUsed = used
+				foundSecondaryUsage = true
 			}
 		}
 
-		if v := headers.Get("anthropic-ratelimit-requests-reset"); v != "" {
-			if t, err := time.Parse(time.RFC3339, v); err == nil {
-				snap.SecondaryResetAt = t
+		if !foundSecondaryReset {
+			if v := headers.Get("anthropic-ratelimit-requests-reset"); v != "" {
+				if t, err := time.Parse(time.RFC3339, v); err == nil {
+					snap.SecondaryResetAt = t
+					foundSecondaryReset = true
+				}
 			}
 		}
 	}
 
-	// Only update if we found any usage data
-	if snap.PrimaryUsedPercent > 0 || snap.SecondaryUsedPercent > 0 {
-		acc.Usage = mergeUsage(acc.Usage, snap)
-	}
+	acc.Usage = mergeUsage(acc.Usage, snap)
 }
 
 func (p *ClaudeProvider) UpstreamURL(path string) *url.URL {
