@@ -595,9 +595,16 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 			// Ratio of sustainable to baseline: >1 means we can use more than average
 			burnRateRatio := sustainableBurnRate / baselineBurnRate
 
+			// Higher cap for urgent drains (reset < 6 hours with significant headroom)
+			// This ensures accounts about to reset get priority ("use it or lose it")
+			maxMultiplier := 3.0
+			if hoursRemaining < 6 && headroom > 0.1 {
+				maxMultiplier = 8.0 // Much more aggressive when reset imminent
+			}
+
 			// Apply as multiplier to headroom, capped to reasonable range
-			if burnRateRatio > 3.0 {
-				burnRateRatio = 3.0
+			if burnRateRatio > maxMultiplier {
+				burnRateRatio = maxMultiplier
 			} else if burnRateRatio < 0.3 {
 				burnRateRatio = 0.3
 			}
@@ -643,7 +650,17 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 			headroom -= 0.1
 		}
 	}
-	headroom -= a.Penalty
+	// Reduce penalty effect when drain urgency is high
+	// Penalties matter less when we need to drain capacity before reset
+	penaltyFactor := 1.0
+	if !a.Usage.SecondaryResetAt.IsZero() {
+		hoursRemaining := a.Usage.SecondaryResetAt.Sub(now).Hours()
+		secondaryHeadroom := 1.0 - secondaryUsed
+		if hoursRemaining > 0 && hoursRemaining < 6 && secondaryHeadroom > 0.1 {
+			penaltyFactor = 0.3 // Penalties matter less when draining urgently
+		}
+	}
+	headroom -= a.Penalty * penaltyFactor
 	if headroom < 0.01 {
 		headroom = 0.01
 	}
@@ -671,6 +688,12 @@ func planPreferenceMultiplier(planType string, secondaryUsedPct float64) float64
 			return 5.0 // Very high preference - use this account first
 		}
 		return 2.0 // Still prefer even when nearly full
+	case "max":
+		// Claude Max plans have higher capacity - prefer when available
+		if secondaryUsedPct < 0.9 {
+			return 1.5 // Prefer max plans when they have capacity
+		}
+		return 1.0
 	case "plus":
 		// Drain Plus first - prefer until 80% used
 		if secondaryUsedPct < 0.8 {
