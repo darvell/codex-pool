@@ -145,6 +145,8 @@ admin_password = "admin"
 jwt_secret = "32-char-secret-for-jwt-tokens!!"
 ```
 
+Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly (no retries). Default is 16777216 (16 MiB).
+
 ---
 
 ## Credential Formats

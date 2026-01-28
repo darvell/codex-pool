@@ -9,6 +9,8 @@ db_path = "./data/proxy.db"
 max_attempts = 3
 disable_refresh = false
 debug = false
+# Max request body size to buffer in memory before streaming (bytes).
+# Set via env PROXY_MAX_INMEM_BODY_BYTES (default 16777216).
 
 # Public URL for generated configs and instructions
 # Use this when behind a reverse proxy or using a custom domain

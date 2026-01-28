@@ -898,12 +898,12 @@ brew install claude-code</pre>
 
                     <!-- Claude Manual -->
                     <div id="claude-manual" class="sub-tab-content">
-                        <div class="step-label">01 // Settings Configuration</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.claude/settings.json</code></p>
+                        <div class="step-label">01 // Shell Environment (Required)</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code> (Claude Code reads env vars for auth)</p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('claude-settings-json', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="claude-settings-json"></pre>
+                                <pre id="claude-env"></pre>
                             </div>
                         </div>
                         <div class="step-label">02 // Skip Onboarding</div>
@@ -914,12 +914,12 @@ brew install claude-code</pre>
                                 <pre id="claude-json">{"hasCompletedOnboarding": true}</pre>
                             </div>
                         </div>
-                        <div class="step-label">Alternative: Shell Environment</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code></p>
+                        <div class="step-label">03 // Optional: Settings.json</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Claude Code ignores auth in <code>~/.claude/settings.json</code>; this is optional for other settings</p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('claude-settings-json', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="claude-env"></pre>
+                                <pre id="claude-settings-json"></pre>
                             </div>
                         </div>
                     </div>
@@ -1038,6 +1038,29 @@ brew install claude-code</pre>
                                     <tbody id="accounts-tbody"></tbody>
                                 </table>
                             </div>
+                        </div>
+
+                        <!-- Add Codex Account -->
+                        <div class="step-label" style="margin-top: 30px;">Add Codex Account</div>
+                        <div id="codex-add-section" style="background: #0c0c0c; padding: 20px; border-radius: 6px; border: 1px solid #1a1a1a;">
+                            <div id="codex-add-init">
+                                <p style="color: var(--text-muted); font-size: 0.8rem; margin: 0 0 15px 0;">
+                                    Add a new Codex account via OAuth. Click the button to generate an authorization URL.
+                                </p>
+                                <button id="btn-codex-oauth" class="btn" onclick="startCodexOAuth()" style="width: 100%;">Generate OAuth URL</button>
+                            </div>
+                            <div id="codex-add-oauth" style="display: none;">
+                                <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0; text-transform: uppercase;">1. Open this URL in your browser:</p>
+                                <div style="position: relative; margin-bottom: 15px;">
+                                    <pre id="codex-oauth-url" style="background: #050505; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 0.7rem; color: var(--gold-bright); white-space: nowrap; margin: 0;"></pre>
+                                    <button class="copy-btn" onclick="copyToClipboard('codex-oauth-url', this)" style="position: absolute; top: 8px; right: 8px;">Copy</button>
+                                </div>
+                                <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0; text-transform: uppercase;">2. After logging in, paste the callback URL:</p>
+                                <input type="text" id="codex-callback-url" placeholder="http://localhost:1455/auth/callback?code=..." style="width: 100%; margin-bottom: 15px; font-size: 0.8rem; text-align: left;">
+                                <button id="btn-codex-exchange" class="btn" onclick="exchangeCodexCode()" style="width: 100%;">Add Account</button>
+                                <button class="btn" onclick="cancelCodexOAuth()" style="width: 100%; margin-top: 10px; background: transparent; border: 1px solid #333; color: var(--text-muted);">Cancel</button>
+                            </div>
+                            <div id="codex-add-status" style="margin-top: 15px;"></div>
                         </div>
 
                         <!-- Claude Accounts -->
@@ -1284,7 +1307,7 @@ export GOOGLE_GEMINI_BASE_URL="${publicUrl}"
 
             // Populate Claude
             const claudeScriptUrl = `${publicUrl}/setup/claude/${downloadToken}`;
-            document.getElementById('claude-one-liner').textContent = `curl -sL "${claudeScriptUrl}" | bash`;
+            document.getElementById('claude-one-liner').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
             if (claudeApiKey) {
                 document.getElementById('claude-settings-json').textContent = `{
   "env": {
@@ -1394,7 +1417,7 @@ export GOOGLE_GEMINI_BASE_URL="${result.public_url}"
                 // Populate Claude
                 const claudeApiKey = result.claude_api_key || '';
                 const claudeScriptUrl = `${result.public_url}/setup/claude/${result.download_token}`;
-                document.getElementById('claude-one-liner').textContent = `curl -sL "${claudeScriptUrl}" | bash`;
+                document.getElementById('claude-one-liner').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
                 document.getElementById('claude-settings-json').textContent = `{
   "env": {
     "ANTHROPIC_BASE_URL": "${result.public_url}",
@@ -1795,6 +1818,103 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
 
             } catch (err) {
                 document.getElementById('usage-chart').innerHTML = '<div style="color: var(--text-muted);">Chart unavailable</div>';
+            }
+        }
+
+        // Codex OAuth flow
+        let codexOAuthVerifier = null;
+
+        async function startCodexOAuth() {
+            const statusEl = document.getElementById('codex-add-status');
+            statusEl.innerHTML = '<span style="color: var(--text-muted);">Generating OAuth URL...</span>';
+
+            try {
+                const response = await poolFetch('/admin/codex/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const data = await response.json();
+                codexOAuthVerifier = data.verifier;
+
+                document.getElementById('codex-oauth-url').textContent = data.oauth_url;
+                document.getElementById('codex-add-init').style.display = 'none';
+                document.getElementById('codex-add-oauth').style.display = 'block';
+                statusEl.innerHTML = '';
+            } catch (err) {
+                statusEl.innerHTML = `<span style="color: var(--error-red);">Error: ${err.message}</span>`;
+            }
+        }
+
+        function cancelCodexOAuth() {
+            codexOAuthVerifier = null;
+            document.getElementById('codex-callback-url').value = '';
+            document.getElementById('codex-add-init').style.display = 'block';
+            document.getElementById('codex-add-oauth').style.display = 'none';
+            document.getElementById('codex-add-status').innerHTML = '';
+        }
+
+        async function exchangeCodexCode() {
+            const callbackUrl = document.getElementById('codex-callback-url').value.trim();
+            const statusEl = document.getElementById('codex-add-status');
+
+            if (!callbackUrl) {
+                statusEl.innerHTML = '<span style="color: var(--error-red);">Please paste the callback URL</span>';
+                return;
+            }
+
+            // Extract code from callback URL
+            let code;
+            try {
+                const url = new URL(callbackUrl);
+                code = url.searchParams.get('code');
+                if (!code) {
+                    throw new Error('No code found in URL');
+                }
+            } catch (err) {
+                statusEl.innerHTML = `<span style="color: var(--error-red);">Invalid callback URL: ${err.message}</span>`;
+                return;
+            }
+
+            if (!codexOAuthVerifier) {
+                statusEl.innerHTML = '<span style="color: var(--error-red);">Session expired, please start over</span>';
+                return;
+            }
+
+            statusEl.innerHTML = '<span style="color: var(--text-muted);">Exchanging code for tokens...</span>';
+
+            try {
+                const response = await poolFetch('/admin/codex/exchange', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        code: code,
+                        verifier: codexOAuthVerifier
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const data = await response.json();
+                statusEl.innerHTML = `<span style="color: var(--success-green);">Account added: ${data.account_id}</span>`;
+
+                // Reset the form
+                codexOAuthVerifier = null;
+                document.getElementById('codex-callback-url').value = '';
+                document.getElementById('codex-add-init').style.display = 'block';
+                document.getElementById('codex-add-oauth').style.display = 'none';
+
+                // Reload stats to show new account
+                setTimeout(() => loadStats(), 1000);
+            } catch (err) {
+                statusEl.innerHTML = `<span style="color: var(--error-red);">Error: ${err.message}</span>`;
             }
         }
 

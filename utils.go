@@ -55,6 +55,21 @@ func respondJSON(w http.ResponseWriter, v any) {
 	_ = enc.Encode(v)
 }
 
+// shouldStreamBody returns true when the request body should be streamed directly
+// instead of fully buffered in memory.
+func shouldStreamBody(r *http.Request, maxInMem int64) bool {
+	if r == nil {
+		return false
+	}
+	if r.ContentLength < 0 {
+		return true
+	}
+	if maxInMem <= 0 {
+		return false
+	}
+	return r.ContentLength > maxInMem
+}
+
 // readBodyForReplay reads the full body into memory so we can retry requests across accounts.
 // It also returns a bounded sample for logging.
 func readBodyForReplay(body io.ReadCloser, wantSample bool, sampleLimit int64) (full []byte, sample []byte, err error) {

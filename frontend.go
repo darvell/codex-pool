@@ -415,12 +415,56 @@ func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Req
 	publicURL := h.getEffectivePublicURL(r)
 
 	script := fmt.Sprintf(`#!/bin/bash
+IS_SOURCED=0
+if [ -n "$ZSH_VERSION" ]; then
+    case $ZSH_EVAL_CONTEXT in *:file) IS_SOURCED=1 ;; esac
+elif [ -n "$BASH_VERSION" ]; then
+    if [ "${BASH_SOURCE[0]}" != "$0" ]; then IS_SOURCED=1; fi
+fi
+ERREXIT_WAS_SET=0
+case $- in *e*) ERREXIT_WAS_SET=1 ;; esac
 set -e
 BASE_URL="%s"
 OAUTH_TOKEN="%s"
 
 echo "Configuring Claude Code for pool access..."
 echo ""
+
+# Set env vars in the current shell if this script is sourced
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH_TOKEN"
+
+# Add env vars to shell profile (Claude Code reads tokens from process.env)
+add_to_profile() {
+    for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        if [ -f "$profile" ]; then
+            # Remove old Claude pool-related env vars
+            grep -v "CLAUDE_CODE_OAUTH_TOKEN=" "$profile" 2>/dev/null | \
+            grep -v "ANTHROPIC_BASE_URL=" "$profile" 2>/dev/null | \
+            grep -v "ANTHROPIC_AUTH_TOKEN=" "$profile" 2>/dev/null > "$profile.tmp" || true
+            mv "$profile.tmp" "$profile"
+
+            # Add pool configuration
+            cat >> "$profile" << 'ENVEOF'
+
+# Claude Code Pool Configuration
+export ANTHROPIC_BASE_URL="%s"
+export CLAUDE_CODE_OAUTH_TOKEN="%s"
+ENVEOF
+            echo "✓ Added Claude Code pool config to $(basename $profile)"
+            return
+        fi
+    done
+
+    # Fallback: create .zshrc
+    cat >> "$HOME/.zshrc" << 'ENVEOF'
+
+# Claude Code Pool Configuration
+export ANTHROPIC_BASE_URL="%s"
+export CLAUDE_CODE_OAUTH_TOKEN="%s"
+ENVEOF
+    echo "✓ Created ~/.zshrc with Claude Code pool config"
+}
 
 mkdir -p "$HOME/.claude"
 SETTINGS_FILE="$HOME/.claude/settings.json"
@@ -508,14 +552,20 @@ PYTHON_SCRIPT
 
 update_settings
 update_claude_json
+add_to_profile
 
 echo ""
 echo "Setup complete!"
 echo ""
 echo "Claude Code will now use the pool proxy at: $BASE_URL"
 echo ""
-echo "Start Claude Code with: claude"
+echo "Run 'source ~/.zshrc' (or ~/.bashrc) or start a new terminal, then run 'claude'."
+if [ "$IS_SOURCED" -eq 1 ] && [ "$ERREXIT_WAS_SET" -eq 0 ]; then
+    set +e
+fi
 `, publicURL, claudeAuth.AccessToken,
+		publicURL, claudeAuth.AccessToken,
+		publicURL, claudeAuth.AccessToken,
 		publicURL, claudeAuth.AccessToken, // node
 		publicURL, claudeAuth.AccessToken, // python
 		publicURL, claudeAuth.AccessToken) // bash fallback
