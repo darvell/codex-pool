@@ -207,6 +207,15 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Codex account admin routes (friend auth - accessible from friend landing page)
+	if strings.HasPrefix(r.URL.Path, "/admin/codex") {
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		h.serveCodexAdmin(w, r)
+		return
+	}
+
 	// Config download routes (no auth - token is the auth)
 	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") {
 		h.serveConfigDownload(w, r)

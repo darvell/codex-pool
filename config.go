@@ -8,17 +8,18 @@ import (
 
 // ConfigFile represents the config.toml structure.
 type ConfigFile struct {
-	ListenAddr     string `toml:"listen_addr"`
-	PoolDir        string `toml:"pool_dir"`
-	DBPath         string `toml:"db_path"`
-	MaxAttempts    int    `toml:"max_attempts"`
-	DisableRefresh bool   `toml:"disable_refresh"`
-	Debug          bool   `toml:"debug"`
-	PublicURL      string `toml:"public_url"`
-	FriendCode     string `toml:"friend_code"`
-	FriendName     string `toml:"friend_name"`
-	FriendTagline  string `toml:"friend_tagline"`
-	AdminToken     string `toml:"admin_token"`
+	ListenAddr      string `toml:"listen_addr"`
+	PoolDir         string `toml:"pool_dir"`
+	DBPath          string `toml:"db_path"`
+	MaxAttempts     int    `toml:"max_attempts"`
+	DisableRefresh  bool   `toml:"disable_refresh"`
+	RefreshProxyURL string `toml:"refresh_proxy_url"` // HTTP proxy for refresh operations
+	Debug           bool   `toml:"debug"`
+	PublicURL       string `toml:"public_url"`
+	FriendCode      string `toml:"friend_code"`
+	FriendName      string `toml:"friend_name"`
+	FriendTagline   string `toml:"friend_tagline"`
+	AdminToken      string `toml:"admin_token"`
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
 }

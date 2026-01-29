@@ -428,16 +428,16 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 							conversationID, id, a.RateLimitUntil.Format(time.RFC3339))
 					}
 				}
-				// Don't use pinned account if it's overloaded (>70% weekly usage)
-				// This prevents conversation pinning from hammering one account
+				// Don't use pinned account if it's nearly exhausted (>90% weekly usage)
+				// This prevents conversation pinning from burning out an account completely
 				secondaryUsed := a.Usage.SecondaryUsedPercent
 				if secondaryUsed == 0 {
 					secondaryUsed = a.Usage.SecondaryUsed
 				}
-				if secondaryUsed > 0.60 {
+				if secondaryUsed > 0.90 {
 					ok = false
 					if p.debug {
-						log.Printf("unpinning conversation %s from overloaded account %s (%.0f%% weekly)",
+						log.Printf("unpinning conversation %s from exhausted account %s (%.0f%% weekly)",
 							conversationID, id, secondaryUsed*100)
 					}
 				}
