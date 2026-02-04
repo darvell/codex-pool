@@ -76,6 +76,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/":
 		h.serveFriendLanding(w, r)
 		return
+	case "/status":
+		h.serveStatusPage(w, r)
+		return
 	case "/og-image.png":
 		h.serveOGImage(w, r)
 		return
