@@ -33,7 +33,12 @@ func (h *proxyHandler) refreshUsageIfStale() {
 	accs := append([]*Account{}, h.pool.accounts...)
 	h.pool.mu.RUnlock()
 
-	for _, a := range accs {
+	for i, a := range accs {
+		// Stagger requests to avoid rate limiting
+		// Usage polling should not sleep minutes between accounts; refreshAccount already rate limits OAuth.
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
 		if a == nil {
 			continue
 		}

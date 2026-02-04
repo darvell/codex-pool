@@ -422,48 +422,67 @@ func isGeminiOAuthPoolToken(secret, token string) (bool, string) {
 		return false, ""
 	}
 
-	// Extract parts: ya29.pool-<payload>_<signature>
+	// Extract rest: ya29.pool-<payload>_<signature>
+	//
+	// Note: payload and signature are base64url strings, and base64url *can contain* "_".
+	// We therefore cannot safely split on "_" and expect exactly 2 parts.
 	rest := strings.TrimPrefix(token, "ya29.pool-")
-	parts := strings.Split(rest, "_")
-	if len(parts) != 2 {
+	if rest == "" {
 		return false, ""
 	}
 
-	payloadB64 := parts[0]
-	sigB64 := parts[1]
+	tryParse := func(payloadB64, sigB64 string) (bool, string) {
+		// Decode payload
+		payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
+		if err != nil {
+			return false, ""
+		}
 
-	// Decode payload
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
-	if err != nil {
-		return false, ""
+		// Decode signature
+		providedSig, err := base64.RawURLEncoding.DecodeString(sigB64)
+		if err != nil {
+			return false, ""
+		}
+
+		// Verify signature
+		expectedSig := hmacSign(secret, payloadBytes)
+		if !hmac.Equal(expectedSig, providedSig) {
+			return false, ""
+		}
+
+		// Extract user_id from payload
+		var payload struct {
+			UserID string `json:"user_id"`
+			Exp    int64  `json:"exp"`
+		}
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			return false, ""
+		}
+
+		// Check expiry
+		if payload.Exp > 0 && payload.Exp < time.Now().Unix() {
+			return false, "" // Expired
+		}
+
+		return true, payload.UserID
 	}
 
-	// Verify signature
-	expectedSig := hmacSign(secret, payloadBytes)
-	providedSig, err := base64.RawURLEncoding.DecodeString(sigB64)
-	if err != nil {
-		return false, ""
+	// Try every possible split position. Only the correct one will pass HMAC validation.
+	for i := 0; i < len(rest); i++ {
+		if rest[i] != '_' {
+			continue
+		}
+		payloadB64 := rest[:i]
+		sigB64 := rest[i+1:]
+		if payloadB64 == "" || sigB64 == "" {
+			continue
+		}
+		if ok, uid := tryParse(payloadB64, sigB64); ok {
+			return true, uid
+		}
 	}
 
-	if !hmac.Equal(expectedSig, providedSig) {
-		return false, ""
-	}
-
-	// Extract user_id from payload
-	var payload struct {
-		UserID string `json:"user_id"`
-		Exp    int64  `json:"exp"`
-	}
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return false, ""
-	}
-
-	// Check expiry
-	if payload.Exp > 0 && payload.Exp < time.Now().Unix() {
-		return false, "" // Expired
-	}
-
-	return true, payload.UserID
+	return false, ""
 }
 
 // isPoolGeminiAPIKey checks if an API key is a pool-generated Gemini key.
@@ -538,11 +557,12 @@ type PoolUserClaudeAuth struct {
 }
 
 // generateClaudeAuth creates the credentials JSON content for a Claude Code pool user.
-// Uses a fake sk-ant-api-pool-* format that looks like a real Claude API key but
-// contains an embedded user ID and signature for pool authentication.
+// Uses a fake sk-ant-oat01-pool-* format that looks like a real Claude OAuth token
+// (CLAUDE_CODE_OAUTH_TOKEN) but contains an embedded user ID and signature for pool
+// authentication.
 func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, error) {
-	// Generate a fake sk-ant-api key with embedded pool user info
-	// Format: sk-ant-api-pool-<base64(userID:timestamp:signature)>
+	// Generate a fake sk-ant-oat01 token with embedded pool user info.
+	// Format: sk-ant-oat01-pool-<base64url(userID.timestamp.signature)>
 	accessToken := generateClaudePoolToken(secret, user.ID)
 
 	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
@@ -556,11 +576,16 @@ func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, err
 }
 
 // ClaudePoolTokenPrefix is the prefix for pool-generated Claude tokens.
-// These look like real sk-ant-api keys but have "pool" marker for detection.
-const ClaudePoolTokenPrefix = "sk-ant-api-pool-"
+// These look like real sk-ant-oat01 tokens but have a "pool" marker for detection.
+//
+// Note: we keep accepting the legacy sk-ant-api-pool-* prefix for backward compatibility
+// with already-issued tokens.
+const ClaudePoolTokenPrefix = "sk-ant-oat01-pool-"
 
-// generateClaudePoolToken creates a fake Claude API key with embedded pool user info.
-// Format: sk-ant-api-pool-<base64url(userID.timestamp.signature)>
+const ClaudePoolTokenLegacyPrefix = "sk-ant-api-pool-"
+
+// generateClaudePoolToken creates a fake Claude OAuth token with embedded pool user info.
+// Format: sk-ant-oat01-pool-<base64url(userID.timestamp.signature)>
 func generateClaudePoolToken(secret, userID string) string {
 	now := time.Now().Unix()
 	// Create payload: userID.timestamp
@@ -578,10 +603,18 @@ func generateClaudePoolToken(secret, userID string) string {
 // parseClaudePoolToken extracts the user ID from a pool-generated Claude token.
 // Returns (userID, isValid).
 func parseClaudePoolToken(secret, token string) (string, bool) {
-	if !strings.HasPrefix(token, ClaudePoolTokenPrefix) {
+	if secret == "" {
 		return "", false
 	}
-	encoded := strings.TrimPrefix(token, ClaudePoolTokenPrefix)
+	var encoded string
+	switch {
+	case strings.HasPrefix(token, ClaudePoolTokenPrefix):
+		encoded = strings.TrimPrefix(token, ClaudePoolTokenPrefix)
+	case strings.HasPrefix(token, ClaudePoolTokenLegacyPrefix):
+		encoded = strings.TrimPrefix(token, ClaudePoolTokenLegacyPrefix)
+	default:
+		return "", false
+	}
 	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		return "", false

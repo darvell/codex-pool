@@ -214,6 +214,15 @@ func (h *proxyHandler) getEffectivePublicURL(r *http.Request) string {
 	return fmt.Sprintf("%s://%s", scheme, host)
 }
 
+func wantsPowerShell(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("shell"))) {
+	case "powershell", "pwsh", "ps", "ps1":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.URL.Path, "/setup/codex/")
 	if token == "" || strings.Contains(token, "/") {
@@ -221,6 +230,66 @@ func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	publicURL := h.getEffectivePublicURL(r)
+
+	if wantsPowerShell(r) {
+		script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$Token = '%s'
+$BaseUrl = '%s'
+
+$authDir = Join-Path $HOME '.codex'
+$configFile = Join-Path $authDir 'config.toml'
+$authFile = Join-Path $authDir 'auth.json'
+
+Write-Host 'Initializing Codex Pool setup...'
+New-Item -ItemType Directory -Path $authDir -Force | Out-Null
+
+Write-Host '1. Fetching credentials...'
+$authUrl = "$BaseUrl/config/codex/$Token"
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  (Invoke-WebRequest -UseBasicParsing -Uri $authUrl).Content | Set-Content -Path $authFile -Encoding UTF8
+} else {
+  (Invoke-WebRequest -Uri $authUrl).Content | Set-Content -Path $authFile -Encoding UTF8
+}
+
+Write-Host '2. Updating configuration...'
+if (-not (Test-Path $configFile)) {
+  New-Item -ItemType File -Path $configFile -Force | Out-Null
+}
+
+$existing = ''
+try { $existing = Get-Content -Path $configFile -Raw } catch {}
+
+if ($existing -notmatch 'codex-pool') {
+  $new = @"
+# Codex Pool Proxy Config
+model_provider = "codex-pool"
+chatgpt_base_url = "$BaseUrl"
+
+$existing
+
+[model_providers.codex-pool]
+name = "OpenAI via codex-pool proxy"
+base_url = "$BaseUrl/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"@
+
+  Set-Content -Path $configFile -Value $new -Encoding UTF8
+  Write-Host "Configuration updated in $configFile"
+} else {
+  Write-Host "Configuration already present in $configFile. Skipping."
+}
+
+Write-Host 'Setup complete! You are ready to use the pool.'
+`, token, publicURL)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(script))
+		return
+	}
 
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
@@ -317,6 +386,67 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 
 	// Script sets env vars to bypass Google OAuth validation and route through proxy
 	// Uses GOOGLE_GENAI_USE_GCA + GOOGLE_CLOUD_ACCESS_TOKEN to skip getTokenInfo() check
+	if wantsPowerShell(r) {
+		script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$BaseUrl = '%s'
+$PoolToken = '%s'
+
+Write-Host 'Configuring Gemini CLI for pool access...'
+Write-Host ''
+
+# Set env vars for the current session
+$env:CODE_ASSIST_ENDPOINT = $BaseUrl
+$env:GOOGLE_GENAI_USE_GCA = '1'
+$env:GOOGLE_CLOUD_ACCESS_TOKEN = $PoolToken
+
+# Persist env vars for future PowerShell sessions
+$profilePath = $PROFILE.CurrentUserAllHosts
+New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
+if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force -Path $profilePath | Out-Null }
+
+$start = '# >>> Gemini Pool Configuration >>>'
+$end = '# <<< Gemini Pool Configuration <<<'
+$nl = [Environment]::NewLine
+$blockLines = @(
+  $start,
+  ('$env:CODE_ASSIST_ENDPOINT = "' + $BaseUrl + '"'),
+  ('$env:GOOGLE_GENAI_USE_GCA = "1"'),
+  ('$env:GOOGLE_CLOUD_ACCESS_TOKEN = "' + $PoolToken + '"'),
+  $end
+)
+$block = $blockLines -join $nl
+
+$existing = ''
+try { $existing = Get-Content -Path $profilePath -Raw } catch {}
+
+$pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
+if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
+  $updated = [regex]::Replace($existing, $pattern, $block, [Text.RegularExpressions.RegexOptions]::Singleline)
+} else {
+  $sep = if ($existing -and -not ($existing.EndsWith($nl))) { $nl } else { '' }
+  $updated = $existing + $sep + $nl + $block + $nl
+}
+
+Set-Content -Path $profilePath -Value $updated -Encoding UTF8
+Write-Host ("✓ Added Gemini pool config to " + $profilePath)
+
+Write-Host ''
+Write-Host 'Setup complete!'
+Write-Host ''
+Write-Host ("Gemini CLI will use the pool proxy at: " + $BaseUrl)
+Write-Host 'No Google login required - validation is bypassed.'
+Write-Host ''
+Write-Host 'Start a new terminal, or run: . $PROFILE'
+`, publicURL, geminiAuth.AccessToken)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(script))
+		return
+	}
+
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 BASE_URL="%s"
@@ -413,6 +543,88 @@ func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Req
 	}
 
 	publicURL := h.getEffectivePublicURL(r)
+
+	if wantsPowerShell(r) {
+		script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$BaseUrl = '%s'
+$OAuthToken = '%s'
+
+Write-Host 'Configuring Claude Code for pool access...'
+Write-Host ''
+
+# Set env vars for the current session
+$env:ANTHROPIC_BASE_URL = $BaseUrl
+$env:CLAUDE_CODE_OAUTH_TOKEN = $OAuthToken
+
+# Persist env vars for future PowerShell sessions
+$profilePath = $PROFILE.CurrentUserAllHosts
+New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
+if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force -Path $profilePath | Out-Null }
+
+$start = '# >>> Claude Code Pool Configuration >>>'
+$end = '# <<< Claude Code Pool Configuration <<<'
+$nl = [Environment]::NewLine
+$blockLines = @(
+  $start,
+  ('$env:ANTHROPIC_BASE_URL = "' + $BaseUrl + '"'),
+  ('$env:CLAUDE_CODE_OAUTH_TOKEN = "' + $OAuthToken + '"'),
+  $end
+)
+$block = $blockLines -join $nl
+
+$existing = ''
+try { $existing = Get-Content -Path $profilePath -Raw } catch {}
+
+$pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
+if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
+  $updated = [regex]::Replace($existing, $pattern, $block, [Text.RegularExpressions.RegexOptions]::Singleline)
+} else {
+  $sep = if ($existing -and -not ($existing.EndsWith($nl))) { $nl } else { '' }
+  $updated = $existing + $sep + $nl + $block + $nl
+}
+
+Set-Content -Path $profilePath -Value $updated -Encoding UTF8
+Write-Host ("✓ Added Claude Code pool config to " + $profilePath)
+
+# Ensure Claude config directory exists
+$claudeDir = Join-Path $HOME '.claude'
+New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+
+# Update ~/.claude/settings.json
+$settingsFile = Join-Path $claudeDir 'settings.json'
+$settings = $null
+try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch { $settings = [ordered]@{} }
+if ($null -eq $settings) { $settings = [ordered]@{} }
+if ($null -eq $settings.env) { $settings | Add-Member -MemberType NoteProperty -Name env -Value ([ordered]@{}) -Force }
+$settings.env.ANTHROPIC_BASE_URL = $BaseUrl
+$settings.env.CLAUDE_CODE_OAUTH_TOKEN = $OAuthToken
+($settings | ConvertTo-Json -Depth 10) | Set-Content -Path $settingsFile -Encoding UTF8
+Write-Host ("✓ Updated " + $settingsFile)
+
+# Update ~/.claude.json (skip onboarding)
+$claudeJsonFile = Join-Path $HOME '.claude.json'
+$claudeJson = $null
+try { $claudeJson = Get-Content -Path $claudeJsonFile -Raw | ConvertFrom-Json } catch { $claudeJson = [ordered]@{} }
+if ($null -eq $claudeJson) { $claudeJson = [ordered]@{} }
+$claudeJson.hasCompletedOnboarding = $true
+($claudeJson | ConvertTo-Json -Depth 10) | Set-Content -Path $claudeJsonFile -Encoding UTF8
+Write-Host ("✓ Updated " + $claudeJsonFile)
+
+Write-Host ''
+Write-Host 'Setup complete!'
+Write-Host ''
+Write-Host ("Claude Code will now use the pool proxy at: " + $BaseUrl)
+Write-Host ''
+Write-Host 'Start a new terminal, or run: . $PROFILE'
+`, publicURL, claudeAuth.AccessToken)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(script))
+		return
+	}
 
 	script := fmt.Sprintf(`#!/bin/bash
 IS_SOURCED=0
@@ -838,7 +1050,7 @@ func (h *proxyHandler) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	secret := getPoolJWTSecret()
 
-	// Check for Claude pool tokens first (sk-ant-api-pool-*)
+	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*)
 	if secret != "" {
 		if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
 			userID = uid

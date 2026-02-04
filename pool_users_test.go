@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -270,5 +271,35 @@ func TestLooksLikeProviderCredential(t *testing.T) {
 				t.Errorf("looksLikeProviderCredential() provider = %v, want %v", gotProvider, tt.wantProvider)
 			}
 		})
+	}
+}
+
+func TestClaudePoolToken_FormatAndBackwardCompatibility(t *testing.T) {
+	secret := "test-secret-key-12345678901234567890"
+	userID := "user123"
+
+	tok := generateClaudePoolToken(secret, userID)
+	if !strings.HasPrefix(tok, ClaudePoolTokenPrefix) {
+		t.Fatalf("expected token to start with %q, got %q", ClaudePoolTokenPrefix, tok)
+	}
+	if !strings.HasPrefix(tok, "sk-ant-oat01-") {
+		t.Fatalf("expected token to look like sk-ant-oat01-*, got %q", tok)
+	}
+
+	// Validate parse + auth header helper.
+	if uid, ok := parseClaudePoolToken(secret, tok); !ok || uid != userID {
+		t.Fatalf("parseClaudePoolToken failed: ok=%v uid=%q want=%q", ok, uid, userID)
+	}
+	if ok, uid := isClaudePoolToken(secret, "Bearer "+tok); !ok || uid != userID {
+		t.Fatalf("isClaudePoolToken failed: ok=%v uid=%q want=%q", ok, uid, userID)
+	}
+
+	// Legacy prefix should continue to work for already-issued tokens.
+	legacy := ClaudePoolTokenLegacyPrefix + strings.TrimPrefix(tok, ClaudePoolTokenPrefix)
+	if uid, ok := parseClaudePoolToken(secret, legacy); !ok || uid != userID {
+		t.Fatalf("legacy parseClaudePoolToken failed: ok=%v uid=%q want=%q", ok, uid, userID)
+	}
+	if ok, uid := isClaudePoolToken(secret, "Bearer "+legacy); !ok || uid != userID {
+		t.Fatalf("legacy isClaudePoolToken failed: ok=%v uid=%q want=%q", ok, uid, userID)
 	}
 }

@@ -765,10 +765,22 @@ brew install codex</pre>
                     <!-- Codex Auto -->
                     <div id="codex-auto" class="sub-tab-content active">
                         <div class="step-label">One-Liner Execution</div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            macOS / Linux (bash)
+                        </p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('cmd-one-liner', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('cmd-one-liner-unix', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="cmd-one-liner"></pre>
+                                <pre id="cmd-one-liner-unix"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            Windows (PowerShell)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('cmd-one-liner-windows', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="cmd-one-liner-windows"></pre>
                             </div>
                         </div>
                         <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
@@ -825,10 +837,22 @@ brew install gemini-cli</pre>
                     <!-- Gemini Auto -->
                     <div id="gemini-auto" class="sub-tab-content active">
                         <div class="step-label">One-Liner Execution</div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            macOS / Linux (bash)
+                        </p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner-unix', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="gemini-one-liner"></pre>
+                                <pre id="gemini-one-liner-unix"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            Windows (PowerShell)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner-windows', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-one-liner-windows"></pre>
                             </div>
                         </div>
                         <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
@@ -840,10 +864,22 @@ brew install gemini-cli</pre>
                     <div id="gemini-manual" class="sub-tab-content">
                         <div class="step-label">01 // Configuration</div>
                         <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code> + environment variable</p>
+                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            macOS / Linux (bash/zsh)
+                        </p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('gemini-auth-json', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-auth-json-unix', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="gemini-auth-json"></pre>
+                                <pre id="gemini-auth-json-unix"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            Windows (PowerShell)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-auth-json-windows', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-auth-json-windows"></pre>
                             </div>
                         </div>
 
@@ -885,10 +921,22 @@ brew install claude-code</pre>
                     <!-- Claude Auto -->
                     <div id="claude-auto" class="sub-tab-content active">
                         <div class="step-label">One-Liner Execution</div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            macOS / Linux (bash/zsh)
+                        </p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('claude-one-liner', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('claude-one-liner-unix', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="claude-one-liner"></pre>
+                                <pre id="claude-one-liner-unix"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            Windows (PowerShell)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-one-liner-windows', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-one-liner-windows"></pre>
                             </div>
                         </div>
                         <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
@@ -899,11 +947,23 @@ brew install claude-code</pre>
                     <!-- Claude Manual -->
                     <div id="claude-manual" class="sub-tab-content">
                         <div class="step-label">01 // Shell Environment (Required)</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code> (Claude Code reads env vars for auth)</p>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code> (macOS/Linux) or <code>$PROFILE</code> (PowerShell). Claude Code reads env vars for auth.</p>
+                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            macOS / Linux (bash/zsh)
+                        </p>
                         <div class="code-wrapper">
-                            <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
+                            <button class="copy-btn" onclick="copyToClipboard('claude-env-unix', this)">Copy</button>
                             <div class="code-block">
-                                <pre id="claude-env"></pre>
+                                <pre id="claude-env-unix"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            Windows (PowerShell)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-env-windows', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="claude-env-windows"></pre>
                             </div>
                         </div>
                         <div class="step-label">02 // Skip Onboarding</div>
@@ -1258,7 +1318,8 @@ brew install claude-code</pre>
 
             // Populate Codex
             const codexScriptUrl = `${publicUrl}/setup/codex/${downloadToken}`;
-            document.getElementById('cmd-one-liner').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+            document.getElementById('cmd-one-liner-unix').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+            document.getElementById('cmd-one-liner-windows').textContent = `irm "${codexScriptUrl}?shell=powershell" | iex`;
             document.getElementById('code-auth-json').textContent = authJson;
             document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
 chatgpt_base_url = "${publicUrl}"
@@ -1271,9 +1332,10 @@ requires_openai_auth = true`;
 
             // Populate Gemini (API key mode - bypasses OAuth)
             const geminiScriptUrl = `${publicUrl}/setup/gemini/${downloadToken}`;
-            document.getElementById('gemini-one-liner').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
+            document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
+            document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
             if (geminiApiKey) {
-                document.getElementById('gemini-auth-json').textContent = `# 1. Save API key to ~/.gemini/api_key:
+                document.getElementById('gemini-auth-json-unix').textContent = `# 1. Save API key to ~/.gemini/api_key:
 echo "${geminiApiKey}" > ~/.gemini/api_key
 chmod 600 ~/.gemini/api_key
 
@@ -1282,6 +1344,24 @@ export GEMINI_API_KEY=$(cat ~/.gemini/api_key 2>/dev/null)
 export GOOGLE_GEMINI_BASE_URL="${publicUrl}"
 
 # 3. Settings file (~/.gemini/settings.json):
+{
+  "codeAssistEndpoint": "${publicUrl}",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "useExternal": true
+    }
+  }
+}`;
+                document.getElementById('gemini-auth-json-windows').textContent = `# 1. Save API key to $HOME\\.gemini\\api_key:
+New-Item -ItemType Directory -Force -Path "$HOME\\.gemini" | Out-Null
+Set-Content -Encoding utf8 -Path "$HOME\\.gemini\\api_key" -Value "${geminiApiKey}"
+
+# 2. Add to your PowerShell profile ($PROFILE):
+$env:GEMINI_API_KEY = (Get-Content "$HOME\\.gemini\\api_key" -Raw).Trim()
+$env:GOOGLE_GEMINI_BASE_URL = "${publicUrl}"
+
+# 3. Settings file ($HOME\\.gemini\\settings.json):
 {
   "codeAssistEndpoint": "${publicUrl}",
   "security": {
@@ -1301,13 +1381,15 @@ export GOOGLE_GEMINI_BASE_URL="${publicUrl}"
   }
 }`;
             } else {
-                document.getElementById('gemini-auth-json').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('gemini-auth-json-unix').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('gemini-auth-json-windows').textContent = `# Run the one-liner above to configure automatically`;
                 document.getElementById('gemini-connect').textContent = `# Run the one-liner above to configure automatically`;
             }
 
             // Populate Claude
             const claudeScriptUrl = `${publicUrl}/setup/claude/${downloadToken}`;
-            document.getElementById('claude-one-liner').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
+            document.getElementById('claude-one-liner-unix').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
+            document.getElementById('claude-one-liner-windows').textContent = `irm "${claudeScriptUrl}?shell=powershell" | iex`;
             if (claudeApiKey) {
                 document.getElementById('claude-settings-json').textContent = `{
   "env": {
@@ -1315,11 +1397,14 @@ export GOOGLE_GEMINI_BASE_URL="${publicUrl}"
     "CLAUDE_CODE_OAUTH_TOKEN": "${claudeApiKey}"
   }
 }`;
-                document.getElementById('claude-env').textContent = `export ANTHROPIC_BASE_URL="${publicUrl}"
+                document.getElementById('claude-env-unix').textContent = `export ANTHROPIC_BASE_URL="${publicUrl}"
 export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
+                document.getElementById('claude-env-windows').textContent = `$env:ANTHROPIC_BASE_URL = "${publicUrl}"
+$env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
             } else {
                 document.getElementById('claude-settings-json').textContent = `# Run the one-liner above to configure automatically`;
-                document.getElementById('claude-env').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('claude-env-unix').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('claude-env-windows').textContent = `# Run the one-liner above to configure automatically`;
             }
 
             // Show success state
@@ -1369,7 +1454,8 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
 
                 // Populate Codex
                 const codexScriptUrl = `${result.public_url}/setup/codex/${result.download_token}`;
-                document.getElementById('cmd-one-liner').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+                document.getElementById('cmd-one-liner-unix').textContent = `curl -sL "${codexScriptUrl}" | bash`;
+                document.getElementById('cmd-one-liner-windows').textContent = `irm "${codexScriptUrl}?shell=powershell" | iex`;
 
                 document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
 chatgpt_base_url = "${result.public_url}"
@@ -1383,9 +1469,10 @@ requires_openai_auth = true`;
                 // Populate Gemini (API key mode - bypasses OAuth)
                 const geminiApiKey = result.gemini_api_key || '';
                 const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
-                document.getElementById('gemini-one-liner').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
+                document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
+                document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
 
-                document.getElementById('gemini-auth-json').textContent = `# 1. Save API key to ~/.gemini/api_key:
+                document.getElementById('gemini-auth-json-unix').textContent = `# 1. Save API key to ~/.gemini/api_key:
 echo "${geminiApiKey}" > ~/.gemini/api_key
 chmod 600 ~/.gemini/api_key
 
@@ -1394,6 +1481,24 @@ export GEMINI_API_KEY=$(cat ~/.gemini/api_key 2>/dev/null)
 export GOOGLE_GEMINI_BASE_URL="${result.public_url}"
 
 # 3. Settings file (~/.gemini/settings.json):
+{
+  "codeAssistEndpoint": "${result.public_url}",
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key",
+      "useExternal": true
+    }
+  }
+}`;
+                document.getElementById('gemini-auth-json-windows').textContent = `# 1. Save API key to $HOME\\.gemini\\api_key:
+New-Item -ItemType Directory -Force -Path "$HOME\\.gemini" | Out-Null
+Set-Content -Encoding utf8 -Path "$HOME\\.gemini\\api_key" -Value "${geminiApiKey}"
+
+# 2. Add to your PowerShell profile ($PROFILE):
+$env:GEMINI_API_KEY = (Get-Content "$HOME\\.gemini\\api_key" -Raw).Trim()
+$env:GOOGLE_GEMINI_BASE_URL = "${result.public_url}"
+
+# 3. Settings file ($HOME\\.gemini\\settings.json):
 {
   "codeAssistEndpoint": "${result.public_url}",
   "security": {
@@ -1417,15 +1522,18 @@ export GOOGLE_GEMINI_BASE_URL="${result.public_url}"
                 // Populate Claude
                 const claudeApiKey = result.claude_api_key || '';
                 const claudeScriptUrl = `${result.public_url}/setup/claude/${result.download_token}`;
-                document.getElementById('claude-one-liner').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
+                document.getElementById('claude-one-liner-unix').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
+                document.getElementById('claude-one-liner-windows').textContent = `irm "${claudeScriptUrl}?shell=powershell" | iex`;
                 document.getElementById('claude-settings-json').textContent = `{
   "env": {
     "ANTHROPIC_BASE_URL": "${result.public_url}",
     "CLAUDE_CODE_OAUTH_TOKEN": "${claudeApiKey}"
   }
 }`;
-                document.getElementById('claude-env').textContent = `export ANTHROPIC_BASE_URL="${result.public_url}"
+                document.getElementById('claude-env-unix').textContent = `export ANTHROPIC_BASE_URL="${result.public_url}"
 export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
+                document.getElementById('claude-env-windows').textContent = `$env:ANTHROPIC_BASE_URL = "${result.public_url}"
+$env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
 
                 // Transition with animation
                 loginSec.style.opacity = '0';

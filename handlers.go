@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -114,10 +115,12 @@ func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string)
 		if a.ID == accountID {
 			a.mu.Lock()
 			wasDead := a.Dead
+			wasRateLimited := !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(time.Now())
 			a.Dead = false
 			a.Penalty = 0
+			a.RateLimitUntil = time.Time{}
 			a.mu.Unlock()
-			log.Printf("resurrected account %s (was_dead=%v)", accountID, wasDead)
+			log.Printf("resurrected account %s (was_dead=%v, was_rate_limited=%v)", accountID, wasDead, wasRateLimited)
 			w.WriteHeader(http.StatusOK)
 			respondJSON(w, map[string]any{"status": "ok", "account": accountID, "was_dead": wasDead})
 			return
@@ -125,6 +128,67 @@ func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string)
 	}
 
 	http.Error(w, "account not found", http.StatusNotFound)
+}
+
+// clearAllRateLimits clears rate limits on all accounts.
+func (h *proxyHandler) clearAllRateLimits(w http.ResponseWriter) {
+	h.pool.mu.Lock()
+	defer h.pool.mu.Unlock()
+
+	now := time.Now()
+	cleared := 0
+	for _, a := range h.pool.accounts {
+		a.mu.Lock()
+		if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+			a.RateLimitUntil = time.Time{}
+			cleared++
+		}
+		a.mu.Unlock()
+	}
+
+	log.Printf("cleared rate limits on %d accounts", cleared)
+	respondJSON(w, map[string]any{"status": "ok", "cleared": cleared})
+}
+
+// forceRefreshAccount forces a token refresh for a specific account, bypassing rate limits.
+func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID string) {
+	h.pool.mu.RLock()
+	var target *Account
+	for _, a := range h.pool.accounts {
+		if a.ID == accountID {
+			target = a
+			break
+		}
+	}
+	h.pool.mu.RUnlock()
+
+	if target == nil {
+		http.Error(w, "account not found", http.StatusNotFound)
+		return
+	}
+
+	// Clear rate limit first
+	target.mu.Lock()
+	target.RateLimitUntil = time.Time{}
+	target.LastRefresh = time.Time{} // Clear last refresh to bypass needsRefresh check
+	hasRefreshToken := target.RefreshToken != ""
+	target.mu.Unlock()
+
+	if !hasRefreshToken {
+		http.Error(w, "account has no refresh token", http.StatusBadRequest)
+		return
+	}
+
+	// Force refresh
+	err := h.refreshAccountOnce(context.Background(), target)
+	if err != nil {
+		log.Printf("force refresh %s failed: %v", accountID, err)
+		respondJSON(w, map[string]any{"status": "error", "account": accountID, "error": err.Error()})
+		return
+	}
+
+	log.Printf("force refresh %s succeeded", accountID)
+	respondJSON(w, map[string]any{"status": "ok", "account": accountID})
 }
 
 // serveTokenCapacity returns token tracking and capacity analysis data.

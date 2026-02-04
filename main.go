@@ -455,7 +455,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	var userType string // "pool_user", "passthrough", or "anonymous"
 	secret := getPoolJWTSecret()
 
-	// Check for Claude pool tokens first (sk-ant-api-pool-*)
+	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*)
 	if secret != "" {
 		if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
 			userID = uid
@@ -717,6 +717,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 
 		if isRetryableStatus(resp.StatusCode) {
+			// Read error body FIRST before any other processing
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			resp.Body.Close()
+			errBody = bodyForInspection(nil, errBody)
+			errBodyStr := string(errBody)
+
 			// Mark account health and try another one.
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				acc.mu.Lock()
@@ -725,10 +731,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if refreshFailed && acc.Type != AccountTypeCodex {
 					acc.Dead = true
 					acc.Penalty += 1.0
-					if h.cfg.debug {
-						log.Printf("[%s] marking account %s as dead (401/403, refresh failed or unavailable)", reqID, acc.ID)
-					}
 					acc.mu.Unlock()
+					log.Printf("[%s] account %s DEAD: 401/403 refresh failed, body=%s", reqID, acc.ID, errBodyStr)
 					if err := saveAccount(acc); err != nil {
 						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 					}
@@ -737,22 +741,17 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					// Others: refresh was rate-limited or not needed
 					// Add heavy penalty so this account drops below working ones
 					acc.Penalty += 10.0
-					if h.cfg.debug {
-						log.Printf("[%s] account %s got 401/403, adding heavy penalty (not marking dead)", reqID, acc.ID)
-					}
 					acc.mu.Unlock()
+					// Always log 401/403 with error body for debugging
+					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s", reqID, acc.ID, resp.StatusCode, acc.Penalty, errBodyStr)
 				}
 			} else {
 				acc.mu.Lock()
 				acc.Penalty += 0.3
 				acc.mu.Unlock()
 			}
-			// Read error body to include in error message
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-			resp.Body.Close()
-			errBody = bodyForInspection(nil, errBody)
 			if len(errBody) > 0 {
-				lastErr = fmt.Errorf("upstream %s: %s", resp.Status, string(errBody))
+				lastErr = fmt.Errorf("upstream %s: %s", resp.Status, errBodyStr)
 			} else {
 				lastErr = fmt.Errorf("upstream %s", resp.Status)
 			}
@@ -990,7 +989,15 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	provider.SetAuthHeaders(outReq, acc)
 
 	if h.cfg.debug {
-		log.Printf("[%s] streamed -> %s %s (account=%s account_id=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID, acc.AccountID)
+		authHeader := outReq.Header.Get("Authorization")
+		authLen := len(authHeader)
+		authPreview := ""
+		if authLen > 20 {
+			authPreview = authHeader[:20] + "..."
+		} else if authLen > 0 {
+			authPreview = authHeader
+		}
+		log.Printf("[%s] streamed -> %s %s (account=%s account_id=%s auth_len=%d auth=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID, acc.AccountID, authLen, authPreview)
 	}
 
 	resp, err := h.transport.RoundTrip(outReq)
@@ -1015,6 +1022,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		acc.mu.Unlock()
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// Log the error body for debugging
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		decompressed := bodyForInspection(nil, errBody) // nil request - will auto-detect gzip
+		log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(decompressed))
+		// Replace body so client still gets the error
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+
 		acc.mu.Lock()
 		if refreshFailed && acc.Type != AccountTypeCodex {
 			acc.Dead = true
@@ -1208,9 +1222,9 @@ func looksLikeProviderCredential(authHeader string) (bool, AccountType) {
 		return false, ""
 	}
 
-	// Pool-generated Claude tokens: sk-ant-api-pool-* should NOT be passed through
-	// These are fake API keys that identify pool users
-	if strings.HasPrefix(token, ClaudePoolTokenPrefix) {
+	// Pool-generated Claude tokens (current and legacy) should NOT be passed through.
+	// These are fake Claude OAuth/API-looking tokens that identify pool users.
+	if strings.HasPrefix(token, ClaudePoolTokenPrefix) || strings.HasPrefix(token, ClaudePoolTokenLegacyPrefix) {
 		return false, ""
 	}
 
@@ -1817,16 +1831,15 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	}
 	err := provider.RefreshToken(ctx, a, h.refreshTransport)
 
-	// On FAILED refresh, still update LastRefresh and save to prevent retrying for 1 hour
-	// Successful refreshes already update LastRefresh in the provider
-	if err != nil {
-		a.mu.Lock()
-		a.LastRefresh = time.Now().UTC()
-		a.mu.Unlock()
-		// Save to disk so rate limiting persists across restarts
-		if saveErr := saveAccount(a); saveErr != nil {
-			log.Printf("warning: failed to save account %s after refresh failure: %v", a.ID, saveErr)
-		}
+	a.mu.Lock()
+	a.LastRefresh = time.Now().UTC()
+	a.mu.Unlock()
+
+	// Always save to disk after refresh (success or failure)
+	// - On success: persist the new access token
+	// - On failure: persist LastRefresh to prevent retrying for 1 hour
+	if saveErr := saveAccount(a); saveErr != nil {
+		log.Printf("warning: failed to save account %s after refresh: %v", a.ID, saveErr)
 	}
 
 	return err

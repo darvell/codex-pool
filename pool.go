@@ -421,11 +421,16 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
 				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType)
-				if ok && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+				if ok && a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 					ok = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from rate-limited account %s (until %s)",
 							conversationID, id, a.RateLimitUntil.Format(time.RFC3339))
+					}
+				} else if ok && a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+					if p.debug {
+						log.Printf("ignoring rate limit for codex account %s (until %s)",
+							id, a.RateLimitUntil.Format(time.RFC3339))
 					}
 				}
 				// Don't use pinned account if it's nearly exhausted (>90% weekly usage)
@@ -486,12 +491,17 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			a.mu.Unlock()
 			continue
 		}
-		if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+		if a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 			a.mu.Unlock()
 			if p.debug {
 				log.Printf("skipping account %s: rate limited until %s", a.ID, a.RateLimitUntil.Format(time.RFC3339))
 			}
 			continue
+		}
+		if a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+			if p.debug {
+				log.Printf("ignoring rate limit for codex account %s (until %s)", a.ID, a.RateLimitUntil.Format(time.RFC3339))
+			}
 		}
 		// Hard exclusion: accounts with >=95% primary (5hr) usage should never be selected
 		primaryUsed := a.Usage.PrimaryUsedPercent

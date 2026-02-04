@@ -11,6 +11,7 @@ import (
 func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bool {
 	if h.cfg.adminToken == "" {
 		// No admin token configured - deny all admin access
+		log.Printf("admin auth: no token configured")
 		http.Error(w, "admin access disabled", http.StatusForbidden)
 		return false
 	}
@@ -19,6 +20,10 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 	token := r.Header.Get("X-Admin-Token")
 	if token == "" {
 		token = r.URL.Query().Get("admin_token")
+	}
+
+	if h.cfg.debug {
+		log.Printf("admin auth: provided=%q configured=%q", token, h.cfg.adminToken)
 	}
 
 	if token != h.cfg.adminToken {
@@ -142,6 +147,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.serveTokenCapacity(w)
 		return
+	case "/admin/clear-rate-limits":
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.clearAllRateLimits(w)
+		return
 	}
 
 	// Account resurrect: /admin/accounts/:id/resurrect
@@ -157,6 +172,21 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
 		accountID := strings.TrimSuffix(path, "/resurrect")
 		h.resurrectAccount(w, accountID)
+		return
+	}
+
+	// Account force refresh: /admin/accounts/:id/refresh
+	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && strings.HasSuffix(r.URL.Path, "/refresh") {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
+		accountID := strings.TrimSuffix(path, "/refresh")
+		h.forceRefreshAccount(w, accountID)
 		return
 	}
 
