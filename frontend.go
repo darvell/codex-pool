@@ -242,6 +242,9 @@ $BaseUrl = '%s'
 $authDir = Join-Path $HOME '.codex'
 $configFile = Join-Path $authDir 'config.toml'
 $authFile = Join-Path $authDir 'auth.json'
+$modelCatalog = Join-Path $authDir 'model_catalog.json'
+$mcpScript = Join-Path $authDir 'model_sync.ps1'
+$nl = [Environment]::NewLine
 
 Write-Host 'Initializing Codex Pool setup...'
 New-Item -ItemType Directory -Path $authDir -Force | Out-Null
@@ -254,7 +257,179 @@ if ($PSVersionTable.PSEdition -eq 'Desktop') {
   (Invoke-WebRequest -Uri $authUrl).Content | Set-Content -Path $authFile -Encoding UTF8
 }
 
-Write-Host '2. Updating configuration...'
+Write-Host '2. Installing model sync MCP sidecar...'
+$mcpContent = @'
+param(
+  [string]$BaseUrl = ""
+)
+
+$ErrorActionPreference = 'Stop'
+
+$authDir = Join-Path $HOME '.codex'
+$authFile = Join-Path $authDir 'auth.json'
+$modelCatalog = Join-Path $authDir 'model_catalog.json'
+
+function Refresh-ModelCatalog {
+  param([string]$Url)
+  if ([string]::IsNullOrWhiteSpace($Url)) { return }
+  if (-not (Test-Path $authFile)) { return }
+
+  try {
+    $raw = Get-Content -Path $authFile -Raw
+    $auth = $raw | ConvertFrom-Json -Depth 20
+  } catch {
+    return
+  }
+
+  $token = $null
+  if ($auth -and $auth.tokens -and $auth.tokens.access_token) {
+    $token = [string]$auth.tokens.access_token
+  } elseif ($auth -and $auth.access_token) {
+    $token = [string]$auth.access_token
+  }
+  if ([string]::IsNullOrWhiteSpace($token)) { return }
+
+  $modelsUrl = $Url.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0'
+  $headers = @{ Authorization = "Bearer $token" }
+
+  try {
+    $tmp = [System.IO.Path]::GetTempFileName()
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+      Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 5 | Out-Null
+    } else {
+      Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 5 | Out-Null
+    }
+    Move-Item -Force -Path $tmp -Destination $modelCatalog
+  } catch {
+    if ($tmp -and (Test-Path $tmp)) { Remove-Item -Force -Path $tmp -ErrorAction SilentlyContinue }
+  }
+}
+
+function Write-McpResponse {
+  param(
+    [string]$Payload,
+    [string]$Transport = 'framed'
+  )
+
+  if ($Transport -eq 'jsonl') {
+    [Console]::Out.WriteLine($Payload)
+    [Console]::Out.Flush()
+    return
+  }
+
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+  $nl = [Environment]::NewLine
+  [Console]::Out.Write("Content-Length: " + $bytes.Length + $nl + $nl + $Payload)
+  [Console]::Out.Flush()
+}
+
+Refresh-ModelCatalog -Url $BaseUrl
+
+while ($true) {
+  $transport = 'framed'
+  $contentLength = 0
+  $body = ''
+
+  $firstLine = [Console]::In.ReadLine()
+  if ($null -eq $firstLine) { exit 0 }
+
+  if ($firstLine -match '^[ \t]*\{') {
+    $transport = 'jsonl'
+    $body = $firstLine
+  } else {
+    $line = $firstLine
+    while ($true) {
+      if ($line -eq '') { break }
+      if ($line -match '^(?i)content-length:') {
+        $lengthText = ($line -split ':', 2)[1].Trim()
+        [int]::TryParse($lengthText, [ref]$contentLength) | Out-Null
+      }
+      $line = [Console]::In.ReadLine()
+      if ($null -eq $line) { exit 0 }
+    }
+  }
+
+  if ($transport -eq 'framed' -and $contentLength -le 0) { continue }
+  if ($transport -eq 'framed') {
+    $buffer = New-Object char[] $contentLength
+    $readTotal = 0
+    while ($readTotal -lt $contentLength) {
+      $readNow = [Console]::In.Read($buffer, $readTotal, $contentLength - $readTotal)
+      if ($readNow -le 0) { exit 0 }
+      $readTotal += $readNow
+    }
+    $body = -join $buffer
+  }
+
+  try {
+    $request = $body | ConvertFrom-Json -Depth 20
+  } catch {
+    continue
+  }
+
+  if (-not $request.PSObject.Properties.Name.Contains('id')) {
+    continue
+  }
+
+  $method = ''
+  if ($request.PSObject.Properties.Name.Contains('method')) {
+    $method = [string]$request.method
+  }
+
+  $result = $null
+  switch ($method) {
+    'initialize' {
+      $result = @{
+        protocolVersion = '2024-11-05'
+        capabilities = @{
+          tools = @{ listChanged = $false }
+          resources = @{ listChanged = $false }
+          prompts = @{ listChanged = $false }
+        }
+        serverInfo = @{
+          name = 'model_sync'
+          version = '1.0.0'
+        }
+      }
+    }
+    'tools/list' { $result = @{ tools = @() } }
+    'resources/list' { $result = @{ resources = @() } }
+    'prompts/list' { $result = @{ prompts = @() } }
+    'ping' { $result = @{} }
+    default {
+      $errorResponse = @{
+        jsonrpc = '2.0'
+        id = $request.id
+        error = @{
+          code = -32601
+          message = 'Method not found'
+        }
+      } | ConvertTo-Json -Compress -Depth 20
+      Write-McpResponse -Payload $errorResponse -Transport $transport
+      continue
+    }
+  }
+
+  $response = @{
+    jsonrpc = '2.0'
+    id = $request.id
+    result = $result
+  } | ConvertTo-Json -Compress -Depth 20
+  Write-McpResponse -Payload $response -Transport $transport
+}
+'@
+Set-Content -Path $mcpScript -Value $mcpContent -Encoding UTF8
+
+$mcpCommand = (Get-Process -Id $PID).Path
+if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
+  $mcpCommand = 'powershell'
+}
+
+$modelCatalogToml = $modelCatalog -replace '\\', '\\\\'
+$mcpScriptToml = $mcpScript -replace '\\', '\\\\'
+$mcpCommandToml = $mcpCommand -replace '\\', '\\\\'
+
+Write-Host '3. Updating configuration...'
 if (-not (Test-Path $configFile)) {
   New-Item -ItemType File -Path $configFile -Force | Out-Null
 }
@@ -266,21 +441,56 @@ if ($existing -notmatch 'codex-pool') {
   $new = @"
 # Codex Pool Proxy Config
 model_provider = "codex-pool"
-chatgpt_base_url = "$BaseUrl"
+chatgpt_base_url = "$BaseUrl/backend-api"
+model_catalog_json = "$modelCatalogToml"
 
 $existing
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "$BaseUrl/v1"
+base_url = "$BaseUrl"
 wire_api = "responses"
 requires_openai_auth = true
+supports_websockets = true
+
+[model_providers.codex-pool.features]
+responses_websockets_v2 = true
+
+[mcp_servers.model_sync]
+command = "$mcpCommandToml"
+args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
 "@
 
   Set-Content -Path $configFile -Value $new -Encoding UTF8
   Write-Host "Configuration updated in $configFile"
 } else {
-  Write-Host "Configuration already present in $configFile. Skipping."
+  $updated = $false
+
+  if ($existing -notmatch '(?m)^[ \t]*model_catalog_json[ \t]*=') {
+    $existing = 'model_catalog_json = "' + $modelCatalogToml + '"' + $nl + $existing
+    $updated = $true
+  }
+
+  if ($existing -match '(?m)^\[mcp_servers\.codex_pool_model_sync\]') {
+    $existing = $existing -replace '(?m)^\[mcp_servers\.codex_pool_model_sync\]', '[mcp_servers.model_sync]'
+    $updated = $true
+  }
+
+  if ($existing -notmatch '(?m)^\[mcp_servers\.model_sync\]') {
+    $existing = $existing.TrimEnd() +
+      $nl + $nl +
+      '[mcp_servers.model_sync]' + $nl +
+      'command = "' + $mcpCommandToml + '"' + $nl +
+      'args = ["-NoLogo", "-NoProfile", "-File", "' + $mcpScriptToml + '", "' + $BaseUrl + '"]' + $nl
+    $updated = $true
+  }
+
+  if ($updated) {
+    Set-Content -Path $configFile -Value $existing -Encoding UTF8
+    Write-Host "Configuration updated in $configFile"
+  } else {
+    Write-Host "Configuration already present in $configFile. Skipping."
+  }
 }
 
 Write-Host 'Setup complete! You are ready to use the pool.'
@@ -292,12 +502,14 @@ Write-Host 'Setup complete! You are ready to use the pool.'
 	}
 
 	script := fmt.Sprintf(`#!/bin/bash
-set -e
+set -euo pipefail
 TOKEN="%s"
 BASE_URL="%s"
 AUTH_DIR="$HOME/.codex"
 CONFIG_FILE="$AUTH_DIR/config.toml"
 AUTH_FILE="$AUTH_DIR/auth.json"
+MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
+MCP_SCRIPT="$AUTH_DIR/model_sync.sh"
 
 echo "Initializing Codex Pool setup..."
 mkdir -p "$AUTH_DIR"
@@ -306,7 +518,138 @@ echo "1. Fetching credentials..."
 curl -sL "$BASE_URL/config/codex/$TOKEN" -o "$AUTH_FILE"
 chmod 600 "$AUTH_FILE"
 
-echo "2. Updating configuration..."
+echo "2. Installing model sync MCP sidecar..."
+cat <<'EOF' > "$MCP_SCRIPT"
+#!/bin/bash
+set -euo pipefail
+
+BASE_URL="${1:-}"
+AUTH_DIR="${HOME}/.codex"
+AUTH_FILE="$AUTH_DIR/auth.json"
+MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
+CLIENT_VERSION="0.106.0"
+
+refresh_model_catalog() {
+    if [ -z "$BASE_URL" ] || [ ! -f "$AUTH_FILE" ]; then
+        return 0
+    fi
+
+    local token
+    token=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
+    if [ -z "${token:-}" ]; then
+        return 0
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp "${MODEL_CATALOG}.tmp.XXXXXX")
+    if curl --connect-timeout 2 --max-time 5 -fsSL -H "Authorization: Bearer $token" \
+        "${BASE_URL%%/}/backend-api/codex/models?client_version=${CLIENT_VERSION}" \
+        -o "$tmp_file"; then
+        mv "$tmp_file" "$MODEL_CATALOG"
+        chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
+    else
+        rm -f "$tmp_file"
+    fi
+}
+
+read_request() {
+    local line content_length
+    content_length=0
+
+    if ! IFS= read -r line; then
+        return 1
+    fi
+    line="${line%%$'\r'}"
+
+    if [[ "$line" == \{* ]]; then
+        MCP_TRANSPORT_MODE="jsonl"
+        REQUEST_BODY="$line"
+        return 0
+    fi
+
+    while true; do
+        if [ -z "$line" ]; then
+            break
+        fi
+        case "$line" in
+            [Cc]ontent-[Ll]ength:*|[Cc]ONTENT-[Ll]ENGTH:*|CONTENT-LENGTH:*|content-length:*)
+                content_length=$(printf '%%s' "${line#*:}" | tr -d '[:space:]')
+                ;;
+        esac
+        if ! IFS= read -r line; then
+            return 1
+        fi
+        line="${line%%$'\r'}"
+    done
+
+    if [ -z "$content_length" ] || ! [[ "$content_length" =~ ^[0-9]+$ ]] || [ "$content_length" -le 0 ]; then
+        return 1
+    fi
+
+    MCP_TRANSPORT_MODE="framed"
+    REQUEST_BODY=$(dd bs=1 count="$content_length" 2>/dev/null)
+    return 0
+}
+
+write_response() {
+    local payload="$1"
+    if [ "${MCP_TRANSPORT_MODE:-framed}" = "jsonl" ]; then
+        printf '%%s\n' "$payload"
+        return
+    fi
+
+    local length
+    length=$(printf '%%s' "$payload" | LC_ALL=C wc -c | tr -d '[:space:]')
+    printf 'Content-Length: %%s\r\n\r\n%%s' "$length" "$payload"
+}
+
+handle_request() {
+    local request="$1"
+    local method id payload
+
+    method=$(printf '%%s' "$request" | sed -n 's/.*"method"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    id=$(printf '%%s' "$request" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | head -n 1)
+    if [ -z "${id:-}" ]; then
+        return 0
+    fi
+
+    case "$method" in
+        initialize)
+            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false},"resources":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"model_sync","version":"1.0.0"}}}'
+            ;;
+        tools/list)
+            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"tools":[]}}'
+            ;;
+        resources/list)
+            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"resources":[]}}'
+            ;;
+        prompts/list)
+            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"prompts":[]}}'
+            ;;
+        ping)
+            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{}}'
+            ;;
+        *)
+            payload='{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32601,"message":"Method not found"}}'
+            ;;
+    esac
+
+    write_response "$payload"
+}
+
+refresh_model_catalog >/dev/null 2>&1 &
+
+while true; do
+    REQUEST_BODY=""
+    if ! read_request; then
+        exit 0
+    fi
+    handle_request "$REQUEST_BODY"
+done
+EOF
+chmod 700 "$MCP_SCRIPT"
+
+echo "3. Updating configuration..."
 if [ ! -f "$CONFIG_FILE" ]; then
     touch "$CONFIG_FILE"
 fi
@@ -318,7 +661,8 @@ if ! grep -q "codex-pool" "$CONFIG_FILE"; then
     cat <<EOF > "$TEMP_FILE"
 # Codex Pool Proxy Config
 model_provider = "codex-pool"
-chatgpt_base_url = "$BASE_URL"
+chatgpt_base_url = "$BASE_URL/backend-api"
+model_catalog_json = "$MODEL_CATALOG"
 
 EOF
     # Append existing config
@@ -329,16 +673,58 @@ EOF
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "$BASE_URL/v1"
+base_url = "$BASE_URL"
 wire_api = "responses"
 requires_openai_auth = true
+supports_websockets = true
+
+[model_providers.codex-pool.features]
+responses_websockets_v2 = true
+
+[mcp_servers.model_sync]
+command = "bash"
+args = ["$MCP_SCRIPT", "$BASE_URL"]
 EOF
 
     mv "$TEMP_FILE" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
     echo "Configuration updated in $CONFIG_FILE"
 else
-    echo "Configuration already present in $CONFIG_FILE. Skipping."
+    UPDATED=0
+
+    if ! grep -Eq '^[[:space:]]*model_catalog_json[[:space:]]*=' "$CONFIG_FILE"; then
+        TEMP_FILE=$(mktemp)
+        cat <<EOF > "$TEMP_FILE"
+model_catalog_json = "$MODEL_CATALOG"
+EOF
+        cat "$CONFIG_FILE" >> "$TEMP_FILE"
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+        UPDATED=1
+    fi
+
+    if grep -q '^\[mcp_servers\.codex_pool_model_sync\]' "$CONFIG_FILE"; then
+        TEMP_FILE=$(mktemp)
+        sed 's/^\[mcp_servers\.codex_pool_model_sync\]/[mcp_servers.model_sync]/' "$CONFIG_FILE" > "$TEMP_FILE"
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+        UPDATED=1
+    fi
+
+    if ! grep -q '^\[mcp_servers\.model_sync\]' "$CONFIG_FILE"; then
+        cat <<EOF >> "$CONFIG_FILE"
+
+[mcp_servers.model_sync]
+command = "bash"
+args = ["$MCP_SCRIPT", "$BASE_URL"]
+EOF
+        UPDATED=1
+    fi
+
+    chmod 600 "$CONFIG_FILE"
+    if [ "$UPDATED" -eq 1 ]; then
+        echo "Configuration updated in $CONFIG_FILE"
+    else
+        echo "Configuration already present in $CONFIG_FILE. Skipping."
+    fi
 fi
 
 echo "Setup complete! You are ready to use the pool."
@@ -800,6 +1186,7 @@ type PoolStats struct {
 	Accounts         []AccountStats    `json:"accounts"`
 	AggregateUsage   AggregateStats    `json:"aggregate"`
 	CapacityAnalysis *CapacityAnalysis `json:"capacity_analysis,omitempty"`
+	Last24hTokens    int64             `json:"last_24h_tokens"`
 	GeneratedAt      time.Time         `json:"generated_at"`
 }
 
@@ -1039,6 +1426,15 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Include last 24h tokens aggregate from hourly buckets
+	if h.store != nil {
+		if hourly, err := h.store.getGlobalHourlyUsage(24); err == nil {
+			for _, hu := range hourly {
+				stats.Last24hTokens += hu.BillableTokens
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
@@ -1221,5 +1617,80 @@ func (h *proxyHandler) handleUserDaily(w http.ResponseWriter, r *http.Request) {
 		"user_id": userID,
 		"days":    days,
 		"daily":   daily,
+	})
+}
+
+// handleUserHourly returns a user's hourly usage over the last N hours.
+func (h *proxyHandler) handleUserHourly(w http.ResponseWriter, r *http.Request) {
+	// Extract user ID from path: /api/pool/users/:id/hourly
+	path := r.URL.Path
+	path = strings.TrimPrefix(path, "/api/pool/users/")
+	path = strings.TrimSuffix(path, "/hourly")
+	userID := path
+
+	if userID == "" {
+		http.Error(w, "user ID required", http.StatusBadRequest)
+		return
+	}
+
+	hours := 24
+	if h := r.URL.Query().Get("hours"); h != "" {
+		if n, err := strconv.Atoi(h); err == nil && n > 0 && n <= 168 {
+			hours = n
+		}
+	}
+
+	hourly, err := h.store.getUserHourlyUsage(userID, hours)
+	if err != nil {
+		http.Error(w, "failed to fetch hourly usage", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"user_id": userID,
+		"hours":   hours,
+		"hourly":  hourly,
+	})
+}
+
+// handleGlobalHourly returns global hourly usage (all users combined) over the last N hours.
+func (h *proxyHandler) handleGlobalHourly(w http.ResponseWriter, r *http.Request) {
+	hours := 24
+	if hParam := r.URL.Query().Get("hours"); hParam != "" {
+		if n, err := strconv.Atoi(hParam); err == nil && n > 0 && n <= 168 {
+			hours = n
+		}
+	}
+
+	hourly, err := h.store.getGlobalHourlyUsage(hours)
+	if err != nil {
+		http.Error(w, "failed to fetch hourly usage", http.StatusInternalServerError)
+		return
+	}
+
+	// Calculate aggregate totals for the period
+	var totalBillable, totalInput, totalOutput, totalCached, totalReasoning, totalRequests int64
+	for _, h := range hourly {
+		totalBillable += h.BillableTokens
+		totalInput += h.InputTokens
+		totalOutput += h.OutputTokens
+		totalCached += h.CachedTokens
+		totalReasoning += h.ReasoningTokens
+		totalRequests += h.RequestCount
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"hours":  hours,
+		"hourly": hourly,
+		"totals": map[string]int64{
+			"billable_tokens":  totalBillable,
+			"input_tokens":     totalInput,
+			"output_tokens":    totalOutput,
+			"cached_tokens":    totalCached,
+			"reasoning_tokens": totalReasoning,
+			"request_count":    totalRequests,
+		},
 	})
 }

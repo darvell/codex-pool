@@ -1322,13 +1322,22 @@ brew install claude-code</pre>
             document.getElementById('cmd-one-liner-windows').textContent = `irm "${codexScriptUrl}?shell=powershell" | iex`;
             document.getElementById('code-auth-json').textContent = authJson;
             document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
-chatgpt_base_url = "${publicUrl}"
+chatgpt_base_url = "${publicUrl}/backend-api"
+model_catalog_json = "~/.codex/model_catalog.json"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${publicUrl}/v1"
+base_url = "${publicUrl}"
 wire_api = "responses"
-requires_openai_auth = true`;
+requires_openai_auth = true
+supports_websockets = true
+
+[model_providers.codex-pool.features]
+responses_websockets_v2 = true
+
+[mcp_servers.model_sync]
+command = "bash"
+args = ["~/.codex/model_sync.sh", "${publicUrl}"]`;
 
             // Populate Gemini (API key mode - bypasses OAuth)
             const geminiScriptUrl = `${publicUrl}/setup/gemini/${downloadToken}`;
@@ -1458,13 +1467,22 @@ $env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
                 document.getElementById('cmd-one-liner-windows').textContent = `irm "${codexScriptUrl}?shell=powershell" | iex`;
 
                 document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
-chatgpt_base_url = "${result.public_url}"
+chatgpt_base_url = "${result.public_url}/backend-api"
+model_catalog_json = "~/.codex/model_catalog.json"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${result.public_url}/v1"
+base_url = "${result.public_url}"
 wire_api = "responses"
-requires_openai_auth = true`;
+requires_openai_auth = true
+supports_websockets = true
+
+[model_providers.codex-pool.features]
+responses_websockets_v2 = true
+
+[mcp_servers.model_sync]
+command = "bash"
+args = ["~/.codex/model_sync.sh", "${result.public_url}"]`;
 
                 // Populate Gemini (API key mode - bypasses OAuth)
                 const geminiApiKey = result.gemini_api_key || '';

@@ -29,6 +29,46 @@ func TestServeCodexSetupScript_PowerShell(t *testing.T) {
 	if !strings.Contains(body, "Join-Path $HOME '.codex'") {
 		t.Fatalf("expected codex paths in script body, got:\n%s", body)
 	}
+	if !strings.Contains(body, "model_catalog_json = ") {
+		t.Fatalf("expected model catalog config in script body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "[mcp_servers.model_sync]") {
+		t.Fatalf("expected MCP sidecar config in script body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "model_sync.ps1") {
+		t.Fatalf("expected MCP sidecar script install in PowerShell body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "$firstLine = [Console]::In.ReadLine()") {
+		t.Fatalf("expected MCP JSONL transport support in PowerShell body, got:\n%s", body)
+	}
+}
+
+func TestServeCodexSetupScript_Bash(t *testing.T) {
+	h := &proxyHandler{}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/codex/testtoken", nil)
+	rr := httptest.NewRecorder()
+	h.serveCodexSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/x-shellscript") {
+		t.Fatalf("Content-Type = %q, want text/x-shellscript*", ct)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "model_sync.sh") {
+		t.Fatalf("expected MCP sidecar script install in bash body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "model_catalog_json = ") {
+		t.Fatalf("expected model catalog config in bash script body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "[mcp_servers.model_sync]") {
+		t.Fatalf("expected MCP sidecar config in bash script body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "MCP_TRANSPORT_MODE=\"jsonl\"") {
+		t.Fatalf("expected MCP JSONL transport support in bash body, got:\n%s", body)
+	}
 }
 
 func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
