@@ -246,18 +246,77 @@ $modelCatalog = Join-Path $authDir 'model_catalog.json'
 $mcpScript = Join-Path $authDir 'model_sync.ps1'
 $nl = [Environment]::NewLine
 
+# PS 5.1 compat wrapper: ConvertFrom-Json -Depth was added in PS 6
+function ConvertFrom-JsonCompat {
+  param([Parameter(ValueFromPipeline)]$InputObject)
+  process {
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+      $InputObject | ConvertFrom-Json -Depth 20
+    } else {
+      $InputObject | ConvertFrom-Json
+    }
+  }
+}
+
+# PS 5.1 writes UTF-8 with BOM which breaks JSON/TOML parsers. Write without BOM.
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
+# Safe property check that works with Set-StrictMode -Version Latest
+function Has-Property {
+  param($Obj, [string]$Name)
+  if ($null -eq $Obj) { return $false }
+  if ($Obj -is [System.Collections.IDictionary]) { return $Obj.ContainsKey($Name) }
+  return [bool]($Obj.PSObject.Properties.Name -contains $Name)
+}
+
 Write-Host 'Initializing Codex Pool setup...'
 New-Item -ItemType Directory -Path $authDir -Force | Out-Null
 
 Write-Host '1. Fetching credentials...'
 $authUrl = "$BaseUrl/config/codex/$Token"
 if ($PSVersionTable.PSEdition -eq 'Desktop') {
-  (Invoke-WebRequest -UseBasicParsing -Uri $authUrl).Content | Set-Content -Path $authFile -Encoding UTF8
+  $authContent = (Invoke-WebRequest -UseBasicParsing -Uri $authUrl).Content
 } else {
-  (Invoke-WebRequest -Uri $authUrl).Content | Set-Content -Path $authFile -Encoding UTF8
+  $authContent = (Invoke-WebRequest -Uri $authUrl).Content
+}
+Set-Utf8NoBom -Path $authFile -Value $authContent
+
+Write-Host '2. Fetching model catalog...'
+try {
+  $raw = Get-Content -Path $authFile -Raw
+  $auth = $raw | ConvertFrom-JsonCompat
+  $accessToken = $null
+  if ($auth -and (Has-Property $auth 'tokens') -and (Has-Property $auth.tokens 'access_token')) {
+    $accessToken = [string]$auth.tokens.access_token
+  } elseif ($auth -and (Has-Property $auth 'access_token')) {
+    $accessToken = [string]$auth.access_token
+  }
+  if (-not [string]::IsNullOrWhiteSpace($accessToken)) {
+    $modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0'
+    $headers = @{ Authorization = "Bearer $accessToken" }
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+      if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
+      } else {
+        Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
+      }
+      Move-Item -Force -Path $tmp -Destination $modelCatalog
+      Write-Host "Model catalog saved to $modelCatalog"
+    } catch {
+      if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
+      Write-Host "Warning: Could not fetch model catalog (non-fatal): $_"
+    }
+  }
+} catch {
+  Write-Host "Warning: Could not parse auth for model catalog fetch (non-fatal): $_"
 }
 
-Write-Host '2. Installing model sync MCP sidecar...'
+Write-Host '3. Installing model sync MCP sidecar...'
 $mcpContent = @'
 param(
   [string]$BaseUrl = ""
@@ -269,6 +328,18 @@ $authDir = Join-Path $HOME '.codex'
 $authFile = Join-Path $authDir 'auth.json'
 $modelCatalog = Join-Path $authDir 'model_catalog.json'
 
+# PS 5.1 compat wrapper: ConvertFrom-Json -Depth was added in PS 6
+function ConvertFrom-JsonCompat {
+  param([Parameter(ValueFromPipeline)]$InputObject)
+  process {
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+      $InputObject | ConvertFrom-Json -Depth 20
+    } else {
+      $InputObject | ConvertFrom-Json
+    }
+  }
+}
+
 function Refresh-ModelCatalog {
   param([string]$Url)
   if ([string]::IsNullOrWhiteSpace($Url)) { return }
@@ -276,7 +347,7 @@ function Refresh-ModelCatalog {
 
   try {
     $raw = Get-Content -Path $authFile -Raw
-    $auth = $raw | ConvertFrom-Json -Depth 20
+    $auth = $raw | ConvertFrom-JsonCompat
   } catch {
     return
   }
@@ -362,7 +433,7 @@ while ($true) {
   }
 
   try {
-    $request = $body | ConvertFrom-Json -Depth 20
+    $request = $body | ConvertFrom-JsonCompat
   } catch {
     continue
   }
@@ -420,7 +491,15 @@ while ($true) {
 '@
 Set-Content -Path $mcpScript -Value $mcpContent -Encoding UTF8
 
-$mcpCommand = (Get-Process -Id $PID).Path
+# Find PowerShell executable path robustly
+$mcpCommand = $null
+try { $mcpCommand = (Get-Process -Id $PID).Path } catch {}
+if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
+  try { $mcpCommand = (Get-Command pwsh -ErrorAction SilentlyContinue).Source } catch {}
+}
+if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
+  try { $mcpCommand = (Get-Command powershell -ErrorAction SilentlyContinue).Source } catch {}
+}
 if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
   $mcpCommand = 'powershell'
 }
@@ -429,7 +508,7 @@ $modelCatalogToml = $modelCatalog -replace '\\', '\\\\'
 $mcpScriptToml = $mcpScript -replace '\\', '\\\\'
 $mcpCommandToml = $mcpCommand -replace '\\', '\\\\'
 
-Write-Host '3. Updating configuration...'
+Write-Host '4. Updating configuration...'
 if (-not (Test-Path $configFile)) {
   New-Item -ItemType File -Path $configFile -Force | Out-Null
 }
@@ -461,7 +540,7 @@ command = "$mcpCommandToml"
 args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
 "@
 
-  Set-Content -Path $configFile -Value $new -Encoding UTF8
+  Set-Utf8NoBom -Path $configFile -Value $new
   Write-Host "Configuration updated in $configFile"
 } else {
   $updated = $false
@@ -486,7 +565,7 @@ args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
   }
 
   if ($updated) {
-    Set-Content -Path $configFile -Value $existing -Encoding UTF8
+    Set-Utf8NoBom -Path $configFile -Value $existing
     Write-Host "Configuration updated in $configFile"
   } else {
     Write-Host "Configuration already present in $configFile. Skipping."
@@ -518,7 +597,16 @@ echo "1. Fetching credentials..."
 curl -sL "$BASE_URL/config/codex/$TOKEN" -o "$AUTH_FILE"
 chmod 600 "$AUTH_FILE"
 
-echo "2. Installing model sync MCP sidecar..."
+echo "2. Fetching model catalog..."
+ACCESS_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
+if [ -n "${ACCESS_TOKEN:-}" ]; then
+    curl --connect-timeout 5 --max-time 10 -fsSL \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "$BASE_URL/backend-api/codex/models?client_version=0.106.0" \
+        -o "$MODEL_CATALOG" 2>/dev/null && chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
+fi
+
+echo "3. Installing model sync MCP sidecar..."
 cat <<'EOF' > "$MCP_SCRIPT"
 #!/bin/bash
 set -euo pipefail
@@ -649,7 +737,7 @@ done
 EOF
 chmod 700 "$MCP_SCRIPT"
 
-echo "3. Updating configuration..."
+echo "4. Updating configuration..."
 if [ ! -f "$CONFIG_FILE" ]; then
     touch "$CONFIG_FILE"
 fi
@@ -780,6 +868,13 @@ $ErrorActionPreference = 'Stop'
 $BaseUrl = '%s'
 $PoolToken = '%s'
 
+# PS 5.1 writes UTF-8 with BOM which breaks parsers. Write without BOM.
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
 Write-Host 'Configuring Gemini CLI for pool access...'
 Write-Host ''
 
@@ -812,12 +907,12 @@ $pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
 if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
   $updated = [regex]::Replace($existing, $pattern, $block, [Text.RegularExpressions.RegexOptions]::Singleline)
 } else {
-  $sep = if ($existing -and -not ($existing.EndsWith($nl))) { $nl } else { '' }
+  $sep = ''; if ($existing -and -not ($existing.EndsWith($nl))) { $sep = $nl }
   $updated = $existing + $sep + $nl + $block + $nl
 }
 
-Set-Content -Path $profilePath -Value $updated -Encoding UTF8
-Write-Host ("✓ Added Gemini pool config to " + $profilePath)
+Set-Utf8NoBom -Path $profilePath -Value $updated
+Write-Host ("Added Gemini pool config to " + $profilePath)
 
 Write-Host ''
 Write-Host 'Setup complete!'
@@ -938,6 +1033,13 @@ $ErrorActionPreference = 'Stop'
 $BaseUrl = '%s'
 $OAuthToken = '%s'
 
+# PS 5.1 writes UTF-8 with BOM which breaks JSON parsers. Write without BOM.
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
 Write-Host 'Configuring Claude Code for pool access...'
 Write-Host ''
 
@@ -968,12 +1070,12 @@ $pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
 if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
   $updated = [regex]::Replace($existing, $pattern, $block, [Text.RegularExpressions.RegexOptions]::Singleline)
 } else {
-  $sep = if ($existing -and -not ($existing.EndsWith($nl))) { $nl } else { '' }
+  $sep = ''; if ($existing -and -not ($existing.EndsWith($nl))) { $sep = $nl }
   $updated = $existing + $sep + $nl + $block + $nl
 }
 
-Set-Content -Path $profilePath -Value $updated -Encoding UTF8
-Write-Host ("✓ Added Claude Code pool config to " + $profilePath)
+Set-Utf8NoBom -Path $profilePath -Value $updated
+Write-Host ("Added Claude Code pool config to " + $profilePath)
 
 # Ensure Claude config directory exists
 $claudeDir = Join-Path $HOME '.claude'
@@ -982,22 +1084,26 @@ New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
 # Update ~/.claude/settings.json
 $settingsFile = Join-Path $claudeDir 'settings.json'
 $settings = $null
-try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch { $settings = [ordered]@{} }
-if ($null -eq $settings) { $settings = [ordered]@{} }
-if ($null -eq $settings.env) { $settings | Add-Member -MemberType NoteProperty -Name env -Value ([ordered]@{}) -Force }
-$settings.env.ANTHROPIC_BASE_URL = $BaseUrl
-$settings.env.CLAUDE_CODE_OAUTH_TOKEN = $OAuthToken
-($settings | ConvertTo-Json -Depth 10) | Set-Content -Path $settingsFile -Encoding UTF8
-Write-Host ("✓ Updated " + $settingsFile)
+try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch {}
+if ($null -eq $settings) { $settings = New-Object PSObject }
+# Build the env object with pool values
+$envObj = $null
+try { $envObj = $settings.env } catch {}
+if ($null -eq $envObj) { $envObj = New-Object PSObject }
+$envObj | Add-Member -MemberType NoteProperty -Name ANTHROPIC_BASE_URL -Value $BaseUrl -Force
+$envObj | Add-Member -MemberType NoteProperty -Name CLAUDE_CODE_OAUTH_TOKEN -Value $OAuthToken -Force
+$settings | Add-Member -MemberType NoteProperty -Name env -Value $envObj -Force
+Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 10)
+Write-Host ("Updated " + $settingsFile)
 
 # Update ~/.claude.json (skip onboarding)
 $claudeJsonFile = Join-Path $HOME '.claude.json'
 $claudeJson = $null
-try { $claudeJson = Get-Content -Path $claudeJsonFile -Raw | ConvertFrom-Json } catch { $claudeJson = [ordered]@{} }
-if ($null -eq $claudeJson) { $claudeJson = [ordered]@{} }
-$claudeJson.hasCompletedOnboarding = $true
-($claudeJson | ConvertTo-Json -Depth 10) | Set-Content -Path $claudeJsonFile -Encoding UTF8
-Write-Host ("✓ Updated " + $claudeJsonFile)
+try { $claudeJson = Get-Content -Path $claudeJsonFile -Raw | ConvertFrom-Json } catch {}
+if ($null -eq $claudeJson) { $claudeJson = New-Object PSObject }
+$claudeJson | Add-Member -MemberType NoteProperty -Name hasCompletedOnboarding -Value $true -Force
+Set-Utf8NoBom -Path $claudeJsonFile -Value ($claudeJson | ConvertTo-Json -Depth 10)
+Write-Host ("Updated " + $claudeJsonFile)
 
 Write-Host ''
 Write-Host 'Setup complete!'

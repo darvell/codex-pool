@@ -233,7 +233,9 @@ func main() {
 	_ = http2.ConfigureTransport(standardTransport)
 
 	// Use hybrid transport: rustls fingerprint for Cloudflare-protected hosts, standard for others
-	transport := newRustlsHybridTransport(standardTransport)
+	// NOTE: rustls fingerprint disabled - Cloudflare started blocking the HTTP/1.1-only fingerprint
+	// with 403 challenge pages. Using standard Go transport with HTTP/2 for all hosts.
+	var transport http.RoundTripper = standardTransport
 
 	// Create refresh transport - may use a proxy for token refresh operations
 	var refreshTransport http.RoundTripper = transport
@@ -392,15 +394,21 @@ func extractConversationIDFromHeaders(headers http.Header) string {
 }
 
 func removeConflictingProxyHeaders(h http.Header) {
+	// Remove ALL Cloudflare headers (Cf-*) — our own Cloudflare adds these,
+	// and they confuse upstream Cloudflare (e.g. chatgpt.com) into blocking us.
+	for key := range h {
+		if strings.HasPrefix(strings.ToLower(key), "cf-") {
+			h.Del(key)
+		}
+	}
 	h.Del("Cdn-Loop")
-	h.Del("Cf-Connecting-Ip")
-	h.Del("Cf-Ray")
-	h.Del("Cf-Visitor")
-	h.Del("Cf-Warp-Tag-Id")
-	h.Del("Cf-Ipcountry")
+	// Remove proxy/forwarding headers added by Caddy or Cloudflare
 	h.Del("X-Forwarded-For")
 	h.Del("X-Forwarded-Proto")
+	h.Del("X-Forwarded-Host")
 	h.Del("X-Real-Ip")
+	h.Del("Via")
+	h.Del("True-Client-Ip")
 }
 
 func normalizePath(basePath, incoming string) string {
@@ -831,8 +839,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					// Add heavy penalty so this account drops below working ones
 					acc.Penalty += 10.0
 					acc.mu.Unlock()
-					// Always log 401/403 with error body for debugging
-					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s", reqID, acc.ID, resp.StatusCode, acc.Penalty, errBodyStr)
+					// Always log 401/403 with error body and response headers for debugging
+					var respHdrs []string
+					for k, v := range resp.Header {
+						respHdrs = append(respHdrs, fmt.Sprintf("%s=%s", k, v[0]))
+					}
+					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, acc.Penalty, errBodyStr, respHdrs)
 				}
 			} else {
 				acc.mu.Lock()
@@ -1349,6 +1361,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	outReq.Host = targetBase.Host
 	outReq.Header = cloneHeader(r.Header)
 	removeHopByHopHeaders(outReq.Header)
+	removeConflictingProxyHeaders(outReq.Header)
 	if r.ContentLength >= 0 {
 		outReq.ContentLength = r.ContentLength
 	}
@@ -1804,18 +1817,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	outReq.Host = targetBase.Host
 	outReq.Header = cloneHeader(r.Header)
 	removeHopByHopHeaders(outReq.Header)
-
-	// Keep the original Authorization header (don't delete it like we do for pool requests)
-	// Remove Cloudflare/proxy headers that would cause issues
-	outReq.Header.Del("Cdn-Loop")
-	outReq.Header.Del("Cf-Connecting-Ip")
-	outReq.Header.Del("Cf-Ray")
-	outReq.Header.Del("Cf-Visitor")
-	outReq.Header.Del("Cf-Warp-Tag-Id")
-	outReq.Header.Del("Cf-Ipcountry")
-	outReq.Header.Del("X-Forwarded-For")
-	outReq.Header.Del("X-Forwarded-Proto")
-	outReq.Header.Del("X-Real-Ip")
+	removeConflictingProxyHeaders(outReq.Header)
 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
@@ -1926,21 +1928,10 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	outReq.Host = targetBase.Host
 	outReq.Header = cloneHeader(r.Header)
 	removeHopByHopHeaders(outReq.Header)
+	removeConflictingProxyHeaders(outReq.Header)
 	if r.ContentLength >= 0 {
 		outReq.ContentLength = r.ContentLength
 	}
-
-	// Keep the original Authorization header (don't delete it like we do for pool requests)
-	// Remove Cloudflare/proxy headers that would cause issues
-	outReq.Header.Del("Cdn-Loop")
-	outReq.Header.Del("Cf-Connecting-Ip")
-	outReq.Header.Del("Cf-Ray")
-	outReq.Header.Del("Cf-Visitor")
-	outReq.Header.Del("Cf-Warp-Tag-Id")
-	outReq.Header.Del("Cf-Ipcountry")
-	outReq.Header.Del("X-Forwarded-For")
-	outReq.Header.Del("X-Forwarded-Proto")
-	outReq.Header.Del("X-Real-Ip")
 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
@@ -2056,22 +2047,12 @@ func (h *proxyHandler) tryOnce(
 		outReq.Host = targetBase.Host
 		outReq.Header = cloneHeader(in.Header)
 		removeHopByHopHeaders(outReq.Header)
+		removeConflictingProxyHeaders(outReq.Header)
 
 		// Always overwrite client-provided auth; the proxy is the single source of truth.
 		outReq.Header.Del("Authorization")
 		outReq.Header.Del("ChatGPT-Account-ID")
 		outReq.Header.Del("X-Api-Key") // Remove Claude API key from client (might be pool token)
-
-		// Remove Cloudflare/proxy headers that would cause issues with OpenAI's Cloudflare
-		outReq.Header.Del("Cdn-Loop")
-		outReq.Header.Del("Cf-Connecting-Ip")
-		outReq.Header.Del("Cf-Ray")
-		outReq.Header.Del("Cf-Visitor")
-		outReq.Header.Del("Cf-Warp-Tag-Id")
-		outReq.Header.Del("Cf-Ipcountry")
-		outReq.Header.Del("X-Forwarded-For")
-		outReq.Header.Del("X-Forwarded-Proto")
-		outReq.Header.Del("X-Real-Ip")
 		// Remove Gemini API key header (we use Bearer auth for pool accounts)
 		outReq.Header.Del("x-goog-api-key")
 
@@ -2086,19 +2067,17 @@ func (h *proxyHandler) tryOnce(
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
 
-		// Debug: log outgoing headers for Claude OAuth
-		if h.cfg.debug && provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
+		// Debug: log ALL outgoing headers
+		if h.cfg.debug {
 			var hdrs []string
 			for k, v := range outReq.Header {
-				if strings.HasPrefix(strings.ToLower(k), "anthropic") || strings.HasPrefix(strings.ToLower(k), "x-stainless") || strings.ToLower(k) == "authorization" {
-					val := v[0]
-					if len(val) > 30 {
-						val = val[:30]
-					}
-					hdrs = append(hdrs, fmt.Sprintf("%s=%s", k, val))
+				val := v[0]
+				if len(val) > 80 {
+					val = val[:80]
 				}
+				hdrs = append(hdrs, fmt.Sprintf("%s=%s", k, val))
 			}
-			log.Printf("[%s] claude oauth outgoing headers: %v", reqID, hdrs)
+			log.Printf("[%s] ALL outgoing headers (%s): %v", reqID, provider.Type(), hdrs)
 		}
 
 		// Keep the original User-Agent from the client - don't override it
