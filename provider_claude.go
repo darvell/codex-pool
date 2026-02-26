@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -79,35 +78,9 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 }
 
 func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
-	// Required header for Claude API
-	req.Header.Set("anthropic-version", "2023-06-01")
-
 	// OAuth tokens start with sk-ant-oat, API keys with sk-ant-api
 	if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
 		req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
-		// Required for OAuth tokens to work - tells Anthropic this is a browser/CLI client
-		req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-		// Beta features header - must include oauth-2025-04-20 for OAuth tokens
-		req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27")
-		// User-Agent must match Claude Code
-		req.Header.Set("User-Agent", "claude-cli/2.0.76 (external, cli)")
-		// X-App header identifies the client
-		req.Header.Set("X-App", "cli")
-		// Standard request headers
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Accept-Language", "*")
-		req.Header.Set("Accept-Encoding", "gzip, br")
-		req.Header.Set("Sec-Fetch-Mode", "cors")
-		// Stainless SDK headers (must match Claude Code client)
-		req.Header.Set("x-stainless-lang", "js")
-		req.Header.Set("x-stainless-package-version", "0.70.0")
-		req.Header.Set("x-stainless-os", "MacOS")
-		req.Header.Set("x-stainless-arch", "arm64")
-		req.Header.Set("x-stainless-runtime", "node")
-		req.Header.Set("x-stainless-runtime-version", "v24.3.0")
-		req.Header.Set("x-stainless-retry-count", "0")
-		req.Header.Set("x-stainless-timeout", "600")
-		req.Header.Set("x-stainless-helper-method", "stream")
 	} else {
 		req.Header.Set("X-Api-Key", acc.AccessToken)
 	}
@@ -157,6 +130,10 @@ func (p *ClaudeProvider) ParseUsage(obj map[string]any) *RequestUsage {
 		if ru.InputTokens == 0 {
 			return nil
 		}
+		// Extract model from message object (e.g., "claude-sonnet-4-5-20250929")
+		if model, ok := msg["model"].(string); ok {
+			ru.Model = model
+		}
 		// Clamp to non-negative since cached can exceed input in Claude's API
 		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens)
 		return ru
@@ -166,118 +143,9 @@ func (p *ClaudeProvider) ParseUsage(obj map[string]any) *RequestUsage {
 }
 
 func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
-	acc.mu.Lock()
-	defer acc.mu.Unlock()
-
-	snap := acc.Usage
-	snap.RetrievedAt = time.Now()
-	snap.Source = "headers"
-
-	// Try unified rate limit headers first (used by Claude Code CLI)
-	// These have format: anthropic-ratelimit-unified-{type}-utilization (0-100)
-	// and anthropic-ratelimit-unified-{type}-reset (Unix seconds)
-	unifiedTypes := []string{"primary", "secondary", "tokens", "requests"}
-	foundUnified := false
-	foundPrimaryUsage := false
-	foundPrimaryReset := false
-	foundSecondaryUsage := false
-	foundSecondaryReset := false
-
-	for _, ut := range unifiedTypes {
-		utilization := headers.Get("anthropic-ratelimit-unified-" + ut + "-utilization")
-		reset := headers.Get("anthropic-ratelimit-unified-" + ut + "-reset")
-
-		if utilization != "" {
-			foundUnified = true
-			if util, err := strconv.ParseFloat(utilization, 64); err == nil {
-				// Utilization is 0-100, convert to 0-1
-				normalized := util / 100.0
-				if ut == "primary" || ut == "tokens" {
-					snap.PrimaryUsedPercent = normalized
-					snap.PrimaryUsed = normalized
-					foundPrimaryUsage = true
-				} else if ut == "secondary" || ut == "requests" {
-					snap.SecondaryUsedPercent = normalized
-					snap.SecondaryUsed = normalized
-					foundSecondaryUsage = true
-				}
-			}
-		}
-
-		if reset != "" {
-			if resetSec, err := strconv.ParseInt(reset, 10, 64); err == nil {
-				resetTime := time.Unix(resetSec, 0)
-				if ut == "primary" || ut == "tokens" {
-					snap.PrimaryResetAt = resetTime
-					foundPrimaryReset = true
-				} else if ut == "secondary" || ut == "requests" {
-					snap.SecondaryResetAt = resetTime
-					foundSecondaryReset = true
-				}
-			}
-		}
-	}
-
-	// Also check for unified status
-	if status := headers.Get("anthropic-ratelimit-unified-status"); status != "" {
-		// Status could be "ok", "warning", "exceeded" etc
-		foundUnified = true
-	}
-
-	// Fall back to legacy anthropic-ratelimit-* headers, but allow partial fallback even when
-	// some unified headers are present (some responses only include request headers).
-	if !foundUnified || !foundPrimaryUsage || !foundPrimaryReset {
-		tokensLimit := headers.Get("anthropic-ratelimit-tokens-limit")
-		tokensRemaining := headers.Get("anthropic-ratelimit-tokens-remaining")
-
-		// Parse token limits
-		if !foundPrimaryUsage && tokensLimit != "" && tokensRemaining != "" {
-			limit, err1 := strconv.ParseInt(tokensLimit, 10, 64)
-			remaining, err2 := strconv.ParseInt(tokensRemaining, 10, 64)
-			if err1 == nil && err2 == nil && limit > 0 {
-				used := float64(limit-remaining) / float64(limit)
-				snap.PrimaryUsedPercent = used
-				snap.PrimaryUsed = used
-				foundPrimaryUsage = true
-			}
-		}
-
-		// Parse token reset time
-		if !foundPrimaryReset {
-			v := headers.Get("anthropic-ratelimit-tokens-reset")
-			if t, err := time.Parse(time.RFC3339, v); err == nil {
-				snap.PrimaryResetAt = t
-				foundPrimaryReset = true
-			}
-		}
-	}
-
-	if !foundUnified || !foundSecondaryUsage || !foundSecondaryReset {
-		// Parse request limits as secondary usage
-		reqLimit := headers.Get("anthropic-ratelimit-requests-limit")
-		reqRemaining := headers.Get("anthropic-ratelimit-requests-remaining")
-		if !foundSecondaryUsage && reqLimit != "" && reqRemaining != "" {
-			limit, err1 := strconv.ParseInt(reqLimit, 10, 64)
-			remaining, err2 := strconv.ParseInt(reqRemaining, 10, 64)
-			if err1 == nil && err2 == nil && limit > 0 {
-				used := float64(limit-remaining) / float64(limit)
-				snap.SecondaryUsedPercent = used
-				snap.SecondaryUsed = used
-				foundSecondaryUsage = true
-			}
-		}
-
-		if !foundSecondaryReset {
-			if v := headers.Get("anthropic-ratelimit-requests-reset"); v != "" {
-				if t, err := time.Parse(time.RFC3339, v); err == nil {
-					snap.SecondaryResetAt = t
-					foundSecondaryReset = true
-				}
-			}
-		}
-	}
-
-	acc.Usage = mergeUsage(acc.Usage, snap)
+	// Claude usage should come from the periodic /api/oauth/usage poller only.
+	_ = acc
+	_ = headers
 }
 
 func (p *ClaudeProvider) UpstreamURL(path string) *url.URL {

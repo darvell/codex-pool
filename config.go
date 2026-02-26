@@ -2,24 +2,26 @@ package main
 
 import (
 	"os"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 )
 
 // ConfigFile represents the config.toml structure.
 type ConfigFile struct {
-	ListenAddr      string `toml:"listen_addr"`
-	PoolDir         string `toml:"pool_dir"`
-	DBPath          string `toml:"db_path"`
-	MaxAttempts     int    `toml:"max_attempts"`
-	DisableRefresh  bool   `toml:"disable_refresh"`
-	RefreshProxyURL string `toml:"refresh_proxy_url"` // HTTP proxy for refresh operations
-	Debug           bool   `toml:"debug"`
-	PublicURL       string `toml:"public_url"`
-	FriendCode      string `toml:"friend_code"`
-	FriendName      string `toml:"friend_name"`
-	FriendTagline   string `toml:"friend_tagline"`
-	AdminToken      string `toml:"admin_token"`
+	ListenAddr      string  `toml:"listen_addr"`
+	PoolDir         string  `toml:"pool_dir"`
+	DBPath          string  `toml:"db_path"`
+	MaxAttempts     int     `toml:"max_attempts"`
+	DisableRefresh  bool    `toml:"disable_refresh"`
+	RefreshProxyURL string  `toml:"refresh_proxy_url"` // HTTP proxy for refresh operations
+	Debug           bool    `toml:"debug"`
+	PublicURL       string  `toml:"public_url"`
+	FriendCode      string  `toml:"friend_code"`
+	FriendName      string  `toml:"friend_name"`
+	FriendTagline   string  `toml:"friend_tagline"`
+	AdminToken      string  `toml:"admin_token"`
+	TierThreshold   float64 `toml:"tier_threshold"` // Secondary usage % threshold for tier preference (default 0.15)
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
 }
@@ -82,6 +84,19 @@ func getConfigInt(envKey string, configValue int, defaultValue int) int {
 	if v := os.Getenv(envKey); v != "" {
 		if n, err := parseInt64(v); err == nil && n > 0 {
 			return int(n)
+		}
+	}
+	if configValue > 0 {
+		return configValue
+	}
+	return defaultValue
+}
+
+// getConfigFloat64 returns the config value with priority: env var > config file > default.
+func getConfigFloat64(envKey string, configValue float64, defaultValue float64) float64 {
+	if v := os.Getenv(envKey); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	if configValue > 0 {

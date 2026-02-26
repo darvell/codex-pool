@@ -31,6 +31,7 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 - Routes to whichever account has capacity
 - Pins conversations to the same account (ensures standard cached token performance)
 - Auto-refreshes tokens before they expire
+- Proxies WebSocket upgrades (including Codex Responses WS and realtime `/ws` flows)
 - Tracks usage so you can see who's burning through quota
 
 ---

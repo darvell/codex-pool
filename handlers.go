@@ -104,6 +104,21 @@ func (h *proxyHandler) reloadAccounts() {
 	if h.pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", h.cfg.poolDir)
 	}
+
+	// Restore persisted usage totals so hot-reloads don't lose data
+	if h.store != nil {
+		if persisted, err := h.store.loadAllAccountUsage(); err == nil && len(persisted) > 0 {
+			h.pool.mu.RLock()
+			for _, a := range h.pool.accounts {
+				if usage, ok := persisted[a.ID]; ok {
+					a.mu.Lock()
+					a.Totals = usage
+					a.mu.Unlock()
+				}
+			}
+			h.pool.mu.RUnlock()
+		}
+	}
 }
 
 // resurrectAccount marks a dead account as alive and resets its penalty.

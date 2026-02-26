@@ -2,10 +2,76 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
 )
+
+// idleTimeoutReader wraps an io.ReadCloser and returns an error if no data
+// is received for longer than the configured idle timeout. This prevents
+// zombie SSE connections where the upstream stops sending data but never
+// closes the TCP connection.
+type idleTimeoutReader struct {
+	rc      io.ReadCloser
+	timeout time.Duration
+	timer   *time.Timer
+	done    chan struct{}
+	cancel  func() // cancel the request context
+	closed  bool
+}
+
+func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration, cancel func()) *idleTimeoutReader {
+	r := &idleTimeoutReader{
+		rc:      rc,
+		timeout: timeout,
+		timer:   time.NewTimer(timeout),
+		done:    make(chan struct{}),
+		cancel:  cancel,
+	}
+	go r.watchdog()
+	return r
+}
+
+func (r *idleTimeoutReader) watchdog() {
+	select {
+	case <-r.timer.C:
+		// Idle timeout expired - cancel the request context which will
+		// cause the Read to return with a context error.
+		r.cancel()
+	case <-r.done:
+		r.timer.Stop()
+	}
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	n, err := r.rc.Read(p)
+	if n > 0 {
+		// Got data - reset the idle timer
+		r.timer.Reset(r.timeout)
+	}
+	if err != nil {
+		// Wrap context.Canceled with a more descriptive message
+		if err.Error() == "context canceled" || err.Error() == "context deadline exceeded" {
+			// Check if our timer fired (as opposed to a client disconnect)
+			select {
+			case <-r.timer.C:
+				return n, fmt.Errorf("SSE stream idle for %v, closing", r.timeout)
+			default:
+			}
+		}
+	}
+	return n, err
+}
+
+func (r *idleTimeoutReader) Close() error {
+	if !r.closed {
+		r.closed = true
+		close(r.done)
+		r.timer.Stop()
+	}
+	return r.rc.Close()
+}
 
 type limitedWriter struct {
 	w io.Writer
@@ -86,7 +152,12 @@ func (sw *sseInterceptWriter) scanForEvents() {
 			if idx < 0 {
 				// Keep buffer bounded - if it gets too big without events, truncate front
 				if len(sw.buf) > 32*1024 {
-					sw.buf = sw.buf[len(sw.buf)-16*1024:]
+					cutPoint := len(sw.buf) - 16*1024
+					// Advance past any partial UTF-8 sequence at the cut point
+					for cutPoint < len(sw.buf) && cutPoint > 0 && sw.buf[cutPoint]&0xC0 == 0x80 {
+						cutPoint++
+					}
+					sw.buf = sw.buf[cutPoint:]
 				}
 				return
 			}

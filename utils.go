@@ -137,6 +137,25 @@ func removeHopByHopHeaders(h http.Header) {
 	}
 }
 
+func headerContainsToken(h http.Header, name, token string) bool {
+	for _, value := range h.Values(name) {
+		for _, part := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isWebSocketUpgradeRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return headerContainsToken(r.Header, "Connection", "Upgrade") &&
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

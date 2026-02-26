@@ -320,12 +320,16 @@ func (p *CodexProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 }
 
 func (p *CodexProvider) UpstreamURL(path string) *url.URL {
+	if strings.HasPrefix(path, "/backend-api/") {
+		return p.whamBase
+	}
 	return p.responsesBase
 }
 
 func (p *CodexProvider) MatchesPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/") ||
-		strings.HasPrefix(path, "/responses/") ||
+		strings.HasPrefix(path, "/responses") ||
+		strings.HasPrefix(path, "/ws") ||
 		strings.HasPrefix(path, "/backend-api/") ||
 		strings.HasPrefix(path, "/api/codex/")
 }
@@ -334,6 +338,15 @@ func (p *CodexProvider) NormalizePath(path string) string {
 	// Map /v1/responses/* and /responses/* to the correct upstream path
 	if strings.HasPrefix(path, "/v1/responses") || strings.HasPrefix(path, "/responses") {
 		return mapResponsesPath(path)
+	}
+	// If caller already included /backend-api in the request path, avoid
+	// duplicating it when we join against upstreams that also include /backend-api.
+	if strings.HasPrefix(path, "/backend-api/") {
+		trimmed := strings.TrimPrefix(path, "/backend-api")
+		if trimmed == "" {
+			return "/"
+		}
+		return trimmed
 	}
 	return path
 }

@@ -106,6 +106,12 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleDailyBreakdown(w, r)
 		return
+	case "/api/pool/hourly":
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		h.handleGlobalHourly(w, r)
+		return
 	case "/favicon.ico":
 		http.NotFound(w, r)
 		return
@@ -202,6 +208,12 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// User daily usage: /api/pool/users/:id/daily
 	if strings.HasPrefix(r.URL.Path, "/api/pool/users/") && strings.HasSuffix(r.URL.Path, "/daily") {
 		h.handleUserDaily(w, r)
+		return
+	}
+
+	// User hourly usage: /api/pool/users/:id/hourly
+	if strings.HasPrefix(r.URL.Path, "/api/pool/users/") && strings.HasSuffix(r.URL.Path, "/hourly") {
+		h.handleUserHourly(w, r)
 		return
 	}
 

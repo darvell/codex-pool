@@ -736,26 +736,34 @@ cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
             document.getElementById('codex-one-liner').textContent =
 `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'
 model_provider = "codex-pool"
-chatgpt_base_url = "${BASE_URL}"
+chatgpt_base_url = "${BASE_URL}/backend-api"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${BASE_URL}/v1"
+base_url = "${BASE_URL}"
 wire_api = "responses"
 requires_openai_auth = true
+supports_websockets = true
+
+[model_providers.codex-pool.features]
+responses_websockets_v2 = true
 EOF
 echo "Config written! Copy an auth.json from your pool folder:"
 echo "  cp pool/ACCOUNT.json ~/.codex/auth.json"`;
 
             document.getElementById('codex-config').textContent =
 `model_provider = "codex-pool"
-chatgpt_base_url = "${BASE_URL}"
+chatgpt_base_url = "${BASE_URL}/backend-api"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${BASE_URL}/v1"
+base_url = "${BASE_URL}"
 wire_api = "responses"
-requires_openai_auth = true`;
+requires_openai_auth = true
+supports_websockets = true
+
+[model_providers.codex-pool.features]
+responses_websockets_v2 = true`;
 
             // Claude
             document.getElementById('claude-one-liner').textContent =

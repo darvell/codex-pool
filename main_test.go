@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -15,6 +14,28 @@ func TestBuildWhamUsageURLKeepsBackendAPI(t *testing.T) {
 	expected := "https://chatgpt.com/backend-api/wham/usage"
 	if got != expected {
 		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestCodexProviderUpstreamURLBackendAPIPathUsesWhamBase(t *testing.T) {
+	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
+	provider := NewCodexProvider(responsesBase, whamBase, nil)
+
+	got := provider.UpstreamURL("/backend-api/codex/models")
+	if got.String() != whamBase.String() {
+		t.Fatalf("expected wham base %s, got %s", whamBase, got)
+	}
+}
+
+func TestCodexProviderNormalizePathBackendAPIPathStripsPrefix(t *testing.T) {
+	provider := &CodexProvider{}
+
+	normalized := provider.NormalizePath("/backend-api/codex/models")
+	got := singleJoin("/backend-api", normalized)
+	expected := "/backend-api/codex/models"
+	if got != expected {
+		t.Fatalf("expected %s, got %s (normalized=%s)", expected, got, normalized)
 	}
 }
 
@@ -56,64 +77,112 @@ func TestParseRequestUsageFromSSE(t *testing.T) {
 	}
 }
 
-func TestClaudeProviderParseUsageHeadersPartialUnifiedFallback(t *testing.T) {
+func TestExtractRequestedModelFromJSON(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"hi"}`)
+	got := extractRequestedModelFromJSON(body)
+	if got != "gpt-5.3-codex-spark" {
+		t.Fatalf("model=%q", got)
+	}
+	if !modelRequiresCodexPro(got) {
+		t.Fatalf("expected model to require codex pro")
+	}
+}
+
+func TestClaudeProviderParseUsageHeadersIgnored(t *testing.T) {
 	acc := &Account{Type: AccountTypeClaude}
 	provider := &ClaudeProvider{}
-	now := time.Now().UTC()
-
-	primaryReset := now.Add(2 * time.Hour).Truncate(time.Second)
-	secondaryReset := now.Add(6 * 24 * time.Hour).Truncate(time.Second)
+	retrievedAt := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	primaryReset := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	secondaryReset := time.Now().UTC().Add(3 * 24 * time.Hour).Truncate(time.Second)
+	acc.Usage = UsageSnapshot{
+		PrimaryUsedPercent:   0.25,
+		SecondaryUsedPercent: 0.33,
+		PrimaryUsed:          0.25,
+		SecondaryUsed:        0.33,
+		PrimaryResetAt:       primaryReset,
+		SecondaryResetAt:     secondaryReset,
+		RetrievedAt:          retrievedAt,
+		Source:               "claude-api",
+	}
 
 	provider.ParseUsageHeaders(acc, mapToHeader(map[string]string{
-		// Unified only includes request utilization/reset (common for some responses).
-		"anthropic-ratelimit-unified-requests-utilization": "6.0",
-		"anthropic-ratelimit-unified-requests-reset":       strconv.FormatInt(secondaryReset.Unix(), 10),
-
-		// Legacy tokens headers should still populate primary usage/reset.
-		"anthropic-ratelimit-tokens-limit":     "100",
-		"anthropic-ratelimit-tokens-remaining": "44",
-		"anthropic-ratelimit-tokens-reset":     primaryReset.Format(time.RFC3339),
+		"anthropic-ratelimit-unified-tokens-utilization":   "99.9",
+		"anthropic-ratelimit-unified-requests-utilization": "88.8",
+		"anthropic-ratelimit-unified-tokens-reset":         "9999999999",
+		"anthropic-ratelimit-unified-requests-reset":       "9999999999",
 	}))
 
-	if acc.Usage.PrimaryUsedPercent != 0.56 {
+	if acc.Usage.PrimaryUsedPercent != 0.25 {
 		t.Fatalf("primary percent = %v", acc.Usage.PrimaryUsedPercent)
 	}
-	if acc.Usage.SecondaryUsedPercent != 0.06 {
+	if acc.Usage.SecondaryUsedPercent != 0.33 {
 		t.Fatalf("secondary percent = %v", acc.Usage.SecondaryUsedPercent)
 	}
-	if acc.Usage.PrimaryResetAt.IsZero() {
-		t.Fatalf("expected primary reset to be set")
-	}
-	if acc.Usage.SecondaryResetAt.IsZero() {
-		t.Fatalf("expected secondary reset to be set")
-	}
-	// Match timestamps to the second (RFC3339 parse truncates to second precision here).
 	if acc.Usage.PrimaryResetAt.UTC().Unix() != primaryReset.Unix() {
 		t.Fatalf("primary reset = %v want %v", acc.Usage.PrimaryResetAt.UTC(), primaryReset)
 	}
 	if acc.Usage.SecondaryResetAt.UTC().Unix() != secondaryReset.Unix() {
 		t.Fatalf("secondary reset = %v want %v", acc.Usage.SecondaryResetAt.UTC(), secondaryReset)
 	}
+	if acc.Usage.RetrievedAt.UTC().Unix() != retrievedAt.Unix() {
+		t.Fatalf("retrieved_at = %v want %v", acc.Usage.RetrievedAt.UTC(), retrievedAt)
+	}
 }
 
-func TestClaudeProviderParseUsageHeadersZeroUtilizationStillUpdatesReset(t *testing.T) {
-	acc := &Account{Type: AccountTypeClaude}
-	provider := &ClaudeProvider{}
-	resetAt := time.Now().UTC().Add(5 * time.Hour).Truncate(time.Second)
-
-	provider.ParseUsageHeaders(acc, mapToHeader(map[string]string{
-		"anthropic-ratelimit-unified-tokens-utilization": "0",
-		"anthropic-ratelimit-unified-tokens-reset":       strconv.FormatInt(resetAt.Unix(), 10),
-	}))
-
-	if acc.Usage.PrimaryUsedPercent != 0 {
-		t.Fatalf("primary percent = %v", acc.Usage.PrimaryUsedPercent)
+func TestMergeUsageClaudeAPIAllowsPerWindowResetToZero(t *testing.T) {
+	prev := UsageSnapshot{
+		PrimaryUsedPercent:   0.5,
+		SecondaryUsedPercent: 0.25,
+		PrimaryUsed:          0.5,
+		SecondaryUsed:        0.25,
+		RetrievedAt:          time.Now().UTC().Add(-10 * time.Minute),
+		Source:               "claude-api",
 	}
-	if acc.Usage.PrimaryResetAt.IsZero() {
-		t.Fatalf("expected primary reset to be set")
+	next := UsageSnapshot{
+		PrimaryUsedPercent:   0,
+		SecondaryUsedPercent: 0.25,
+		PrimaryUsed:          0,
+		SecondaryUsed:        0.25,
+		RetrievedAt:          time.Now().UTC(),
+		Source:               "claude-api",
 	}
-	if acc.Usage.PrimaryResetAt.UTC().Unix() != resetAt.Unix() {
-		t.Fatalf("primary reset = %v want %v", acc.Usage.PrimaryResetAt.UTC(), resetAt)
+
+	got := mergeUsage(prev, next)
+	if got.PrimaryUsedPercent != 0 {
+		t.Fatalf("primary percent = %v", got.PrimaryUsedPercent)
+	}
+	if got.PrimaryUsed != 0 {
+		t.Fatalf("primary used = %v", got.PrimaryUsed)
+	}
+	if got.SecondaryUsedPercent != 0.25 {
+		t.Fatalf("secondary percent = %v", got.SecondaryUsedPercent)
+	}
+}
+
+func TestParseClaudeResetAt(t *testing.T) {
+	resetAt := time.Now().UTC().Add(4 * time.Hour).Truncate(time.Second)
+
+	if _, ok := parseClaudeResetAt(nil); ok {
+		t.Fatalf("expected nil reset value to be ignored")
+	}
+	if _, ok := parseClaudeResetAt(""); ok {
+		t.Fatalf("expected empty reset value to be ignored")
+	}
+
+	fromString, ok := parseClaudeResetAt(resetAt.Format(time.RFC3339))
+	if !ok {
+		t.Fatalf("expected RFC3339 reset to parse")
+	}
+	if fromString.UTC().Unix() != resetAt.Unix() {
+		t.Fatalf("string reset = %v want %v", fromString.UTC(), resetAt)
+	}
+
+	fromUnix, ok := parseClaudeResetAt(float64(resetAt.Unix()))
+	if !ok {
+		t.Fatalf("expected unix reset to parse")
+	}
+	if fromUnix.UTC().Unix() != resetAt.Unix() {
+		t.Fatalf("unix reset = %v want %v", fromUnix.UTC(), resetAt)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,6 +170,9 @@ type RequestUsage struct {
 	// Rate limit snapshot after this request
 	PrimaryUsedPct   float64
 	SecondaryUsedPct float64
+	// Model and provider info
+	Model       string      `json:"model,omitempty"`        // e.g., "claude-sonnet-4-5-20250929", "o4-mini"
+	AccountType AccountType `json:"account_type,omitempty"` // "claude", "codex", "gemini"
 }
 
 // AccountUsage stores aggregates for an account with time windows.
@@ -380,15 +382,16 @@ func parseClaims(idToken string) jwtClaims {
 
 // poolState wraps accounts with a mutex.
 type poolState struct {
-	mu       sync.RWMutex
-	accounts []*Account
-	convPin  map[string]string // conversation_id -> account ID
-	debug    bool
-	rr       uint64
+	mu            sync.RWMutex
+	accounts      []*Account
+	convPin       map[string]string // conversation_id -> account ID
+	debug         bool
+	rr            uint64
+	tierThreshold float64 // secondary usage % at which we stop preferring a tier
 }
 
 func newPoolState(accs []*Account, debug bool) *poolState {
-	return &poolState{accounts: accs, convPin: map[string]string{}, debug: debug}
+	return &poolState{accounts: accs, convPin: map[string]string{}, debug: debug, tierThreshold: 0.15}
 }
 
 // replace swaps the pool accounts (used on reload).
@@ -406,21 +409,54 @@ func (p *poolState) count() int {
 	return len(p.accounts)
 }
 
-// candidate selects the best account, optionally filtering by type.
+// accountTier returns the preference tier for an account (1 = best, 2 = lesser).
+// Tier 1: max for Claude, pro for Codex, ultra for Gemini
+// Tier 2: everything else
+func accountTier(accType AccountType, planType string) int {
+	switch accType {
+	case AccountTypeClaude:
+		if planType == "max" {
+			return 1
+		}
+		return 2
+	case AccountTypeCodex:
+		if planType == "pro" {
+			return 1
+		}
+		return 2
+	case AccountTypeGemini:
+		if planType == "ultra" {
+			return 1
+		}
+		return 2
+	}
+	return 2
+}
+
+// candidate selects the best account using tiered selection, optionally filtering by type.
 // If accountType is empty, all account types are considered.
-func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType) *Account {
+//
+// Selection strategy:
+//  1. Conversation pinning (stickiness) — only unpin at hard limits
+//  2. Split eligible accounts into Tier 1 and Tier 2
+//  3. If any Tier 1 account has secondary < tierThreshold → pick from Tier 1
+//  4. Else if any Tier 2 account has secondary < tierThreshold → pick from Tier 2
+//  5. Else → pick from all accounts with most headroom
+//  6. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
+func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := time.Now()
 
+	// Conversation pinning — keep using the same account unless at hard limits
 	if conversationID != "" {
 		if id, ok := p.convPin[conversationID]; ok {
 			if exclude != nil && exclude[id] {
 				// pinned excluded; fall through to selection
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
-				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType)
+				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan)
 				if ok && a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 					ok = false
 					if p.debug {
@@ -433,16 +469,15 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 							id, a.RateLimitUntil.Format(time.RFC3339))
 					}
 				}
-				// Don't use pinned account if it's nearly exhausted (>90% weekly usage)
-				// This prevents conversation pinning from burning out an account completely
+				// Unpin at 95% secondary (raised from 90% for better stickiness)
 				secondaryUsed := a.Usage.SecondaryUsedPercent
 				if secondaryUsed == 0 {
 					secondaryUsed = a.Usage.SecondaryUsed
 				}
-				if secondaryUsed > 0.90 {
+				if ok && secondaryUsed >= 0.95 {
 					ok = false
 					if p.debug {
-						log.Printf("unpinning conversation %s from exhausted account %s (%.0f%% weekly)",
+						log.Printf("unpinning conversation %s from exhausted account %s (%.0f%% secondary >= 95%%)",
 							conversationID, id, secondaryUsed*100)
 					}
 				}
@@ -459,7 +494,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 					}
 				}
 				// Also unpin if token is expired - don't wait for a failed request
-				if ok && a.ExpiresAt.Before(now) {
+				if ok && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
 					ok = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from expired account %s",
@@ -474,12 +509,20 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		}
 	}
 
-	var best *Account
-	bestScore := math.Inf(-1)
 	n := len(p.accounts)
 	if n == 0 {
 		return nil
 	}
+
+	// Collect eligible accounts with their tier and score
+	type scoredAccount struct {
+		acc          *Account
+		tier         int
+		secondaryPct float64
+		score        float64
+	}
+	var eligible []scoredAccount
+
 	start := int(p.rr % uint64(n))
 	for i := 0; i < n; i++ {
 		a := p.accounts[(start+i)%n]
@@ -487,7 +530,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) {
+		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) {
 			a.mu.Unlock()
 			continue
 		}
@@ -503,7 +546,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 				log.Printf("ignoring rate limit for codex account %s (until %s)", a.ID, a.RateLimitUntil.Format(time.RFC3339))
 			}
 		}
-		// Hard exclusion: accounts with >=95% primary (5hr) usage should never be selected
+		// Hard exclusion: >=95% primary usage
 		primaryUsed := a.Usage.PrimaryUsedPercent
 		if primaryUsed == 0 {
 			primaryUsed = a.Usage.PrimaryUsed
@@ -515,7 +558,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			}
 			continue
 		}
-		// Hard exclusion: accounts at >=99% weekly usage are completely unusable
+		// Hard exclusion: >=99% secondary usage
 		secondaryUsed := a.Usage.SecondaryUsedPercent
 		if secondaryUsed == 0 {
 			secondaryUsed = a.Usage.SecondaryUsed
@@ -523,23 +566,74 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		if secondaryUsed >= 0.99 {
 			a.mu.Unlock()
 			if p.debug {
-				log.Printf("excluding account %s: weekly usage %.1f%% >= 99%%", a.ID, secondaryUsed*100)
+				log.Printf("excluding account %s: secondary usage %.1f%% >= 99%%", a.ID, secondaryUsed*100)
 			}
 			continue
 		}
+		tier := accountTier(a.Type, a.PlanType)
 		score := scoreAccountLocked(a, now)
 		a.mu.Unlock()
-		// Slightly prefer less-loaded accounts to reduce tail latency.
+		// Prefer less-loaded accounts
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		if score > bestScore {
-			bestScore = score
-			best = a
+		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score})
+	}
+
+	if len(eligible) == 0 {
+		return nil
+	}
+
+	threshold := p.tierThreshold
+
+	// Try Tier 1 accounts below threshold
+	var bestTier1 *scoredAccount
+	for i := range eligible {
+		sa := &eligible[i]
+		if sa.tier == 1 && sa.secondaryPct < threshold {
+			if bestTier1 == nil || sa.score > bestTier1.score {
+				bestTier1 = sa
+			}
 		}
 	}
-	if best != nil {
+	if bestTier1 != nil {
 		p.rr++
+		return bestTier1.acc
 	}
-	return best
+
+	// Try Tier 2 accounts below threshold
+	var bestTier2 *scoredAccount
+	for i := range eligible {
+		sa := &eligible[i]
+		if sa.tier == 2 && sa.secondaryPct < threshold {
+			if bestTier2 == nil || sa.score > bestTier2.score {
+				bestTier2 = sa
+			}
+		}
+	}
+	if bestTier2 != nil {
+		p.rr++
+		return bestTier2.acc
+	}
+
+	// All accounts past threshold — pick the one with highest score (most headroom)
+	var bestAll *scoredAccount
+	for i := range eligible {
+		sa := &eligible[i]
+		if bestAll == nil || sa.score > bestAll.score {
+			bestAll = sa
+		}
+	}
+	if bestAll != nil {
+		p.rr++
+		return bestAll.acc
+	}
+	return nil
+}
+
+func planMatchesRequired(planType, requiredPlan string) bool {
+	if requiredPlan == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(planType), strings.TrimSpace(requiredPlan))
 }
 
 // countByType returns the number of accounts of a given type (or all if empty).
@@ -675,8 +769,11 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		headroom = 0.01
 	}
 
-	// Plan preference: Drain Plus accounts first (until 80% used), then fall back to Pro/Team.
-	planPreference := planPreferenceMultiplier(a.PlanType, secondaryUsed)
+	// Recency bonus: accounts used in the last 5 minutes get a small bonus
+	// to reduce swapping between accounts with similar scores (stickiness).
+	if !a.LastUsed.IsZero() && now.Sub(a.LastUsed) < 5*time.Minute {
+		headroom += 0.1
+	}
 
 	// credits bonuses
 	creditBonus := 1.0
@@ -684,43 +781,7 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 		creditBonus = 1.1
 	}
 
-	return headroom * planPreference * creditBonus
-}
-
-// planPreferenceMultiplier returns a multiplier that affects account selection preference.
-// We drain Plus accounts first (until 80% used), then fall back to Pro/Team.
-// Higher value = more preferred.
-func planPreferenceMultiplier(planType string, secondaryUsedPct float64) float64 {
-	switch planType {
-	case "ultra":
-		// Ultra has ~10x capacity of other plans - strongly prefer
-		if secondaryUsedPct < 0.9 {
-			return 5.0 // Very high preference - use this account first
-		}
-		return 2.0 // Still prefer even when nearly full
-	case "max":
-		// Claude Max plans have higher capacity - prefer when available
-		if secondaryUsedPct < 0.9 {
-			return 1.5 // Prefer max plans when they have capacity
-		}
-		return 1.0
-	case "plus":
-		// Drain Plus first - prefer until 80% used
-		if secondaryUsedPct < 0.8 {
-			return 1.4 // Highest preference when has capacity
-		}
-		return 0.8 // Deprioritize when nearly full
-	case "pro":
-		return 1.0 // Normal preference - save for when Plus is drained
-	case "team":
-		return 1.0 // Same as Pro
-	case "enterprise":
-		return 1.1 // Slight preference for enterprise
-	case "gemini":
-		return 1.0 // Gemini has its own quota system
-	default:
-		return 1.0
-	}
+	return headroom * creditBonus
 }
 
 func (p *poolState) pin(conversationID, accountID string) {
@@ -872,18 +933,19 @@ func atomicWriteJSON(filePath string, data any) error {
 func mergeUsage(prev, next UsageSnapshot) UsageSnapshot {
 	res := next
 	hardSource := res.Source == "body" || res.Source == "headers" || res.Source == "wham"
+	authoritativeZero := res.Source == "claude-api" || res.Source == "wham"
 	hardReset := res.PrimaryUsedPercent == 0 && res.SecondaryUsedPercent == 0
 
-	if res.PrimaryUsedPercent == 0 && prev.PrimaryUsedPercent > 0 && !(hardSource && hardReset) {
+	if res.PrimaryUsedPercent == 0 && prev.PrimaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
 		res.PrimaryUsedPercent = prev.PrimaryUsedPercent
 	}
-	if res.SecondaryUsedPercent == 0 && prev.SecondaryUsedPercent > 0 && !(hardSource && hardReset) {
+	if res.SecondaryUsedPercent == 0 && prev.SecondaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
 		res.SecondaryUsedPercent = prev.SecondaryUsedPercent
 	}
-	if res.PrimaryUsed == 0 && prev.PrimaryUsed > 0 && !(hardSource && hardReset) {
+	if res.PrimaryUsed == 0 && prev.PrimaryUsed > 0 && !authoritativeZero && !(hardSource && hardReset) {
 		res.PrimaryUsed = prev.PrimaryUsed
 	}
-	if res.SecondaryUsed == 0 && prev.SecondaryUsed > 0 && !(hardSource && hardReset) {
+	if res.SecondaryUsed == 0 && prev.SecondaryUsed > 0 && !authoritativeZero && !(hardSource && hardReset) {
 		res.SecondaryUsed = prev.SecondaryUsed
 	}
 	if res.PrimaryWindowMinutes == 0 && prev.PrimaryWindowMinutes > 0 {

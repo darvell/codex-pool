@@ -33,10 +33,10 @@ func TestCandidateUsesPinUnlessExcluded(t *testing.T) {
 	p := newPoolState([]*Account{a1, a2}, true)
 	p.pin("c1", "a1")
 
-	if got := p.candidate("c1", nil, ""); got == nil || got.ID != "a1" {
+	if got := p.candidate("c1", nil, "", ""); got == nil || got.ID != "a1" {
 		t.Fatalf("expected pinned a1, got %+v", got)
 	}
-	if got := p.candidate("c1", map[string]bool{"a1": true}, ""); got == nil || got.ID != "a2" {
+	if got := p.candidate("c1", map[string]bool{"a1": true}, "", ""); got == nil || got.ID != "a2" {
 		t.Fatalf("expected a2 when pinned excluded, got %+v", got)
 	}
 }
@@ -47,9 +47,32 @@ func TestCandidateSkipsDeadOrDisabled(t *testing.T) {
 	ok := &Account{ID: "ok", Type: AccountTypeCodex, Usage: UsageSnapshot{PrimaryUsedPercent: 0.5}}
 	p := newPoolState([]*Account{dead, disabled, ok}, false)
 
-	got := p.candidate("", nil, "")
+	got := p.candidate("", nil, "", "")
 	if got == nil || got.ID != "ok" {
 		t.Fatalf("expected ok, got %+v", got)
+	}
+}
+
+func TestCandidateRequiredPlanFiltersAccounts(t *testing.T) {
+	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
+	p := newPoolState([]*Account{plus, pro}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "pro")
+	if got == nil || got.ID != "pro" {
+		t.Fatalf("expected pro account, got %+v", got)
+	}
+}
+
+func TestCandidateRequiredPlanOverridesPinnedConversation(t *testing.T) {
+	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
+	p := newPoolState([]*Account{plus, pro}, false)
+	p.pin("c1", "plus")
+
+	got := p.candidate("c1", nil, AccountTypeCodex, "pro")
+	if got == nil || got.ID != "pro" {
+		t.Fatalf("expected pinned plus to be bypassed for required plan, got %+v", got)
 	}
 }
 

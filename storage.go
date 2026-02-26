@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	bucketUsageRequests   = "usage_requests"
-	bucketAccountUsage    = "account_usage"
-	bucketPlanCapacity    = "plan_capacity"
-	bucketCapacitySamples = "capacity_samples"
-	bucketUserUsage       = "user_usage"
-	bucketUserDailyUsage  = "user_daily_usage"
+	bucketUsageRequests    = "usage_requests"
+	bucketAccountUsage     = "account_usage"
+	bucketPlanCapacity     = "plan_capacity"
+	bucketCapacitySamples  = "capacity_samples"
+	bucketUserUsage        = "user_usage"
+	bucketUserDailyUsage   = "user_daily_usage"
+	bucketUserHourlyUsage  = "user_hourly_usage"
+	bucketGlobalHourlyUsage = "global_hourly_usage"
 )
 
 // UserUsage tracks aggregate token usage per user.
@@ -34,9 +36,29 @@ type UserUsage struct {
 
 // UserDailyUsage tracks per-day token usage for a user.
 type UserDailyUsage struct {
-	Date           string `json:"date"` // YYYY-MM-DD
-	BillableTokens int64  `json:"billable_tokens"`
-	RequestCount   int64  `json:"request_count"`
+	Date            string `json:"date"` // YYYY-MM-DD
+	BillableTokens  int64  `json:"billable_tokens"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	RequestCount    int64  `json:"request_count"`
+	// Per-provider breakdown
+	ClaudeTokens int64 `json:"claude_tokens,omitempty"`
+	CodexTokens  int64 `json:"codex_tokens,omitempty"`
+	GeminiTokens int64 `json:"gemini_tokens,omitempty"`
+}
+
+// UserHourlyUsage tracks per-hour per-provider token usage.
+type UserHourlyUsage struct {
+	Hour            string `json:"hour"`          // "2025-02-05T14" (ISO hour)
+	AccountType     string `json:"account_type"`  // "claude", "codex", "gemini"
+	InputTokens     int64  `json:"input_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	BillableTokens  int64  `json:"billable_tokens"`
+	RequestCount    int64  `json:"request_count"`
 }
 
 type usageStore struct {
@@ -78,7 +100,7 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
@@ -195,9 +217,65 @@ func (s *usageStore) record(u RequestUsage) error {
 			}
 			daily.Date = dateKey
 			daily.BillableTokens += u.BillableTokens
+			daily.InputTokens += u.InputTokens
+			daily.OutputTokens += u.OutputTokens
+			daily.CachedTokens += u.CachedInputTokens
+			daily.ReasoningTokens += u.ReasoningTokens
 			daily.RequestCount++
+			// Per-provider breakdown
+			switch u.AccountType {
+			case AccountTypeClaude:
+				daily.ClaudeTokens += u.BillableTokens
+			case AccountTypeCodex:
+				daily.CodexTokens += u.BillableTokens
+			case AccountTypeGemini:
+				daily.GeminiTokens += u.BillableTokens
+			}
 			if enc, err := json.Marshal(&daily); err == nil {
 				_ = dailyBucket.Put([]byte(dailyKey), enc)
+			}
+
+			// Update hourly usage (per-user)
+			hourKey := u.Timestamp.Format("2006-01-02T15")
+			acctType := string(u.AccountType)
+			if acctType == "" {
+				acctType = "unknown"
+			}
+			hourlyBucket := tx.Bucket([]byte(bucketUserHourlyUsage))
+			hourlyBucketKey := fmt.Sprintf("%s|%s|%s", u.UserID, hourKey, acctType)
+			var hourly UserHourlyUsage
+			if raw := hourlyBucket.Get([]byte(hourlyBucketKey)); raw != nil {
+				_ = json.Unmarshal(raw, &hourly)
+			}
+			hourly.Hour = hourKey
+			hourly.AccountType = acctType
+			hourly.InputTokens += u.InputTokens
+			hourly.CachedTokens += u.CachedInputTokens
+			hourly.OutputTokens += u.OutputTokens
+			hourly.ReasoningTokens += u.ReasoningTokens
+			hourly.BillableTokens += u.BillableTokens
+			hourly.RequestCount++
+			if enc, err := json.Marshal(&hourly); err == nil {
+				_ = hourlyBucket.Put([]byte(hourlyBucketKey), enc)
+			}
+
+			// Update global hourly usage (all users combined)
+			globalHourlyBucket := tx.Bucket([]byte(bucketGlobalHourlyUsage))
+			globalHourlyKey := fmt.Sprintf("%s|%s", hourKey, acctType)
+			var globalHourly UserHourlyUsage
+			if raw := globalHourlyBucket.Get([]byte(globalHourlyKey)); raw != nil {
+				_ = json.Unmarshal(raw, &globalHourly)
+			}
+			globalHourly.Hour = hourKey
+			globalHourly.AccountType = acctType
+			globalHourly.InputTokens += u.InputTokens
+			globalHourly.CachedTokens += u.CachedInputTokens
+			globalHourly.OutputTokens += u.OutputTokens
+			globalHourly.ReasoningTokens += u.ReasoningTokens
+			globalHourly.BillableTokens += u.BillableTokens
+			globalHourly.RequestCount++
+			if enc, err := json.Marshal(&globalHourly); err == nil {
+				_ = globalHourlyBucket.Put([]byte(globalHourlyKey), enc)
 			}
 		}
 
@@ -631,4 +709,110 @@ func (s *usageStore) getUserDailyUsage(userID string, days int) ([]UserDailyUsag
 		}
 	}
 	return daily, nil
+}
+
+// getUserHourlyUsage returns hourly usage for a user over the last N hours.
+func (s *usageStore) getUserHourlyUsage(userID string, hours int) ([]UserHourlyUsage, error) {
+	var result []UserHourlyUsage
+	if s == nil || s.db == nil {
+		return result, nil
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+
+	// Generate hour keys for the last N hours
+	now := time.Now()
+	hourKeys := make(map[string]bool)
+	for i := 0; i < hours; i++ {
+		h := now.Add(-time.Duration(i) * time.Hour)
+		hourKeys[h.Format("2006-01-02T15")] = true
+	}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketUserHourlyUsage))
+		prefix := []byte(userID + "|")
+		c := b.Cursor()
+		for k, v := c.Seek(prefix); k != nil && len(k) > len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
+			// Key format: userID|hourKey|accountType
+			rest := string(k[len(prefix):])
+			parts := strings.SplitN(rest, "|", 2)
+			if len(parts) < 1 {
+				continue
+			}
+			hourKey := parts[0]
+			if hourKeys[hourKey] {
+				var h UserHourlyUsage
+				if err := json.Unmarshal(v, &h); err == nil {
+					result = append(result, h)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort by hour descending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Hour > result[i].Hour {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result, nil
+}
+
+// getGlobalHourlyUsage returns global hourly usage (all users combined) over the last N hours.
+func (s *usageStore) getGlobalHourlyUsage(hours int) ([]UserHourlyUsage, error) {
+	var result []UserHourlyUsage
+	if s == nil || s.db == nil {
+		return result, nil
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+
+	// Generate hour keys for the last N hours
+	now := time.Now()
+	hourKeys := make(map[string]bool)
+	for i := 0; i < hours; i++ {
+		h := now.Add(-time.Duration(i) * time.Hour)
+		hourKeys[h.Format("2006-01-02T15")] = true
+	}
+
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketGlobalHourlyUsage))
+		return b.ForEach(func(k, v []byte) error {
+			// Key format: hourKey|accountType
+			key := string(k)
+			parts := strings.SplitN(key, "|", 2)
+			if len(parts) < 1 {
+				return nil
+			}
+			hourKey := parts[0]
+			if hourKeys[hourKey] {
+				var h UserHourlyUsage
+				if err := json.Unmarshal(v, &h); err == nil {
+					result = append(result, h)
+				}
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort by hour descending
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Hour > result[i].Hour {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result, nil
 }

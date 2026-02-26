@@ -305,6 +305,41 @@ func buildWhamUsageURL(base *url.URL) string {
 	return copy.String()
 }
 
+func parseClaudeResetAt(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return time.Time{}, false
+		}
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return t, true
+	case float64:
+		if v <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(int64(v), 0), true
+	case int64:
+		if v <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(v, 0), true
+	case int:
+		if v <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(int64(v), 0), true
+	case json.Number:
+		if n, err := v.Int64(); err == nil && n > 0 {
+			return time.Unix(n, 0), true
+		}
+	}
+	return time.Time{}, false
+}
+
 // fetchClaudeUsage fetches usage data from Claude's /api/oauth/usage endpoint.
 func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	// Only OAuth tokens can use the usage endpoint
@@ -352,7 +387,13 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		// Try refresh once
 		refreshAttempted := false
 		refreshSucceeded := false
-		if !h.cfg.disableRefresh && h.needsRefresh(a) {
+		hasRefreshToken := false
+		if !h.cfg.disableRefresh {
+			a.mu.Lock()
+			hasRefreshToken = a.RefreshToken != ""
+			a.mu.Unlock()
+		}
+		if !h.cfg.disableRefresh && hasRefreshToken {
 			refreshAttempted = true
 			if err := h.refreshAccount(context.Background(), a); err == nil {
 				refreshSucceeded = true
@@ -374,24 +415,15 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		}
 
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			if refreshAttempted && refreshSucceeded {
-				// We refreshed successfully but still got 401/403 - account is truly dead
-				a.mu.Lock()
-				a.Dead = true
-				a.Penalty += 1.0
-				a.mu.Unlock()
-				log.Printf("marking claude account %s as dead: usage fetch 401/403 after successful refresh", a.ID)
-				if err := saveAccount(a); err != nil {
-					log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
-				}
-				return fmt.Errorf("claude usage unauthorized: %s", resp.Status)
-			}
-			// Couldn't refresh (rate limited or not needed) - just add penalty and skip
 			a.mu.Lock()
 			a.Penalty += 0.3
 			a.mu.Unlock()
 			if h.cfg.debug {
-				log.Printf("claude usage fetch %s got 401/403, refresh not attempted or rate limited, adding penalty", a.ID)
+				if refreshAttempted && refreshSucceeded {
+					log.Printf("claude usage fetch %s got 401/403 even after refresh; keeping account alive and adding penalty", a.ID)
+				} else {
+					log.Printf("claude usage fetch %s got 401/403, refresh not attempted or rate limited, adding penalty", a.ID)
+				}
 			}
 			return fmt.Errorf("claude usage unauthorized (not marking dead): %s", resp.Status)
 		}
@@ -404,20 +436,20 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	// Parse the Claude usage response
 	var payload struct {
 		FiveHour *struct {
-			Utilization float64 `json:"utilization"`
-			ResetsAt    string  `json:"resets_at"`
+			Utilization *float64 `json:"utilization"`
+			ResetsAt    any      `json:"resets_at"`
 		} `json:"five_hour"`
 		SevenDay *struct {
-			Utilization float64 `json:"utilization"`
-			ResetsAt    string  `json:"resets_at"`
+			Utilization *float64 `json:"utilization"`
+			ResetsAt    any      `json:"resets_at"`
 		} `json:"seven_day"`
 		SevenDaySonnet *struct {
-			Utilization float64 `json:"utilization"`
-			ResetsAt    string  `json:"resets_at"`
+			Utilization *float64 `json:"utilization"`
+			ResetsAt    any      `json:"resets_at"`
 		} `json:"seven_day_sonnet"`
 		SevenDayOpus *struct {
-			Utilization float64 `json:"utilization"`
-			ResetsAt    string  `json:"resets_at"`
+			Utilization *float64 `json:"utilization"`
+			ResetsAt    any      `json:"resets_at"`
 		} `json:"seven_day_opus"`
 		ExtraUsage *struct {
 			IsEnabled   bool     `json:"is_enabled"`
@@ -436,9 +468,11 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 
 	// Map five_hour to primary, seven_day to secondary
 	if payload.FiveHour != nil {
-		snap.PrimaryUsed = payload.FiveHour.Utilization / 100.0
-		snap.PrimaryUsedPercent = payload.FiveHour.Utilization / 100.0
-		if t, err := time.Parse(time.RFC3339, payload.FiveHour.ResetsAt); err == nil {
+		if payload.FiveHour.Utilization != nil {
+			snap.PrimaryUsed = *payload.FiveHour.Utilization / 100.0
+			snap.PrimaryUsedPercent = *payload.FiveHour.Utilization / 100.0
+		}
+		if t, ok := parseClaudeResetAt(payload.FiveHour.ResetsAt); ok {
 			snap.PrimaryResetAt = t
 		} else if !prevPrimaryResetAt.IsZero() {
 			// Some accounts return resets_at=null when utilization=0; infer the next reset from
@@ -454,9 +488,11 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	}
 
 	if payload.SevenDay != nil {
-		snap.SecondaryUsed = payload.SevenDay.Utilization / 100.0
-		snap.SecondaryUsedPercent = payload.SevenDay.Utilization / 100.0
-		if t, err := time.Parse(time.RFC3339, payload.SevenDay.ResetsAt); err == nil {
+		if payload.SevenDay.Utilization != nil {
+			snap.SecondaryUsed = *payload.SevenDay.Utilization / 100.0
+			snap.SecondaryUsedPercent = *payload.SevenDay.Utilization / 100.0
+		}
+		if t, ok := parseClaudeResetAt(payload.SevenDay.ResetsAt); ok {
 			snap.SecondaryResetAt = t
 		} else if !prevSecondaryResetAt.IsZero() {
 			elapsed := now.Sub(prevSecondaryResetAt)
