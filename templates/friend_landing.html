@@ -1959,6 +1959,7 @@ print(response.choices[0].message.content)`;
                     const weekColor = getPaceColor(acc.secondary_window_used_pct, acc.secondary_reset_minutes, 10080);
                     const scoreDisplay = acc.score > 0 ? acc.score.toFixed(2) : '-';
                     const scoreColor = acc.is_primary ? 'var(--gold-bright)' : (acc.score > 0.5 ? '#27ae60' : '#888');
+                    const scoreTooltip = escapeAttr(acc.score_tooltip || 'No score details available');
                     const rowStyle = acc.is_primary ? 'background: rgba(212, 175, 55, 0.05);' : '';
                     const primaryBadge = acc.is_primary ? ' <span style="color: var(--gold-bright); font-size: 0.6rem;">★</span>' : '';
 
@@ -1968,7 +1969,7 @@ print(response.choices[0].message.content)`;
                         <td style="font-family: monospace; color: #888;">${acc.id}${primaryBadge}</td>
                         <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type}</td>
                         <td style="color: ${rowStatusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
-                        <td style="text-align: right; font-family: monospace; color: ${scoreColor}; font-weight: ${acc.is_primary ? 'bold' : 'normal'};">${scoreDisplay}</td>
+                        <td title="${scoreTooltip}" style="${scoreCellStyle(scoreColor, acc.is_primary)}">${scoreDisplay}</td>
                         <td style="text-align: right; font-family: monospace; color: ${priColor};">${formatPct(acc.primary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
                         <td style="text-align: right; font-family: monospace; color: ${weekColor};">${formatPct(acc.secondary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
                         <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${tokens}</td>
@@ -2009,6 +2010,7 @@ print(response.choices[0].message.content)`;
                         // Format score and highlight primary account
                         const scoreDisplay = acc.score > 0 ? acc.score.toFixed(2) : '-';
                         const scoreColor = acc.is_primary ? 'var(--gold-bright)' : (acc.score > 0.5 ? '#27ae60' : '#888');
+                        const scoreTooltip = escapeAttr(acc.score_tooltip || 'No score details available');
                         const rowStyle = acc.is_primary ? 'background: rgba(212, 175, 55, 0.1);' : '';
                         const primaryBadge = acc.is_primary ? ' <span style="color: var(--gold-bright); font-size: 0.6rem;">★</span>' : '';
 
@@ -2018,7 +2020,7 @@ print(response.choices[0].message.content)`;
                             <td style="font-family: monospace; color: #888;">${acc.id}${primaryBadge}</td>
                             <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type || 'pro'}</td>
                             <td style="color: ${rowStatusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
-                            <td style="text-align: right; font-family: monospace; color: ${scoreColor}; font-weight: ${acc.is_primary ? 'bold' : 'normal'};">${scoreDisplay}</td>
+                            <td title="${scoreTooltip}" style="${scoreCellStyle(scoreColor, acc.is_primary)}">${scoreDisplay}</td>
                             <td style="text-align: right; font-family: monospace;">${formatPct(acc.primary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
                             <td style="text-align: right; font-family: monospace;">${formatPct(acc.secondary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
                             <td style="text-align: right; font-family: monospace; color: #888; font-size: 0.8rem;">$${acc.subscription_cost_monthly || 0}</td>
@@ -2239,6 +2241,19 @@ print(response.choices[0].message.content)`;
             if (roi >= 10) return '#27ae60';
             if (roi >= 5) return '#f39c12';
             return '#e67e22';
+        }
+
+        function escapeAttr(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\n/g, '&#10;');
+        }
+
+        function scoreCellStyle(scoreColor, isPrimary) {
+            return `text-align: right; font-family: monospace; color: ${scoreColor}; font-weight: ${isPrimary ? 'bold' : 'normal'}; cursor: help; text-decoration: underline dotted; text-underline-offset: 2px;`;
         }
 
         async function loadDailyChart() {

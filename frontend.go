@@ -1335,6 +1335,7 @@ type AccountStats struct {
 	CreditsBalance          float64 `json:"credits_balance,omitempty"`
 	HasCredits              bool    `json:"has_credits"`
 	Score                   float64 `json:"score"`
+	ScoreTooltip            string  `json:"score_tooltip,omitempty"`
 	IsPrimary               bool    `json:"is_primary"` // highest score for this provider type
 	SubscriptionCostMonthly float64 `json:"subscription_cost_monthly"`
 	SubscriptionLabel       string  `json:"subscription_label"`
@@ -1430,11 +1431,13 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Calculate score while we have the lock
+		breakdown := scoreBreakdown{}
 		score := float64(0)
 		if !acc.Dead && !acc.Disabled {
-			score = scoreAccountLocked(acc, stats.GeneratedAt)
+			breakdown = scoreAccountBreakdownLocked(acc, stats.GeneratedAt)
+			score = breakdown.Score
 		}
+		scoreTooltip := scoreTooltipFromBreakdownLocked(acc, stats.GeneratedAt, breakdown)
 
 		as := AccountStats{
 			ID:                    hashAccountID(acc.ID),
@@ -1455,6 +1458,7 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			HasCredits:            acc.Usage.HasCredits,
 			CreditsBalance:        acc.Usage.CreditsBalance,
 			Score:                 score,
+			ScoreTooltip:          scoreTooltip,
 		}
 
 		totalInput += acc.Totals.TotalInputTokens

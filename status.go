@@ -67,6 +67,7 @@ type AccountStatus struct {
 	ExpiresIn          string
 	LastUsed           string
 	Score              float64
+	ScoreTooltip       string
 	Inflight           int64
 	TotalTokens        int64
 }
@@ -114,6 +115,7 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 		// Effective usage is now just the raw usage (no capacity weighting)
 		effectivePrimary := primaryUsed
 		effectiveSecondary := secondaryUsed
+		scoreBreakdown := scoreAccountBreakdownLocked(a, now)
 
 		status := AccountStatus{
 			ID:                 a.ID,
@@ -126,7 +128,8 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 			SecondaryUsed:      secondaryUsed * 100,
 			EffectivePrimary:   effectivePrimary * 100,
 			EffectiveSecondary: effectiveSecondary * 100,
-			Score:              scoreAccountLocked(a, now),
+			Score:              scoreBreakdown.Score,
+			ScoreTooltip:       scoreTooltipFromBreakdownLocked(a, now, scoreBreakdown),
 			Inflight:           a.Inflight,
 			TotalTokens:        a.Totals.TotalBillableTokens,
 		}
@@ -380,6 +383,7 @@ const statusHTML = `<!DOCTYPE html>
         .tag-dead { background: #f85149; color: #fff; }
         .usage-cell { white-space: nowrap; }
         .effective { color: #8b949e; font-size: 11px; }
+        .score-cell { cursor: help; text-decoration: underline dotted; text-underline-offset: 2px; }
         a { color: #58a6ff; text-decoration: none; }
         a:hover { text-decoration: underline; }
     </style>
@@ -494,7 +498,7 @@ const statusHTML = `<!DOCTYPE html>
                 {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}{{if ne .PlanType "claude"}}{{if ne .PlanType "max"}}<span class="effective">(→{{pct .EffectiveSecondary}})</span>{{end}}{{end}}{{end}}{{end}}
                 {{if .SecondaryResetIn}}<br><small>resets in {{.SecondaryResetIn}}</small>{{end}}
             </td>
-            <td>
+            <td class="score-cell" title="{{.ScoreTooltip}}">
                 {{if .Dead}}<span class="status-dead">—</span>
                 {{else if .Disabled}}<span class="status-warn">—</span>
                 {{else}}{{score .Score}}{{end}}

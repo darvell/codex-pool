@@ -687,7 +687,27 @@ func scoreAccount(a *Account, now time.Time) float64 {
 	return scoreAccountLocked(a, now)
 }
 
-func scoreAccountLocked(a *Account, now time.Time) float64 {
+type scoreBreakdown struct {
+	Score             float64
+	PrimaryUsed       float64
+	SecondaryUsed     float64
+	BaseHeadroom      float64
+	DrainMultiplier   float64
+	PrimaryPaceBonus  float64
+	PrimaryPenalty    float64
+	ExpiryPenalty     float64
+	PenaltyRaw        float64
+	PenaltyFactor     float64
+	PenaltyApplied    float64
+	ClampedToFloor    bool
+	RecentUseBonus    float64
+	CreditBonus       float64
+	HeadroomPreCredit float64
+}
+
+func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
+	var out scoreBreakdown
+
 	decayPenaltyLocked(a, now)
 	primaryUsed := a.Usage.PrimaryUsedPercent
 	secondaryUsed := a.Usage.SecondaryUsedPercent
@@ -697,117 +717,157 @@ func scoreAccountLocked(a *Account, now time.Time) float64 {
 	if secondaryUsed == 0 && a.Usage.SecondaryUsed > 0 {
 		secondaryUsed = a.Usage.SecondaryUsed
 	}
+	out.PrimaryUsed = primaryUsed
+	out.SecondaryUsed = secondaryUsed
 
-	// Calculate headroom based on weekly (secondary) usage with drain urgency.
-	// Key insight: an account at 51% with 1.5 days left can sustain 33%/day burn rate,
-	// while an account at 4% with 7 days left can only sustain 14%/day to last the week.
-	// We should prefer accounts that need draining (high urgency, available capacity).
+	// Start from weekly headroom.
 	headroom := 1.0 - secondaryUsed
+	out.BaseHeadroom = headroom
+	out.DrainMultiplier = 1.0
 
-	// Calculate drain urgency based on time until reset
-	// Accounts closer to reset should be used more aggressively
+	// Accounts closer to reset can absorb more traffic right now.
 	if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
 		hoursRemaining := a.Usage.SecondaryResetAt.Sub(now).Hours()
-		totalHours := 168.0 // 7 days
-
-		// Available burn rate = remaining capacity / time remaining
-		// e.g., 49% remaining / 37 hours = 1.32%/hour available
-		// e.g., 96% remaining / 165 hours = 0.58%/hour available
-		// The first can sustain 2.3x more load right now!
-
+		totalHours := 168.0
 		if hoursRemaining > 1 && hoursRemaining < totalHours {
-			// Calculate sustainable burn rate (% per hour)
 			sustainableBurnRate := headroom / hoursRemaining
-
-			// Baseline burn rate is 100% / 168 hours = 0.595%/hour
 			baselineBurnRate := 1.0 / totalHours
-
-			// Ratio of sustainable to baseline: >1 means we can use more than average
 			burnRateRatio := sustainableBurnRate / baselineBurnRate
 
-			// Higher cap for urgent drains (reset < 6 hours with significant headroom)
-			// This ensures accounts about to reset get priority ("use it or lose it")
 			maxMultiplier := 3.0
 			if hoursRemaining < 6 && headroom > 0.1 {
-				maxMultiplier = 8.0 // Much more aggressive when reset imminent
+				maxMultiplier = 8.0
 			}
 
-			// Apply as multiplier to headroom, capped to reasonable range
 			if burnRateRatio > maxMultiplier {
 				burnRateRatio = maxMultiplier
 			} else if burnRateRatio < 0.3 {
 				burnRateRatio = 0.3
 			}
+
+			out.DrainMultiplier = burnRateRatio
 			headroom *= burnRateRatio
 		}
 	}
 
-	// 5hr window: bonus for accounts with more short-term capacity
-	primaryPaceBonus := 0.0
+	// Bonus for strong short-term headroom in the 5h window.
 	if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
 		hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
 		primaryHeadroom := 1.0 - primaryUsed
 		if hoursRemaining > 0.1 && hoursRemaining < 5.0 && primaryHeadroom > 0.1 {
-			// Sustainable burn rate for 5hr window
 			sustainableBurnRate := primaryHeadroom / hoursRemaining
-			baselineBurnRate := 1.0 / 5.0 // 20%/hour baseline
+			baselineBurnRate := 1.0 / 5.0
 			burnRateRatio := sustainableBurnRate / baselineBurnRate
 			if burnRateRatio > 1.5 {
-				primaryPaceBonus = 0.15 // Significant bonus for high 5hr capacity
+				out.PrimaryPaceBonus = 0.15
 			} else if burnRateRatio > 1.0 {
-				primaryPaceBonus = 0.05 // Small bonus
+				out.PrimaryPaceBonus = 0.05
 			}
 		}
 	}
-	headroom += primaryPaceBonus
+	headroom += out.PrimaryPaceBonus
 
-	// 5hr usage only penalizes when getting critically high (>80%)
-	// to avoid immediate rate limits
+	// Penalize only when 5h usage gets critically high.
 	if primaryUsed > 0.8 {
-		primaryPenalty := (primaryUsed - 0.8) * 2.0 // Scales 0.8->1.0 to 0->0.4 penalty
-		headroom -= primaryPenalty
+		out.PrimaryPenalty = (primaryUsed - 0.8) * 2.0
+		headroom -= out.PrimaryPenalty
 	}
 
-	// expiry risk - be gentle since access tokens often outlive ID token expiry.
-	// Accounts that truly fail will get marked dead via 401/403 handling.
+	// Mild expiry penalty.
 	if !a.ExpiresAt.IsZero() {
 		ttl := a.ExpiresAt.Sub(now).Minutes()
 		if ttl < 0 {
-			headroom -= 0.3 // Expired but may still work - mild penalty
+			out.ExpiryPenalty = 0.3
 		} else if ttl < 30 {
-			headroom -= 0.2
+			out.ExpiryPenalty = 0.2
 		} else if ttl < 60 {
-			headroom -= 0.1
+			out.ExpiryPenalty = 0.1
 		}
 	}
-	// Reduce penalty effect when drain urgency is high
-	// Penalties matter less when we need to drain capacity before reset
-	penaltyFactor := 1.0
+	headroom -= out.ExpiryPenalty
+
+	out.PenaltyFactor = 1.0
 	if !a.Usage.SecondaryResetAt.IsZero() {
 		hoursRemaining := a.Usage.SecondaryResetAt.Sub(now).Hours()
 		secondaryHeadroom := 1.0 - secondaryUsed
 		if hoursRemaining > 0 && hoursRemaining < 6 && secondaryHeadroom > 0.1 {
-			penaltyFactor = 0.3 // Penalties matter less when draining urgently
+			out.PenaltyFactor = 0.3
 		}
 	}
-	headroom -= a.Penalty * penaltyFactor
+	out.PenaltyRaw = a.Penalty
+	out.PenaltyApplied = a.Penalty * out.PenaltyFactor
+	headroom -= out.PenaltyApplied
+
 	if headroom < 0.01 {
 		headroom = 0.01
+		out.ClampedToFloor = true
 	}
 
-	// Recency bonus: accounts used in the last 5 minutes get a small bonus
-	// to reduce swapping between accounts with similar scores (stickiness).
 	if !a.LastUsed.IsZero() && now.Sub(a.LastUsed) < 5*time.Minute {
-		headroom += 0.1
+		out.RecentUseBonus = 0.1
+		headroom += out.RecentUseBonus
 	}
 
-	// credits bonuses
-	creditBonus := 1.0
+	out.CreditBonus = 1.0
 	if a.Usage.CreditsUnlimited || a.Usage.HasCredits {
-		creditBonus = 1.1
+		out.CreditBonus = 1.1
 	}
 
-	return headroom * creditBonus
+	out.HeadroomPreCredit = headroom
+	out.Score = headroom * out.CreditBonus
+	return out
+}
+
+func scoreAccountLocked(a *Account, now time.Time) float64 {
+	return scoreAccountBreakdownLocked(a, now).Score
+}
+
+func scoreTooltipFromBreakdownLocked(a *Account, now time.Time, breakdown scoreBreakdown) string {
+	if a.Disabled {
+		return "Not scored because this account is disabled."
+	}
+	if a.Dead {
+		return "Not scored because this account is marked dead."
+	}
+
+	lines := make([]string, 0, 12)
+	lines = append(lines, fmt.Sprintf("Final score: %.2f", breakdown.Score))
+	lines = append(lines, fmt.Sprintf("7d headroom: %.2f from %.0f%% weekly usage", breakdown.BaseHeadroom, breakdown.SecondaryUsed*100))
+
+	if breakdown.DrainMultiplier != 1.0 {
+		lines = append(lines, fmt.Sprintf("Drain multiplier: x%.2f", breakdown.DrainMultiplier))
+	}
+	if breakdown.PrimaryPaceBonus > 0 {
+		lines = append(lines, fmt.Sprintf("5h pace bonus: +%.2f", breakdown.PrimaryPaceBonus))
+	}
+	if breakdown.PrimaryPenalty > 0 {
+		lines = append(lines, fmt.Sprintf("5h high-usage penalty: -%.2f at %.0f%%", breakdown.PrimaryPenalty, breakdown.PrimaryUsed*100))
+	}
+	if breakdown.ExpiryPenalty > 0 {
+		lines = append(lines, fmt.Sprintf("Expiry penalty: -%.2f", breakdown.ExpiryPenalty))
+	}
+	if breakdown.PenaltyApplied > 0 {
+		lines = append(lines, fmt.Sprintf("Penalty applied: -%.2f (raw %.2f x %.2f)", breakdown.PenaltyApplied, breakdown.PenaltyRaw, breakdown.PenaltyFactor))
+	}
+	if breakdown.ClampedToFloor {
+		lines = append(lines, "Headroom floor applied: 0.01")
+	}
+	if breakdown.RecentUseBonus > 0 {
+		lines = append(lines, fmt.Sprintf("Recent-use bonus: +%.2f", breakdown.RecentUseBonus))
+	}
+	if breakdown.CreditBonus > 1.0 {
+		lines = append(lines, fmt.Sprintf("Credits multiplier: x%.2f", breakdown.CreditBonus))
+	}
+	if accountCoolingDownLocked(a, now) {
+		lines = append(lines, "Cooldown is separate from score; this account is currently cooling down.")
+	}
+
+	lines = append(lines, fmt.Sprintf("Pre-credit headroom: %.2f", breakdown.HeadroomPreCredit))
+	return strings.Join(lines, "\n")
+}
+
+func scoreTooltipLocked(a *Account, now time.Time) string {
+	return scoreTooltipFromBreakdownLocked(a, now, scoreAccountBreakdownLocked(a, now))
 }
 
 func (p *poolState) pin(conversationID, accountID string) {

@@ -35,6 +35,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		LastRefresh             time.Time   `json:"last_refresh,omitempty"`
 		Penalty                 float64     `json:"penalty"`
 		Score                   float64     `json:"score"`
+		ScoreTooltip            string      `json:"score_tooltip,omitempty"`
 		IsPrimary               bool        `json:"is_primary"`
 		Usage                   any         `json:"usage"`
 		Totals                  any         `json:"totals"`
@@ -52,7 +53,9 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		expiresAt := a.ExpiresAt
 		lastRefresh := a.LastRefresh
 		penalty := a.Penalty
-		score := scoreAccountLocked(a, now)
+		breakdown := scoreAccountBreakdownLocked(a, now)
+		score := breakdown.Score
+		scoreTooltip := scoreTooltipFromBreakdownLocked(a, now, breakdown)
 		usage := a.Usage
 		totals := a.Totals
 		a.mu.Unlock()
@@ -70,6 +73,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 			LastRefresh:             lastRefresh,
 			Penalty:                 penalty,
 			Score:                   score,
+			ScoreTooltip:            scoreTooltip,
 			Usage:                   usage,
 			Totals:                  totals,
 		})
