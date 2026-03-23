@@ -528,6 +528,32 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		}
 	}
 
+	// Fall back to model-specific buckets when top-level seven_day is empty.
+	// Pro/Team plans report per-model usage (seven_day_sonnet, seven_day_opus)
+	// instead of aggregate seven_day.
+	if snap.SecondaryUsedPercent == 0 && snap.SecondaryResetAt.IsZero() {
+		type bucket struct {
+			Utilization *float64
+			ResetsAt    any
+		}
+		var candidates []bucket
+		if payload.SevenDaySonnet != nil {
+			candidates = append(candidates, bucket{payload.SevenDaySonnet.Utilization, payload.SevenDaySonnet.ResetsAt})
+		}
+		if payload.SevenDayOpus != nil {
+			candidates = append(candidates, bucket{payload.SevenDayOpus.Utilization, payload.SevenDayOpus.ResetsAt})
+		}
+		for _, c := range candidates {
+			if c.Utilization != nil && *c.Utilization/100.0 > snap.SecondaryUsedPercent {
+				snap.SecondaryUsed = *c.Utilization / 100.0
+				snap.SecondaryUsedPercent = *c.Utilization / 100.0
+				if t, ok := parseClaudeResetAt(c.ResetsAt); ok {
+					snap.SecondaryResetAt = t
+				}
+			}
+		}
+	}
+
 	log.Printf("claude usage fetch %s: 5hr=%.1f%% 7day=%.1f%%",
 		a.ID,
 		snap.PrimaryUsedPercent*100,

@@ -750,6 +750,15 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 		}
 	}
 
+	// Cap drain multiplier for accounts with no primary window data.
+	// Pro/Team plans lack a 5hr window; don't let phantom headroom inflate their score.
+	if a.Usage.PrimaryResetAt.IsZero() && primaryUsed == 0 {
+		if out.DrainMultiplier > 1.0 {
+			out.DrainMultiplier = 1.0
+			headroom = out.BaseHeadroom
+		}
+	}
+
 	// Bonus for strong short-term headroom in the 5h window.
 	if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
 		hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
