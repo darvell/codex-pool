@@ -530,6 +530,17 @@ func modelRequiresCodexPro(model string) bool {
 	return strings.EqualFold(strings.TrimSpace(model), "gpt-5.3-codex-spark")
 }
 
+func claudeRequestRequiresMax(r *http.Request, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(model, "[1m]") {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Anthropic-Beta")), "context-1m")
+}
+
 // modelRouteOverride checks if the requested model should be routed to an external
 // provider (Kimi, MiniMax, etc.) instead of the path-detected provider.
 // Returns (provider, baseURL, rewrittenBody) or (nil, nil, nil) if no override.
@@ -670,7 +681,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		if geminiAPIKey != "" {
 			if isPoolKey, uid, _ := isPoolGeminiAPIKey(secret, geminiAPIKey); isPoolKey {
 				userID = uid
-					// Check if user is disabled
+				// Check if user is disabled
 				if h.poolUsers != nil {
 					if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
 						http.Error(w, "pool user disabled", http.StatusForbidden)
@@ -971,6 +982,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if accountType == AccountTypeCodex && modelRequiresCodexPro(requestedModel) {
 		requiredPlan = "pro"
 	}
+	if accountType == AccountTypeClaude && claudeRequestRequiresMax(r, requestedModel) {
+		requiredPlan = "max"
+	}
 
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
 
@@ -1043,6 +1057,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			errBodyStr := string(errBody)
 
 			// Refine classification with body content.
+			if acc.Type == AccountTypeClaude && isClaudeOrganizationDisabled(errBody) {
+				h.disableAccountPermanently(acc, reqID, safeText(errBody))
+				lastErr = fmt.Errorf("claude organization disabled for account %s", acc.ID)
+				h.recent.add(lastErr.Error())
+				continue
+			}
+
 			if errClass == ErrorClassPayment && isDeactivatedWorkspace(errBody) {
 				acc.mu.Lock()
 				acc.Dead = true
@@ -1221,7 +1242,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			w.WriteHeader(resp.StatusCode)
 			w.Write(result)
 		} else if !isSSE && translateDir != TranslateNone {
-		// Non-SSE format translation: buffer the whole body, translate, write.
+			// Non-SSE format translation: buffer the whole body, translate, write.
 			w.Header().Del("Content-Length")
 			w.Header().Set("Content-Type", "application/json")
 
@@ -2120,7 +2141,6 @@ func clientOrDefaultTimeout(r *http.Request, reqTimeout, streamTimeout time.Dura
 	return reqTimeout
 }
 
-
 func (h *proxyHandler) logRateLimitResponseHeaders(reqID string, accountType AccountType, hdr http.Header) {
 	if h == nil || !h.cfg.debug.Load() {
 		return
@@ -2876,7 +2896,6 @@ const refreshMinInterval = 5 * time.Second
 // This is persisted to disk and survives restarts, preventing hammering OAuth endpoints
 // 15 minutes balances between preventing hammering and allowing recovery from expired tokens
 const refreshPerAccountInterval = 15 * time.Minute
-
 
 func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	if a == nil {

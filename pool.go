@@ -397,6 +397,10 @@ func accountTier(accType AccountType, planType string) int {
 	return 2
 }
 
+func isCodexProPlan(planType string) bool {
+	return strings.EqualFold(strings.TrimSpace(planType), "pro")
+}
+
 // nearestCooldown returns how long until the next rate-limited account of the
 // given type becomes available. Returns 0 if no accounts are cooling down.
 // This lets the retry loop wait briefly instead of returning 503 immediately.
@@ -453,6 +457,12 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
 				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan)
+				if ok && a.Type == AccountTypeCodex && !isCodexProPlan(a.PlanType) {
+					ok = false
+					if p.debug {
+						log.Printf("unpinning conversation %s from non-pro codex account %s", conversationID, id)
+					}
+				}
 				if ok && a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 					ok = false
 					if p.debug {
@@ -614,7 +624,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		if bestTier1Any != nil {
 			// Tier 1 exists but all above threshold. Still prefer tier 1 by score
 			// unless a tier 2 below threshold has significantly better score.
-			if bestTier2Below != nil && bestTier2Below.score > bestTier1Any.score+0.3 {
+			if accountType != AccountTypeCodex && bestTier2Below != nil && bestTier2Below.score > bestTier1Any.score+0.3 {
 				p.rr++
 				return bestTier2Below.acc
 			}

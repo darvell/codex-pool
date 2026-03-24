@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -406,6 +407,16 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		return nil
 	}
 
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		inspected := bodyForInspection(nil, errBody)
+		if isClaudeOrganizationDisabled(inspected) {
+			h.disableAccountPermanently(a, "", safeText(inspected))
+			return fmt.Errorf("claude organization disabled")
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	}
+
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// Try refresh once
 		refreshAttempted := false
@@ -497,16 +508,11 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		}
 		if t, ok := parseClaudeResetAt(payload.FiveHour.ResetsAt); ok {
 			snap.PrimaryResetAt = t
-		} else if !prevPrimaryResetAt.IsZero() {
-			// Some accounts return resets_at=null when utilization=0; infer the next reset from
-			// the last known reset so the dashboard doesn't show "-".
-			elapsed := now.Sub(prevPrimaryResetAt)
-			if elapsed < 0 {
-				snap.PrimaryResetAt = prevPrimaryResetAt
-			} else {
-				cycles := int64(elapsed / (5 * time.Hour))
-				snap.PrimaryResetAt = prevPrimaryResetAt.Add(time.Duration(cycles+1) * (5 * time.Hour))
-			}
+		} else {
+			// Some accounts return resets_at=null when utilization=0. Keep the prior cadence
+			// when we have one, otherwise synthesize a reasonable next reset so the 5h
+			// window still shows up in the dashboard.
+			snap.PrimaryResetAt = inferClaudeWindowReset(now, prevPrimaryResetAt, 5*time.Hour)
 		}
 	}
 
@@ -517,14 +523,8 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 		}
 		if t, ok := parseClaudeResetAt(payload.SevenDay.ResetsAt); ok {
 			snap.SecondaryResetAt = t
-		} else if !prevSecondaryResetAt.IsZero() {
-			elapsed := now.Sub(prevSecondaryResetAt)
-			if elapsed < 0 {
-				snap.SecondaryResetAt = prevSecondaryResetAt
-			} else {
-				cycles := int64(elapsed / (7 * 24 * time.Hour))
-				snap.SecondaryResetAt = prevSecondaryResetAt.Add(time.Duration(cycles+1) * (7 * 24 * time.Hour))
-			}
+		} else {
+			snap.SecondaryResetAt = inferClaudeWindowReset(now, prevSecondaryResetAt, 7*24*time.Hour)
 		}
 	}
 
@@ -565,6 +565,18 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	syncUsageCooldown(a)
 
 	return nil
+}
+
+func inferClaudeWindowReset(now, prev time.Time, window time.Duration) time.Time {
+	if prev.IsZero() {
+		return now.Add(window)
+	}
+	elapsed := now.Sub(prev)
+	if elapsed < 0 {
+		return prev
+	}
+	cycles := int64(elapsed / window)
+	return prev.Add(time.Duration(cycles+1) * window)
 }
 
 // DailyBreakdownDay represents one day of usage data.

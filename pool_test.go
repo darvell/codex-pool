@@ -76,6 +76,29 @@ func TestCandidateRequiredPlanOverridesPinnedConversation(t *testing.T) {
 	}
 }
 
+func TestCandidateBypassesPinnedNonProCodex(t *testing.T) {
+	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.01, SecondaryUsedPercent: 0.01}}
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.6, SecondaryUsedPercent: 0.6}}
+	p := newPoolState([]*Account{plus, pro}, false)
+	p.pin("c1", "plus")
+
+	got := p.candidate("c1", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "pro" {
+		t.Fatalf("expected codex pro to bypass pinned non-pro account, got %+v", got)
+	}
+}
+
+func TestCandidatePrefersCodexProEvenWhenTierTwoScoresBetter(t *testing.T) {
+	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.01, SecondaryUsedPercent: 0.01}}
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.8, SecondaryUsedPercent: 0.8}}
+	p := newPoolState([]*Account{plus, pro}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "pro" {
+		t.Fatalf("expected codex pro to stay preferred, got %+v", got)
+	}
+}
+
 func TestMergeUsagePreservesExistingFields(t *testing.T) {
 	prev := UsageSnapshot{
 		PrimaryUsedPercent:   0.2,
