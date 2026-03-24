@@ -92,15 +92,6 @@ func TestExtractRequestedModelFromJSON(t *testing.T) {
 func TestClaudeRequestRequiresMax(t *testing.T) {
 	t.Parallel()
 
-	req, err := http.NewRequest(http.MethodPost, "/v1/messages", nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Anthropic-Beta", "claude-code-20250219,context-1m-2025-08-07")
-
-	if !claudeRequestRequiresMax(req, "claude-opus-4-6") {
-		t.Fatal("expected context-1m beta header to require max")
-	}
 	if !claudeRequestRequiresMax(nil, "claude-opus-4-6 [1m]") {
 		t.Fatal("expected [1m] model suffix to require max")
 	}

@@ -532,13 +532,7 @@ func modelRequiresCodexPro(model string) bool {
 
 func claudeRequestRequiresMax(r *http.Request, model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(model, "[1m]") {
-		return true
-	}
-	if r == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(r.Header.Get("Anthropic-Beta")), "context-1m")
+	return strings.Contains(model, "[1m]")
 }
 
 // modelRouteOverride checks if the requested model should be routed to an external
