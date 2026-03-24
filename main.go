@@ -43,6 +43,9 @@ type config struct {
 	debug                atomic.Bool
 	logBodies            bool
 	bodyLogLimit         int64
+	claudeTraceDir       string
+	claudeTraceBodyLimit int64
+	claudeTraceSecrets   bool
 	maxInMemoryBodyBytes int64
 	flushInterval        time.Duration
 	usageRefresh         time.Duration
@@ -118,6 +121,14 @@ func buildConfig() *config {
 			cfg.bodyLogLimit = n
 		}
 	}
+	cfg.claudeTraceDir = strings.TrimSpace(getenv("PROXY_CLAUDE_TRACE_DIR", ""))
+	cfg.claudeTraceBodyLimit = 256 * 1024
+	if v := getenv("PROXY_CLAUDE_TRACE_BODY_LIMIT", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n > 0 {
+			cfg.claudeTraceBodyLimit = n
+		}
+	}
+	cfg.claudeTraceSecrets = getenv("PROXY_CLAUDE_TRACE_INCLUDE_SECRETS", "0") == "1"
 	cfg.maxInMemoryBodyBytes = 16 * 1024 * 1024 // 16 MiB
 	if v := getenv("PROXY_MAX_INMEM_BODY_BYTES", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
@@ -359,6 +370,9 @@ func main() {
 	}
 	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v)",
 		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout)
+	if cfg.claudeTraceDir != "" {
+		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -2418,22 +2432,6 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		log.Printf("[%s] passthrough -> %s %s", reqID, outReq.Method, outReq.URL.String())
 	}
 
-	// Full dump for Claude passthrough requests
-	if providerType == AccountTypeClaude {
-		log.Printf("[%s] === CLAUDE PASSTHROUGH FULL DUMP ===", reqID)
-		log.Printf("[%s] URL: %s", reqID, outReq.URL.String())
-		for k, v := range outReq.Header {
-			for _, val := range v {
-				if len(val) > 100 {
-					log.Printf("[%s] Header %s: %s...(truncated)", reqID, k, val[:100])
-				} else {
-					log.Printf("[%s] Header %s: %s", reqID, k, val)
-				}
-			}
-		}
-		log.Printf("[%s] === END DUMP ===", reqID)
-	}
-
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
 		h.recent.add(err.Error())
@@ -2441,6 +2439,13 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer resp.Body.Close()
+	if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+		sampleLimit := h.claudeTraceSampleLimit(16 * 1024)
+		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
+			sampleLimit = h.claudeTraceSampleLimit(h.cfg.bodyLogLimit)
+		}
+		h.attachClaudeTrace(reqID, "passthrough", nil, r, bodyBytes, outReq, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
+	}
 
 	// Write response to client
 	copyHeader(w.Header(), resp.Header)
@@ -2843,13 +2848,18 @@ func (h *proxyHandler) tryOnce(
 	if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 		sampleLimit = h.cfg.bodyLogLimit
 	}
+	sampleLimit = h.claudeTraceSampleLimit(sampleLimit)
 	buf := &bytes.Buffer{}
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{
-		Reader: io.TeeReader(resp.Body, &limitedWriter{w: buf, n: sampleLimit}),
-		Closer: resp.Body,
+	if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+		h.attachClaudeTrace(reqID, "pool", acc, in, bodyBytes, outReq, resp, translateDir, buf, sampleLimit)
+	} else {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: io.TeeReader(resp.Body, &limitedWriter{w: buf, n: sampleLimit}),
+			Closer: resp.Body,
+		}
 	}
 	return resp, buf, refreshFailed, nil
 }
