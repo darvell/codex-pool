@@ -582,7 +582,7 @@ brew install claude-code</pre>
                 <div class="install-section">
                     <div class="section-header">
                         <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
-                        One-Line Setup
+                        Gemini CLI // One-Line Setup
                     </div>
                     <div class="step-label">Run this command</div>
                     <div class="code-wrapper">
@@ -592,7 +592,24 @@ brew install claude-code</pre>
                         </div>
                     </div>
                     <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
-                        Downloads credentials and configures Gemini CLI endpoint.
+                        Configures Gemini CLI endpoint settings.
+                    </p>
+                </div>
+
+                <div class="install-section" style="margin-top: 18px;">
+                    <div class="section-header">
+                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
+                        Pi // One-Line Setup
+                    </div>
+                    <div class="step-label">Run this command</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('gemini-pi-one-liner', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="gemini-pi-one-liner"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        Writes <code>~/.pi/agent/auth.json</code> and <code>~/.pi/agent/models.json</code> so Pi uses the built-in <code>google</code> provider via API-key mode.
                     </p>
                 </div>
 
@@ -602,7 +619,7 @@ brew install claude-code</pre>
                 </div>
 
                 <div id="gemini-auto" class="sub-tab-content active">
-                    <div class="step-label">Install CLI First</div>
+                    <div class="step-label">Install Gemini CLI First</div>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('gemini-install', this)">Copy</button>
                         <div class="code-block">
@@ -616,7 +633,7 @@ brew install gemini-cli</pre>
                 </div>
 
                 <div id="gemini-manual" class="sub-tab-content">
-                    <div class="step-label">Config (~/.gemini/settings.json)</div>
+                    <div class="step-label">Gemini CLI Config (~/.gemini/settings.json)</div>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('gemini-config', this)">Copy</button>
                         <div class="code-block">
@@ -624,12 +641,20 @@ brew install gemini-cli</pre>
                         </div>
                     </div>
 
-                    <div class="step-label">Auth (~/.gemini/oauth_creds.json)</div>
+                    <div class="step-label">Gemini CLI Auth (~/.gemini/oauth_creds.json)</div>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
                         <div class="code-block">
                             <pre id="gemini-auth"># Copy Gemini account from your pool folder
 cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
+                        </div>
+                    </div>
+
+                    <div class="step-label">Pi Config (~/.pi/agent/auth.json + models.json)</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('gemini-pi-manual', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="gemini-pi-manual"></pre>
                         </div>
                     </div>
                 </div>
@@ -782,9 +807,35 @@ export ANTHROPIC_API_KEY="local-pool"`;
 echo "Config written! Copy oauth_creds.json from your pool folder:"
 echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
 
+            document.getElementById('gemini-pi-one-liner').textContent =
+`mkdir -p ~/.pi/agent
+cat > ~/.pi/agent/auth.json << 'EOF'
+{
+  "google": { "type": "api_key", "key": "AIzaSy-pool-REPLACE_ME" }
+}
+EOF
+cat > ~/.pi/agent/models.json << 'EOF'
+{
+  "providers": {
+    "google": { "baseUrl": "${BASE_URL}" }
+  }
+}
+EOF`;
+
             document.getElementById('gemini-config').textContent =
 `{
   "codeAssistEndpoint": "${BASE_URL}"
+}`;
+
+            document.getElementById('gemini-pi-manual').textContent =
+`{
+  "google": { "type": "api_key", "key": "AIzaSy-pool-REPLACE_ME" }
+}
+
+{
+  "providers": {
+    "google": { "baseUrl": "${BASE_URL}" }
+  }
 }`;
 
             loadStats();

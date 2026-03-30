@@ -841,7 +841,7 @@ brew install gemini-cli</pre>
 
                     <!-- Gemini Auto -->
                     <div id="gemini-auto" class="sub-tab-content active">
-                        <div class="step-label">One-Liner Execution</div>
+                        <div class="step-label">Gemini CLI // One-Liner Execution</div>
                         <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash)
                         </p>
@@ -861,13 +861,36 @@ brew install gemini-cli</pre>
                             </div>
                         </div>
                         <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
-                            Automatically retrieves OAuth token and configures endpoint settings.
+                            Uses Gemini CLI / Cloud Code Assist mode.
+                        </p>
+
+                        <div class="step-label" style="margin-top: 22px;">Pi // One-Liner Execution</div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            macOS / Linux (bash)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-pi-one-liner-unix', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-pi-one-liner-unix"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                            Windows (PowerShell)
+                        </p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-pi-one-liner-windows', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-pi-one-liner-windows"></pre>
+                            </div>
+                        </div>
+                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                            Pi should use the built-in <code>google</code> provider via API-key mode. Do not point Pi at <code>google-gemini-cli</code> for this pool.
                         </p>
                     </div>
 
                     <!-- Gemini Manual -->
                     <div id="gemini-manual" class="sub-tab-content">
-                        <div class="step-label">01 // Configuration</div>
+                        <div class="step-label">Gemini CLI // Configuration</div>
                         <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code> + environment variable</p>
                         <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash/zsh)
@@ -888,12 +911,21 @@ brew install gemini-cli</pre>
                             </div>
                         </div>
 
-                        <div class="step-label">02 // Settings Only</div>
+                        <div class="step-label">Gemini CLI // Settings Only</div>
                         <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('gemini-connect', this)">Copy</button>
                             <div class="code-block">
                                 <pre id="gemini-connect"></pre>
+                            </div>
+                        </div>
+
+                        <div class="step-label" style="margin-top: 22px;">Pi // Manual Config</div>
+                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Targets: <code>~/.pi/agent/auth.json</code> and <code>~/.pi/agent/models.json</code></p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('gemini-pi-manual', this)">Copy</button>
+                            <div class="code-block">
+                                <pre id="gemini-pi-manual"></pre>
                             </div>
                         </div>
                     </div>
@@ -1549,8 +1581,11 @@ args = ["~/.codex/model_sync.sh", "${publicUrl}"]`;
 
             // Populate Gemini (API key mode - bypasses OAuth)
             const geminiScriptUrl = `${publicUrl}/setup/gemini/${downloadToken}`;
+            const geminiPiScriptUrl = `${geminiScriptUrl}?client=pi`;
             document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
             document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
+            document.getElementById('gemini-pi-one-liner-unix').textContent = `curl -sL "${geminiPiScriptUrl}" | bash`;
+            document.getElementById('gemini-pi-one-liner-windows').textContent = `irm "${geminiScriptUrl}?client=pi&shell=powershell" | iex`;
             if (geminiApiKey) {
                 document.getElementById('gemini-auth-json-unix').textContent = `# 1. Save API key to ~/.gemini/api_key:
 echo "${geminiApiKey}" > ~/.gemini/api_key
@@ -1597,10 +1632,20 @@ $env:GOOGLE_GEMINI_BASE_URL = "${publicUrl}"
     }
   }
 }`;
+                document.getElementById('gemini-pi-manual').textContent = `{
+  "google": { "type": "api_key", "key": "${geminiApiKey}" }
+}
+
+{
+  "providers": {
+    "google": { "baseUrl": "${publicUrl}" }
+  }
+}`;
             } else {
                 document.getElementById('gemini-auth-json-unix').textContent = `# Run the one-liner above to configure automatically`;
                 document.getElementById('gemini-auth-json-windows').textContent = `# Run the one-liner above to configure automatically`;
                 document.getElementById('gemini-connect').textContent = `# Run the one-liner above to configure automatically`;
+                document.getElementById('gemini-pi-manual').textContent = `# Run the Pi one-liner above to configure automatically`;
             }
 
             // Populate Claude
@@ -1729,8 +1774,11 @@ args = ["~/.codex/model_sync.sh", "${result.public_url}"]`;
                 // Populate Gemini (API key mode - bypasses OAuth)
                 const geminiApiKey = result.gemini_api_key || '';
                 const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
+                const geminiPiScriptUrl = `${geminiScriptUrl}?client=pi`;
                 document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
                 document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
+                document.getElementById('gemini-pi-one-liner-unix').textContent = `curl -sL "${geminiPiScriptUrl}" | bash`;
+                document.getElementById('gemini-pi-one-liner-windows').textContent = `irm "${geminiScriptUrl}?client=pi&shell=powershell" | iex`;
 
                 document.getElementById('gemini-auth-json-unix').textContent = `# 1. Save API key to ~/.gemini/api_key:
 echo "${geminiApiKey}" > ~/.gemini/api_key
@@ -1776,6 +1824,15 @@ $env:GOOGLE_GEMINI_BASE_URL = "${result.public_url}"
       "selectedType": "gemini-api-key",
       "useExternal": true
     }
+  }
+}`;
+                document.getElementById('gemini-pi-manual').textContent = `{
+  "google": { "type": "api_key", "key": "${geminiApiKey}" }
+}
+
+{
+  "providers": {
+    "google": { "baseUrl": "${result.public_url}" }
   }
 }`;
 
