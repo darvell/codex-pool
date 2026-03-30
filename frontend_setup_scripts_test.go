@@ -114,6 +114,98 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 	}
 }
 
+func TestServeGeminiSetupScript_PiBash(t *testing.T) {
+	secret := "test-secret-key-12345678901234567890"
+	t.Setenv("POOL_JWT_SECRET", secret)
+
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "pool_users.json")
+	store, err := newPoolUserStore(usersPath)
+	if err != nil {
+		t.Fatalf("newPoolUserStore: %v", err)
+	}
+
+	user := &PoolUser{
+		ID:        "user123",
+		Token:     "tok123",
+		Email:     "test@example.com",
+		PlanType:  "pro",
+		CreatedAt: time.Now(),
+	}
+	if err := store.Create(user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	h := &proxyHandler{poolUsers: store}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/gemini/tok123?client=pi", nil)
+	rr := httptest.NewRecorder()
+	h.serveGeminiSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/x-shellscript") {
+		t.Fatalf("Content-Type = %q, want text/x-shellscript*", ct)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "auth['google'] = {'type': 'api_key', 'key': os.environ['GEMINI_API_KEY']}") {
+		t.Fatalf("expected Pi auth.json update in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "google['baseUrl'] = os.environ['BASE_URL']") {
+		t.Fatalf("expected Pi models.json update in body, got:\n%s", body)
+	}
+}
+
+func TestServeGeminiSetupScript_PiPowerShell(t *testing.T) {
+	secret := "test-secret-key-12345678901234567890"
+	t.Setenv("POOL_JWT_SECRET", secret)
+
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "pool_users.json")
+	store, err := newPoolUserStore(usersPath)
+	if err != nil {
+		t.Fatalf("newPoolUserStore: %v", err)
+	}
+
+	user := &PoolUser{
+		ID:        "user123",
+		Token:     "tok123",
+		Email:     "test@example.com",
+		PlanType:  "pro",
+		CreatedAt: time.Now(),
+	}
+	if err := store.Create(user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	h := &proxyHandler{poolUsers: store}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/gemini/tok123?client=pi&shell=powershell", nil)
+	rr := httptest.NewRecorder()
+	h.serveGeminiSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain*", ct)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Configuring Pi for Gemini pool access") {
+		t.Fatalf("expected Pi setup text in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "Add-Member -MemberType NoteProperty -Name google -Value $googleAuth -Force") {
+		t.Fatalf("expected auth.json update in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "Add-Member -MemberType NoteProperty -Name baseUrl -Value $BaseUrl -Force") {
+		t.Fatalf("expected models.json update in body, got:\n%s", body)
+	}
+	if strings.Contains(body, "`") {
+		t.Fatalf("PowerShell script should not contain backticks (Go raw string safety), got:\n%s", body)
+	}
+}
+
 func TestServeClaudeSetupScript_PowerShell(t *testing.T) {
 	secret := "test-secret-key-12345678901234567890"
 	t.Setenv("POOL_JWT_SECRET", secret)

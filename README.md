@@ -114,6 +114,23 @@ export ANTHROPIC_API_KEY="pool"
 export CODE_ASSIST_ENDPOINT="http://127.0.0.1:8989"
 ```
 
+**Pi (Gemini via API-key mode)**:
+```bash
+mkdir -p ~/.pi/agent
+# auth.json
+# {
+#   "google": { "type": "api_key", "key": "AIzaSy-pool-..." }
+# }
+# models.json
+# {
+#   "providers": {
+#     "google": { "baseUrl": "http://127.0.0.1:8989" }
+#   }
+# }
+```
+
+Pi should use the built-in `google` provider here, not `google-gemini-cli`. The proxy's API-key mode avoids the Cloud Code Assist project handshake that Pi does not perform.
+
 ---
 
 ## Friends Mode

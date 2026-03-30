@@ -230,6 +230,15 @@ func wantsPowerShell(r *http.Request) bool {
 	}
 }
 
+func wantsPiClient(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("client"))) {
+	case "pi", "pi-coding-agent":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.URL.Path, "/setup/codex/")
 	if token == "" || strings.Contains(token, "/") {
@@ -851,19 +860,142 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Generate pool OAuth credentials for this user
 	secret := getPoolJWTSecret()
 	if secret == "" {
 		http.Error(w, "JWT secret not configured", http.StatusServiceUnavailable)
 		return
 	}
+
+	publicURL := h.getEffectivePublicURL(r)
+
+	if wantsPiClient(r) {
+		geminiAPIKey := generateGeminiAPIKey(secret, user)
+		if wantsPowerShell(r) {
+			script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$BaseUrl = '%s'
+$GeminiApiKey = '%s'
+
+# PS 5.1 writes UTF-8 with BOM which breaks JSON parsers. Write without BOM.
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
+Write-Host 'Configuring Pi for Gemini pool access...'
+Write-Host ''
+
+$piDir = Join-Path $HOME '.pi\agent'
+New-Item -ItemType Directory -Force -Path $piDir | Out-Null
+
+$authFile = Join-Path $piDir 'auth.json'
+$auth = $null
+try { $auth = Get-Content -Path $authFile -Raw | ConvertFrom-Json } catch {}
+if ($null -eq $auth) { $auth = New-Object PSObject }
+$googleAuth = New-Object PSObject
+$googleAuth | Add-Member -MemberType NoteProperty -Name type -Value 'api_key' -Force
+$googleAuth | Add-Member -MemberType NoteProperty -Name key -Value $GeminiApiKey -Force
+$auth | Add-Member -MemberType NoteProperty -Name google -Value $googleAuth -Force
+Set-Utf8NoBom -Path $authFile -Value ($auth | ConvertTo-Json -Depth 10)
+Write-Host ('Updated ' + $authFile)
+
+$modelsFile = Join-Path $piDir 'models.json'
+$models = $null
+try { $models = Get-Content -Path $modelsFile -Raw | ConvertFrom-Json } catch {}
+if ($null -eq $models) { $models = New-Object PSObject }
+$providers = $null
+try { $providers = $models.providers } catch {}
+if ($null -eq $providers) { $providers = New-Object PSObject }
+$googleProvider = $null
+try { $googleProvider = $providers.google } catch {}
+if ($null -eq $googleProvider) { $googleProvider = New-Object PSObject }
+$googleProvider | Add-Member -MemberType NoteProperty -Name baseUrl -Value $BaseUrl -Force
+$providers | Add-Member -MemberType NoteProperty -Name google -Value $googleProvider -Force
+$models | Add-Member -MemberType NoteProperty -Name providers -Value $providers -Force
+Set-Utf8NoBom -Path $modelsFile -Value ($models | ConvertTo-Json -Depth 10)
+Write-Host ('Updated ' + $modelsFile)
+
+Write-Host ''
+Write-Host 'Setup complete!'
+Write-Host ''
+Write-Host ('Pi will now route the built-in google provider through: ' + $BaseUrl)
+Write-Host 'This uses Gemini API-key mode instead of Cloud Code Assist, which avoids the project-id handshake that Pi does not perform.'
+Write-Host ''
+Write-Host 'Run /reload in pi, then choose a google/gemini model.'
+`, publicURL, geminiAPIKey)
+
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write([]byte(script))
+			return
+		}
+
+		script := fmt.Sprintf(`#!/bin/bash
+set -e
+BASE_URL="%s"
+GEMINI_API_KEY="%s"
+
+echo "Configuring Pi for Gemini pool access..."
+echo ""
+
+mkdir -p "$HOME/.pi/agent"
+AUTH_FILE="$HOME/.pi/agent/auth.json"
+MODELS_FILE="$HOME/.pi/agent/models.json"
+
+if command -v python3 >/dev/null 2>&1; then
+    BASE_URL="$BASE_URL" GEMINI_API_KEY="$GEMINI_API_KEY" python3 <<'PY'
+import json, os
+from pathlib import Path
+
+auth_path = Path.home() / '.pi' / 'agent' / 'auth.json'
+models_path = Path.home() / '.pi' / 'agent' / 'models.json'
+
+def load_json(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+auth = load_json(auth_path)
+auth['google'] = {'type': 'api_key', 'key': os.environ['GEMINI_API_KEY']}
+auth_path.write_text(json.dumps(auth, indent=2) + '\n')
+
+models = load_json(models_path)
+providers = models.setdefault('providers', {})
+google = providers.setdefault('google', {})
+google['baseUrl'] = os.environ['BASE_URL']
+models_path.write_text(json.dumps(models, indent=2) + '\n')
+
+print(f'✓ Updated {auth_path}')
+print(f'✓ Updated {models_path}')
+PY
+else
+    echo "python3 is required to update Pi config files" >&2
+    exit 1
+fi
+
+echo ""
+echo "Setup complete!"
+echo ""
+echo "Pi will now route the built-in google provider through: $BASE_URL"
+echo "This uses Gemini API-key mode instead of Cloud Code Assist, which avoids the project-id handshake that Pi does not perform."
+echo ""
+echo "Run /reload in pi, then choose a google/gemini model."
+`, publicURL, geminiAPIKey)
+
+		w.Header().Set("Content-Type", "text/x-shellscript")
+		w.Write([]byte(script))
+		return
+	}
+
+	// Default Gemini CLI setup path: use pool OAuth-style token that the CLI accepts.
 	geminiAuth, err := generateGeminiAuth(secret, user)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	publicURL := h.getEffectivePublicURL(r)
 
 	// Script sets env vars to bypass Google OAuth validation and route through proxy
 	// Uses GOOGLE_GENAI_USE_GCA + GOOGLE_CLOUD_ACCESS_TOKEN to skip getTokenInfo() check
