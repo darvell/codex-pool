@@ -42,6 +42,12 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	// Load last_refresh from root level (for rate limiting across restarts)
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err == nil {
+		if dead, ok := root["dead"].(bool); ok {
+			acc.Dead = dead
+		}
+		if disabled, ok := root["disabled"].(bool); ok {
+			acc.Disabled = disabled
+		}
 		if lr, ok := root["last_refresh"].(string); ok && lr != "" {
 			if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
 				acc.LastRefresh = t

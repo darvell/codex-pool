@@ -189,6 +189,16 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	codexAccessToken := ""
+	if authData.Tokens != nil {
+		codexAccessToken = authData.Tokens.AccessToken
+	}
+	piModelsJSON, err := generatePiModelsJSON(h.getEffectivePublicURL(r), codexAccessToken, claudeAuthData.AccessToken)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate pi models config.")
+		return
+	}
+
 	// Generate Gemini API key for API key mode (bypasses OAuth)
 	geminiAPIKey := generateGeminiAPIKey(secret, newUser)
 
@@ -202,6 +212,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		"gemini_auth_json": string(geminiJSONBytes),
 		"gemini_api_key":   geminiAPIKey,               // API key for Gemini CLI API key mode
 		"claude_api_key":   claudeAuthData.AccessToken, // JWT token to use as API key
+		"pi_models_json":   string(piModelsJSON),
 	})
 }
 
@@ -1660,6 +1671,7 @@ func (h *proxyHandler) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	var userType string
 	authHeader := r.Header.Get("Authorization")
 	secret := getPoolJWTSecret()
+	originID := hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode))
 
 	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*)
 	if secret != "" {
@@ -1687,25 +1699,45 @@ func (h *proxyHandler) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userID == "" {
-		ip := getClientIP(r)
-		salt := h.cfg.friendCode
-		if salt == "" {
-			salt = "codex-pool"
-		}
-		userID = hashUserIP(ip, salt)
+		userID = strings.TrimPrefix(originID, "ip_")
 		userType = "anonymous"
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"user_id": userID,
-		"type":    userType,
+		"user_id":   userID,
+		"origin_id": originID,
+		"type":      userType,
 	})
 }
 
 // PoolUserStats represents a user's usage for the leaderboard.
 type PoolUserStats struct {
 	UserID              string    `json:"user_id"`
+	TotalBillableTokens int64     `json:"total_billable_tokens"`
+	TotalInputTokens    int64     `json:"total_input_tokens"`
+	TotalOutputTokens   int64     `json:"total_output_tokens"`
+	RequestCount        int64     `json:"request_count"`
+	FirstSeen           time.Time `json:"first_seen"`
+	LastSeen            time.Time `json:"last_seen"`
+}
+
+type PoolOriginStats struct {
+	OriginID            string    `json:"origin_id"`
+	TotalBillableTokens int64     `json:"total_billable_tokens"`
+	TotalInputTokens    int64     `json:"total_input_tokens"`
+	TotalOutputTokens   int64     `json:"total_output_tokens"`
+	RequestCount        int64     `json:"request_count"`
+	FirstSeen           time.Time `json:"first_seen"`
+	LastSeen            time.Time `json:"last_seen"`
+}
+
+type AdminOriginStats struct {
+	OriginID            string    `json:"origin_id"`
+	RawIP               string    `json:"raw_ip,omitempty"`
+	LastUserID          string    `json:"last_user_id,omitempty"`
+	LastUserAgent       string    `json:"last_user_agent,omitempty"`
+	LastPath            string    `json:"last_path,omitempty"`
 	TotalBillableTokens int64     `json:"total_billable_tokens"`
 	TotalInputTokens    int64     `json:"total_input_tokens"`
 	TotalOutputTokens   int64     `json:"total_output_tokens"`
@@ -1740,6 +1772,104 @@ func (h *proxyHandler) handlePoolUsers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"users":       stats,
 		"total_users": len(stats),
+	})
+}
+
+// handlePoolOrigins returns the public leaderboard of hashed incoming origin usage.
+func (h *proxyHandler) handlePoolOrigins(w http.ResponseWriter, r *http.Request) {
+	origins, err := h.store.getAllOriginUsage()
+	if err != nil {
+		http.Error(w, "failed to fetch origin usage", http.StatusInternalServerError)
+		return
+	}
+
+	stats := make([]PoolOriginStats, len(origins))
+	for i, origin := range origins {
+		stats[i] = PoolOriginStats{
+			OriginID:            origin.OriginID,
+			TotalBillableTokens: origin.TotalBillableTokens,
+			TotalInputTokens:    origin.TotalInputTokens,
+			TotalOutputTokens:   origin.TotalOutputTokens,
+			RequestCount:        origin.RequestCount,
+			FirstSeen:           origin.FirstSeen,
+			LastSeen:            origin.LastSeen,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"origins":       stats,
+		"total_origins": len(stats),
+	})
+}
+
+// handleAdminOrigins returns hashed origin usage joined with admin-only raw attribution metadata.
+func (h *proxyHandler) handleAdminOrigins(w http.ResponseWriter, r *http.Request) {
+	originFilter := strings.TrimSpace(r.URL.Query().Get("origin_id"))
+
+	origins, err := h.store.getAllOriginUsage()
+	if err != nil {
+		http.Error(w, "failed to fetch origin usage", http.StatusInternalServerError)
+		return
+	}
+	metas, err := h.store.getAllOriginMetadata()
+	if err != nil {
+		http.Error(w, "failed to fetch origin metadata", http.StatusInternalServerError)
+		return
+	}
+
+	metaByID := make(map[string]OriginMetadata, len(metas))
+	for _, meta := range metas {
+		metaByID[meta.OriginID] = meta
+	}
+
+	stats := make([]AdminOriginStats, 0, len(origins))
+	for _, origin := range origins {
+		if originFilter != "" && origin.OriginID != originFilter {
+			continue
+		}
+		meta := metaByID[origin.OriginID]
+		firstSeen := origin.FirstSeen
+		if firstSeen.IsZero() {
+			firstSeen = meta.FirstSeen
+		}
+		lastSeen := origin.LastSeen
+		if lastSeen.IsZero() {
+			lastSeen = meta.LastSeen
+		}
+		stats = append(stats, AdminOriginStats{
+			OriginID:            origin.OriginID,
+			RawIP:               meta.RawIP,
+			LastUserID:          meta.LastUserID,
+			LastUserAgent:       meta.LastUserAgent,
+			LastPath:            meta.LastPath,
+			TotalBillableTokens: origin.TotalBillableTokens,
+			TotalInputTokens:    origin.TotalInputTokens,
+			TotalOutputTokens:   origin.TotalOutputTokens,
+			RequestCount:        origin.RequestCount,
+			FirstSeen:           firstSeen,
+			LastSeen:            lastSeen,
+		})
+	}
+
+	if originFilter != "" && len(stats) == 0 {
+		if meta, ok := metaByID[originFilter]; ok {
+			stats = append(stats, AdminOriginStats{
+				OriginID:      meta.OriginID,
+				RawIP:         meta.RawIP,
+				LastUserID:    meta.LastUserID,
+				LastUserAgent: meta.LastUserAgent,
+				LastPath:      meta.LastPath,
+				FirstSeen:     meta.FirstSeen,
+				LastSeen:      meta.LastSeen,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"origins":       stats,
+		"total_origins": len(stats),
 	})
 }
 

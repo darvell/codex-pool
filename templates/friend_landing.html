@@ -736,6 +736,11 @@
                         <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" fill="currentColor"/></svg>
                         OpenAI API
                     </div>
+                    <div class="tab" data-tab="pi">
+                        <!-- Pi Icon -->
+                        <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm5 4h2v10H9V9zm4 0h2v10h-2V9zm-6 8h10v2H7v-2z" fill="currentColor"/></svg>
+                        Pi
+                    </div>
                     <div class="tab" data-tab="stats">
                         <!-- Stats Icon -->
                         <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
@@ -985,10 +990,10 @@ brew install claude-code</pre>
                             <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">haiku</span>
                             <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">sonnet</span>
                             <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">opus</span>
-                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi</span>
-                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-for-coding</span>
-                            <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">minimax</span>
-                            <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">minimax-m2.5</span>
+                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
+                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-k2-thinking</span>
+                            <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
+                            <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
                         </div>
                         <div class="step-label">04 // Optional: Settings.json</div>
                         <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Claude Code ignores auth in <code>~/.claude/settings.json</code>; this is optional for other settings</p>
@@ -1055,22 +1060,89 @@ brew install claude-code</pre>
                     <div class="step-label">04 // Available Models</div>
                     <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Use any model name. Requests are auto-routed to the right provider and translated if needed.</p>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-4-5-20250514</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-haiku-3-5-20241022</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-0-20250514</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-4-6</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-haiku-4-5</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-6</span>
                     </div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
-                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.4-codex</span>
-                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">o3</span>
-                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">codex-mini-latest</span>
+                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.4</span>
+                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.3-codex</span>
+                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.1-codex-mini</span>
                     </div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px;">
-                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi</span>
-                        <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">minimax</span>
+                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
+                        <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.1</span>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">
                         Claude models sent to /v1/chat/completions are auto-translated to the Anthropic Messages API and back.
                         OpenAI models sent to /v1/messages are auto-translated to the Chat Completions API and back.
+                    </p>
+
+                </div>
+
+                <!-- PI -->
+                <div id="tab-pi" class="tab-content">
+                    <div class="install-section">
+                        <div class="section-header">
+                            <svg viewBox="0 0 24 24"><path d="M13 4v6.3c2.9.4 5 1.8 5 3.5 0 2-2.7 3.7-6 3.7s-6-1.7-6-3.7c0-1.7 2.1-3.1 5-3.5V4h2zm-1 8c-2.6 0-4 1.1-4 1.8s1.4 1.8 4 1.8 4-1.1 4-1.8-1.4-1.8-4-1.8zM7 19h10v2H7v-2z" fill="currentColor"/></svg>
+                            Pi Setup
+                        </div>
+                        <p style="color: #999; font-size: 0.8rem; margin-bottom: 15px;">
+                            Pi gets its own <code>models.json</code>. Codex runs through <code>openai-codex-responses</code>, while Claude, Kimi, and MiniMax run through <code>anthropic-messages</code>.
+                        </p>
+                    </div>
+
+                    <div class="step-label">01 // Install models.json</div>
+                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.pi/agent/models.json</code></p>
+                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        macOS / Linux (bash/zsh)
+                    </p>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('pi-install-unix', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="pi-install-unix"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        Windows (PowerShell)
+                    </p>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('pi-install-windows', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="pi-install-windows"></pre>
+                        </div>
+                    </div>
+
+                    <div class="step-label">02 // Curated Providers</div>
+                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Pi only gets the pool-backed providers, so the built-in Anthropic clutter stays out of the picker.</p>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude</span>
+                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi</span>
+                        <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">minimax</span>
+                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">codex</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">zai</span>
+                    </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px;">
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-haiku-4-5</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-4-6</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-6</span>
+                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
+                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-k2-thinking</span>
+                        <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
+                        <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.1</span>
+                    </div>
+
+                    <div class="step-label">03 // Raw models.json</div>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('pi-models-json', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="pi-models-json"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #888; font-size: 0.75rem; font-style: italic;">
+                        Replace the file, then fully restart Pi so it reloads the provider list.
                     </p>
                 </div>
 
@@ -1365,6 +1437,10 @@ brew install claude-code</pre>
                                 <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">Your ID</span>
                                 <span id="your-user-id" style="font-family: 'Space Mono', monospace; color: var(--gold-bright); font-size: 0.9rem;">Loading...</span>
                             </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid #1a1a1a;">
+                                <span style="color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase;">Your IP Hash</span>
+                                <span id="your-origin-id" style="font-family: 'Space Mono', monospace; color: #60a5fa; font-size: 0.9rem;">Loading...</span>
+                            </div>
                         </div>
 
                         <div id="users-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
@@ -1389,6 +1465,25 @@ brew install claude-code</pre>
                             </div>
                             <p style="color: var(--text-muted); font-size: 0.7rem; margin-top: 15px; font-style: italic;">
                                 User IDs are hashed and cannot be reversed to identify actual users.
+                            </p>
+
+                            <div class="step-label" style="margin-top: 28px;">Hashed Incoming IPs</div>
+                            <div style="overflow-x: auto;">
+                                <table id="origins-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>IP Hash</th>
+                                            <th style="text-align: right;">Tokens</th>
+                                            <th style="text-align: right;">Requests</th>
+                                            <th style="text-align: right;">Last Seen</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="origins-tbody"></tbody>
+                                </table>
+                            </div>
+                            <p style="color: var(--text-muted); font-size: 0.7rem; margin-top: 15px; font-style: italic;">
+                                IP hashes use the pool salt, so they stay stable inside this pool and reveal repeated origins without exposing raw IP addresses.
                             </p>
                         </div>
                     </div>
@@ -1504,6 +1599,7 @@ brew install claude-code</pre>
             let geminiAuthJson = '# Loading...';
             let geminiApiKey = '';
             let claudeApiKey = '';
+            let piModelsJson = '# Loading...';
 
             if (friendCode) {
                 try {
@@ -1518,6 +1614,7 @@ brew install claude-code</pre>
                         geminiAuthJson = result.gemini_auth_json || '# Unable to fetch';
                         geminiApiKey = result.gemini_api_key || '';
                         claudeApiKey = result.claude_api_key || '';
+                        piModelsJson = result.pi_models_json || '# Unable to fetch';
                     }
                 } catch (e) {
                     console.error('Failed to fetch auth data:', e);
@@ -1639,7 +1736,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.4-codex",  # or claude-sonnet-4-5-20250514, kimi, etc.
+    model="gpt-5.4",  # or claude-sonnet-4-6, k2p5, MiniMax-M2.7, etc.
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)`;
@@ -1647,14 +1744,23 @@ print(response.choices[0].message.content)`;
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${openaiKey}" \\
   -d '{
-    "model": "gpt-5.4-codex",
+    "model": "gpt-5.4",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'`;
+                document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
+curl -sL "${publicUrl}/config/pi/${downloadToken}" -o ~/.pi/agent/models.json
+chmod 600 ~/.pi/agent/models.json`;
+                document.getElementById('pi-install-windows').textContent = `New-Item -ItemType Directory -Force -Path "$HOME\\.pi\\agent" | Out-Null
+Invoke-WebRequest -UseBasicParsing -Uri "${publicUrl}/config/pi/${downloadToken}" -OutFile "$HOME\\.pi\\agent\\models.json"`;
+                document.getElementById('pi-models-json').textContent = piModelsJson;
             } else {
                 document.getElementById('openai-env-unix').textContent = `# Log in first to get your API key`;
                 document.getElementById('openai-env-windows').textContent = `# Log in first to get your API key`;
                 document.getElementById('openai-python-example').textContent = `# Log in first to get your API key`;
                 document.getElementById('openai-curl-example').textContent = `# Log in first to get your API key`;
+                document.getElementById('pi-install-unix').textContent = `# Log in first to get your Pi models.json`;
+                document.getElementById('pi-install-windows').textContent = `# Log in first to get your Pi models.json`;
+                document.getElementById('pi-models-json').textContent = `# Log in first to get your Pi models.json`;
             }
 
             // Show success state
@@ -1728,6 +1834,7 @@ args = ["~/.codex/model_sync.sh", "${result.public_url}"]`;
 
                 // Populate Gemini (API key mode - bypasses OAuth)
                 const geminiApiKey = result.gemini_api_key || '';
+                const piModelsJson = result.pi_models_json || '';
                 const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
                 document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
                 document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
@@ -1810,7 +1917,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.4-codex",  # or claude-sonnet-4-5-20250514, kimi, etc.
+    model="gpt-5.4",  # or claude-sonnet-4-6, k2p5, MiniMax-M2.7, etc.
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)`;
@@ -1818,9 +1925,19 @@ print(response.choices[0].message.content)`;
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${openaiKey2}" \\
   -d '{
-    "model": "gpt-5.4-codex",
+    "model": "gpt-5.4",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'`;
+                    document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
+curl -sL "${result.public_url}/config/pi/${result.download_token}" -o ~/.pi/agent/models.json
+chmod 600 ~/.pi/agent/models.json`;
+                    document.getElementById('pi-install-windows').textContent = `New-Item -ItemType Directory -Force -Path "$HOME\\.pi\\agent" | Out-Null
+Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result.download_token}" -OutFile "$HOME\\.pi\\agent\\models.json"`;
+                    document.getElementById('pi-models-json').textContent = piModelsJson;
+                } else {
+                    document.getElementById('pi-install-unix').textContent = `# Log in first to get your Pi models.json`;
+                    document.getElementById('pi-install-windows').textContent = `# Log in first to get your Pi models.json`;
+                    document.getElementById('pi-models-json').textContent = `# Log in first to get your Pi models.json`;
                 }
 
                 // Transition with animation
@@ -1875,11 +1992,12 @@ print(response.choices[0].message.content)`;
                     claude:  { bg: 'rgba(139, 92, 246, 0.15)', fg: '#a78bfa' },
                     gemini:  { bg: 'rgba(52, 211, 153, 0.15)', fg: '#34d399' },
                     kimi:    { bg: 'rgba(59, 130, 246, 0.15)', fg: '#60a5fa' },
-                    minimax: { bg: 'rgba(245, 158, 11, 0.15)', fg: '#fbbf24' }
+                    minimax: { bg: 'rgba(245, 158, 11, 0.15)', fg: '#fbbf24' },
+                    zai:     { bg: 'rgba(239, 68, 68, 0.15)', fg: '#f87171' }
                 };
                 const breakdownEl = document.getElementById('provider-breakdown');
                 breakdownEl.innerHTML = '';
-                const providerOrder = ['codex', 'claude', 'gemini', 'kimi', 'minimax'];
+                const providerOrder = ['codex', 'claude', 'gemini', 'kimi', 'minimax', 'zai'];
                 const costByProvider = (agg.cost_by_provider) || {};
                 providerOrder.forEach(type => {
                     const count = providerCounts[type];
@@ -2143,13 +2261,18 @@ print(response.choices[0].message.content)`;
                 if (whoamiRes.ok) {
                     const whoami = await whoamiRes.json();
                     document.getElementById('your-user-id').textContent = whoami.user_id;
+                    document.getElementById('your-origin-id').textContent = whoami.origin_id || '-';
                     window.currentUserId = whoami.user_id;
+                    window.currentOriginId = whoami.origin_id || '';
                 }
 
                 // Get all users
                 const usersRes = await poolFetch('/api/pool/users');
                 if (!usersRes.ok) throw new Error('Failed to load users');
                 const data = await usersRes.json();
+                const originsRes = await poolFetch('/api/pool/origins');
+                if (!originsRes.ok) throw new Error('Failed to load origin usage');
+                const originData = await originsRes.json();
 
                 document.getElementById('users-loading').style.display = 'none';
                 document.getElementById('users-content').style.display = 'block';
@@ -2159,25 +2282,50 @@ print(response.choices[0].message.content)`;
 
                 if (!data.users || data.users.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 40px;">No usage data yet. Start using the pool to appear here!</td></tr>';
+                } else {
+                    data.users.forEach((user, index) => {
+                        const isCurrentUser = user.user_id === window.currentUserId;
+                        const rowStyle = isCurrentUser ? 'background: rgba(212, 175, 55, 0.1);' : '';
+                        const idStyle = isCurrentUser ? 'color: var(--gold-bright); font-weight: bold;' : 'color: #888;';
+                        const lastSeen = user.last_seen ? formatRelativeTime(user.last_seen) : '-';
+
+                        const row = document.createElement('tr');
+                        row.style.cssText = rowStyle;
+                        row.innerHTML = `
+                            <td style="font-family: monospace; color: var(--text-muted);">${index + 1}</td>
+                            <td style="font-family: monospace; ${idStyle}">${user.user_id}${isCurrentUser ? ' (you)' : ''}</td>
+                            <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${formatNumber(user.total_billable_tokens)}</td>
+                            <td style="text-align: right; font-family: monospace;">${user.request_count}</td>
+                            <td style="text-align: right; color: var(--text-muted); font-size: 0.75rem;">${lastSeen}</td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                }
+
+                const originsTbody = document.getElementById('origins-tbody');
+                originsTbody.innerHTML = '';
+
+                if (!originData.origins || originData.origins.length === 0) {
+                    originsTbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">No origin data yet.</td></tr>';
                     return;
                 }
 
-                data.users.forEach((user, index) => {
-                    const isCurrentUser = user.user_id === window.currentUserId;
-                    const rowStyle = isCurrentUser ? 'background: rgba(212, 175, 55, 0.1);' : '';
-                    const idStyle = isCurrentUser ? 'color: var(--gold-bright); font-weight: bold;' : 'color: #888;';
-                    const lastSeen = user.last_seen ? formatRelativeTime(user.last_seen) : '-';
+                originData.origins.forEach((origin, index) => {
+                    const isCurrentOrigin = origin.origin_id === window.currentOriginId;
+                    const rowStyle = isCurrentOrigin ? 'background: rgba(96, 165, 250, 0.1);' : '';
+                    const idStyle = isCurrentOrigin ? 'color: #60a5fa; font-weight: bold;' : 'color: #888;';
+                    const lastSeen = origin.last_seen ? formatRelativeTime(origin.last_seen) : '-';
 
                     const row = document.createElement('tr');
                     row.style.cssText = rowStyle;
                     row.innerHTML = `
                         <td style="font-family: monospace; color: var(--text-muted);">${index + 1}</td>
-                        <td style="font-family: monospace; ${idStyle}">${user.user_id}${isCurrentUser ? ' (you)' : ''}</td>
-                        <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${formatNumber(user.total_billable_tokens)}</td>
-                        <td style="text-align: right; font-family: monospace;">${user.request_count}</td>
+                        <td style="font-family: monospace; ${idStyle}">${origin.origin_id}${isCurrentOrigin ? ' (you)' : ''}</td>
+                        <td style="text-align: right; font-family: monospace; color: #60a5fa;">${formatNumber(origin.total_billable_tokens)}</td>
+                        <td style="text-align: right; font-family: monospace;">${origin.request_count}</td>
                         <td style="text-align: right; color: var(--text-muted); font-size: 0.75rem;">${lastSeen}</td>
                     `;
-                    tbody.appendChild(row);
+                    originsTbody.appendChild(row);
                 });
             } catch (err) {
                 document.getElementById('users-loading').textContent = 'Unable to load user data.';
@@ -2352,7 +2500,7 @@ print(response.choices[0].message.content)`;
             const maxCost = Math.max(...dates.map(d => Object.values(byDate[d]).reduce((a, b) => a + b, 0)), 0.01);
 
             const costProviderColors = {
-                codex: '#d4af37', claude: '#a78bfa', gemini: '#34d399', kimi: '#60a5fa', minimax: '#fbbf24'
+                codex: '#d4af37', claude: '#a78bfa', gemini: '#34d399', kimi: '#60a5fa', minimax: '#fbbf24', zai: '#f87171'
             };
 
             chart.innerHTML = '';

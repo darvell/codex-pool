@@ -125,8 +125,12 @@ func (p *MinimaxProvider) DetectsSSE(path string, contentType string) bool {
 
 // minimaxModels maps request model names to the canonical model name sent upstream.
 var minimaxModels = map[string]string{
-	"minimax-m2.5": "MiniMax-M2.5",
-	"minimax":      "MiniMax-M2.5",
+	"minimax":                "MiniMax-M2.5",
+	"minimax-m2":             "MiniMax-M2",
+	"minimax-m2.1":           "MiniMax-M2.1",
+	"minimax-m2.5":           "MiniMax-M2.5",
+	"minimax-m2.7":           "MiniMax-M2.7",
+	"minimax-m2.7-highspeed": "MiniMax-M2.7-highspeed",
 }
 
 // isMinimaxModel returns true if the given model name should be routed to MiniMax.

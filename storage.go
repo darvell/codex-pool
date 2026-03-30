@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,13 +12,15 @@ import (
 )
 
 const (
-	bucketUsageRequests    = "usage_requests"
-	bucketAccountUsage     = "account_usage"
-	bucketPlanCapacity     = "plan_capacity"
-	bucketCapacitySamples  = "capacity_samples"
-	bucketUserUsage        = "user_usage"
-	bucketUserDailyUsage   = "user_daily_usage"
-	bucketUserHourlyUsage  = "user_hourly_usage"
+	bucketUsageRequests     = "usage_requests"
+	bucketAccountUsage      = "account_usage"
+	bucketPlanCapacity      = "plan_capacity"
+	bucketCapacitySamples   = "capacity_samples"
+	bucketUserUsage         = "user_usage"
+	bucketOriginUsage       = "origin_usage"
+	bucketOriginMetadata    = "origin_metadata"
+	bucketUserDailyUsage    = "user_daily_usage"
+	bucketUserHourlyUsage   = "user_hourly_usage"
 	bucketGlobalHourlyUsage = "global_hourly_usage"
 )
 
@@ -32,6 +35,30 @@ type UserUsage struct {
 	RequestCount         int64     `json:"request_count"`
 	FirstSeen            time.Time `json:"first_seen"`
 	LastSeen             time.Time `json:"last_seen"`
+}
+
+// OriginUsage tracks aggregate token usage per hashed incoming origin.
+type OriginUsage struct {
+	OriginID             string    `json:"origin_id"`
+	TotalInputTokens     int64     `json:"total_input_tokens"`
+	TotalCachedTokens    int64     `json:"total_cached_tokens"`
+	TotalOutputTokens    int64     `json:"total_output_tokens"`
+	TotalReasoningTokens int64     `json:"total_reasoning_tokens"`
+	TotalBillableTokens  int64     `json:"total_billable_tokens"`
+	RequestCount         int64     `json:"request_count"`
+	FirstSeen            time.Time `json:"first_seen"`
+	LastSeen             time.Time `json:"last_seen"`
+}
+
+// OriginMetadata tracks admin-only attribution details for a hashed origin.
+type OriginMetadata struct {
+	OriginID      string    `json:"origin_id"`
+	RawIP         string    `json:"raw_ip"`
+	LastUserID    string    `json:"last_user_id,omitempty"`
+	LastUserAgent string    `json:"last_user_agent,omitempty"`
+	LastPath      string    `json:"last_path,omitempty"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
 }
 
 // UserDailyUsage tracks per-day token usage for a user.
@@ -53,8 +80,8 @@ type UserDailyUsage struct {
 
 // UserHourlyUsage tracks per-hour per-provider token usage.
 type UserHourlyUsage struct {
-	Hour            string `json:"hour"`          // "2025-02-05T14" (ISO hour)
-	AccountType     string `json:"account_type"`  // "claude", "codex", "gemini"
+	Hour            string `json:"hour"`         // "2025-02-05T14" (ISO hour)
+	AccountType     string `json:"account_type"` // "claude", "codex", "gemini"
 	InputTokens     int64  `json:"input_tokens"`
 	CachedTokens    int64  `json:"cached_tokens"`
 	OutputTokens    int64  `json:"output_tokens"`
@@ -102,7 +129,7 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketOriginUsage, bucketOriginMetadata, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
@@ -285,6 +312,29 @@ func (s *usageStore) record(u RequestUsage) error {
 			}
 		}
 
+		// Update origin usage aggregates (if OriginID is set)
+		if u.OriginID != "" {
+			originBucket := tx.Bucket([]byte(bucketOriginUsage))
+			var originAgg OriginUsage
+			if raw := originBucket.Get([]byte(u.OriginID)); raw != nil {
+				_ = json.Unmarshal(raw, &originAgg)
+			}
+			if originAgg.FirstSeen.IsZero() {
+				originAgg.FirstSeen = u.Timestamp
+			}
+			originAgg.OriginID = u.OriginID
+			originAgg.TotalInputTokens += u.InputTokens
+			originAgg.TotalCachedTokens += u.CachedInputTokens
+			originAgg.TotalOutputTokens += u.OutputTokens
+			originAgg.TotalReasoningTokens += u.ReasoningTokens
+			originAgg.TotalBillableTokens += u.BillableTokens
+			originAgg.RequestCount++
+			originAgg.LastSeen = u.Timestamp
+			if enc, err := json.Marshal(&originAgg); err == nil {
+				_ = originBucket.Put([]byte(u.OriginID), enc)
+			}
+		}
+
 		// Store capacity sample if we have meaningful deltas
 		if u.BillableTokens > 0 && (primaryDelta > 0.001 || secondaryDelta > 0.001) {
 			sample := CapacitySample{
@@ -317,6 +367,94 @@ func (s *usageStore) record(u RequestUsage) error {
 		s.prune()
 	}
 	return nil
+}
+
+// getAllOriginUsage returns usage for all hashed origins, sorted by total billable tokens descending.
+func (s *usageStore) getAllOriginUsage() ([]OriginUsage, error) {
+	var origins []OriginUsage
+	if s == nil || s.db == nil {
+		return origins, nil
+	}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketOriginUsage))
+		return b.ForEach(func(k, v []byte) error {
+			var origin OriginUsage
+			if err := json.Unmarshal(v, &origin); err == nil {
+				if origin.OriginID == "" {
+					origin.OriginID = string(k)
+				}
+				origins = append(origins, origin)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(origins, func(i, j int) bool {
+		if origins[i].TotalBillableTokens == origins[j].TotalBillableTokens {
+			return origins[i].LastSeen.After(origins[j].LastSeen)
+		}
+		return origins[i].TotalBillableTokens > origins[j].TotalBillableTokens
+	})
+	return origins, nil
+}
+
+func (s *usageStore) recordOriginMetadata(originID, rawIP, userID, userAgent, path string, seenAt time.Time) error {
+	if s == nil || s.db == nil || originID == "" || rawIP == "" {
+		return nil
+	}
+	if seenAt.IsZero() {
+		seenAt = time.Now()
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketOriginMetadata))
+		var meta OriginMetadata
+		if raw := b.Get([]byte(originID)); raw != nil {
+			_ = json.Unmarshal(raw, &meta)
+		}
+		if meta.FirstSeen.IsZero() {
+			meta.FirstSeen = seenAt
+		}
+		meta.OriginID = originID
+		meta.RawIP = rawIP
+		meta.LastUserID = userID
+		meta.LastUserAgent = userAgent
+		meta.LastPath = path
+		meta.LastSeen = seenAt
+		enc, err := json.Marshal(&meta)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(originID), enc)
+	})
+}
+
+func (s *usageStore) getAllOriginMetadata() ([]OriginMetadata, error) {
+	var metas []OriginMetadata
+	if s == nil || s.db == nil {
+		return metas, nil
+	}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketOriginMetadata))
+		return b.ForEach(func(k, v []byte) error {
+			var meta OriginMetadata
+			if err := json.Unmarshal(v, &meta); err == nil {
+				if meta.OriginID == "" {
+					meta.OriginID = string(k)
+				}
+				metas = append(metas, meta)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(metas, func(i, j int) bool {
+		return metas[i].LastSeen.After(metas[j].LastSeen)
+	})
+	return metas, nil
 }
 
 func (s *usageStore) updatePlanCapacity(tx *bbolt.Tx, sample CapacitySample) {

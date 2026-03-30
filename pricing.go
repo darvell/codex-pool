@@ -39,10 +39,10 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	monthly float64
 	label   string
 }{
-	{AccountTypeClaude, "pro"}:    {20, "Claude Pro"},
-	{AccountTypeClaude, "max_5x"}: {100, "Claude Max 5x"},
-	{AccountTypeClaude, "default_claude_max_5x"}: {100, "Claude Max 5x"},
-	{AccountTypeClaude, "max_20x"}:               {200, "Claude Max 20x"},
+	{AccountTypeClaude, "pro"}:                    {20, "Claude Pro"},
+	{AccountTypeClaude, "max_5x"}:                 {100, "Claude Max 5x"},
+	{AccountTypeClaude, "default_claude_max_5x"}:  {100, "Claude Max 5x"},
+	{AccountTypeClaude, "max_20x"}:                {200, "Claude Max 20x"},
 	{AccountTypeClaude, "default_claude_max_20x"}: {200, "Claude Max 20x"},
 	{AccountTypeClaude, "team"}:                   {25, "Claude Team"},
 	{AccountTypeCodex, "plus"}:                    {20, "Codex Plus"},
@@ -53,6 +53,8 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeKimi, ""}:                         {49, "Kimi Coding"},
 	{AccountTypeMinimax, "api"}:                   {5, "MiniMax API"},
 	{AccountTypeMinimax, ""}:                      {5, "MiniMax API"},
+	{AccountTypeZAI, "zai"}:                       {0, "Z.ai Coding Plan"},
+	{AccountTypeZAI, ""}:                          {0, "Z.ai Coding Plan"},
 }
 
 // getSubscriptionCost returns monthly cost and label for an account.
@@ -211,6 +213,7 @@ var defaultModelForProvider = map[AccountType]string{
 	AccountTypeClaude:  "claude-sonnet-4-5",
 	AccountTypeKimi:    "moonshot.kimi-k2-thinking",
 	AccountTypeMinimax: "minimax.minimax-m2",
+	AccountTypeZAI:     "zai.glm-5.1",
 }
 
 func (pd *PricingData) calculateCost(ru RequestUsage) float64 {

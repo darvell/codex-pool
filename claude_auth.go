@@ -340,6 +340,19 @@ func saveClaudeAccount(a *Account) error {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
 
+	// Persist account state flags so disabled/dead accounts stay unavailable
+	// across reloads and restarts.
+	if a.Dead {
+		root["dead"] = true
+	} else {
+		delete(root, "dead")
+	}
+	if a.Disabled {
+		root["disabled"] = true
+	} else {
+		delete(root, "disabled")
+	}
+
 	return atomicWriteJSON(a.File, root)
 }
 

@@ -167,6 +167,9 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 	case strings.HasPrefix(path, "/config/claude/"):
 		configType = "claude"
 		token = strings.TrimPrefix(path, "/config/claude/")
+	case strings.HasPrefix(path, "/config/pi/"):
+		configType = "pi"
+		token = strings.TrimPrefix(path, "/config/pi/")
 	default:
 		http.NotFound(w, r)
 		return
@@ -218,5 +221,27 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		json.NewEncoder(w).Encode(auth)
+	case "pi":
+		codexAuth, err := generateCodexAuth(secret, user)
+		if err != nil {
+			respondJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		auth, err := generateClaudeAuth(secret, user)
+		if err != nil {
+			respondJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		publicURL := h.getEffectivePublicURL(r)
+		codexAccessToken := ""
+		if codexAuth.Tokens != nil {
+			codexAccessToken = codexAuth.Tokens.AccessToken
+		}
+		modelsJSON, err := generatePiModelsJSON(publicURL, codexAccessToken, auth.AccessToken)
+		if err != nil {
+			respondJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Write(modelsJSON)
 	}
 }

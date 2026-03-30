@@ -34,12 +34,12 @@ func (f RequestFormat) String() string {
 type TranslateDirection int
 
 const (
-	TranslateNone            TranslateDirection = iota
-	TranslateClaudeToOAI                        // Client sent Claude format, upstream expects OpenAI Chat Completions
-	TranslateOAIToClaude                        // Client sent OpenAI format, upstream expects Claude
-	TranslateChatToResponses                    // Client sent Chat Completions, upstream expects Responses API
-	TranslateResponsesToClaude                  // Client sent Responses API, upstream expects Claude Messages
-	TranslateClaudeToResponses                  // Client sent Claude format, upstream expects Responses API
+	TranslateNone              TranslateDirection = iota
+	TranslateClaudeToOAI                          // Client sent Claude format, upstream expects OpenAI Chat Completions
+	TranslateOAIToClaude                          // Client sent OpenAI format, upstream expects Claude
+	TranslateChatToResponses                      // Client sent Chat Completions, upstream expects Responses API
+	TranslateResponsesToClaude                    // Client sent Responses API, upstream expects Claude Messages
+	TranslateClaudeToResponses                    // Client sent Claude format, upstream expects Responses API
 )
 
 // detectRequestFormat determines the API format from the request path.
@@ -58,6 +58,8 @@ func detectRequestFormat(path string) RequestFormat {
 func providerTargetFormat(accountType AccountType) RequestFormat {
 	switch accountType {
 	case AccountTypeClaude:
+		return FormatClaude
+	case AccountTypeZAI:
 		return FormatClaude
 	case AccountTypeCodex:
 		return FormatOpenAI
@@ -1227,24 +1229,40 @@ func isOpenAIModel(model string) bool {
 // isClaudeModel returns true if the model name looks like an Anthropic Claude model.
 // claudeCanonicalModel maps short Claude model names to their full API model IDs.
 func claudeCanonicalModel(model string) string {
-	m := strings.ToLower(model)
-	if idx := strings.LastIndex(m, "("); idx > 0 {
-		m = m[:idx]
-	}
-	m = strings.TrimSpace(m)
-	// Already a full Claude model name
-	if strings.HasPrefix(m, "claude") {
+	raw := strings.TrimSpace(model)
+	if raw == "" {
 		return model
 	}
-	switch m {
-	case "opus":
-		return "claude-opus-4-6"
-	case "sonnet":
-		return "claude-sonnet-4-6"
-	case "haiku":
-		return "claude-haiku-4-5-20251001"
+	lower := strings.ToLower(raw)
+	if idx := strings.LastIndex(lower, "("); idx > 0 {
+		raw = strings.TrimSpace(raw[:idx])
+		lower = strings.TrimSpace(lower[:idx])
 	}
-	return model
+
+	has1M := strings.Contains(lower, "[1m]")
+	baseRaw := strings.TrimSpace(strings.ReplaceAll(raw, "[1m]", ""))
+	baseLower := strings.TrimSpace(strings.ReplaceAll(lower, "[1m]", ""))
+
+	var canonical string
+	if strings.HasPrefix(baseLower, "claude") {
+		canonical = baseRaw
+	} else {
+		switch baseLower {
+		case "opus":
+			canonical = "claude-opus-4-6"
+		case "sonnet":
+			canonical = "claude-sonnet-4-6"
+		case "haiku":
+			canonical = "claude-haiku-4-5-20251001"
+		default:
+			return model
+		}
+	}
+
+	if has1M {
+		return canonical + " [1m]"
+	}
+	return canonical
 }
 
 func isClaudeModel(model string) bool {
@@ -1328,36 +1346,36 @@ func logTranslation(reqID string, direction TranslateDirection, debug bool) {
 
 func claudeModelEntry(slug, displayName string, contextWindow int) map[string]any {
 	return map[string]any{
-		"slug":                          slug,
-		"display_name":                  displayName,
-		"description":                   displayName + " via Codex Pool",
-		"prefer_websockets":             false,
-		"support_verbosity":             false,
-		"default_verbosity":             nil,
-		"default_reasoning_level":       "high",
-		"default_reasoning_summary":     "none",
+		"slug":                           slug,
+		"display_name":                   displayName,
+		"description":                    displayName + " via Codex Pool",
+		"prefer_websockets":              false,
+		"support_verbosity":              false,
+		"default_verbosity":              nil,
+		"default_reasoning_level":        "high",
+		"default_reasoning_summary":      "none",
 		"apply_patch_tool_type":          "freeform",
 		"web_search_tool_type":           "text",
-		"shell_type":                    "shell_command",
-		"input_modalities":              []string{"text", "image"},
+		"shell_type":                     "shell_command",
+		"input_modalities":               []string{"text", "image"},
 		"supports_image_detail_original": false,
-		"supports_parallel_tool_calls":  true,
-		"supports_reasoning_summaries":  false,
-		"supports_search_tool":          false,
-		"supported_in_api":              true,
-		"supported_reasoning_levels":    []any{},
-		"experimental_supported_tools":  []any{},
-		"truncation_policy":             map[string]any{"mode": "tokens", "limit": 10000},
-		"context_window":                contextWindow,
-		"priority":                      100,
-		"visibility":                    "list",
-		"availability_nux":              nil,
-		"available_in_plans":            []string{"plus", "pro", "team", "enterprise", "business"},
-		"minimal_client_version":        "0.1.0",
-		"reasoning_summary_format":      "none",
-		"model_messages":                nil,
-		"base_instructions":             "",
-		"upgrade":                       nil,
+		"supports_parallel_tool_calls":   true,
+		"supports_reasoning_summaries":   false,
+		"supports_search_tool":           false,
+		"supported_in_api":               true,
+		"supported_reasoning_levels":     []any{},
+		"experimental_supported_tools":   []any{},
+		"truncation_policy":              map[string]any{"mode": "tokens", "limit": 10000},
+		"context_window":                 contextWindow,
+		"priority":                       100,
+		"visibility":                     "list",
+		"availability_nux":               nil,
+		"available_in_plans":             []string{"plus", "pro", "team", "enterprise", "business"},
+		"minimal_client_version":         "0.1.0",
+		"reasoning_summary_format":       "none",
+		"model_messages":                 nil,
+		"base_instructions":              "",
+		"upgrade":                        nil,
 	}
 }
 
@@ -1389,7 +1407,9 @@ func injectClaudeModels(body []byte) []byte {
 
 	claudeModels := []map[string]any{
 		claudeModelEntry("opus", "Claude Opus 4.6", 200000),
+		claudeModelEntry("opus[1m]", "Claude Opus 4.6 [1m]", 1000000),
 		claudeModelEntry("sonnet", "Claude Sonnet 4.6", 200000),
+		claudeModelEntry("sonnet[1m]", "Claude Sonnet 4.6 [1m]", 1000000),
 		claudeModelEntry("haiku", "Claude Haiku 4.5", 200000),
 	}
 

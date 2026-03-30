@@ -85,6 +85,16 @@ func isDeactivatedWorkspace(body []byte) bool {
 		strings.Contains(s, "payment_required")
 }
 
+// isClaudeOrganizationDisabled checks for Anthropic responses that indicate
+// the org behind a Claude OAuth token has been disabled permanently.
+func isClaudeOrganizationDisabled(body []byte) bool {
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "organization has been disabled") ||
+		strings.Contains(s, "organization is disabled") ||
+		strings.Contains(s, "organization_has_been_disabled") ||
+		strings.Contains(s, "organization_disabled")
+}
+
 // Retryable returns true if this class should be retried on another account.
 func (c ErrorClass) Retryable() bool {
 	switch c {

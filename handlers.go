@@ -511,6 +511,7 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 			"codex_accounts":    poolStats.CodexCount,
 			"gemini_accounts":   poolStats.GeminiCount,
 			"claude_accounts":   poolStats.ClaudeCount,
+			"zai_accounts":      poolStats.ZAICount,
 			"avg_primary_pct":   int(poolStats.AvgPrimaryUsed * 100),
 			"avg_secondary_pct": int(poolStats.AvgSecondaryUsed * 100),
 			"min_secondary_pct": int(poolStats.MinSecondaryUsed * 100),

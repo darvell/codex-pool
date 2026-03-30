@@ -130,6 +130,12 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handlePoolUsers(w, r)
 		return
+	case "/api/pool/origins":
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		h.handlePoolOrigins(w, r)
+		return
 	case "/api/pool/daily-breakdown":
 		if !h.checkAdminOrFriendAuth(w, r) {
 			return
@@ -175,6 +181,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveAccounts(w)
+		return
+	case "/admin/origins":
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleAdminOrigins(w, r)
 		return
 	case "/admin/tokens":
 		if !h.checkAdminAuth(w, r) {
@@ -325,8 +341,17 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Z.ai account admin routes (friend auth - accessible from friend landing page)
+	if strings.HasPrefix(r.URL.Path, "/admin/zai") {
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		h.serveZAIAdmin(w, r)
+		return
+	}
+
 	// Config download routes (no auth - token is the auth)
-	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") {
+	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") || strings.HasPrefix(r.URL.Path, "/config/pi/") {
 		h.serveConfigDownload(w, r)
 		return
 	}

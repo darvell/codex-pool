@@ -35,6 +35,7 @@ type config struct {
 	claudeBase    *url.URL // Claude API endpoint
 	kimiBase      *url.URL // Kimi API endpoint
 	minimaxBase   *url.URL // MiniMax API endpoint
+	zaiBase       *url.URL // Z.ai Anthropic-compatible endpoint
 	poolDir       string
 
 	disableRefresh  bool
@@ -107,6 +108,7 @@ func buildConfig() *config {
 	cfg.claudeBase = mustParse(getenv("UPSTREAM_CLAUDE_BASE", "https://api.anthropic.com"))
 	cfg.kimiBase = mustParse(getenv("UPSTREAM_KIMI_BASE", "https://api.kimi.com/coding"))
 	cfg.minimaxBase = mustParse(getenv("UPSTREAM_MINIMAX_BASE", "https://api.minimax.io/anthropic"))
+	cfg.zaiBase = mustParse(getenv("UPSTREAM_ZAI_BASE", "https://api.z.ai/api/anthropic"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -196,7 +198,8 @@ func main() {
 	geminiProvider := NewGeminiProvider(cfg.geminiBase, cfg.geminiAPIBase)
 	kimiProvider := NewKimiProvider(cfg.kimiBase)
 	minimaxProvider := NewMinimaxProvider(cfg.minimaxBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider)
+	zaiProvider := NewZAIProvider(cfg.zaiBase)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider, zaiProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -210,6 +213,7 @@ func main() {
 	geminiCount := pool.countByType(AccountTypeGemini)
 	kimiCount := pool.countByType(AccountTypeKimi)
 	minimaxCount := pool.countByType(AccountTypeMinimax)
+	zaiCount := pool.countByType(AccountTypeZAI)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
@@ -368,8 +372,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -552,13 +556,13 @@ func claudeRequestRequiresMax(r *http.Request, model string) bool {
 // modelRouteOverride checks if the requested model should be routed to an external
 // provider (Kimi, MiniMax, etc.) instead of the path-detected provider.
 // Returns (provider, baseURL, rewrittenBody) or (nil, nil, nil) if no override.
-func (h *proxyHandler) modelRouteOverride(model string, body []byte) (Provider, *url.URL, []byte) {
+func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Provider, *url.URL, []byte) {
 	if isKimiModel(model) {
 		p := h.registry.ForType(AccountTypeKimi)
 		if p == nil {
 			return nil, nil, nil
 		}
-		return p, p.UpstreamURL(""), nil
+		return p, p.UpstreamURL(path), nil
 	}
 	if isMinimaxModel(model) {
 		p := h.registry.ForType(AccountTypeMinimax)
@@ -568,14 +572,23 @@ func (h *proxyHandler) modelRouteOverride(model string, body []byte) (Provider, 
 		// Rewrite the model name to the canonical upstream name
 		canonical := minimaxCanonicalModel(model)
 		rewritten := rewriteModelInBody(body, canonical)
-		return p, p.UpstreamURL(""), rewritten
+		return p, p.UpstreamURL(path), rewritten
+	}
+	if isZAIModel(model) {
+		p := h.registry.ForType(AccountTypeZAI)
+		if p == nil {
+			return nil, nil, nil
+		}
+		canonical := zaiCanonicalModel(model)
+		rewritten := rewriteModelInBody(body, canonical)
+		return p, p.UpstreamURL(path), rewritten
 	}
 	// Cross-format model routing: detect if the model belongs to a different provider
 	// than the one the request path would normally select.
 	if isOpenAIModel(model) {
 		p := h.registry.ForType(AccountTypeCodex)
 		if p != nil {
-			return p, p.UpstreamURL(""), nil
+			return p, p.UpstreamURL(path), nil
 		}
 	}
 	if isClaudeModel(model) {
@@ -583,7 +596,7 @@ func (h *proxyHandler) modelRouteOverride(model string, body []byte) (Provider, 
 		if p != nil {
 			canonical := claudeCanonicalModel(model)
 			rewritten := rewriteModelInBody(body, canonical)
-			return p, p.UpstreamURL(""), rewritten
+			return p, p.UpstreamURL(path), rewritten
 		}
 	}
 	return nil, nil, nil
@@ -755,6 +768,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, "unauthorized: valid pool token required", http.StatusUnauthorized)
 		return
 	}
+	originID := hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode))
+	originIP := getClientIP(r)
+	if h.store != nil && originID != "" && originIP != "" {
+		_ = h.store.recordOriginMetadata(originID, originIP, userID, r.UserAgent(), r.URL.Path, time.Now())
+	}
 
 	provider, targetBase := h.pickUpstream(r.URL.Path, r.Header)
 	if provider == nil || targetBase == nil {
@@ -764,7 +782,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	accountType := provider.Type()
 
 	if isWebSocketUpgradeRequest(r) {
-		h.proxyRequestWebSocket(w, r, reqID, userID, provider, targetBase)
+		h.proxyRequestWebSocket(w, r, reqID, userID, originID, provider, targetBase)
 		return
 	}
 
@@ -774,7 +792,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			log.Printf("[%s] streaming request body: method=%s path=%s provider=%s content-length=%d",
 				reqID, r.Method, r.URL.Path, accountType, r.ContentLength)
 		}
-		h.proxyRequestStreamed(w, r, reqID, userID, provider, targetBase)
+		h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
 		return
 	}
 
@@ -813,7 +831,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	// Model-based provider override: route to external providers by model name.
 	if requestedModel != "" {
-		if overrideProvider, overrideBase, rewrittenBody := h.modelRouteOverride(requestedModel, bodyBytes); overrideProvider != nil {
+		if overrideProvider, overrideBase, rewrittenBody := h.modelRouteOverride(r.URL.Path, requestedModel, bodyBytes); overrideProvider != nil {
 			provider = overrideProvider
 			targetBase = overrideBase
 			accountType = overrideProvider.Type()
@@ -937,12 +955,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 
 	if h.cfg.debug.Load() {
-		log.Printf("[%s] incoming %s %s provider=%s conv_id=%s authZ_len=%d chatgpt-id=%q content-type=%q content-encoding=%q body_bytes=%d",
+		log.Printf("[%s] incoming %s %s provider=%s conv_id=%s user_id=%s origin_id=%s authZ_len=%d chatgpt-id=%q content-type=%q content-encoding=%q body_bytes=%d",
 			reqID,
 			r.Method,
 			r.URL.Path,
 			accountType,
 			conversationID,
+			userID,
+			originID,
 			len(r.Header.Get("Authorization")),
 			r.Header.Get("ChatGPT-Account-ID"),
 			r.Header.Get("Content-Type"),
@@ -1094,25 +1114,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				acc.mu.Unlock()
 
 			case ErrorClassAuth:
-				acc.mu.Lock()
-				// Codex accounts: only mark dead from usage endpoint failures, not proxy failures.
-				// Other accounts: mark dead if refresh already failed.
-				if refreshFailed && acc.Type != AccountTypeCodex {
-					acc.Dead = true
-					acc.Penalty += 1.0
-					acc.mu.Unlock()
+				markedDead, penaltyNow := applyProxyAuthFailure(acc, refreshFailed)
+				if markedDead {
 					log.Printf("[%s] account %s DEAD: %d refresh failed, body=%s", reqID, acc.ID, resp.StatusCode, errBodyStr)
 					if err := saveAccount(acc); err != nil {
 						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 					}
 				} else {
-					acc.Penalty += 10.0
-					acc.mu.Unlock()
 					var respHdrs []string
 					for k, v := range resp.Header {
 						respHdrs = append(respHdrs, fmt.Sprintf("%s=%s", k, v[0]))
 					}
-					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, acc.Penalty, errBodyStr, respHdrs)
+					log.Printf("[%s] account %s got %d, penalty now %.1f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, penaltyNow, errBodyStr, respHdrs)
 				}
 
 			case ErrorClassPayment:
@@ -1228,6 +1241,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						if ru.SecondaryUsedPct == 0 && headerSecondaryPct > 0 {
 							ru.SecondaryUsedPct = headerSecondaryPct
 						}
+						ru.UserID = userID
+						ru.OriginID = originID
+						ru.AccountType = acc.Type
 						h.recordUsage(acc, *ru)
 					}
 				}
@@ -1265,7 +1281,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if sampleBuf != nil {
 				sampleBuf.Write(respBody)
 			}
-			h.updateUsageFromBody(acc, respBody)
+			h.updateUsageFromBody(acc, respBody, userID, originID)
 
 			var translated []byte
 			if resp.StatusCode >= 400 {
@@ -1355,6 +1371,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						claudeAccum = nil
 						ru.AccountID = acc.ID
 						ru.UserID = userID
+						ru.OriginID = originID
 						ru.AccountType = acc.Type
 						acc.mu.Lock()
 						ru.PlanType = acc.PlanType
@@ -1374,6 +1391,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 				ru.AccountID = acc.ID
 				ru.UserID = userID
+				ru.OriginID = originID
 				ru.AccountType = acc.Type
 				acc.mu.Lock()
 				ru.PlanType = acc.PlanType
@@ -1449,6 +1467,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if claudeAccum != nil {
 				claudeAccum.AccountID = acc.ID
 				claudeAccum.UserID = userID
+				claudeAccum.OriginID = originID
 				claudeAccum.AccountType = acc.Type
 				acc.mu.Lock()
 				claudeAccum.PlanType = acc.PlanType
@@ -1485,7 +1504,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
 			}
 			if !isSSE && len(respSample) > 0 {
-				h.updateUsageFromBody(acc, respSample)
+				h.updateUsageFromBody(acc, respSample, userID, originID)
 			}
 		}
 
@@ -1537,6 +1556,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	r *http.Request,
 	reqID string,
 	userID string,
+	originID string,
 	provider Provider,
 	targetBase *url.URL,
 ) {
@@ -1631,16 +1651,8 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			}
 
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				acc.mu.Lock()
-				markDead := refreshFailed && acc.Type != AccountTypeCodex
-				if markDead {
-					acc.Dead = true
-					acc.Penalty += 1.0
-				} else {
-					acc.Penalty += 10.0
-				}
-				acc.mu.Unlock()
-				if markDead {
+				markedDead, _ := applyProxyAuthFailure(acc, refreshFailed)
+				if markedDead {
 					if err := saveAccount(acc); err != nil {
 						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 					}
@@ -1693,7 +1705,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
 	}
 	if h.cfg.debug.Load() {
-		log.Printf("[%s] websocket done status=%d account=%s user=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, time.Since(start).Milliseconds())
+		log.Printf("[%s] websocket done status=%d account=%s user=%s origin=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, originID, time.Since(start).Milliseconds())
 	}
 }
 
@@ -1776,7 +1788,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	}
 }
 
-func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID string, provider Provider, targetBase *url.URL) {
+func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL) {
 	start := time.Now()
 	accountType := provider.Type()
 
@@ -1922,17 +1934,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		// Replace body so client still gets the error
 		resp.Body = io.NopCloser(bytes.NewReader(errBody))
 
-		acc.mu.Lock()
-		if refreshFailed && acc.Type != AccountTypeCodex {
-			acc.Dead = true
-			acc.Penalty += 1.0
-			acc.mu.Unlock()
+		markedDead, _ := applyProxyAuthFailure(acc, refreshFailed)
+		if markedDead {
 			if err := saveAccount(acc); err != nil {
 				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 			}
-		} else {
-			acc.Penalty += 10.0
-			acc.mu.Unlock()
 		}
 	} else if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
 		acc.mu.Lock()
@@ -2017,6 +2023,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 						claudeAccum2 = nil
 						ru.AccountID = acc.ID
 						ru.UserID = userID
+						ru.OriginID = originID
 						ru.AccountType = acc.Type
 						acc.mu.Lock()
 						ru.PlanType = acc.PlanType
@@ -2035,6 +2042,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 				// Non-Claude: record immediately
 				ru.AccountID = acc.ID
 				ru.UserID = userID
+				ru.OriginID = originID
 				ru.AccountType = acc.Type
 				acc.mu.Lock()
 				ru.PlanType = acc.PlanType
@@ -2064,6 +2072,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	if claudeAccum2 != nil {
 		claudeAccum2.AccountID = acc.ID
 		claudeAccum2.UserID = userID
+		claudeAccum2.OriginID = originID
 		claudeAccum2.AccountType = acc.Type
 		acc.mu.Lock()
 		claudeAccum2.PlanType = acc.PlanType
@@ -2095,7 +2104,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
 	}
 	if !isSSE && len(respSample) > 0 {
-		h.updateUsageFromBody(acc, respSample)
+		h.updateUsageFromBody(acc, respSample, userID, originID)
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -2974,7 +2983,7 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	return err
 }
 
-func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte) {
+func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte, userID, originID string) {
 	if a == nil || len(sample) == 0 {
 		return
 	}
@@ -3000,6 +3009,9 @@ func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte) {
 			ru := parseTokenCountEvent(obj)
 			if ru != nil {
 				ru.AccountID = a.ID
+				ru.UserID = userID
+				ru.OriginID = originID
+				ru.AccountType = a.Type
 				a.mu.Lock()
 				ru.PlanType = a.PlanType
 				a.mu.Unlock()
@@ -3024,6 +3036,9 @@ func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte) {
 			}
 			if ru := parseRequestUsage(resp); ru != nil {
 				ru.AccountID = a.ID
+				ru.UserID = userID
+				ru.OriginID = originID
+				ru.AccountType = a.Type
 				a.mu.Lock()
 				ru.PlanType = a.PlanType
 				a.mu.Unlock()
@@ -3034,6 +3049,9 @@ func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte) {
 		// Legacy: direct usage object
 		if ru := parseRequestUsage(obj); ru != nil {
 			ru.AccountID = a.ID
+			ru.UserID = userID
+			ru.OriginID = originID
+			ru.AccountType = a.Type
 			a.mu.Lock()
 			ru.PlanType = a.PlanType
 			a.mu.Unlock()

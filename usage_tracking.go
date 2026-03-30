@@ -94,6 +94,15 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
+		if accType == AccountTypeZAI {
+			if retrievedAt.IsZero() {
+				if err := h.seedZAIUsage(now, a); err != nil && h.cfg.debug.Load() {
+					log.Printf("zai usage seed %s failed: %v", a.ID, err)
+				}
+			}
+			continue
+		}
+
 		// Kimi has a dedicated usage endpoint
 		if accType == AccountTypeKimi {
 			if retrievedAt.IsZero() || now.Sub(retrievedAt) >= h.cfg.usageRefresh {
@@ -924,6 +933,46 @@ func (h *proxyHandler) seedMinimaxUsage(now time.Time, a *Account) error {
 	// Parse rate limit headers from the response
 	applyMinimaxRateLimits(a, resp.Header, now)
 
+	return nil
+}
+
+func (h *proxyHandler) seedZAIUsage(now time.Time, a *Account) error {
+	a.mu.Lock()
+	access := a.AccessToken
+	a.mu.Unlock()
+
+	seedURL := h.cfg.zaiBase.String() + "/v1/messages"
+	body := []byte(`{"model":"glm-5.1","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+
+	req, _ := http.NewRequest(http.MethodPost, seedURL, bytes.NewReader(body))
+	req.Header.Set("X-Api-Key", access)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := h.transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		a.mu.Lock()
+		a.Dead = true
+		a.Penalty += 100.0
+		a.mu.Unlock()
+		log.Printf("marking zai account %s as dead: seed returned %d", a.ID, resp.StatusCode)
+		if err := saveAccount(a); err != nil {
+			log.Printf("warning: failed to save dead zai account %s: %v", a.ID, err)
+		}
+		return fmt.Errorf("zai seed unauthorized: %s", resp.Status)
+	}
+
+	a.mu.Lock()
+	a.Usage = mergeUsage(a.Usage, UsageSnapshot{
+		RetrievedAt: now,
+		Source:      "seed",
+	})
+	a.mu.Unlock()
 	return nil
 }
 

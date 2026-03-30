@@ -40,6 +40,32 @@ func TestCodexProviderNormalizePathBackendAPIPathStripsPrefix(t *testing.T) {
 	}
 }
 
+func TestModelRouteOverrideOpenAIModelKeepsBackendAPIBase(t *testing.T) {
+	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
+	handler := &proxyHandler{
+		registry: NewProviderRegistry(
+			NewCodexProvider(responsesBase, whamBase, nil),
+			&ClaudeProvider{},
+			&GeminiProvider{},
+		),
+	}
+
+	provider, base, _ := handler.modelRouteOverride("/backend-api/codex/responses", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+	if provider == nil {
+		t.Fatal("expected override provider")
+	}
+	if provider.Type() != AccountTypeCodex {
+		t.Fatalf("expected codex provider, got %s", provider.Type())
+	}
+	if base == nil {
+		t.Fatal("expected override base URL")
+	}
+	if got := base.String(); got != whamBase.String() {
+		t.Fatalf("expected wham base %s, got %s", whamBase, got)
+	}
+}
+
 func TestCodexProviderParseUsageHeaders(t *testing.T) {
 	acc := &Account{Type: AccountTypeCodex}
 	provider := &CodexProvider{}

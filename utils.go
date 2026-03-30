@@ -53,6 +53,25 @@ func getClientIP(r *http.Request) string {
 	return ip
 }
 
+func poolHashSalt(friendCode string) string {
+	friendCode = strings.TrimSpace(friendCode)
+	if friendCode != "" {
+		return friendCode
+	}
+	return "codex-pool"
+}
+
+func hashRequestOrigin(r *http.Request, salt string) string {
+	if r == nil {
+		return ""
+	}
+	ip := getClientIP(r)
+	if ip == "" {
+		return ""
+	}
+	return "ip_" + hashUserIP(ip, salt)
+}
+
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)

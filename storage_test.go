@@ -39,6 +39,85 @@ func TestUsageStoreRecordAndAggregate(t *testing.T) {
 	}
 }
 
+func TestUsageStoreRecordTracksOriginUsage(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "proxy.db")
+	s, err := newUsageStore(path, 30)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	ru := RequestUsage{
+		AccountID:         "acct1",
+		OriginID:          "ip_deadbeefcafebabe",
+		InputTokens:       120,
+		CachedInputTokens: 20,
+		OutputTokens:      10,
+		BillableTokens:    110,
+		Timestamp:         now,
+		RequestID:         "req-origin-1",
+	}
+	if err := s.record(ru); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	origins, err := s.getAllOriginUsage()
+	if err != nil {
+		t.Fatalf("get origins: %v", err)
+	}
+	if len(origins) != 1 {
+		t.Fatalf("expected 1 origin, got %d", len(origins))
+	}
+	if origins[0].OriginID != ru.OriginID {
+		t.Fatalf("origin id = %q, want %q", origins[0].OriginID, ru.OriginID)
+	}
+	if origins[0].TotalBillableTokens != ru.BillableTokens || origins[0].RequestCount != 1 {
+		t.Fatalf("unexpected origin aggregate: %+v", origins[0])
+	}
+}
+
+func TestUsageStoreOriginMetadata(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "proxy.db")
+	s, err := newUsageStore(path, 30)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.recordOriginMetadata(
+		"ip_deadbeefcafebabe",
+		"203.0.113.42",
+		"user123",
+		"claude-cli/test",
+		"/v1/messages",
+		now,
+	); err != nil {
+		t.Fatalf("record origin metadata: %v", err)
+	}
+
+	metas, err := s.getAllOriginMetadata()
+	if err != nil {
+		t.Fatalf("get origin metadata: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("expected 1 origin metadata row, got %d", len(metas))
+	}
+	meta := metas[0]
+	if meta.OriginID != "ip_deadbeefcafebabe" {
+		t.Fatalf("origin id = %q", meta.OriginID)
+	}
+	if meta.RawIP != "203.0.113.42" {
+		t.Fatalf("raw ip = %q", meta.RawIP)
+	}
+	if meta.LastUserID != "user123" || meta.LastPath != "/v1/messages" {
+		t.Fatalf("unexpected metadata: %+v", meta)
+	}
+}
+
 func TestUsageStorePrune(t *testing.T) {
 	s, err := newUsageStore(filepath.Join(t.TempDir(), "db.db"), 1)
 	if err != nil {

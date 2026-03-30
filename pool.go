@@ -21,6 +21,7 @@ const (
 	AccountTypeClaude  AccountType = "claude"
 	AccountTypeKimi    AccountType = "kimi"
 	AccountTypeMinimax AccountType = "minimax"
+	AccountTypeZAI     AccountType = "zai"
 )
 
 type Account struct {
@@ -163,6 +164,7 @@ type RequestUsage struct {
 	AccountID         string
 	PlanType          string
 	UserID            string
+	OriginID          string
 	PromptCacheKey    string
 	RequestID         string
 	InputTokens       int64
@@ -299,6 +301,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		"gemini":  AccountTypeGemini,
 		"kimi":    AccountTypeKimi,
 		"minimax": AccountTypeMinimax,
+		"zai":     AccountTypeZAI,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -925,6 +928,8 @@ func saveAccount(a *Account) error {
 		return saveAPIKeyAccount(a)
 	case AccountTypeMinimax:
 		return saveAPIKeyAccount(a)
+	case AccountTypeZAI:
+		return saveAPIKeyAccount(a)
 	default:
 		return saveCodexAccount(a)
 	}
@@ -1423,6 +1428,7 @@ type UsagePoolStats struct {
 	CodexCount       int            `json:"codex_count"`
 	GeminiCount      int            `json:"gemini_count"`
 	ClaudeCount      int            `json:"claude_count"`
+	ZAICount         int            `json:"zai_count"`
 	AvgPrimaryUsed   float64        `json:"avg_primary_used"`
 	AvgSecondaryUsed float64        `json:"avg_secondary_used"`
 	MinSecondaryUsed float64        `json:"min_secondary_used"`
@@ -1522,6 +1528,8 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			stats.GeminiCount++
 		case AccountTypeClaude:
 			stats.ClaudeCount++
+		case AccountTypeZAI:
+			stats.ZAICount++
 		}
 
 		// Determine status
