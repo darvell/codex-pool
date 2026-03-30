@@ -47,7 +47,7 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 				"type": "message",
 				"role": "user",
 			}
-			content := convertOAIContentToResponsesContent(m["content"])
+			content := convertOAIContentToResponsesContent(m["content"], "user")
 			item["content"] = content
 			input = append(input, item)
 
@@ -91,7 +91,7 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 					"type": "message",
 					"role": "assistant",
 				}
-				content := convertOAIContentToResponsesContent(m["content"])
+				content := convertOAIContentToResponsesContent(m["content"], "assistant")
 				item["content"] = content
 				input = append(input, item)
 			}
@@ -182,11 +182,19 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 }
 
 // convertOAIContentToResponsesContent converts OpenAI message content to Responses API content format.
-func convertOAIContentToResponsesContent(content any) []any {
+// role controls whether we emit input_* (user) or output_* (assistant) content types.
+func convertOAIContentToResponsesContent(content any, role string) []any {
+	isAssistant := role == "assistant"
+	textType := "input_text"
+	imageType := "input_image"
+	if isAssistant {
+		textType = "output_text"
+		imageType = "output_image"
+	}
 	switch c := content.(type) {
 	case string:
 		return []any{
-			map[string]any{"type": "input_text", "text": c},
+			map[string]any{"type": textType, "text": c},
 		}
 	case []any:
 		var result []any
@@ -199,13 +207,13 @@ func convertOAIContentToResponsesContent(content any) []any {
 			switch partType {
 			case "text":
 				text, _ := p["text"].(string)
-				result = append(result, map[string]any{"type": "input_text", "text": text})
+				result = append(result, map[string]any{"type": textType, "text": text})
 			case "image_url":
 				imageURL, _ := p["image_url"].(map[string]any)
 				if imageURL != nil {
 					url, _ := imageURL["url"].(string)
 					result = append(result, map[string]any{
-						"type":      "input_image",
+						"type":      imageType,
 						"image_url": url,
 					})
 				}
