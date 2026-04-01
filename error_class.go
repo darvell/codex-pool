@@ -64,6 +64,9 @@ func classifyStatus(statusCode int) ErrorClass {
 	case statusCode == http.StatusRequestTimeout: // 408
 		return ErrorClassTransient
 
+	case statusCode == 524: // Cloudflare timeout — origin didn't respond in time
+		return ErrorClassTransient
+
 	case statusCode == http.StatusTooManyRequests: // 429
 		return ErrorClassRateLimit
 
