@@ -785,6 +785,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	accountType := provider.Type()
 
+	// Block paths that are not API endpoints — these hit Cloudflare challenges
+	// and cascade auth penalties across every account in the pool.
+	if strings.Contains(r.URL.Path, "/api/codex/apps") {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
 	if isWebSocketUpgradeRequest(r) {
 		h.proxyRequestWebSocket(w, r, reqID, userID, originID, provider, targetBase)
 		return
