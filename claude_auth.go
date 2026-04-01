@@ -200,8 +200,9 @@ func FetchClaudeProfile(accessToken string) (*ClaudeProfileInfo, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-version", ccAnthropicVersion)
 	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+	req.Header.Set("User-Agent", ccUserAgent())
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("Accept", "application/json")
 

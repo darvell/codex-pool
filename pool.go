@@ -160,18 +160,19 @@ type UsageSnapshot struct {
 
 // RequestUsage captures per-request token consumption parsed from SSE events.
 type RequestUsage struct {
-	Timestamp         time.Time
-	AccountID         string
-	PlanType          string
-	UserID            string
-	OriginID          string
-	PromptCacheKey    string
-	RequestID         string
-	InputTokens       int64
-	CachedInputTokens int64
-	OutputTokens      int64
-	ReasoningTokens   int64
-	BillableTokens    int64
+	Timestamp              time.Time
+	AccountID              string
+	PlanType               string
+	UserID                 string
+	OriginID               string
+	PromptCacheKey         string
+	RequestID              string
+	InputTokens            int64
+	CachedInputTokens      int64 // cache_read_input_tokens (cheap reads from cache)
+	CacheCreationTokens    int64 // cache_creation_input_tokens (expensive writes to cache)
+	OutputTokens           int64
+	ReasoningTokens        int64
+	BillableTokens         int64
 	// Rate limit snapshot after this request
 	PrimaryUsedPct   float64
 	SecondaryUsedPct float64

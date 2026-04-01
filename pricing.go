@@ -21,6 +21,7 @@ type ModelPricing struct {
 	InputCostPerToken  float64 `json:"input_cost_per_token"`
 	OutputCostPerToken float64 `json:"output_cost_per_token"`
 	CacheReadCost      float64 `json:"cache_read_input_token_cost"`
+	CacheWriteCost     float64 `json:"cache_creation_input_token_cost"`
 }
 
 // PricingData holds the loaded pricing map and provides thread-safe lookup.
@@ -93,9 +94,10 @@ func (pd *PricingData) loadFromJSON(data []byte) {
 			continue
 		}
 		var entry struct {
-			InputCost  *float64 `json:"input_cost_per_token"`
-			OutputCost *float64 `json:"output_cost_per_token"`
-			CacheCost  *float64 `json:"cache_read_input_token_cost"`
+			InputCost      *float64 `json:"input_cost_per_token"`
+			OutputCost     *float64 `json:"output_cost_per_token"`
+			CacheCost      *float64 `json:"cache_read_input_token_cost"`
+			CacheWriteCost *float64 `json:"cache_creation_input_token_cost"`
 		}
 		if err := json.Unmarshal(val, &entry); err != nil {
 			continue
@@ -109,6 +111,9 @@ func (pd *PricingData) loadFromJSON(data []byte) {
 		}
 		if entry.CacheCost != nil {
 			mp.CacheReadCost = *entry.CacheCost
+		}
+		if entry.CacheWriteCost != nil {
+			mp.CacheWriteCost = *entry.CacheWriteCost
 		}
 		models[key] = mp
 	}
@@ -206,7 +211,8 @@ func isAllDigits(s string) bool {
 }
 
 // calculateCost computes the estimated API cost for a request.
-// Formula: (input - cached) * input_price + cached * cache_price + (output + reasoning) * output_price
+// Formula: uncached_input * input_price + cache_read * cache_read_price
+//        + cache_creation * cache_write_price + (output + reasoning) * output_price
 // defaultModelForProvider returns a fallback model name when the request didn't include one.
 var defaultModelForProvider = map[AccountType]string{
 	AccountTypeCodex:   "gpt-5.2-codex",
@@ -226,13 +232,14 @@ func (pd *PricingData) calculateCost(ru RequestUsage) float64 {
 		return 0
 	}
 
-	uncachedInput := ru.InputTokens - ru.CachedInputTokens
+	uncachedInput := ru.InputTokens - ru.CachedInputTokens - ru.CacheCreationTokens
 	if uncachedInput < 0 {
 		uncachedInput = 0
 	}
 
 	cost := float64(uncachedInput) * mp.InputCostPerToken
 	cost += float64(ru.CachedInputTokens) * mp.CacheReadCost
+	cost += float64(ru.CacheCreationTokens) * mp.CacheWriteCost
 	cost += float64(ru.OutputTokens+ru.ReasoningTokens) * mp.OutputCostPerToken
 
 	return cost

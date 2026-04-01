@@ -237,7 +237,7 @@ func (h *proxyHandler) fetchClaudeOAuthProfile(accessToken string) (map[string]a
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-version", ccAnthropicVersion)
 	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("Accept", "application/json")

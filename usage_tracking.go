@@ -392,18 +392,13 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 
 	// Set all the Claude Code headers
 	req.Header.Set("Authorization", "Bearer "+access)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-version", ccAnthropicVersion)
 	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-	req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27")
-	req.Header.Set("User-Agent", "claude-cli/2.0.76 (external, cli)")
+	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
+	req.Header.Set("User-Agent", ccUserAgent())
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-stainless-lang", "js")
-	req.Header.Set("x-stainless-package-version", "0.70.0")
-	req.Header.Set("x-stainless-os", "MacOS")
-	req.Header.Set("x-stainless-arch", "arm64")
-	req.Header.Set("x-stainless-runtime", "node")
-	req.Header.Set("x-stainless-runtime-version", "v24.3.0")
+	ccStainlessHeaders(req.Header.Set)
 
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {
@@ -910,7 +905,7 @@ func (h *proxyHandler) seedMinimaxUsage(now time.Time, a *Account) error {
 	req, _ := http.NewRequest(http.MethodPost, seedURL, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+access)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-version", ccAnthropicVersion)
 
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {
@@ -947,7 +942,7 @@ func (h *proxyHandler) seedZAIUsage(now time.Time, a *Account) error {
 	req, _ := http.NewRequest(http.MethodPost, seedURL, bytes.NewReader(body))
 	req.Header.Set("X-Api-Key", access)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("anthropic-version", ccAnthropicVersion)
 
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {

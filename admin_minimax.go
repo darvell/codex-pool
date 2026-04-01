@@ -67,7 +67,7 @@ func (h *proxyHandler) handleMinimaxAdd(w http.ResponseWriter, r *http.Request) 
 	validReq, _ := http.NewRequest(http.MethodPost, validationURL, bytes.NewReader(bodyBytes))
 	validReq.Header.Set("Authorization", "Bearer "+apiKey)
 	validReq.Header.Set("Content-Type", "application/json")
-	validReq.Header.Set("anthropic-version", "2023-06-01")
+	validReq.Header.Set("anthropic-version", ccAnthropicVersion)
 
 	resp, err := h.transport.RoundTrip(validReq)
 	if err != nil {

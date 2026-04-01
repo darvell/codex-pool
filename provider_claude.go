@@ -134,10 +134,7 @@ func (p *ClaudeProvider) ParseUsage(obj map[string]any) *RequestUsage {
 		ru := &RequestUsage{Timestamp: time.Now()}
 		ru.InputTokens = readInt64(usageMap, "input_tokens")
 		ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
-		if ru.CachedInputTokens == 0 {
-			// Fall back to cache_creation_input_tokens when read tokens are absent
-			ru.CachedInputTokens = readInt64(usageMap, "cache_creation_input_tokens")
-		}
+		ru.CacheCreationTokens = readInt64(usageMap, "cache_creation_input_tokens")
 		if ru.InputTokens == 0 {
 			return nil
 		}
@@ -145,8 +142,9 @@ func (p *ClaudeProvider) ParseUsage(obj map[string]any) *RequestUsage {
 		if model, ok := msg["model"].(string); ok {
 			ru.Model = model
 		}
-		// Clamp to non-negative since cached can exceed input in Claude's API
-		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens)
+		// Billable = input minus all cached tokens (both read and creation are
+		// "free" from the input price perspective; each has its own price tier).
+		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens - ru.CacheCreationTokens)
 		return ru
 	}
 

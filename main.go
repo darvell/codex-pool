@@ -174,7 +174,7 @@ func buildConfig() *config {
 			cfg.streamTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.streamIdleTimeout = 0 // No idle timeout; allow long thinking/tool gaps on SSE streams
+	cfg.streamIdleTimeout = 90 * time.Second // Match Claude Code's 90s stream idle watchdog
 	if v := getenv("STREAM_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamIdleTimeout = time.Duration(n) * time.Second
@@ -1053,7 +1053,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
 
-		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir)
+		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel)
 
 		atomic.AddInt64(&acc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
@@ -1366,7 +1366,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					} else {
 						claudeAccum.OutputTokens = ru.OutputTokens
 						claudeAccum.BillableTokens = clampNonNegative(
-							claudeAccum.InputTokens - claudeAccum.CachedInputTokens + ru.OutputTokens)
+							claudeAccum.InputTokens - claudeAccum.CachedInputTokens - claudeAccum.CacheCreationTokens + ru.OutputTokens)
 						ru = claudeAccum
 						claudeAccum = nil
 						ru.AccountID = acc.ID
@@ -1753,7 +1753,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 			removeConflictingProxyHeaders(pr.Out.Header)
 
 			if providerType == AccountTypeClaude && pr.Out.Header.Get("anthropic-version") == "" {
-				pr.Out.Header.Set("anthropic-version", "2023-06-01")
+				pr.Out.Header.Set("anthropic-version", ccAnthropicVersion)
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
@@ -2264,18 +2264,56 @@ func (h *proxyHandler) applyRateLimit(a *Account, hdr http.Header) time.Duration
 	if a == nil {
 		return 0
 	}
-	// Prefer Retry-After header if present; otherwise use exponential backoff.
-	wait, ok := parseRetryAfter(hdr)
-	if !ok {
-		a.mu.Lock()
-		wait = backoffDuration(a.BackoffLevel)
-		a.BackoffLevel++
-		a.mu.Unlock()
-	} else {
-		// Still bump level so repeated rate limits get longer backoffs.
-		a.mu.Lock()
-		a.BackoffLevel++
-		a.mu.Unlock()
+
+	// Try multiple sources for the cooldown duration, in priority order:
+	// 1. anthropic-ratelimit-unified-reset (precise reset timestamp from Claude)
+	// 2. Retry-After header (standard HTTP)
+	// 3. Exponential backoff (fallback)
+	wait := time.Duration(0)
+	gotPreciseReset := false
+
+	if hdr != nil {
+		// Check Claude's unified reset headers for a precise reset time.
+		for _, key := range []string{
+			"anthropic-ratelimit-unified-reset",
+			"anthropic-ratelimit-unified-primary-reset",
+			"anthropic-ratelimit-unified-5h-reset",
+		} {
+			if resetStr := hdr.Get(key); resetStr != "" {
+				if resetAt, ok := parseRateLimitReset(resetStr); ok && resetAt.After(time.Now()) {
+					wait = time.Until(resetAt)
+					gotPreciseReset = true
+					break
+				}
+			}
+		}
+	}
+
+	if !gotPreciseReset {
+		if w, ok := parseRetryAfter(hdr); ok {
+			wait = w
+		} else {
+			a.mu.Lock()
+			wait = backoffDuration(a.BackoffLevel)
+			a.mu.Unlock()
+		}
+	}
+
+	// Always bump backoff level so repeated rate limits get longer fallbacks.
+	a.mu.Lock()
+	a.BackoffLevel++
+	a.mu.Unlock()
+
+	// Also parse full rate limit utilization from the 429 response headers.
+	// This updates the account's usage snapshot so candidate selection
+	// can factor in the current utilization level.
+	if hdr != nil {
+		snap, ok := parseClaudeResponseRateLimits(hdr)
+		if ok {
+			a.mu.Lock()
+			a.Usage = mergeUsage(a.Usage, snap)
+			a.mu.Unlock()
+		}
 	}
 
 	until := time.Now().Add(wait)
@@ -2289,7 +2327,7 @@ func (h *proxyHandler) applyRateLimit(a *Account, hdr http.Header) time.Duration
 	}
 	a.mu.Unlock()
 	if h.cfg.debug.Load() {
-		log.Printf("rate-limit backoff: account=%s level=%d wait=%s", a.ID, a.BackoffLevel, wait)
+		log.Printf("rate-limit backoff: account=%s level=%d wait=%s precise=%v", a.ID, a.BackoffLevel, wait, gotPreciseReset)
 	}
 	return wait
 }
@@ -2433,7 +2471,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
 		if outReq.Header.Get("anthropic-version") == "" {
-			outReq.Header.Set("anthropic-version", "2023-06-01")
+			outReq.Header.Set("anthropic-version", ccAnthropicVersion)
 		}
 	}
 
@@ -2542,7 +2580,7 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
 		if outReq.Header.Get("anthropic-version") == "" {
-			outReq.Header.Set("anthropic-version", "2023-06-01")
+			outReq.Header.Set("anthropic-version", ccAnthropicVersion)
 		}
 	}
 
@@ -2612,6 +2650,7 @@ func (h *proxyHandler) tryOnce(
 	acc *Account,
 	reqID string,
 	translateDir TranslateDirection,
+	requestedModel string,
 ) (*http.Response, *bytes.Buffer, bool, error) {
 	if acc == nil {
 		return nil, nil, false, errors.New("nil account")
@@ -2714,33 +2753,50 @@ func (h *proxyHandler) tryOnce(
 		} else if translateDir == TranslateOAIToClaude || translateDir == TranslateResponsesToClaude {
 			// Client sent OpenAI/Responses format but upstream is Claude — make request
 			// indistinguishable from a native Claude Code request.
-			outReq.Header.Set("anthropic-version", "2023-06-01")
-			outReq.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27")
-			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-			outReq.Header.Set("User-Agent", "claude-cli/2.1.66 (external, cli)")
-			outReq.Header.Set("X-App", "cli")
-			// Set Accept based on whether the translated body requests streaming
+			isOAuth := strings.HasPrefix(access, "sk-ant-oat")
+			is1M := strings.Contains(strings.ToLower(requestedModel), "[1m]")
+
+			// Parse translated body to detect streaming and fast mode
 			acceptHeader := "application/json"
+			isFastMode := false
 			var bodyObj map[string]any
 			if json.Unmarshal(bodyBytes, &bodyObj) == nil {
 				if s, ok := bodyObj["stream"].(bool); ok && s {
 					acceptHeader = "text/event-stream"
 				}
+				if sp, ok := bodyObj["speed"].(string); ok && sp == "fast" {
+					isFastMode = true
+				}
 			}
+			// Extract the model from the translated body (canonical name)
+			bodyModel := ""
+			if m, ok := bodyObj["model"].(string); ok {
+				bodyModel = m
+			}
+			if bodyModel == "" {
+				bodyModel = requestedModel
+			}
+
+			// Inject the CC attribution header and system prefix into the body's
+			// "system" field, converting it to the block-array format that real
+			// Claude Code uses. This must happen before we set Content-Length.
+			if bodyObj != nil {
+				bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
+				outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				outReq.ContentLength = int64(len(bodyBytes))
+			}
+
+			outReq.Header.Set("anthropic-version", ccAnthropicVersion)
+			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode))
+			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+			outReq.Header.Set("User-Agent", ccUserAgent())
+			outReq.Header.Set("X-App", "cli")
 			outReq.Header.Set("Accept", acceptHeader)
 			outReq.Header.Set("Accept-Language", "*")
 			outReq.Header.Set("Content-Type", "application/json")
 			outReq.Header.Set("Sec-Fetch-Mode", "cors")
 			// Add x-stainless headers to match Anthropic SDK fingerprint
-			outReq.Header.Set("X-Stainless-Lang", "js")
-			outReq.Header.Set("X-Stainless-Runtime", "node")
-			outReq.Header.Set("X-Stainless-Runtime-Version", "v22.22.0")
-			outReq.Header.Set("X-Stainless-Arch", "arm64")
-			outReq.Header.Set("X-Stainless-Os", "Linux")
-			outReq.Header.Set("X-Stainless-Package-Version", "0.74.0")
-			outReq.Header.Set("X-Stainless-Retry-Count", "0")
-			outReq.Header.Set("X-Stainless-Timeout", "600")
-			outReq.Header.Set("X-Stainless-Helper-Method", "stream")
+			ccStainlessHeaders(outReq.Header.Set)
 			// Remove any OpenAI-specific headers that might leak
 			outReq.Header.Del("openai-beta")
 			outReq.Header.Del("openai-organization")
