@@ -100,6 +100,38 @@ func TestCandidateRequiredPlanFiltersAccounts(t *testing.T) {
 	}
 }
 
+func TestCandidatePrefersClaudeMaxOverPro(t *testing.T) {
+	// Claude pro should be tier 3 (last resort), max should be tier 1
+	maxAcc := &Account{ID: "max1", Type: AccountTypeClaude, PlanType: "max", Usage: UsageSnapshot{
+		PrimaryUsedPercent: 0.5, SecondaryUsedPercent: 0.7,
+	}}
+	proAcc := &Account{ID: "pro1", Type: AccountTypeClaude, PlanType: "pro", Usage: UsageSnapshot{
+		PrimaryUsedPercent: 0.0, SecondaryUsedPercent: 0.1,
+	}}
+	p := newPoolState([]*Account{proAcc, maxAcc}, false)
+
+	got := p.candidate("", nil, AccountTypeClaude, "")
+	if got == nil || got.ID != "max1" {
+		t.Fatalf("expected max account preferred over pro even with worse usage, got %+v", got)
+	}
+}
+
+func TestCandidateFallsBackToClaudeProWhenMaxExhausted(t *testing.T) {
+	// If max is at hard limit, should fall back to pro
+	maxAcc := &Account{ID: "max1", Type: AccountTypeClaude, PlanType: "max", Usage: UsageSnapshot{
+		PrimaryUsedPercent: 0.96, SecondaryUsedPercent: 0.5,
+	}}
+	proAcc := &Account{ID: "pro1", Type: AccountTypeClaude, PlanType: "pro", Usage: UsageSnapshot{
+		PrimaryUsedPercent: 0.1, SecondaryUsedPercent: 0.1,
+	}}
+	p := newPoolState([]*Account{proAcc, maxAcc}, false)
+
+	got := p.candidate("", nil, AccountTypeClaude, "")
+	if got == nil || got.ID != "pro1" {
+		t.Fatalf("expected pro fallback when max exhausted, got %+v", got)
+	}
+}
+
 func TestCandidateRequiredPlanOverridesPinnedConversation(t *testing.T) {
 	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
 	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}

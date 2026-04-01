@@ -377,16 +377,22 @@ func (p *poolState) count() int {
 	return len(p.accounts)
 }
 
-// accountTier returns the preference tier for an account (1 = best, 2 = lesser).
-// Tier 1: max for Claude, pro for Codex, ultra for Gemini
-// Tier 2: everything else
+// accountTier returns the preference tier for an account (1 = best, 2 = mid, 3 = last resort).
+// Claude: tier 1 = max/team/max_team, tier 2 = unknown/other, tier 3 = pro
+// Codex: tier 1 = pro, tier 2 = everything else
+// Gemini: tier 1 = ultra, tier 2 = everything else
 func accountTier(accType AccountType, planType string) int {
 	switch accType {
 	case AccountTypeClaude:
-		if planType == "max" {
+		p := strings.ToLower(strings.TrimSpace(planType))
+		switch p {
+		case "max", "team", "max_team":
 			return 1
+		case "pro":
+			return 3
+		default:
+			return 2
 		}
-		return 2
 	case AccountTypeCodex:
 		if planType == "pro" {
 			return 1
@@ -642,6 +648,31 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		if bestTier2Any != nil {
 			p.rr++
 			return bestTier2Any.acc
+		}
+
+		// Tier 3: last resort (e.g. Claude pro accounts)
+		var bestTier3Below *scoredAccount
+		var bestTier3Any *scoredAccount
+		for i := range accounts {
+			sa := &accounts[i]
+			if sa.tier == 3 {
+				if bestTier3Any == nil || sa.score > bestTier3Any.score {
+					bestTier3Any = sa
+				}
+				if sa.secondaryPct < threshold {
+					if bestTier3Below == nil || sa.score > bestTier3Below.score {
+						bestTier3Below = sa
+					}
+				}
+			}
+		}
+		if bestTier3Below != nil {
+			p.rr++
+			return bestTier3Below.acc
+		}
+		if bestTier3Any != nil {
+			p.rr++
+			return bestTier3Any.acc
 		}
 
 		// Absolute fallback — pick the one with highest score (most headroom)
