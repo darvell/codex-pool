@@ -1096,6 +1096,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				continue
 			}
 
+			// Cloudflare bot challenges return 403 with HTML — not an auth failure.
+			// Reclassify as transient so accounts don't accumulate auth penalties.
+			if errClass == ErrorClassAuth && isCloudflareChallenge(errBody, resp.Header) {
+				errClass = ErrorClassTransient
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] reclassified 403 as cloudflare challenge for account %s", reqID, acc.ID)
+				}
+			}
+
 			if errClass == ErrorClassPayment && isDeactivatedWorkspace(errBody) {
 				acc.mu.Lock()
 				acc.Dead = true

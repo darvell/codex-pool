@@ -102,6 +102,19 @@ func isClaudeOrganizationDisabled(body []byte) bool {
 		strings.Contains(s, "oauth authentication is currently not allowed")
 }
 
+// isCloudflareChallenge detects Cloudflare bot-mitigation responses that return
+// 403 with an HTML challenge page. These are transient (not auth failures) and
+// should not penalize accounts.
+func isCloudflareChallenge(body []byte, headers http.Header) bool {
+	if headers.Get("Cf-Mitigated") == "challenge" {
+		return true
+	}
+	if headers.Get("Server") == "cloudflare" && strings.Contains(string(body), "<html") {
+		return true
+	}
+	return false
+}
+
 // Retryable returns true if this class should be retried on another account.
 func (c ErrorClass) Retryable() bool {
 	switch c {
