@@ -98,7 +98,8 @@ func isClaudeOrganizationDisabled(body []byte) bool {
 	return strings.Contains(s, "organization has been disabled") ||
 		strings.Contains(s, "organization is disabled") ||
 		strings.Contains(s, "organization_has_been_disabled") ||
-		strings.Contains(s, "organization_disabled")
+		strings.Contains(s, "organization_disabled") ||
+		strings.Contains(s, "oauth authentication is currently not allowed")
 }
 
 // Retryable returns true if this class should be retried on another account.

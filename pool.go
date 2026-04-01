@@ -773,20 +773,30 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 		}
 	}
 
-	// Bonus for strong short-term headroom in the 5h window.
+	// Bonus for short-term headroom in the 5h window.
+	// The 5h window controls burst capacity: an account at 0% primary can absorb
+	// heavy traffic right now regardless of 7d usage. Scale the bonus by how much
+	// primary headroom exists, up to matching the base headroom itself.
 	if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
 		hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
 		primaryHeadroom := 1.0 - primaryUsed
-		if hoursRemaining > 0.1 && hoursRemaining < 5.0 && primaryHeadroom > 0.1 {
-			sustainableBurnRate := primaryHeadroom / hoursRemaining
-			baselineBurnRate := 1.0 / 5.0
-			burnRateRatio := sustainableBurnRate / baselineBurnRate
-			if burnRateRatio > 1.5 {
-				out.PrimaryPaceBonus = 0.15
-			} else if burnRateRatio > 1.0 {
-				out.PrimaryPaceBonus = 0.05
+		if hoursRemaining > 0.1 && hoursRemaining <= 5.0 && primaryHeadroom > 0.05 {
+			// Scale bonus: more primary headroom = bigger boost.
+			// At 100% primary headroom (0% used), bonus ≈ 0.5 * timeWeight.
+			// At 50% primary headroom, bonus ≈ 0.25 * timeWeight.
+			// timeWeight: full bonus when >2h remain, tapers as window shrinks.
+			timeWeight := hoursRemaining / 3.0
+			if timeWeight > 1.0 {
+				timeWeight = 1.0
 			}
+			out.PrimaryPaceBonus = primaryHeadroom * 0.5 * timeWeight
 		}
+	} else if a.Usage.PrimaryResetAt.IsZero() && primaryUsed == 0 && a.Usage.RetrievedAt.IsZero() {
+		// No primary data at all (never polled) -- no bonus.
+	} else if a.Usage.PrimaryResetAt.IsZero() && primaryUsed < 0.5 {
+		// Have primary usage data but no reset time (some plan types).
+		// Give a modest bonus based on raw headroom.
+		out.PrimaryPaceBonus = (1.0 - primaryUsed) * 0.15
 	}
 	headroom += out.PrimaryPaceBonus
 

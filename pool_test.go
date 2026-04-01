@@ -18,6 +18,42 @@ func TestScorePrefersHeadroomAndPlan(t *testing.T) {
 	}
 }
 
+func TestScoreBoostsEmptyPrimaryWindow(t *testing.T) {
+	now := time.Now()
+
+	// Account with 76% 7d used but 0% 5h used, 4h until primary reset, 40h until secondary reset.
+	// Should score much higher than base headroom (0.24) because the 5h window is wide open.
+	highWeeklyEmptyPrimary := &Account{
+		PlanType: "max",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.0,
+			SecondaryUsedPercent: 0.76,
+			PrimaryResetAt:       now.Add(4*time.Hour + 6*time.Minute),
+			SecondaryResetAt:     now.Add(40 * time.Hour),
+		},
+	}
+	score := scoreAccount(highWeeklyEmptyPrimary, now)
+	// With the primary pace bonus, score should be well above 0.5
+	if score < 0.5 {
+		t.Fatalf("expected score > 0.5 for empty primary window, got %.2f", score)
+	}
+
+	// Compare: same 7d usage but primary window is also heavily used. Should score lower.
+	highWeeklyHighPrimary := &Account{
+		PlanType: "max",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.70,
+			SecondaryUsedPercent: 0.76,
+			PrimaryResetAt:       now.Add(4*time.Hour + 6*time.Minute),
+			SecondaryResetAt:     now.Add(40 * time.Hour),
+		},
+	}
+	scoreBusy := scoreAccount(highWeeklyHighPrimary, now)
+	if score <= scoreBusy {
+		t.Fatalf("empty primary (%.2f) should outscore busy primary (%.2f)", score, scoreBusy)
+	}
+}
+
 func TestPenaltyDecay(t *testing.T) {
 	now := time.Now()
 	a := &Account{Penalty: 1.0, LastPenalty: now.Add(-10 * time.Minute)}

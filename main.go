@@ -174,7 +174,11 @@ func buildConfig() *config {
 			cfg.streamTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.streamIdleTimeout = 90 * time.Second // Match Claude Code's 90s stream idle watchdog
+	cfg.streamIdleTimeout = 5 * time.Minute // Generous idle timeout — Anthropic API sends event:ping
+	// keepalives during SSE but the interval is unpredictable during extended
+	// thinking. 5 min is well above observed ping gaps while still catching
+	// truly dead connections. TCP keepalives (30s) detect most dead upstreams
+	// faster than this anyway.
 	if v := getenv("STREAM_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamIdleTimeout = time.Duration(n) * time.Second
@@ -1893,6 +1897,10 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	// Use provider's SetAuthHeaders method for provider-specific auth
 	provider.SetAuthHeaders(outReq, acc)
 
+	// Force uncompressed responses — SSE frame parsing and client decompression
+	// break on gzip-compressed streams that split across TCP segments.
+	outReq.Header.Set("Accept-Encoding", "identity")
+
 	if h.cfg.debug.Load() {
 		authHeader := outReq.Header.Get("Authorization")
 		authLen := len(authHeader)
@@ -2468,6 +2476,9 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	removeHopByHopHeaders(outReq.Header)
 	removeConflictingProxyHeaders(outReq.Header)
 
+	// Force uncompressed responses — SSE streams break with on-the-fly decompression.
+	outReq.Header.Set("Accept-Encoding", "identity")
+
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
 		if outReq.Header.Get("anthropic-version") == "" {
@@ -2576,6 +2587,9 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	if r.ContentLength >= 0 {
 		outReq.ContentLength = r.ContentLength
 	}
+
+	// Force uncompressed responses — SSE streams break with on-the-fly decompression.
+	outReq.Header.Set("Accept-Encoding", "identity")
 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
@@ -2717,14 +2731,18 @@ func (h *proxyHandler) tryOnce(
 
 		// When translating, body size changes — remove the client's Content-Length
 		// so Go's HTTP client recalculates it from the actual body.
-		// Force Accept-Encoding: identity so we get uncompressed response bodies
-		// for translation (deleting it would let Go's transport add gzip, which
-		// breaks SSE streaming translation).
 		if translateDir != TranslateNone {
 			outReq.Header.Del("Content-Length")
 			outReq.ContentLength = int64(len(bodyBytes))
-			outReq.Header.Set("Accept-Encoding", "identity")
 		}
+
+		// Always request uncompressed responses. SSE is a line-oriented text
+		// protocol — gzip/br compression breaks incremental frame parsing in
+		// sseInterceptWriter and causes ZlibError in clients (e.g. Bun's
+		// fetch) when compressed chunks split across TCP segments. Deleting
+		// the header entirely would let Go's transport auto-add gzip, so we
+		// must explicitly set identity.
+		outReq.Header.Set("Accept-Encoding", "identity")
 
 		// Force uncompressed response for model catalog so we can inject Claude models
 		if strings.Contains(in.URL.Path, "codex/models") {
