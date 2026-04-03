@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/coder/websocket"
 	"golang.org/x/net/http2"
 )
 
@@ -1654,7 +1653,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		log.Printf("[%s] websocket tunnel -> %s (account=%s)", reqID, outURL.String(), acc.ID)
 	}
 
-	statusCode, err := tunnelWebSocket(w, r, outURL, upstreamHeaders)
+	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders)
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -1740,7 +1739,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 		log.Printf("[%s] passthrough websocket tunnel -> %s", reqID, outURL.String())
 	}
 
-	statusCode, err := tunnelWebSocket(w, r, outURL, upstreamHeaders)
+	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders)
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -1758,154 +1757,122 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	}
 }
 
-// tunnelWebSocket performs a true bidirectional WebSocket tunnel:
-//  1. Dials the upstream server (TLS if wss://)
-//  2. Sends the HTTP upgrade request with rewritten headers
-//  3. Reads the 101 Switching Protocols response
-//  4. Hijacks the client connection
-//  5. Relays the 101 response to the client
-//  6. Bidirectionally copies raw bytes between client ↔ upstream
+// relayWebSocket accepts a client WS upgrade and opens a separate WS
+// connection to the upstream server, then relays JSON messages between
+// them at the application level. Unlike raw TCP tunneling, this works
+// through Cloudflare (which negotiates h2 and can't tunnel raw WS
+// frames) because each side is an independent WS connection.
 //
-// This replaces httputil.ReverseProxy which can't properly relay
-// multiple WebSocket messages on a persistent connection.
-func tunnelWebSocket(
+// Flow:
+//  1. Accept client WS upgrade (Caddy → proxy, local h1.1)
+//  2. Dial upstream WS (proxy → chatgpt.com, fresh h1.1 + TLS)
+//  3. Relay messages bidirectionally until either side closes
+func relayWebSocket(
 	w http.ResponseWriter,
 	clientReq *http.Request,
 	upstreamURL *url.URL,
 	upstreamHeaders http.Header,
 ) (int, error) {
-	// Determine upstream address and TLS config.
-	host := upstreamURL.Hostname()
-	port := upstreamURL.Port()
-	useTLS := upstreamURL.Scheme == "wss" || upstreamURL.Scheme == "https"
-	if port == "" {
-		if useTLS {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
-	addr := net.JoinHostPort(host, port)
+	ctx := clientReq.Context()
 
-	// Dial the upstream server.
-	var upstreamConn net.Conn
-	var err error
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
-	if useTLS {
-		upstreamConn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-			ServerName: host,
-		})
-	} else {
-		upstreamConn, err = dialer.Dial("tcp", addr)
-	}
+	// 1. Accept the client's WS upgrade.
+	clientConn, err := websocket.Accept(w, clientReq, &websocket.AcceptOptions{
+		// Don't check origin — the client is our own CLI tool.
+		InsecureSkipVerify: true,
+	})
 	if err != nil {
-		http.Error(w, "upstream dial failed", http.StatusBadGateway)
-		return 0, fmt.Errorf("dial %s: %w", addr, err)
+		return 0, fmt.Errorf("accept client WS: %w", err)
 	}
-	defer upstreamConn.Close()
+	defer clientConn.CloseNow()
 
-	// Build the upgrade request path.
-	reqPath := upstreamURL.RequestURI()
+	// Set generous read limit (responses can be large with encrypted_content).
+	clientConn.SetReadLimit(64 * 1024 * 1024) // 64 MB
 
-	// Write the HTTP upgrade request to the upstream connection.
-	var reqBuf bytes.Buffer
-	fmt.Fprintf(&reqBuf, "GET %s HTTP/1.1\r\n", reqPath)
-	fmt.Fprintf(&reqBuf, "Host: %s\r\n", upstreamURL.Host)
+	// 2. Build upstream WS URL (https → wss).
+	wsURL := *upstreamURL
+	if wsURL.Scheme == "https" {
+		wsURL.Scheme = "wss"
+	} else if wsURL.Scheme == "http" {
+		wsURL.Scheme = "ws"
+	}
 
-	// Copy headers from the rewritten set.
+	// Build upstream dial headers from the rewritten header set.
+	dialHeaders := make(http.Header)
 	for key, vals := range upstreamHeaders {
-		for _, val := range vals {
-			fmt.Fprintf(&reqBuf, "%s: %s\r\n", key, val)
+		// Skip hop-by-hop headers that coder/websocket manages.
+		lk := strings.ToLower(key)
+		if lk == "connection" || lk == "upgrade" || lk == "sec-websocket-key" ||
+			lk == "sec-websocket-version" || lk == "sec-websocket-extensions" ||
+			lk == "sec-websocket-protocol" || lk == "sec-websocket-accept" {
+			continue
 		}
+		dialHeaders[key] = vals
 	}
 
-	// Ensure required WebSocket headers are present.
-	if upstreamHeaders.Get("Connection") == "" {
-		fmt.Fprintf(&reqBuf, "Connection: Upgrade\r\n")
-	}
-	if upstreamHeaders.Get("Upgrade") == "" {
-		fmt.Fprintf(&reqBuf, "Upgrade: websocket\r\n")
-	}
-	reqBuf.WriteString("\r\n")
-
-	if _, err := upstreamConn.Write(reqBuf.Bytes()); err != nil {
-		http.Error(w, "upstream write failed", http.StatusBadGateway)
-		return 0, fmt.Errorf("write upgrade: %w", err)
-	}
-
-	// Read the upstream response.
-	upstreamBuf := bufio.NewReader(upstreamConn)
-	upstreamResp, err := http.ReadResponse(upstreamBuf, nil)
+	// 3. Connect to upstream.
+	upstreamConn, _, err := websocket.Dial(ctx, wsURL.String(), &websocket.DialOptions{
+		HTTPHeader: dialHeaders,
+	})
 	if err != nil {
-		http.Error(w, "upstream response read failed", http.StatusBadGateway)
-		return 0, fmt.Errorf("read upgrade response: %w", err)
+		clientConn.Close(websocket.StatusInternalError, "upstream connect failed")
+		return 0, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
 	}
+	defer upstreamConn.CloseNow()
 
-	if upstreamResp.StatusCode != http.StatusSwitchingProtocols {
-		// Not a 101 — relay the error response body to the client.
-		body, _ := io.ReadAll(upstreamResp.Body)
-		upstreamResp.Body.Close()
-		w.WriteHeader(upstreamResp.StatusCode)
-		w.Write(body)
-		return upstreamResp.StatusCode, fmt.Errorf("upstream returned %d", upstreamResp.StatusCode)
-	}
+	upstreamConn.SetReadLimit(64 * 1024 * 1024)
 
-	// Hijack the client connection.
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijack not supported", http.StatusInternalServerError)
-		return 101, fmt.Errorf("http.Hijacker not supported")
-	}
-	clientConn, clientBuf, err := hijacker.Hijack()
-	if err != nil {
-		return 101, fmt.Errorf("hijack: %w", err)
-	}
-	defer clientConn.Close()
+	log.Printf("[ws-relay] connected to %s, relaying messages", wsURL.Host)
 
-	// Relay the 101 response to the client.
-	var respBuf bytes.Buffer
-	fmt.Fprintf(&respBuf, "HTTP/1.1 101 Switching Protocols\r\n")
-	for key, vals := range upstreamResp.Header {
-		for _, val := range vals {
-			fmt.Fprintf(&respBuf, "%s: %s\r\n", key, val)
-		}
-	}
-	respBuf.WriteString("\r\n")
-	if _, err := clientConn.Write(respBuf.Bytes()); err != nil {
-		return 101, fmt.Errorf("write 101 to client: %w", err)
-	}
+	// 4. Bidirectional message relay.
+	relayCtx, relayCancel := context.WithCancel(ctx)
+	defer relayCancel()
 
-	// Bidirectional copy: client ↔ upstream.
-	// Both io.Copy calls block until their source connection is closed.
-	// When either direction ends (close frame, error, EOF), we tear down
-	// the whole tunnel — WebSocket connections are all-or-nothing.
-	done := make(chan struct{}, 2)
+	errc := make(chan error, 2)
 
+	// upstream → client
 	go func() {
-		defer func() { done <- struct{}{} }()
-		// upstream → client
-		if upstreamBuf.Buffered() > 0 {
-			buffered, _ := upstreamBuf.Peek(upstreamBuf.Buffered())
-			clientConn.Write(buffered)
-			upstreamBuf.Discard(len(buffered))
-		}
-		io.Copy(clientConn, upstreamConn)
+		errc <- relayMessages(relayCtx, upstreamConn, clientConn, "upstream→client")
 	}()
 
+	// client → upstream
 	go func() {
-		defer func() { done <- struct{}{} }()
-		// client → upstream (flush any buffered data from hijack first)
-		if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
-			buffered, _ := clientBuf.Peek(clientBuf.Reader.Buffered())
-			upstreamConn.Write(buffered)
-		}
-		io.Copy(upstreamConn, clientConn)
+		errc <- relayMessages(relayCtx, clientConn, upstreamConn, "client→upstream")
 	}()
 
-	// Wait for either direction to finish, then close both connections.
-	// The deferred Close() calls will terminate the other goroutine's io.Copy.
-	<-done
+	// Wait for either direction to finish, then tear down both.
+	relayErr := <-errc
+	relayCancel()
+
+	// Close both connections gracefully.
+	closeMsg := "relay ended"
+	if relayErr != nil {
+		closeMsg = relayErr.Error()
+		if len(closeMsg) > 120 {
+			closeMsg = closeMsg[:120]
+		}
+	}
+	clientConn.Close(websocket.StatusNormalClosure, closeMsg)
+	upstreamConn.Close(websocket.StatusNormalClosure, closeMsg)
+
+	if relayErr != nil && !errors.Is(relayErr, context.Canceled) &&
+		!strings.Contains(relayErr.Error(), "closed") {
+		return 101, relayErr
+	}
 	return 101, nil
+}
+
+// relayMessages reads messages from src and writes them to dst until
+// the context is cancelled or an error occurs.
+func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string) error {
+	for {
+		msgType, data, err := src.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("%s read: %w", label, err)
+		}
+		if err := dst.Write(ctx, msgType, data); err != nil {
+			return fmt.Errorf("%s write: %w", label, err)
+		}
+	}
 }
 
 func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL) {
