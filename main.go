@@ -1869,6 +1869,12 @@ func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string) 
 		if err != nil {
 			return fmt.Errorf("%s read: %w", label, err)
 		}
+		// Log message summary (truncate large payloads)
+		summary := string(data)
+		if len(summary) > 200 {
+			summary = summary[:200] + "..."
+		}
+		log.Printf("[ws-relay] %s: type=%v len=%d %s", label, msgType, len(data), summary)
 		if err := dst.Write(ctx, msgType, data); err != nil {
 			return fmt.Errorf("%s write: %w", label, err)
 		}
