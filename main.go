@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,7 +14,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"sort"
@@ -1636,94 +1637,67 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		outURL.RawQuery = q.Encode()
 	}
 
-	var statusCode int
-	var proxyErr error
+	// Build upstream headers: clone client headers, replace auth.
+	upstreamHeaders := cloneHeader(r.Header)
+	upstreamHeaders.Del("Authorization")
+	upstreamHeaders.Del("ChatGPT-Account-ID")
+	upstreamHeaders.Del("X-Api-Key")
+	upstreamHeaders.Del("x-goog-api-key")
+	removeConflictingProxyHeaders(upstreamHeaders)
 
-	reverseProxy := &httputil.ReverseProxy{
-		Transport:     h.transport,
-		FlushInterval: h.cfg.flushInterval,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = outURL.Scheme
-			pr.Out.URL.Host = outURL.Host
-			pr.Out.URL.Path = outURL.Path
-			pr.Out.URL.RawPath = outURL.RawPath
-			pr.Out.URL.RawQuery = outURL.RawQuery
-			pr.Out.Host = targetBase.Host
-			pr.Out.Header = cloneHeader(pr.In.Header)
-
-			// Always overwrite client-provided auth for pooled accounts.
-			pr.Out.Header.Del("Authorization")
-			pr.Out.Header.Del("ChatGPT-Account-ID")
-			pr.Out.Header.Del("X-Api-Key")
-			pr.Out.Header.Del("x-goog-api-key")
-			removeConflictingProxyHeaders(pr.Out.Header)
-			provider.SetAuthHeaders(pr.Out, acc)
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			statusCode = resp.StatusCode
-			provider.ParseUsageHeaders(acc, resp.Header)
-
-			if resp.StatusCode == http.StatusTooManyRequests {
-				h.applyRateLimit(acc, resp.Header)
-				acc.mu.Lock()
-				acc.Penalty += 1.0
-				acc.mu.Unlock()
-			}
-
-			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				markedDead, _ := applyProxyAuthFailure(acc, refreshFailed)
-				if markedDead {
-					if err := saveAccount(acc); err != nil {
-						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
-					}
-				}
-			} else if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
-				acc.mu.Lock()
-				acc.Penalty += 0.3
-				acc.mu.Unlock()
-			}
-
-			if resp.StatusCode == http.StatusSwitchingProtocols || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
-				if conversationID != "" {
-					h.pool.pin(conversationID, acc.ID)
-				}
-				acc.mu.Lock()
-				acc.LastUsed = time.Now()
-				acc.BackoffLevel = 0
-				if acc.Penalty > 0 {
-					acc.Penalty *= 0.5
-					if acc.Penalty < 0.01 {
-						acc.Penalty = 0
-					}
-				}
-				acc.mu.Unlock()
-			}
-
-			return nil
-		},
-		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
-			proxyErr = err
-			if h.cfg.debug.Load() {
-				log.Printf("[%s] websocket proxy error (account=%s): %v", reqID, acc.ID, err)
-			}
-			http.Error(rw, err.Error(), http.StatusBadGateway)
-		},
-	}
+	// Use a temporary request to set provider auth headers.
+	tmpReq := &http.Request{Header: upstreamHeaders}
+	provider.SetAuthHeaders(tmpReq, acc)
+	upstreamHeaders = tmpReq.Header
 
 	if h.cfg.debug.Load() {
-		log.Printf("[%s] websocket -> %s %s (account=%s)", reqID, r.Method, outURL.String(), acc.ID)
+		log.Printf("[%s] websocket tunnel -> %s (account=%s)", reqID, outURL.String(), acc.ID)
 	}
 
-	reverseProxy.ServeHTTP(w, r)
+	statusCode, err := tunnelWebSocket(w, r, outURL, upstreamHeaders)
 
-	if proxyErr != nil {
-		h.recent.add(proxyErr.Error())
+	if err != nil {
+		h.recent.add(err.Error())
 		h.metrics.inc("error", acc.ID)
+		if h.cfg.debug.Load() {
+			log.Printf("[%s] websocket tunnel error (account=%s): %v", reqID, acc.ID, err)
+		}
 		return
 	}
+
 	if statusCode != 0 {
 		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
 	}
+
+	// Handle status-based side effects (same as before).
+	if statusCode == http.StatusTooManyRequests {
+		h.applyRateLimit(acc, nil)
+		acc.mu.Lock()
+		acc.Penalty += 1.0
+		acc.mu.Unlock()
+	} else if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		markedDead, _ := applyProxyAuthFailure(acc, refreshFailed)
+		if markedDead {
+			if err := saveAccount(acc); err != nil {
+				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+			}
+		}
+	} else if statusCode == http.StatusSwitchingProtocols || (statusCode >= 200 && statusCode < 300) {
+		if conversationID != "" {
+			h.pool.pin(conversationID, acc.ID)
+		}
+		acc.mu.Lock()
+		acc.LastUsed = time.Now()
+		acc.BackoffLevel = 0
+		if acc.Penalty > 0 {
+			acc.Penalty *= 0.5
+			if acc.Penalty < 0.01 {
+				acc.Penalty = 0
+			}
+		}
+		acc.mu.Unlock()
+	}
+
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] websocket done status=%d account=%s user=%s origin=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, originID, time.Since(start).Milliseconds())
 	}
@@ -1756,48 +1730,24 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 		}
 	}
 
-	var statusCode int
-	var proxyErr error
-
-	reverseProxy := &httputil.ReverseProxy{
-		Transport:     h.transport,
-		FlushInterval: h.cfg.flushInterval,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = outURL.Scheme
-			pr.Out.URL.Host = outURL.Host
-			pr.Out.URL.Path = outURL.Path
-			pr.Out.URL.RawPath = outURL.RawPath
-			pr.Out.URL.RawQuery = outURL.RawQuery
-			pr.Out.Host = targetBase.Host
-			pr.Out.Header = cloneHeader(pr.In.Header)
-			removeConflictingProxyHeaders(pr.Out.Header)
-
-			if providerType == AccountTypeClaude && pr.Out.Header.Get("anthropic-version") == "" {
-				pr.Out.Header.Set("anthropic-version", ccAnthropicVersion)
-			}
-		},
-		ModifyResponse: func(resp *http.Response) error {
-			statusCode = resp.StatusCode
-			return nil
-		},
-		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
-			proxyErr = err
-			if h.cfg.debug.Load() {
-				log.Printf("[%s] passthrough websocket proxy error: %v", reqID, err)
-			}
-			http.Error(rw, err.Error(), http.StatusBadGateway)
-		},
+	upstreamHeaders := cloneHeader(r.Header)
+	removeConflictingProxyHeaders(upstreamHeaders)
+	if providerType == AccountTypeClaude && upstreamHeaders.Get("anthropic-version") == "" {
+		upstreamHeaders.Set("anthropic-version", ccAnthropicVersion)
 	}
 
 	if h.cfg.debug.Load() {
-		log.Printf("[%s] passthrough websocket -> %s %s", reqID, r.Method, outURL.String())
+		log.Printf("[%s] passthrough websocket tunnel -> %s", reqID, outURL.String())
 	}
 
-	reverseProxy.ServeHTTP(w, r)
+	statusCode, err := tunnelWebSocket(w, r, outURL, upstreamHeaders)
 
-	if proxyErr != nil {
-		h.recent.add(proxyErr.Error())
+	if err != nil {
+		h.recent.add(err.Error())
 		h.metrics.inc("error", "passthrough")
+		if h.cfg.debug.Load() {
+			log.Printf("[%s] passthrough websocket tunnel error: %v", reqID, err)
+		}
 		return
 	}
 	if statusCode != 0 {
@@ -1806,6 +1756,160 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] passthrough websocket done status=%d duration_ms=%d", reqID, statusCode, time.Since(start).Milliseconds())
 	}
+}
+
+// tunnelWebSocket performs a true bidirectional WebSocket tunnel:
+//  1. Dials the upstream server (TLS if wss://)
+//  2. Sends the HTTP upgrade request with rewritten headers
+//  3. Reads the 101 Switching Protocols response
+//  4. Hijacks the client connection
+//  5. Relays the 101 response to the client
+//  6. Bidirectionally copies raw bytes between client ↔ upstream
+//
+// This replaces httputil.ReverseProxy which can't properly relay
+// multiple WebSocket messages on a persistent connection.
+func tunnelWebSocket(
+	w http.ResponseWriter,
+	clientReq *http.Request,
+	upstreamURL *url.URL,
+	upstreamHeaders http.Header,
+) (int, error) {
+	// Determine upstream address and TLS config.
+	host := upstreamURL.Hostname()
+	port := upstreamURL.Port()
+	useTLS := upstreamURL.Scheme == "wss" || upstreamURL.Scheme == "https"
+	if port == "" {
+		if useTLS {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	addr := net.JoinHostPort(host, port)
+
+	// Dial the upstream server.
+	var upstreamConn net.Conn
+	var err error
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	if useTLS {
+		upstreamConn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			ServerName: host,
+		})
+	} else {
+		upstreamConn, err = dialer.Dial("tcp", addr)
+	}
+	if err != nil {
+		http.Error(w, "upstream dial failed", http.StatusBadGateway)
+		return 0, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer upstreamConn.Close()
+
+	// Build the upgrade request path.
+	reqPath := upstreamURL.RequestURI()
+
+	// Write the HTTP upgrade request to the upstream connection.
+	var reqBuf bytes.Buffer
+	fmt.Fprintf(&reqBuf, "GET %s HTTP/1.1\r\n", reqPath)
+	fmt.Fprintf(&reqBuf, "Host: %s\r\n", upstreamURL.Host)
+
+	// Copy headers from the rewritten set.
+	for key, vals := range upstreamHeaders {
+		for _, val := range vals {
+			fmt.Fprintf(&reqBuf, "%s: %s\r\n", key, val)
+		}
+	}
+
+	// Ensure required WebSocket headers are present.
+	if upstreamHeaders.Get("Connection") == "" {
+		fmt.Fprintf(&reqBuf, "Connection: Upgrade\r\n")
+	}
+	if upstreamHeaders.Get("Upgrade") == "" {
+		fmt.Fprintf(&reqBuf, "Upgrade: websocket\r\n")
+	}
+	reqBuf.WriteString("\r\n")
+
+	if _, err := upstreamConn.Write(reqBuf.Bytes()); err != nil {
+		http.Error(w, "upstream write failed", http.StatusBadGateway)
+		return 0, fmt.Errorf("write upgrade: %w", err)
+	}
+
+	// Read the upstream response.
+	upstreamBuf := bufio.NewReader(upstreamConn)
+	upstreamResp, err := http.ReadResponse(upstreamBuf, nil)
+	if err != nil {
+		http.Error(w, "upstream response read failed", http.StatusBadGateway)
+		return 0, fmt.Errorf("read upgrade response: %w", err)
+	}
+
+	if upstreamResp.StatusCode != http.StatusSwitchingProtocols {
+		// Not a 101 — relay the error response body to the client.
+		body, _ := io.ReadAll(upstreamResp.Body)
+		upstreamResp.Body.Close()
+		w.WriteHeader(upstreamResp.StatusCode)
+		w.Write(body)
+		return upstreamResp.StatusCode, fmt.Errorf("upstream returned %d", upstreamResp.StatusCode)
+	}
+
+	// Hijack the client connection.
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return 101, fmt.Errorf("http.Hijacker not supported")
+	}
+	clientConn, clientBuf, err := hijacker.Hijack()
+	if err != nil {
+		return 101, fmt.Errorf("hijack: %w", err)
+	}
+	defer clientConn.Close()
+
+	// Relay the 101 response to the client.
+	var respBuf bytes.Buffer
+	fmt.Fprintf(&respBuf, "HTTP/1.1 101 Switching Protocols\r\n")
+	for key, vals := range upstreamResp.Header {
+		for _, val := range vals {
+			fmt.Fprintf(&respBuf, "%s: %s\r\n", key, val)
+		}
+	}
+	respBuf.WriteString("\r\n")
+	if _, err := clientConn.Write(respBuf.Bytes()); err != nil {
+		return 101, fmt.Errorf("write 101 to client: %w", err)
+	}
+
+	// Bidirectional copy: client ↔ upstream.
+	// If the upstream buffered reader has leftover bytes, prepend them.
+	done := make(chan struct{}, 2)
+
+	go func() {
+		defer func() { done <- struct{}{} }()
+		// upstream → client
+		if upstreamBuf.Buffered() > 0 {
+			buffered, _ := upstreamBuf.Peek(upstreamBuf.Buffered())
+			clientConn.Write(buffered)
+			upstreamBuf.Discard(len(buffered))
+		}
+		io.Copy(clientConn, upstreamConn)
+		// Signal the other direction to stop by closing the write side.
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	go func() {
+		defer func() { done <- struct{}{} }()
+		// client → upstream (flush any buffered data from hijack first)
+		if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
+			buffered, _ := clientBuf.Peek(clientBuf.Reader.Buffered())
+			upstreamConn.Write(buffered)
+		}
+		io.Copy(upstreamConn, clientConn)
+		if tc, ok := upstreamConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	// Wait for either direction to finish.
+	<-done
+	return 101, nil
 }
 
 func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL) {
