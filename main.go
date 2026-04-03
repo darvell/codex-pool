@@ -1876,7 +1876,9 @@ func tunnelWebSocket(
 	}
 
 	// Bidirectional copy: client ↔ upstream.
-	// If the upstream buffered reader has leftover bytes, prepend them.
+	// Both io.Copy calls block until their source connection is closed.
+	// When either direction ends (close frame, error, EOF), we tear down
+	// the whole tunnel — WebSocket connections are all-or-nothing.
 	done := make(chan struct{}, 2)
 
 	go func() {
@@ -1888,10 +1890,6 @@ func tunnelWebSocket(
 			upstreamBuf.Discard(len(buffered))
 		}
 		io.Copy(clientConn, upstreamConn)
-		// Signal the other direction to stop by closing the write side.
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
 	}()
 
 	go func() {
@@ -1902,12 +1900,10 @@ func tunnelWebSocket(
 			upstreamConn.Write(buffered)
 		}
 		io.Copy(upstreamConn, clientConn)
-		if tc, ok := upstreamConn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
 	}()
 
-	// Wait for either direction to finish.
+	// Wait for either direction to finish, then close both connections.
+	// The deferred Close() calls will terminate the other goroutine's io.Copy.
 	<-done
 	return 101, nil
 }
