@@ -83,7 +83,7 @@ func ClaudeAuthorize(accountID string) (string, *ClaudeOAuthSession, error) {
 	q.Set("client_id", ClaudeOAuthClientID)
 	q.Set("response_type", "code")
 	q.Set("redirect_uri", ClaudeOAuthRedirectURI)
-	q.Set("scope", "ClaudeOAuthAllScopes")
+	q.Set("scope", ClaudeOAuthAllScopes)
 	q.Set("code_challenge", pkce.Challenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("state", state)
