@@ -18,6 +18,9 @@
 # Local notes (deployment docs, personal notes)
 .localnotes/
 
+# Security audit iteration logs (working files)
+security-audit-results.tsv
+
 # Local data / secrets
 pool/
 data/

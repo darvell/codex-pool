@@ -69,10 +69,10 @@ func TestCandidateUsesPinUnlessExcluded(t *testing.T) {
 	p := newPoolState([]*Account{a1, a2}, true)
 	p.pin("c1", "a1")
 
-	if got := p.candidate("c1", nil, "", ""); got == nil || got.ID != "a1" {
+	if got := p.candidate("c1", nil, "", "", ""); got == nil || got.ID != "a1" {
 		t.Fatalf("expected pinned a1, got %+v", got)
 	}
-	if got := p.candidate("c1", map[string]bool{"a1": true}, "", ""); got == nil || got.ID != "a2" {
+	if got := p.candidate("c1", map[string]bool{"a1": true}, "", "", ""); got == nil || got.ID != "a2" {
 		t.Fatalf("expected a2 when pinned excluded, got %+v", got)
 	}
 }
@@ -83,7 +83,7 @@ func TestCandidateSkipsDeadOrDisabled(t *testing.T) {
 	ok := &Account{ID: "ok", Type: AccountTypeCodex, Usage: UsageSnapshot{PrimaryUsedPercent: 0.5}}
 	p := newPoolState([]*Account{dead, disabled, ok}, false)
 
-	got := p.candidate("", nil, "", "")
+	got := p.candidate("", nil, "", "", "")
 	if got == nil || got.ID != "ok" {
 		t.Fatalf("expected ok, got %+v", got)
 	}
@@ -94,7 +94,7 @@ func TestCandidateRequiredPlanFiltersAccounts(t *testing.T) {
 	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
 	p := newPoolState([]*Account{plus, pro}, false)
 
-	got := p.candidate("", nil, AccountTypeCodex, "pro")
+	got := p.candidate("", nil, AccountTypeCodex, "pro", "")
 	if got == nil || got.ID != "pro" {
 		t.Fatalf("expected pro account, got %+v", got)
 	}
@@ -110,7 +110,7 @@ func TestCandidatePrefersClaudeMaxOverPro(t *testing.T) {
 	}}
 	p := newPoolState([]*Account{proAcc, maxAcc}, false)
 
-	got := p.candidate("", nil, AccountTypeClaude, "")
+	got := p.candidate("", nil, AccountTypeClaude, "", "")
 	if got == nil || got.ID != "max1" {
 		t.Fatalf("expected max account preferred over pro even with worse usage, got %+v", got)
 	}
@@ -126,7 +126,7 @@ func TestCandidateFallsBackToClaudeProWhenMaxExhausted(t *testing.T) {
 	}}
 	p := newPoolState([]*Account{proAcc, maxAcc}, false)
 
-	got := p.candidate("", nil, AccountTypeClaude, "")
+	got := p.candidate("", nil, AccountTypeClaude, "", "")
 	if got == nil || got.ID != "pro1" {
 		t.Fatalf("expected pro fallback when max exhausted, got %+v", got)
 	}
@@ -138,7 +138,7 @@ func TestCandidateRequiredPlanOverridesPinnedConversation(t *testing.T) {
 	p := newPoolState([]*Account{plus, pro}, false)
 	p.pin("c1", "plus")
 
-	got := p.candidate("c1", nil, AccountTypeCodex, "pro")
+	got := p.candidate("c1", nil, AccountTypeCodex, "pro", "")
 	if got == nil || got.ID != "pro" {
 		t.Fatalf("expected pinned plus to be bypassed for required plan, got %+v", got)
 	}
@@ -150,7 +150,7 @@ func TestCandidateBypassesPinnedNonProCodex(t *testing.T) {
 	p := newPoolState([]*Account{plus, pro}, false)
 	p.pin("c1", "plus")
 
-	got := p.candidate("c1", nil, AccountTypeCodex, "")
+	got := p.candidate("c1", nil, AccountTypeCodex, "", "")
 	if got == nil || got.ID != "pro" {
 		t.Fatalf("expected codex pro to bypass pinned non-pro account, got %+v", got)
 	}
@@ -161,9 +161,31 @@ func TestCandidatePrefersCodexProEvenWhenTierTwoScoresBetter(t *testing.T) {
 	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.8, SecondaryUsedPercent: 0.8}}
 	p := newPoolState([]*Account{plus, pro}, false)
 
-	got := p.candidate("", nil, AccountTypeCodex, "")
+	got := p.candidate("", nil, AccountTypeCodex, "", "")
 	if got == nil || got.ID != "pro" {
 		t.Fatalf("expected codex pro to stay preferred, got %+v", got)
+	}
+}
+
+func TestCandidateSkipsAccountWhenClientIPNotAllowed(t *testing.T) {
+	restricted := &Account{ID: "restricted", Type: AccountTypeCodex, PlanType: "pro", AllowedSourceIPs: []string{"199.45.144.95"}, Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
+	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
+	p := newPoolState([]*Account{restricted, fallback}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "", "203.0.113.10")
+	if got == nil || got.ID != "fallback" {
+		t.Fatalf("expected unrestricted fallback, got %+v", got)
+	}
+}
+
+func TestCandidateAllowsRestrictedAccountWhenClientIPMatches(t *testing.T) {
+	restricted := &Account{ID: "restricted", Type: AccountTypeCodex, PlanType: "pro", AllowedSourceIPs: []string{"199.45.144.95"}, Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
+	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
+	p := newPoolState([]*Account{restricted, fallback}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "", "199.45.144.95")
+	if got == nil || got.ID != "restricted" {
+		t.Fatalf("expected restricted account for matching IP, got %+v", got)
 	}
 }
 
@@ -209,6 +231,7 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 				"foo": 1,
 			},
 		},
+		"allowed_ip":   "199.45.144.95",
 		"last_refresh": "2025-12-01T00:00:00Z",
 		"extra_top":    []any{1, 2, 3},
 		"meta": map[string]any{
@@ -224,13 +247,14 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 	}
 
 	acc := &Account{
-		ID:           "a1",
-		File:         path,
-		AccessToken:  "new-access",
-		RefreshToken: "new-refresh",
-		IDToken:      "new-id",
-		AccountID:    "acct_123",
-		LastRefresh:  time.Date(2025, 12, 17, 0, 0, 0, 0, time.UTC),
+		ID:               "a1",
+		File:             path,
+		AccessToken:      "new-access",
+		RefreshToken:     "new-refresh",
+		IDToken:          "new-id",
+		AccountID:        "acct_123",
+		AllowedSourceIPs: []string{"199.45.144.95"},
+		LastRefresh:      time.Date(2025, 12, 17, 0, 0, 0, 0, time.UTC),
 	}
 	if err := saveAccount(acc); err != nil {
 		t.Fatalf("saveAccount: %v", err)

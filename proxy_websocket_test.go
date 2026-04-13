@@ -124,11 +124,8 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 		t.Fatalf("timed out waiting for upstream websocket request")
 	}
 
-	pool.mu.RLock()
-	pinned := pool.convPin["thread-ws-1"]
-	pool.mu.RUnlock()
-	if pinned != "codex_pool_1" {
-		t.Fatalf("session pin = %q, want %q", pinned, "codex_pool_1")
+	if got := extractConversationIDFromHeaders(http.Header{"Session_id": []string{"thread-ws-1"}}); got != "thread-ws-1" {
+		t.Fatalf("extractConversationIDFromHeaders = %q, want %q", got, "thread-ws-1")
 	}
 }
 
@@ -178,6 +175,69 @@ func TestProxyWebSocketPassthroughPreservesAuthorization(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for upstream websocket auth header")
+	}
+}
+
+func TestProxyWebSocketPinsMaxPlanWhen1MHeaderPresent(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	type upstreamReq struct {
+		authorization string
+		apiKey        string
+	}
+	upstreamReqCh := make(chan upstreamReq, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamReqCh <- upstreamReq{
+			authorization: r.Header.Get("Authorization"),
+			apiKey:        r.Header.Get("X-Api-Key"),
+		}
+		writeWebSocketSwitchingProtocolsResponse(w, r)
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	pro := &Account{Type: AccountTypeClaude, ID: "claude_pro", AccessToken: "pro-token", PlanType: "pro"}
+	max := &Account{Type: AccountTypeClaude, ID: "claude_max", AccessToken: "max-token", PlanType: "max"}
+	pool := newPoolState([]*Account{pro, max}, false)
+
+	h := &proxyHandler{
+		cfg: &config{requestTimeout: 5 * time.Second, maxInMemoryBodyBytes: 1024},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	statusLine := performRawWebSocketHandshake(t, proxy.URL, "/v1/messages", map[string]string{
+		"Authorization":  "Bearer " + generateClaudePoolToken("test-secret", "ws-user"),
+		"anthropic-beta": "context-1m-2025-08-07",
+	})
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101 response, got %q", statusLine)
+	}
+
+	select {
+	case got := <-upstreamReqCh:
+		if got.authorization != "" {
+			t.Fatalf("upstream authorization = %q, want empty for API-key auth", got.authorization)
+		}
+		if got.apiKey != "max-token" {
+			t.Fatalf("upstream X-Api-Key = %q, want max plan token", got.apiKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for upstream websocket request")
 	}
 }
 

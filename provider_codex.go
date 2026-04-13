@@ -55,6 +55,14 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if aj.Tokens.AccountID != nil {
 		acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
 	}
+	if ip := strings.TrimSpace(aj.AllowedIP); ip != "" {
+		acc.AllowedSourceIPs = append(acc.AllowedSourceIPs, ip)
+	}
+	for _, ip := range aj.AllowedSourceIPs {
+		if ip = strings.TrimSpace(ip); ip != "" {
+			acc.AllowedSourceIPs = append(acc.AllowedSourceIPs, ip)
+		}
+	}
 	claims := parseCodexClaims(aj.Tokens.IDToken)
 	acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
 	if acc.AccountID == "" && acc.IDTokenChatGPTAccountID != "" {

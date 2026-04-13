@@ -239,9 +239,12 @@ func (h *proxyHandler) fetchClaudeOAuthProfile(accessToken string) (map[string]a
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("anthropic-version", ccAnthropicVersion)
 	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
+	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
+	req.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-pool-admin-diagnostics")
+	ccStainlessHeaders(req.Header.Set)
 
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {
@@ -387,7 +390,7 @@ func (h *proxyHandler) handleClaudeExchange(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Exchange code for tokens
-	tokens, err := ClaudeExchange(code, verifier)
+	tokens, err := ClaudeExchange(code, verifier, session.State)
 	if err != nil {
 		log.Printf("Claude token exchange failed: %v", err)
 		respondJSONError(w, http.StatusInternalServerError, "token exchange failed: "+err.Error())

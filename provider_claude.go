@@ -56,6 +56,14 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 			}
 		}
 	}
+	if ip := strings.TrimSpace(cj.AllowedIP); ip != "" {
+		acc.AllowedSourceIPs = append(acc.AllowedSourceIPs, ip)
+	}
+	for _, ip := range cj.AllowedSourceIPs {
+		if ip = strings.TrimSpace(ip); ip != "" {
+			acc.AllowedSourceIPs = append(acc.AllowedSourceIPs, ip)
+		}
+	}
 
 	// Check for OAuth format first (from Claude Code keychain)
 	if cj.ClaudeAiOauth != nil && cj.ClaudeAiOauth.AccessToken != "" {

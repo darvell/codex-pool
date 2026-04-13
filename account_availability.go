@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	claudePrimaryCooldownThreshold = 0.90
+	claudePrimaryCooldownThreshold = 1.0
 	primaryHardExcludeThreshold    = 0.95
 	secondaryHardExcludeThreshold  = 0.99
 )

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -120,6 +121,11 @@ func TestClaudeRequestRequiresMax(t *testing.T) {
 
 	if !claudeRequestRequiresMax(nil, "claude-opus-4-6 [1m]") {
 		t.Fatal("expected [1m] model suffix to require max")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("anthropic-beta", "context-1m-2025-08-07")
+	if !claudeRequestRequiresMax(req, "claude-opus-4-6") {
+		t.Fatal("expected 1m beta header to require max")
 	}
 	if claudeRequestRequiresMax(nil, "claude-opus-4-6") {
 		t.Fatal("did not expect regular claude model to require max")

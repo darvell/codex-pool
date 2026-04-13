@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/OneOfOne/xxhash"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -19,11 +25,11 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	// ccVersion is the Claude Code CLI version embedded in User-Agent.
-	ccVersion = "2.1.88"
+	// ccVersion is the internal Claude Code version embedded in User-Agent.
+	ccVersion = "2.1.87"
 
 	// ccSDKVersion is the @anthropic-ai/sdk package version for X-Stainless-Package-Version.
-	ccSDKVersion = "0.74.0"
+	ccSDKVersion = "0.80.0"
 
 	// ccAnthropicVersion is the Anthropic API version header.
 	ccAnthropicVersion = "2023-06-01"
@@ -47,65 +53,133 @@ const (
 	betaTaskBudgets       = "task-budgets-2026-03-13"
 )
 
+var (
+	ccSessionID = uuid.NewString()
+	ccDeviceID  = uuid.NewString()
+	ccMetaMu    sync.Mutex
+)
+
 // ccUserAgent returns the User-Agent string matching Claude Code's format.
 func ccUserAgent() string {
 	return "claude-cli/" + ccVersion + " (external, cli)"
 }
 
+func ccClaudeCodeUserAgent() string {
+	return "claude-code/" + ccVersion
+}
+
+func ccCanonicalClaudeModel(model string) string {
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	modelLower = strings.ReplaceAll(modelLower, "[1m]", "")
+	return strings.TrimSpace(modelLower)
+}
+
+func ccModelSupportsISP(model string) bool {
+	return !strings.Contains(ccCanonicalClaudeModel(model), "claude-3-")
+}
+
+func ccModelSupportsContextManagement(model string) bool {
+	return !strings.Contains(ccCanonicalClaudeModel(model), "claude-3-")
+}
+
+func ccModelSupportsEffort(model string) bool {
+	m := ccCanonicalClaudeModel(model)
+	return strings.Contains(m, "opus-4-6") || strings.Contains(m, "sonnet-4-6")
+}
+
+func ccModelSupportsStructuredOutputs(model string) bool {
+	m := ccCanonicalClaudeModel(model)
+	return strings.Contains(m, "claude-sonnet-4-6") ||
+		strings.Contains(m, "claude-sonnet-4-5") ||
+		strings.Contains(m, "claude-opus-4-1") ||
+		strings.Contains(m, "claude-opus-4-5") ||
+		strings.Contains(m, "claude-opus-4-6") ||
+		strings.Contains(m, "claude-haiku-4-5")
+}
+
+func ccRequestHasStructuredOutputs(bodyObj map[string]any) bool {
+	if bodyObj == nil {
+		return false
+	}
+	if outputConfig, ok := bodyObj["output_config"].(map[string]any); ok {
+		_, hasFormat := outputConfig["format"]
+		return hasFormat
+	}
+	_, hasTopLevelOutputFormat := bodyObj["output_format"]
+	return hasTopLevelOutputFormat
+}
+
+func ccRequestHasTaskBudget(bodyObj map[string]any) bool {
+	if bodyObj == nil {
+		return false
+	}
+	if outputConfig, ok := bodyObj["output_config"].(map[string]any); ok {
+		_, hasTaskBudget := outputConfig["task_budget"]
+		return hasTaskBudget
+	}
+	return false
+}
+
+func ccSessionHeader() string {
+	return ccSessionID
+}
+
+func ccInjectMetadata(bodyObj map[string]any, accountUUID string) {
+	if bodyObj == nil {
+		return
+	}
+	if _, exists := bodyObj["metadata"]; exists {
+		return
+	}
+
+	ccMetaMu.Lock()
+	defer ccMetaMu.Unlock()
+
+	payload := map[string]string{
+		"device_id":    ccDeviceID,
+		"account_uuid": accountUUID,
+		"session_id":   ccSessionID,
+	}
+	userID, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	bodyObj["metadata"] = map[string]any{
+		"user_id": string(userID),
+	}
+}
+
 // ccBetaHeader builds the anthropic-beta header value that Claude Code would
-// send for the given request context. The logic mirrors getAllModelBetas() in
-// claude-code/src/utils/betas.ts for an external, first-party user.
-func ccBetaHeader(model string, isOAuth bool, is1MContext bool, isFastMode bool) string {
-	modelLower := strings.ToLower(model)
-	isClaude3 := strings.Contains(modelLower, "claude-3-")
+// send for the given request context. The logic mirrors the external 1P path in
+// free-code's getAllModelBetas(), plus per-request additions for output config.
+func ccBetaHeader(model string, isOAuth bool, is1MContext bool, isFastMode bool, hasStructuredOutputs bool, hasTaskBudget bool) string {
+	betas := make([]string, 0, 10)
 
-	betas := make([]string, 0, 12)
-
-	// claude-code beta: always present for proxied requests (agentic queries).
-	// CC skips this for non-agentic haiku calls (compaction, classifiers) but
-	// the proxy only handles main-thread agentic queries, so always include it.
+	// Agentic queries always include claude-code beta, including Haiku.
 	betas = append(betas, betaClaudeCode)
 
-	// OAuth beta: for subscriber (OAuth) accounts
 	if isOAuth {
 		betas = append(betas, betaOAuth)
 	}
-
-	// 1M context beta: only for models requesting extended context
 	if is1MContext {
 		betas = append(betas, betaContext1M)
 	}
-
-	// Interleaved thinking: all non-claude-3 models on first-party
-	if !isClaude3 {
+	if ccModelSupportsISP(model) {
 		betas = append(betas, betaInterleavedThink)
 	}
-
-	// Redact thinking: first-party, non-claude-3, interactive sessions
-	if !isClaude3 {
-		betas = append(betas, betaRedactThinking)
-	}
-
-	// Context management: non-claude-3 models
-	if !isClaude3 {
+	if ccModelSupportsContextManagement(model) {
 		betas = append(betas, betaContextManagement)
 	}
-
-	// Structured outputs: non-claude-3 models (Sonnet 4.5+, Opus 4.1+, Haiku 4.5)
-	// CC enables this when the model supports it and strict tools experiment is on.
-	// We include it unconditionally for non-claude-3 since the API ignores it
-	// when not relevant, and real CC sessions nearly always have it.
-	if !isClaude3 {
+	if ccModelSupportsEffort(model) {
+		betas = append(betas, betaEffort)
+	}
+	if hasStructuredOutputs && ccModelSupportsStructuredOutputs(model) {
 		betas = append(betas, betaStructuredOutputs)
 	}
-
-	// Effort: always for first-party
-	betas = append(betas, betaEffort)
-
-	// Prompt caching scope: always for first-party
+	if hasTaskBudget {
+		betas = append(betas, betaTaskBudgets)
+	}
 	betas = append(betas, betaCacheScope)
-
-	// Fast mode: only when the request actually uses fast mode
 	if isFastMode {
 		betas = append(betas, betaFastMode)
 	}
@@ -127,10 +201,10 @@ func ccStainlessHeaders(set func(key, value string)) {
 	set("X-Stainless-Helper-Method", "stream")
 }
 
-// ccMinimalBetaHeader returns a compact beta header suitable for non-model
-// endpoints (usage polling, profile fetches) that only need auth betas.
+// ccMinimalBetaHeader returns the compact beta header used by Claude Code's
+// lightweight OAuth endpoints.
 func ccMinimalBetaHeader() string {
-	return betaClaudeCode + "," + betaOAuth + "," + betaInterleavedThink + "," + betaContextManagement
+	return betaOAuth
 }
 
 // ccAttributionHeader builds the x-anthropic-billing-header that Claude Code
@@ -142,7 +216,24 @@ func ccAttributionHeader(systemText string) string {
 	// with a truncated SHA-256 of whatever system text the client sent.
 	h := sha256.Sum256([]byte(systemText + ccVersion))
 	fp := hex.EncodeToString(h[:4])
-	return "x-anthropic-billing-header: cc_version=" + ccVersion + "." + fp + "; cc_entrypoint=cli;"
+	return "x-anthropic-billing-header: cc_version=" + ccVersion + "." + fp + "; cc_entrypoint=cli; cch=00000;"
+}
+
+const ccCCHSeed uint64 = 0x6E52736AC806831E
+const ccCCHMask uint64 = 0xFFFFF
+
+func ccReplaceCCHPlaceholder(body []byte) []byte {
+	const placeholder = "cch=00000"
+	idx := bytes.Index(body, []byte(placeholder))
+	if idx < 0 {
+		return body
+	}
+	cch := fmt.Sprintf("%05x", xxhash.Checksum64S(body, ccCCHSeed)&ccCCHMask)
+	out := make([]byte, 0, len(body))
+	out = append(out, body[:idx]...)
+	out = append(out, []byte("cch="+cch)...)
+	out = append(out, body[idx+len(placeholder):]...)
+	return out
 }
 
 // ccSystemPrefix is the default Claude Code identity prefix.

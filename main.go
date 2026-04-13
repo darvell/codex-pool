@@ -554,7 +554,28 @@ func modelRequiresCodexPro(model string) bool {
 
 func claudeRequestRequiresMax(r *http.Request, model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "[1m]")
+	if strings.Contains(model, "[1m]") {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	for _, beta := range r.Header.Values("anthropic-beta") {
+		if strings.Contains(strings.ToLower(beta), "context-1m-") {
+			return true
+		}
+	}
+	return false
+}
+
+func requiredPlanForRequest(accountType AccountType, r *http.Request, requestedModel string) string {
+	if accountType == AccountTypeCodex && modelRequiresCodexPro(requestedModel) {
+		return "pro"
+	}
+	if accountType == AccountTypeClaude && claudeRequestRequiresMax(r, requestedModel) {
+		return "max"
+	}
+	return ""
 }
 
 // modelRouteOverride checks if the requested model should be routed to an external
@@ -1017,18 +1038,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	exclude := map[string]bool{}
 	var lastErr error
 	var lastStatus int
-	requiredPlan := ""
-	if accountType == AccountTypeCodex && modelRequiresCodexPro(requestedModel) {
-		requiredPlan = "pro"
-	}
-	if accountType == AccountTypeClaude && claudeRequestRequiresMax(r, requestedModel) {
-		requiredPlan = "max"
-	}
+	requiredPlan := requiredPlanForRequest(accountType, r, requestedModel)
 
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
+		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan, originIP)
 		if acc == nil {
 			// All accounts excluded or rate-limited. If there are rate-limited
 			// accounts, wait for the shortest cooldown instead of 503 immediately.
@@ -1588,7 +1603,8 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		conversationID = extractConversationIDFromHeaders(r.Header)
 	}
 
-	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, "")
+	requiredPlan := requiredPlanForRequest(accountType, r, "")
+	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, requiredPlan, getClientIP(r))
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -1764,9 +1780,9 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 // frames) because each side is an independent WS connection.
 //
 // Flow:
-//  1. Accept client WS upgrade (Caddy → proxy, local h1.1)
-//  2. Dial upstream WS (proxy → chatgpt.com, fresh h1.1 + TLS)
-//  3. Relay messages bidirectionally until either side closes
+//  1. Dial upstream WS first so we can mirror selected handshake state.
+//  2. Accept the client WS upgrade with the negotiated subprotocol.
+//  3. Relay messages bidirectionally until either side closes.
 func relayWebSocket(
 	w http.ResponseWriter,
 	clientReq *http.Request,
@@ -1775,20 +1791,6 @@ func relayWebSocket(
 ) (int, error) {
 	ctx := clientReq.Context()
 
-	// 1. Accept the client's WS upgrade.
-	clientConn, err := websocket.Accept(w, clientReq, &websocket.AcceptOptions{
-		// Don't check origin — the client is our own CLI tool.
-		InsecureSkipVerify: true,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("accept client WS: %w", err)
-	}
-	defer clientConn.CloseNow()
-
-	// Set generous read limit (responses can be large with encrypted_content).
-	clientConn.SetReadLimit(64 * 1024 * 1024) // 64 MB
-
-	// 2. Build upstream WS URL (https → wss).
 	wsURL := *upstreamURL
 	if wsURL.Scheme == "https" {
 		wsURL.Scheme = "wss"
@@ -1796,10 +1798,8 @@ func relayWebSocket(
 		wsURL.Scheme = "ws"
 	}
 
-	// Build upstream dial headers from the rewritten header set.
 	dialHeaders := make(http.Header)
 	for key, vals := range upstreamHeaders {
-		// Skip hop-by-hop headers that coder/websocket manages.
 		lk := strings.ToLower(key)
 		if lk == "connection" || lk == "upgrade" || lk == "sec-websocket-key" ||
 			lk == "sec-websocket-version" || lk == "sec-websocket-extensions" ||
@@ -1809,53 +1809,80 @@ func relayWebSocket(
 		dialHeaders[key] = vals
 	}
 
-	// 3. Connect to upstream.
-	upstreamConn, _, err := websocket.Dial(ctx, wsURL.String(), &websocket.DialOptions{
-		HTTPHeader: dialHeaders,
+	var subprotocols []string
+	for _, raw := range clientReq.Header.Values("Sec-WebSocket-Protocol") {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				subprotocols = append(subprotocols, part)
+			}
+		}
+	}
+
+	upstreamConn, upstreamResp, err := websocket.Dial(ctx, wsURL.String(), &websocket.DialOptions{
+		HTTPHeader:       dialHeaders,
+		Subprotocols:     subprotocols,
+		CompressionMode:  websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
-		clientConn.Close(websocket.StatusInternalError, "upstream connect failed")
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return 0, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
 	}
 	defer upstreamConn.CloseNow()
-
 	upstreamConn.SetReadLimit(64 * 1024 * 1024)
+
+	if turnState := upstreamResp.Header.Get("x-codex-turn-state"); turnState != "" {
+		w.Header().Set("x-codex-turn-state", turnState)
+	}
+
+	acceptOpts := &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+		CompressionMode:    websocket.CompressionNoContextTakeover,
+	}
+	if subprotocol := upstreamConn.Subprotocol(); subprotocol != "" {
+		acceptOpts.Subprotocols = []string{subprotocol}
+	}
+
+	clientConn, err := websocket.Accept(w, clientReq, acceptOpts)
+	if err != nil {
+		upstreamConn.Close(websocket.StatusInternalError, "client accept failed")
+		return 0, fmt.Errorf("accept client WS: %w", err)
+	}
+	defer clientConn.CloseNow()
+	clientConn.SetReadLimit(64 * 1024 * 1024)
 
 	log.Printf("[ws-relay] connected to %s, relaying messages", wsURL.Host)
 
-	// 4. Bidirectional message relay.
 	relayCtx, relayCancel := context.WithCancel(ctx)
 	defer relayCancel()
 
 	errc := make(chan error, 2)
-
-	// upstream → client
 	go func() {
 		errc <- relayMessages(relayCtx, upstreamConn, clientConn, "upstream→client")
 	}()
-
-	// client → upstream
 	go func() {
 		errc <- relayMessages(relayCtx, clientConn, upstreamConn, "client→upstream")
 	}()
 
-	// Wait for either direction to finish, then tear down both.
 	relayErr := <-errc
 	relayCancel()
 
-	// Close both connections gracefully.
+	closeCode := websocket.StatusNormalClosure
 	closeMsg := "relay ended"
 	if relayErr != nil {
+		if code := websocket.CloseStatus(relayErr); code != -1 {
+			closeCode = code
+		}
 		closeMsg = relayErr.Error()
 		if len(closeMsg) > 120 {
 			closeMsg = closeMsg[:120]
 		}
 	}
-	clientConn.Close(websocket.StatusNormalClosure, closeMsg)
-	upstreamConn.Close(websocket.StatusNormalClosure, closeMsg)
+	clientConn.Close(closeCode, closeMsg)
+	upstreamConn.Close(closeCode, closeMsg)
 
 	if relayErr != nil && !errors.Is(relayErr, context.Canceled) &&
-		!strings.Contains(relayErr.Error(), "closed") {
+		!strings.Contains(relayErr.Error(), "closed") && websocket.CloseStatus(relayErr) == -1 {
 		return 101, relayErr
 	}
 	return 101, nil
@@ -1885,7 +1912,8 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	start := time.Now()
 	accountType := provider.Type()
 
-	acc := h.pool.candidate("", map[string]bool{}, accountType, "")
+	requiredPlan := requiredPlanForRequest(accountType, r, "")
+	acc := h.pool.candidate("", map[string]bool{}, accountType, requiredPlan, getClientIP(r))
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -2888,15 +2916,20 @@ func (h *proxyHandler) tryOnce(
 			// "system" field, converting it to the block-array format that real
 			// Claude Code uses. This must happen before we set Content-Length.
 			if bodyObj != nil {
+				ccInjectMetadata(bodyObj, "")
 				bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
+				bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
 				outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				outReq.ContentLength = int64(len(bodyBytes))
 			}
 
 			outReq.Header.Set("anthropic-version", ccAnthropicVersion)
-			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode))
+			hasStructuredOutputs := ccRequestHasStructuredOutputs(bodyObj)
+			hasTaskBudget := ccRequestHasTaskBudget(bodyObj)
+			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode, hasStructuredOutputs, hasTaskBudget))
 			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
 			outReq.Header.Set("User-Agent", ccUserAgent())
+			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
 			outReq.Header.Set("X-App", "cli")
 			outReq.Header.Set("Accept", acceptHeader)
 			outReq.Header.Set("Accept-Language", "*")

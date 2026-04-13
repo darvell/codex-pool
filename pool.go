@@ -53,6 +53,7 @@ type Account struct {
 	LastUsed                time.Time
 	RateLimitUntil          time.Time
 	BackoffLevel            int // exponent: cooldown = min(1s * 2^level, 30m)
+	AllowedSourceIPs        []string
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -245,10 +246,12 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 
 // CodexAuthJSON is the format for Codex auth.json files.
 type CodexAuthJSON struct {
-	OpenAIKey   *string    `json:"OPENAI_API_KEY"`
-	Tokens      *TokenData `json:"tokens"`
-	LastRefresh *time.Time `json:"last_refresh"`
-	Dead        bool       `json:"dead"`
+	OpenAIKey        *string    `json:"OPENAI_API_KEY"`
+	Tokens           *TokenData `json:"tokens"`
+	LastRefresh      *time.Time `json:"last_refresh"`
+	Dead             bool       `json:"dead"`
+	AllowedIP        string     `json:"allowed_ip"`
+	AllowedSourceIPs []string   `json:"allowed_source_ips"`
 }
 
 type TokenData struct {
@@ -277,6 +280,9 @@ type ClaudeAuthJSON struct {
 	// API key format
 	APIKey   string `json:"api_key,omitempty"`
 	PlanType string `json:"plan_type,omitempty"` // optional: pro, max, etc.
+
+	AllowedIP        string   `json:"allowed_ip,omitempty"`
+	AllowedSourceIPs []string `json:"allowed_source_ips,omitempty"`
 
 	// OAuth format (from Claude Code keychain)
 	ClaudeAiOauth *ClaudeOAuthData `json:"claudeAiOauth,omitempty"`
@@ -411,6 +417,22 @@ func isCodexProPlan(planType string) bool {
 	return strings.EqualFold(strings.TrimSpace(planType), "pro")
 }
 
+func accountAllowsClientIPLocked(a *Account, clientIP string) bool {
+	if a == nil || len(a.AllowedSourceIPs) == 0 {
+		return true
+	}
+	clientIP = strings.TrimSpace(clientIP)
+	if clientIP == "" {
+		return false
+	}
+	for _, allowedIP := range a.AllowedSourceIPs {
+		if strings.EqualFold(strings.TrimSpace(allowedIP), clientIP) {
+			return true
+		}
+	}
+	return false
+}
+
 // nearestCooldown returns how long until the next rate-limited account of the
 // given type becomes available. Returns 0 if no accounts are cooling down.
 // This lets the retry loop wait briefly instead of returning 503 immediately.
@@ -453,7 +475,7 @@ func (p *poolState) nearestCooldown(accountType AccountType, exclude map[string]
 //  6. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
 //  7. If all non-codex candidates are rate-limited, pick the best rate-limited account as fallback
 //     to avoid hard 503 failures during transient exhaustion.
-func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
+func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, clientIP string) *Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -466,7 +488,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 				// pinned excluded; fall through to selection
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
-				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan)
+				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan) && accountAllowsClientIPLocked(a, clientIP)
 				if ok && a.Type == AccountTypeCodex && !isCodexProPlan(a.PlanType) {
 					ok = false
 					if p.debug {
@@ -541,7 +563,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) {
+		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
 			a.mu.Unlock()
 			continue
 		}
@@ -1015,6 +1037,17 @@ func saveCodexAccount(a *Account) error {
 
 	if !a.LastRefresh.IsZero() {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
+	}
+	if len(a.AllowedSourceIPs) > 0 {
+		root["allowed_source_ips"] = a.AllowedSourceIPs
+		if len(a.AllowedSourceIPs) == 1 {
+			root["allowed_ip"] = a.AllowedSourceIPs[0]
+		} else {
+			delete(root, "allowed_ip")
+		}
+	} else {
+		delete(root, "allowed_source_ips")
+		delete(root, "allowed_ip")
 	}
 
 	// Persist dead flag so accounts stay dead across restarts

@@ -21,10 +21,13 @@ import (
 // Based on the opencode project's auth implementation.
 
 const (
-	ClaudeOAuthClientID     = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	ClaudeOAuthRedirectURI  = "https://console.anthropic.com/oauth/code/callback"
-	ClaudeOAuthTokenURL     = "https://console.anthropic.com/v1/oauth/token"
-	ClaudeOAuthAuthorizeURL = "https://claude.ai/oauth/authorize"
+	ClaudeOAuthClientID      = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	ClaudeOAuthRedirectURI   = "https://platform.claude.com/oauth/code/callback"
+	ClaudeOAuthTokenURL      = "https://platform.claude.com/v1/oauth/token"
+	ClaudeOAuthAuthorizeURL  = "https://claude.com/cai/oauth/authorize"
+	ClaudeOAuthProfileURL    = "https://api.anthropic.com/api/oauth/profile"
+	ClaudeOAuthAllScopes     = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	ClaudeOAuthRefreshScopes = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 )
 
 // PKCE contains the code verifier and challenge for OAuth PKCE flow.
@@ -55,6 +58,7 @@ func GeneratePKCE() (*PKCE, error) {
 // ClaudeOAuthSession stores the state for an in-progress OAuth flow.
 type ClaudeOAuthSession struct {
 	PKCE      *PKCE
+	State     string
 	CreatedAt time.Time
 	AccountID string // Optional: identifier for this account
 }
@@ -67,20 +71,27 @@ func ClaudeAuthorize(accountID string) (string, *ClaudeOAuthSession, error) {
 		return "", nil, err
 	}
 
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return "", nil, fmt.Errorf("generate state: %w", err)
+	}
+	state := base64.RawURLEncoding.EncodeToString(stateBytes)
+
 	u, _ := url.Parse(ClaudeOAuthAuthorizeURL)
 	q := u.Query()
 	q.Set("code", "true")
 	q.Set("client_id", ClaudeOAuthClientID)
 	q.Set("response_type", "code")
 	q.Set("redirect_uri", ClaudeOAuthRedirectURI)
-	q.Set("scope", "org:create_api_key user:profile user:inference")
+	q.Set("scope", "ClaudeOAuthAllScopes")
 	q.Set("code_challenge", pkce.Challenge)
 	q.Set("code_challenge_method", "S256")
-	q.Set("state", pkce.Verifier)
+	q.Set("state", state)
 	u.RawQuery = q.Encode()
 
 	session := &ClaudeOAuthSession{
 		PKCE:      pkce,
+		State:     state,
 		CreatedAt: time.Now(),
 		AccountID: accountID,
 	}
@@ -98,14 +109,15 @@ type ClaudeTokenResponse struct {
 }
 
 // ClaudeExchange exchanges an authorization code for tokens.
-func ClaudeExchange(code, verifier string) (*ClaudeTokenResponse, error) {
-	// The code format from Anthropic is: code#state
-	// We need to split it and use just the code part
+func ClaudeExchange(code, verifier, state string) (*ClaudeTokenResponse, error) {
+	// Manual copy/paste can still provide code#state; prefer the explicit
+	// session state from ClaudeAuthorize, but preserve compatibility.
 	codeOnly := code
-	state := ""
 	if idx := indexOf(code, '#'); idx >= 0 {
 		codeOnly = code[:idx]
-		state = code[idx+1:]
+		if state == "" {
+			state = code[idx+1:]
+		}
 	}
 
 	body := map[string]string{
@@ -114,9 +126,7 @@ func ClaudeExchange(code, verifier string) (*ClaudeTokenResponse, error) {
 		"client_id":     ClaudeOAuthClientID,
 		"redirect_uri":  ClaudeOAuthRedirectURI,
 		"code_verifier": verifier,
-	}
-	if state != "" {
-		body["state"] = state
+		"state":         state,
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -155,6 +165,7 @@ func ClaudeRefresh(refreshToken string) (*ClaudeTokenResponse, error) {
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
 		"client_id":     ClaudeOAuthClientID,
+		"scope":         ClaudeOAuthRefreshScopes,
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -195,16 +206,19 @@ type ClaudeProfileInfo struct {
 
 // FetchClaudeProfile calls /api/oauth/profile to get the account's plan info.
 func FetchClaudeProfile(accessToken string) (*ClaudeProfileInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, "https://api.anthropic.com/api/oauth/profile", nil)
+	req, err := http.NewRequest(http.MethodGet, ClaudeOAuthProfileURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("anthropic-version", ccAnthropicVersion)
 	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-	req.Header.Set("User-Agent", ccUserAgent())
+	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
+	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
+	req.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("Accept", "application/json")
+	ccStainlessHeaders(req.Header.Set)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -339,6 +353,17 @@ func saveClaudeAccount(a *Account) error {
 	// Save last_refresh at root level for rate limiting across restarts
 	if !a.LastRefresh.IsZero() {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
+	}
+	if len(a.AllowedSourceIPs) > 0 {
+		root["allowed_source_ips"] = a.AllowedSourceIPs
+		if len(a.AllowedSourceIPs) == 1 {
+			root["allowed_ip"] = a.AllowedSourceIPs[0]
+		} else {
+			delete(root, "allowed_ip")
+		}
+	} else {
+		delete(root, "allowed_source_ips")
+		delete(root, "allowed_ip")
 	}
 
 	// Persist account state flags so disabled/dead accounts stay unavailable
