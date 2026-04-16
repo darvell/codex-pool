@@ -12,9 +12,9 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 		"sonnet":      "claude-sonnet-4-6",
 		"sonnet[1m]":  "claude-sonnet-4-6 [1m]",
 		"sonnet [1m]": "claude-sonnet-4-6 [1m]",
-		"opus":        "claude-opus-4-6",
-		"opus[1m]":    "claude-opus-4-6 [1m]",
-		"opus [1m]":   "claude-opus-4-6 [1m]",
+		"opus":        "claude-opus-4-7",
+		"opus[1m]":    "claude-opus-4-7 [1m]",
+		"opus [1m]":   "claude-opus-4-7 [1m]",
 		"haiku":       "claude-haiku-4-5-20251001",
 	}
 
@@ -95,6 +95,8 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		"claude-haiku-4-5":       false,
 		"claude-sonnet-4-6":      false,
 		"claude-sonnet-4-6 [1m]": false,
+		"claude-opus-4-7":        false,
+		"claude-opus-4-7 [1m]":   false,
 		"claude-opus-4-6":        false,
 		"claude-opus-4-6 [1m]":   false,
 	}

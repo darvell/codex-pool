@@ -1249,7 +1249,7 @@ func claudeCanonicalModel(model string) string {
 	} else {
 		switch baseLower {
 		case "opus":
-			canonical = "claude-opus-4-6"
+			canonical = "claude-opus-4-7"
 		case "sonnet":
 			canonical = "claude-sonnet-4-6"
 		case "haiku":
@@ -1406,8 +1406,8 @@ func injectClaudeModels(body []byte) []byte {
 	}
 
 	claudeModels := []map[string]any{
-		claudeModelEntry("opus", "Claude Opus 4.6", 200000),
-		claudeModelEntry("opus[1m]", "Claude Opus 4.6 [1m]", 1000000),
+		claudeModelEntry("opus", "Claude Opus 4.7", 200000),
+		claudeModelEntry("opus[1m]", "Claude Opus 4.7 [1m]", 1000000),
 		claudeModelEntry("sonnet", "Claude Sonnet 4.6", 200000),
 		claudeModelEntry("sonnet[1m]", "Claude Sonnet 4.6 [1m]", 1000000),
 		claudeModelEntry("haiku", "Claude Haiku 4.5", 200000),
