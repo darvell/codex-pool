@@ -176,17 +176,6 @@ func (sw *sseInterceptWriter) scanForEvents() {
 }
 
 func (sw *sseInterceptWriter) processEvent(event []byte) {
-	// Look for usage in the response
-	// OpenAI/Codex format: "usage":{"input_tokens":N,...}
-	// Claude format: "type":"message_start" or "type":"message_delta" with usage
-	// Gemini format: "usageMetadata":{"promptTokenCount":N,...}
-	hasCodexUsage := bytes.Contains(event, []byte(`"usage":{"`)) && bytes.Contains(event, []byte(`"input_tokens":`))
-	hasClaudeUsage := (bytes.Contains(event, []byte(`"type":"message_start"`)) || bytes.Contains(event, []byte(`"type":"message_delta"`))) && bytes.Contains(event, []byte(`"usage":`))
-	hasGeminiUsage := bytes.Contains(event, []byte(`"usageMetadata":{"`)) && bytes.Contains(event, []byte(`"promptTokenCount":`))
-	if !hasCodexUsage && !hasClaudeUsage && !hasGeminiUsage {
-		return
-	}
-
 	// Find the data: prefix and extract JSON from there
 	dataIdx := bytes.Index(event, []byte("data: "))
 	if dataIdx < 0 {
