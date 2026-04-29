@@ -219,6 +219,22 @@ func ccInjectMetadata(bodyObj map[string]any, accountUUID, userID, sessionID str
 // ccBetaHeader builds the anthropic-beta header value that Claude Code would
 // send for the given request context. The logic mirrors the external 1P path in
 // free-code's getAllModelBetas(), plus per-request additions for output config.
+func appendAnthropicBeta(existing string, beta string) string {
+	if beta == "" {
+		return existing
+	}
+	parts := strings.Split(existing, ",")
+	for _, part := range parts {
+		if strings.TrimSpace(part) == beta {
+			return existing
+		}
+	}
+	if strings.TrimSpace(existing) == "" {
+		return beta
+	}
+	return existing + "," + beta
+}
+
 func ccBetaHeader(model string, isOAuth bool, is1MContext bool, isFastMode bool, hasStructuredOutputs bool, hasTaskBudget bool) string {
 	betas := make([]string, 0, 10)
 

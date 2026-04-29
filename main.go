@@ -161,7 +161,7 @@ func buildConfig() *config {
 		}
 	}
 
-	// Request timeouts default to disabled so long-running jobs can finish.
+	// Request and stream timeouts default to disabled so long-running jobs can finish.
 	// Set a positive value to enable a hard timeout.
 	cfg.requestTimeout = 0
 	if v := getenv("PROXY_REQUEST_TIMEOUT_SECONDS", ""); v != "" {
@@ -169,19 +169,19 @@ func buildConfig() *config {
 			cfg.requestTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.streamTimeout = 5 * time.Minute
+	cfg.streamTimeout = 0
 	if v := getenv("PROXY_STREAM_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.streamIdleTimeout = 5 * time.Minute
+	cfg.streamIdleTimeout = 0
 	if v := getenv("STREAM_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamIdleTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.websocketIdleTimeout = 5 * time.Minute
+	cfg.websocketIdleTimeout = 0
 	if v := getenv("WEBSOCKET_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.websocketIdleTimeout = time.Duration(n) * time.Second
@@ -1240,7 +1240,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
 
-		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID)
+		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID, originID)
 
 		atomic.AddInt64(&acc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
@@ -2574,21 +2574,23 @@ func clientOrDefaultTimeout(r *http.Request, reqTimeout, streamTimeout time.Dura
 	}
 	isImageGeneration := len(body) > 0 && requestHasImageGenerationTool(body)
 
-	// Honour SDK/client-requested timeouts, but do not let short 60s/120s
-	// client defaults cut off Codex streams or image-generation streams before
+	// Streaming requests can run for a long time. Use the configured stream
+	// timeout only; a zero value means no hard cap.
+	if isStreaming {
+		return streamTimeout
+	}
+
+	// Honour SDK/client-requested timeouts for non-streaming requests, but do
+	// not let short 60s/120s client defaults cut off image generation before
 	// Codex's expected 300s window.
 	if v := r.Header.Get("X-Stainless-Timeout"); v != "" {
 		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
 			requested := time.Duration(secs * float64(time.Second))
-			if (isStreaming || isImageGeneration) && requested < codexExpectedStreamTimeout {
+			if isImageGeneration && requested < codexExpectedStreamTimeout {
 				return codexExpectedStreamTimeout
 			}
 			return requested
 		}
-	}
-
-	if isStreaming {
-		return streamTimeout
 	}
 	if isImageGeneration && reqTimeout > 0 && reqTimeout < codexExpectedStreamTimeout {
 		return codexExpectedStreamTimeout
@@ -2944,6 +2946,9 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
+		if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+			h.writeClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, bodyBytes, outReq, bodyBytes, nil, TranslateNone, nil, err.Error())
+		}
 		h.recent.add(err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -2954,7 +2959,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 			sampleLimit = h.claudeTraceSampleLimit(h.cfg.bodyLogLimit)
 		}
-		h.attachClaudeTrace(reqID, "passthrough", nil, r, bodyBytes, outReq, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
+		h.attachClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, bodyBytes, outReq, bodyBytes, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
 	}
 
 	// Write response to client
@@ -3021,9 +3026,13 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 
 	var reqSample *bytes.Buffer
 	var body io.Reader = r.Body
-	if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
+	if (h.cfg.logBodies && h.cfg.bodyLogLimit > 0) || (providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled()) {
+		sampleLimit := h.cfg.bodyLogLimit
+		if sampleLimit <= 0 || (providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() && h.cfg.claudeTraceBodyLimit > sampleLimit) {
+			sampleLimit = h.cfg.claudeTraceBodyLimit
+		}
 		reqSample = &bytes.Buffer{}
-		body = io.TeeReader(r.Body, &limitedWriter{w: reqSample, n: h.cfg.bodyLogLimit})
+		body = io.TeeReader(r.Body, &limitedWriter{w: reqSample, n: sampleLimit})
 	}
 
 	outReq, err := http.NewRequestWithContext(ctx, r.Method, outURL.String(), body)
@@ -3056,11 +3065,29 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
+		if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+			var reqBody []byte
+			if reqSample != nil {
+				reqBody = reqSample.Bytes()
+			}
+			h.writeClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, reqBody, outReq, reqBody, nil, TranslateNone, nil, err.Error())
+		}
 		h.recent.add(err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+		var reqBody []byte
+		if reqSample != nil {
+			reqBody = reqSample.Bytes()
+		}
+		sampleLimit := h.claudeTraceSampleLimit(16 * 1024)
+		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
+			sampleLimit = h.claudeTraceSampleLimit(h.cfg.bodyLogLimit)
+		}
+		h.attachClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, reqBody, outReq, reqBody, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
+	}
 
 	if h.cfg.logBodies && reqSample != nil && reqSample.Len() > 0 {
 		log.Printf("[%s] passthrough request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
@@ -3118,11 +3145,13 @@ func (h *proxyHandler) tryOnce(
 	translateDir TranslateDirection,
 	requestedModel string,
 	userID string,
+	originID string,
 ) (*http.Response, *bytes.Buffer, bool, error) {
 	if acc == nil {
 		return nil, nil, false, errors.New("nil account")
 	}
 	refreshFailed := false // Track if refresh was attempted but failed
+	rawIncomingBody := append([]byte(nil), bodyBytes...)
 
 	if !h.cfg.disableRefresh && h.needsRefresh(acc) {
 		if err := h.refreshAccount(ctx, acc); err != nil {
@@ -3184,47 +3213,8 @@ func (h *proxyHandler) tryOnce(
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
 
-		if provider.Type() == AccountTypeClaude && translateDir == TranslateNone {
-			sessionID := ccSessionHeader(in, userID)
-			transformedBody, mapper := transformClaudeSDKRequest(bodyBytes, userID, sessionID)
-			bodyBytes = transformedBody
-			claudeToolNameMapper = mapper
-			outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			outReq.ContentLength = int64(len(bodyBytes))
-			outReq.Header.Del("Content-Length")
-
-			isOAuth := strings.HasPrefix(access, "sk-ant-oat")
-			is1M := strings.Contains(strings.ToLower(requestedModel), "[1m]")
-			acceptHeader := "application/json"
-			isFastMode := false
-			var bodyObj map[string]any
-			if json.Unmarshal(bodyBytes, &bodyObj) == nil {
-				if s, ok := bodyObj["stream"].(bool); ok && s {
-					acceptHeader = "text/event-stream"
-				}
-				if sp, ok := bodyObj["speed"].(string); ok && sp == "fast" {
-					isFastMode = true
-				}
-			}
-			bodyModel := requestedModel
-			if bodyObj != nil {
-				if m, ok := bodyObj["model"].(string); ok && m != "" {
-					bodyModel = m
-				}
-			}
-			hasStructuredOutputs := ccRequestHasStructuredOutputs(bodyObj)
-			hasTaskBudget := ccRequestHasTaskBudget(bodyObj)
-			outReq.Header.Set("anthropic-version", ccAnthropicVersion)
-			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode, hasStructuredOutputs, hasTaskBudget))
-			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-			outReq.Header.Set("User-Agent", ccUserAgent())
-			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader(in, userID))
-			outReq.Header.Set("X-App", "cli")
-			outReq.Header.Set("Accept", acceptHeader)
-			outReq.Header.Set("Accept-Language", "*")
-			outReq.Header.Set("Content-Type", "application/json")
-			outReq.Header.Set("Sec-Fetch-Mode", "cors")
-			ccStainlessHeaders(outReq.Header.Set)
+		if provider.Type() == AccountTypeClaude && translateDir == TranslateNone && strings.HasPrefix(access, "sk-ant-oat") {
+			outReq.Header.Set("anthropic-beta", appendAnthropicBeta(outReq.Header.Get("anthropic-beta"), betaOAuth))
 		}
 
 		// When translating, body size changes — remove the client's Content-Length
@@ -3343,6 +3333,9 @@ func (h *proxyHandler) tryOnce(
 
 	outReq, err := buildReq()
 	if err != nil {
+		if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+			h.writeClaudeTrace(reqID, "pool", userID, originID, acc, in, rawIncomingBody, nil, bodyBytes, nil, translateDir, nil, err.Error())
+		}
 		return nil, nil, false, err
 	}
 
@@ -3359,6 +3352,9 @@ func (h *proxyHandler) tryOnce(
 		resp.Body = newClaudeToolNameReadCloser(resp.Body, claudeToolNameMapper)
 	}
 	if err != nil {
+		if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+			h.writeClaudeTrace(reqID, "pool", userID, originID, acc, in, rawIncomingBody, outReq, bodyBytes, resp, translateDir, nil, err.Error())
+		}
 		acc.mu.Lock()
 		acc.Penalty += 0.2
 		acc.mu.Unlock()
@@ -3382,6 +3378,9 @@ func (h *proxyHandler) tryOnce(
 			if err := h.refreshAccount(ctx, acc); err == nil {
 				outReq, err = buildReq()
 				if err != nil {
+					if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+						h.writeClaudeTrace(reqID, "pool", userID, originID, acc, in, rawIncomingBody, nil, bodyBytes, nil, translateDir, nil, err.Error())
+					}
 					return nil, nil, false, err
 				}
 				if h.cfg.debug.Load() {
@@ -3396,6 +3395,9 @@ func (h *proxyHandler) tryOnce(
 					resp.Body = newClaudeToolNameReadCloser(resp.Body, claudeToolNameMapper)
 				}
 				if err != nil {
+					if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+						h.writeClaudeTrace(reqID, "pool", userID, originID, acc, in, rawIncomingBody, outReq, bodyBytes, resp, translateDir, nil, err.Error())
+					}
 					acc.mu.Lock()
 					acc.Penalty += 0.2
 					acc.mu.Unlock()
@@ -3448,7 +3450,7 @@ func (h *proxyHandler) tryOnce(
 	sampleLimit = h.claudeTraceSampleLimit(sampleLimit)
 	buf := &bytes.Buffer{}
 	if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
-		h.attachClaudeTrace(reqID, "pool", acc, in, bodyBytes, outReq, resp, translateDir, buf, sampleLimit)
+		h.attachClaudeTrace(reqID, "pool", userID, originID, acc, in, rawIncomingBody, outReq, bodyBytes, resp, translateDir, buf, sampleLimit)
 	} else {
 		resp.Body = struct {
 			io.Reader

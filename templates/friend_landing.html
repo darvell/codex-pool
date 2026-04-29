@@ -381,17 +381,41 @@
         }
 
         /* Tool picker */
-        .tabs {
+        .setup-layout {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-            gap: 8px;
-            margin: 0 auto 34px;
+            grid-template-columns: 218px minmax(0, 1fr);
+            gap: 24px;
+            align-items: start;
+            margin-top: 24px;
+        }
+
+        .tool-nav {
+            position: sticky;
+            top: 18px;
+        }
+
+        .tabs {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
             background: linear-gradient(180deg, #090909, #060606);
-            padding: 8px;
+            padding: 12px;
             border: 1px solid #1b1b1b;
             border-radius: 18px;
             box-shadow: var(--inset-shadow);
-            max-width: 900px;
+        }
+
+        .tool-group-label {
+            color: var(--gold-dim);
+            font-size: 0.58rem;
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+            margin: 0 0 7px 4px;
+        }
+
+        .tool-group-items {
+            display: grid;
+            gap: 7px;
         }
 
         .tab {
@@ -406,11 +430,10 @@
             transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 7px;
+            justify-content: flex-start;
+            gap: 8px;
             font-weight: 700;
             letter-spacing: 0.08em;
-            white-space: nowrap;
         }
 
         .tab svg { width: 15px; height: 15px; fill: currentColor; opacity: 0.78; flex: 0 0 auto; }
@@ -429,6 +452,10 @@
             color: #b7b7b7;
             border-color: #2a2a2a;
             background: rgba(255,255,255,0.025);
+        }
+
+        .setup-panel {
+            min-width: 0;
         }
 
         .tab-content { display: none; animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
@@ -764,19 +791,28 @@
             .setup-heading-copy {
                 font-size: 0.74rem;
             }
-            .tabs {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 7px;
-                border-radius: 14px;
-                padding: 8px;
-                max-width: 100%;
+            .setup-layout {
+                display: block;
+                margin-top: 18px;
+            }
+            .tool-nav {
+                position: static;
                 margin-bottom: 24px;
+            }
+            .tabs {
+                gap: 13px;
+                border-radius: 14px;
+                padding: 10px;
+            }
+            .tool-group-items {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
             .tab {
                 min-height: 44px;
                 font-size: 0.62rem;
                 padding: 9px 8px;
                 gap: 5px;
+                justify-content: center;
             }
             .tab svg { width: 14px; height: 14px; }
             .sub-tabs {
@@ -831,48 +867,67 @@
                     <div class="setup-heading-copy">Start with the CLI you actually use. Each panel gives you the automatic installer first, then the raw files if you want to inspect or paste by hand.</div>
                 </div>
 
-                <div class="tabs">
-                    <div class="tab active" data-tab="codex">
-                        <!-- Codex Icon -->
-                        <svg viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.0462 6.0462 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4069-.6666zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2298V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4533l-.142.0805L8.704 5.4596a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l3.8556-2.2088 3.8556 2.2088v4.4162l-3.8556 2.2188-3.8556-2.2188z"/></svg>
-                        Codex
-                    </div>
-                    <div class="tab" data-tab="claude">
-                        <!-- Claude Icon -->
-                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="currentColor"/></svg>
-                        Claude
-                    </div>
-                    <div class="tab" data-tab="anthropic-api">
-                        <!-- Anthropic API Icon -->
-                        <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6zm2 3h8v2H8V9zm0 4h5v2H8v-2z" fill="currentColor"/></svg>
-                        Anthropic API
-                    </div>
-                    <div class="tab" data-tab="gemini">
-                        <!-- Gemini Icon -->
-                        <svg viewBox="0 0 24 24"><path d="M12,2 L14.5,9.5 L22,12 L14.5,14.5 L12,22 L9.5,14.5 L2,12 L9.5,9.5 L12,2 M6,12 L8,18 L14,12 L8,6 L6,12" fill="currentColor"/></svg>
-                        Gemini
-                    </div>
-                    <div class="tab" data-tab="openai">
-                        <!-- OpenAI-Compatible Icon (plug/connector) -->
-                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" fill="currentColor"/></svg>
-                        OpenAI API
-                    </div>
-                    <div class="tab" data-tab="pi">
-                        <!-- Pi Icon -->
-                        <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm5 4h2v10H9V9zm4 0h2v10h-2V9zm-6 8h10v2H7v-2z" fill="currentColor"/></svg>
-                        Pi
-                    </div>
-                    <div class="tab" data-tab="cute-code">
-                        <svg viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5l-2 3-2-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm2 4v2h2V8H7zm4 0v2h6V8h-6zm-4 4v2h6v-2H7zm8 0v2h2v-2h-2z" fill="currentColor"/></svg>
-                        Cute Code
-                    </div>
-                    <div class="tab" data-tab="stats">
-                        <!-- Stats Icon -->
-                        <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
-                        Analytics
-                    </div>
-                </div>
+                <div class="setup-layout">
+                    <nav class="tool-nav" aria-label="Setup sections">
+                        <div class="tabs">
+                            <div class="tool-group">
+                                <div class="tool-group-label">CLIs</div>
+                                <div class="tool-group-items">
+                                    <div class="tab active" data-tab="codex">
+                                        <!-- Codex Icon -->
+                                        <svg viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.0462 6.0462 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4069-.6666zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2298V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4533l-.142.0805L8.704 5.4596a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l3.8556-2.2088 3.8556 2.2088v4.4162l-3.8556 2.2188-3.8556-2.2188z"/></svg>
+                                        Codex
+                                    </div>
+                                    <div class="tab" data-tab="claude">
+                                        <!-- Claude Icon -->
+                                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="currentColor"/></svg>
+                                        Claude
+                                    </div>
+                                    <div class="tab" data-tab="gemini">
+                                        <!-- Gemini Icon -->
+                                        <svg viewBox="0 0 24 24"><path d="M12,2 L14.5,9.5 L22,12 L14.5,14.5 L12,22 L9.5,14.5 L2,12 L9.5,9.5 L12,2 M6,12 L8,18 L14,12 L8,6 L6,12" fill="currentColor"/></svg>
+                                        Gemini
+                                    </div>
+                                    <div class="tab" data-tab="cute-code">
+                                        <svg viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5l-2 3-2-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm2 4v2h2V8H7zm4 0v2h6V8h-6zm-4 4v2h6v-2H7zm8 0v2h2v-2h-2z" fill="currentColor"/></svg>
+                                        Cute Code
+                                    </div>
+                                    <div class="tab" data-tab="pi">
+                                        <!-- Pi Icon -->
+                                        <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm5 4h2v10H9V9zm4 0h2v10h-2V9zm-6 8h10v2H7v-2z" fill="currentColor"/></svg>
+                                        Pi
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="tool-group">
+                                <div class="tool-group-label">SDKs</div>
+                                <div class="tool-group-items">
+                                    <div class="tab" data-tab="anthropic-api">
+                                        <!-- Anthropic API Icon -->
+                                        <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6zm2 3h8v2H8V9zm0 4h5v2H8v-2z" fill="currentColor"/></svg>
+                                        Anthropic API
+                                    </div>
+                                    <div class="tab" data-tab="openai">
+                                        <!-- OpenAI-Compatible Icon (plug/connector) -->
+                                        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" fill="currentColor"/></svg>
+                                        OpenAI API
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="tool-group">
+                                <div class="tool-group-label">Pool</div>
+                                <div class="tool-group-items">
+                                    <div class="tab" data-tab="stats">
+                                        <!-- Stats Icon -->
+                                        <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
+                                        Analytics
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </nav>
 
+                    <div class="setup-panel">
                 <!-- CODEX -->
                 <div id="tab-codex" class="tab-content active">
                     <div class="install-section">
@@ -1772,6 +1827,7 @@ brew install claude-code</pre>
                                 IP hashes use the pool salt, so they stay stable inside this pool and reveal repeated origins without exposing raw IP addresses.
                             </p>
                         </div>
+                    </div>
                     </div>
                 </div>
 

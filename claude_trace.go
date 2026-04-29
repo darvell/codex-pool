@@ -28,9 +28,13 @@ type claudeTraceRecord struct {
 	Timestamp    string              `json:"timestamp"`
 	RequestID    string              `json:"request_id"`
 	Mode         string              `json:"mode"`
+	UserID       string              `json:"user_id,omitempty"`
+	OriginID     string              `json:"origin_id,omitempty"`
+	ClientIP     string              `json:"client_ip,omitempty"`
 	AccountID    string              `json:"account_id,omitempty"`
 	AccountPlan  string              `json:"account_plan,omitempty"`
 	TranslateDir string              `json:"translate_dir,omitempty"`
+	Error        string              `json:"error,omitempty"`
 	Incoming     *claudeTracePayload `json:"incoming,omitempty"`
 	Upstream     *claudeTracePayload `json:"upstream,omitempty"`
 	Response     *claudeTracePayload `json:"response,omitempty"`
@@ -72,10 +76,13 @@ func (h *proxyHandler) claudeTraceSampleLimit(base int64) int64 {
 func (h *proxyHandler) attachClaudeTrace(
 	reqID string,
 	mode string,
+	userID string,
+	originID string,
 	acc *Account,
 	incoming *http.Request,
 	incomingBody []byte,
 	upstream *http.Request,
+	upstreamBody []byte,
 	resp *http.Response,
 	translateDir TranslateDirection,
 	buf *bytes.Buffer,
@@ -90,7 +97,7 @@ func (h *proxyHandler) attachClaudeTrace(
 		reader: io.TeeReader(resp.Body, &limitedWriter{w: buf, n: limit}),
 		closer: closer,
 		finalize: func() {
-			h.writeClaudeTrace(reqID, mode, acc, incoming, incomingBody, upstream, resp, translateDir, buf.Bytes())
+			h.writeClaudeTrace(reqID, mode, userID, originID, acc, incoming, incomingBody, upstream, upstreamBody, resp, translateDir, buf.Bytes(), "")
 		},
 	}
 }
@@ -98,13 +105,17 @@ func (h *proxyHandler) attachClaudeTrace(
 func (h *proxyHandler) writeClaudeTrace(
 	reqID string,
 	mode string,
+	userID string,
+	originID string,
 	acc *Account,
 	incoming *http.Request,
 	incomingBody []byte,
 	upstream *http.Request,
+	upstreamBody []byte,
 	resp *http.Response,
 	translateDir TranslateDirection,
 	respSample []byte,
+	traceErr string,
 ) {
 	if h == nil || h.cfg == nil || !h.cfg.claudeTraceEnabled() {
 		return
@@ -118,10 +129,16 @@ func (h *proxyHandler) writeClaudeTrace(
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 		RequestID:    reqID,
 		Mode:         mode,
+		UserID:       userID,
+		OriginID:     originID,
 		TranslateDir: translateDirectionName(translateDir),
+		Error:        traceErr,
 		Incoming:     tracePayloadFromRequest(incoming, incomingBody, h.cfg.claudeTraceBodyLimit, h.cfg.claudeTraceSecrets),
-		Upstream:     tracePayloadFromRequest(upstream, incomingBody, h.cfg.claudeTraceBodyLimit, h.cfg.claudeTraceSecrets),
+		Upstream:     tracePayloadFromRequest(upstream, upstreamBody, h.cfg.claudeTraceBodyLimit, h.cfg.claudeTraceSecrets),
 		Response:     tracePayloadFromResponse(resp, respSample, h.cfg.claudeTraceBodyLimit, h.cfg.claudeTraceSecrets),
+	}
+	if incoming != nil {
+		record.ClientIP = getClientIP(incoming)
 	}
 	if acc != nil {
 		record.AccountID = acc.ID

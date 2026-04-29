@@ -114,7 +114,7 @@ func TestClaudeToolNameReadCloserRestoresSplitNames(t *testing.T) {
 	}
 }
 
-func TestClaudePoolTokenAcceptedViaXAPIKeyAndShapesClaudeOAuthRequest(t *testing.T) {
+func TestClaudePoolTokenAcceptedViaXAPIKeyPreservesNativeClaudeRequest(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	base, _ := url.Parse("https://api.anthropic.com")
@@ -176,29 +176,23 @@ func TestClaudePoolTokenAcceptedViaXAPIKeyAndShapesClaudeOAuthRequest(t *testing
 	if upstreamAPIKey != "" {
 		t.Fatalf("upstream X-Api-Key leaked pool token: %q", upstreamAPIKey)
 	}
-	if !strings.Contains(upstreamBeta, betaOAuth) || !strings.Contains(upstreamBeta, betaClaudeCode) {
+	if upstreamBeta != betaOAuth {
 		t.Fatalf("upstream anthropic-beta = %q", upstreamBeta)
 	}
-	if obfuscatedToolName == "Bash" || !strings.HasPrefix(obfuscatedToolName, "t_") {
-		t.Fatalf("tool name was not obfuscated: %q", obfuscatedToolName)
+	if obfuscatedToolName != "Bash" {
+		t.Fatalf("tool name should be preserved, got %q", obfuscatedToolName)
 	}
-	system, _ := upstreamBody["system"].([]any)
-	if len(system) != 2 {
-		t.Fatalf("system blocks = %#v, want billing + identity only", system)
-	}
-	identity, _ := system[1].(map[string]any)
-	cache, _ := identity["cache_control"].(map[string]any)
-	if cache["ttl"] != "1h" {
-		t.Fatalf("identity cache ttl = %#v, want 1h", cache)
+	if upstreamBody["system"] != "be helpful" {
+		t.Fatalf("system was rewritten: %#v", upstreamBody["system"])
 	}
 	messages, _ := upstreamBody["messages"].([]any)
 	first, _ := messages[0].(map[string]any)
 	content, _ := first["content"].(string)
-	if !strings.Contains(content, "be helpful") || !strings.Contains(content, "hello") {
-		t.Fatalf("first user content did not absorb system text: %#v", first["content"])
+	if content != "hello" {
+		t.Fatalf("first user content was rewritten: %#v", first["content"])
 	}
 	if !strings.Contains(rr.Body.String(), `"name":"Bash"`) {
-		t.Fatalf("response tool name was not restored: %s", rr.Body.String())
+		t.Fatalf("response body changed unexpectedly: %s", rr.Body.String())
 	}
 }
 
@@ -726,14 +720,17 @@ func TestRequestHasImageGenerationTool(t *testing.T) {
 	}
 }
 
-func TestClientOrDefaultTimeoutClampsCodexStreamTimeouts(t *testing.T) {
+func TestClientOrDefaultTimeoutDoesNotClampStreams(t *testing.T) {
 	t.Parallel()
 
 	streamReq := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	streamReq.Header.Set("X-Stainless-Timeout", "60")
 	streamBody := []byte(`{"stream":true}`)
-	if got := clientOrDefaultTimeout(streamReq, 10*time.Second, 0, streamBody); got != 5*time.Minute {
-		t.Fatalf("stream timeout = %v, want 5m", got)
+	if got := clientOrDefaultTimeout(streamReq, 10*time.Second, 0, streamBody); got != 0 {
+		t.Fatalf("stream timeout = %v, want no timeout", got)
+	}
+	if got := clientOrDefaultTimeout(streamReq, 10*time.Second, 15*time.Minute, streamBody); got != 15*time.Minute {
+		t.Fatalf("configured stream timeout = %v, want 15m", got)
 	}
 
 	imageReq := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)

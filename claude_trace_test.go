@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,23 @@ func TestTraceHeaderValueRedactsSecrets(t *testing.T) {
 	if got := traceHeaderValue("Authorization", "Bearer secret", true); got != "Bearer secret" {
 		t.Fatalf("authorization should remain when includeSecrets=true, got %q", got)
 	}
+}
+
+func waitForTraceFile(t *testing.T, traceDir string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		files, err := os.ReadDir(traceDir)
+		if err != nil {
+			t.Fatalf("read trace dir: %v", err)
+		}
+		if len(files) > 0 {
+			return filepath.Join(traceDir, files[0].Name())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("expected trace file to be written")
+	return ""
 }
 
 func TestClaudeTraceWritesFileForPooledRequest(t *testing.T) {
@@ -90,23 +108,7 @@ func TestClaudeTraceWritesFileForPooledRequest(t *testing.T) {
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	var files []os.DirEntry
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		files, err = os.ReadDir(traceDir)
-		if err != nil {
-			t.Fatalf("read trace dir: %v", err)
-		}
-		if len(files) > 0 {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if len(files) == 0 {
-		t.Fatal("expected trace file to be written")
-	}
-
-	tracePath := filepath.Join(traceDir, files[0].Name())
+	tracePath := waitForTraceFile(t, traceDir)
 	traceBytes, err := os.ReadFile(tracePath)
 	if err != nil {
 		t.Fatalf("read trace file: %v", err)
@@ -151,5 +153,97 @@ func TestClaudeTraceWritesFileForPooledRequest(t *testing.T) {
 	}
 	if record.Response.Body == "" || !bytes.Contains([]byte(record.Response.Body), []byte(`"ok":true`)) {
 		t.Fatalf("response body = %q", record.Response.Body)
+	}
+}
+
+func TestClaudeTraceWritesFileForPooledRoundTripError(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	traceDir := t.TempDir()
+	baseURL, _ := url.Parse("https://anthropic.invalid")
+	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	acc := &Account{Type: AccountTypeClaude, ID: "claude_test", AccessToken: "sk-ant-api-test", PlanType: "pro"}
+	pool := newPoolState([]*Account{acc}, false)
+	transportErr := errors.New("synthetic upstream failure")
+
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 16 * 1024,
+			claudeTraceDir:       traceDir,
+			claudeTraceBodyLimit: 16 * 1024,
+		},
+		transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, transportErr
+		}),
+		pool:     pool,
+		registry: registry,
+		metrics:  newMetrics(),
+		recent:   newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	body := []byte(`{"model":"claude-opus-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "trace-user"))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	traceBytes, err := os.ReadFile(waitForTraceFile(t, traceDir))
+	if err != nil {
+		t.Fatalf("read trace file: %v", err)
+	}
+
+	var record struct {
+		Mode      string `json:"mode"`
+		AccountID string `json:"account_id"`
+		Error     string `json:"error"`
+		Incoming  struct {
+			Body string `json:"body"`
+		} `json:"incoming"`
+		Upstream struct {
+			Body string `json:"body"`
+		} `json:"upstream"`
+		Response *struct{} `json:"response"`
+	}
+	if err := json.Unmarshal(traceBytes, &record); err != nil {
+		t.Fatalf("unmarshal trace: %v\n%s", err, string(traceBytes))
+	}
+	if record.Mode != "pool" {
+		t.Fatalf("mode = %q", record.Mode)
+	}
+	if record.AccountID != "claude_test" {
+		t.Fatalf("account_id = %q", record.AccountID)
+	}
+	if !bytes.Contains([]byte(record.Error), []byte(transportErr.Error())) {
+		t.Fatalf("error = %q", record.Error)
+	}
+	if record.Response != nil {
+		t.Fatalf("response should be absent on round trip failure")
+	}
+	if !bytes.Contains([]byte(record.Incoming.Body), []byte("claude-opus-4-6")) {
+		t.Fatalf("incoming body missing model: %q", record.Incoming.Body)
+	}
+	if !bytes.Contains([]byte(record.Upstream.Body), []byte("claude-opus-4-6")) {
+		t.Fatalf("upstream body missing model: %q", record.Upstream.Body)
 	}
 }
