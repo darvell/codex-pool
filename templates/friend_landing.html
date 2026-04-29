@@ -66,9 +66,9 @@
         /* The Monolith Container */
         .container {
             width: 100%;
-            max-width: 850px;
+            max-width: 1040px;
             position: relative;
-            padding: 40px;
+            padding: clamp(24px, 4vw, 44px);
             background: var(--card-bg);
             border-radius: 4px;
             box-shadow: 
@@ -178,8 +178,8 @@
         /* Success hero */
         .success-wrapper {
             width: 100%;
-            max-width: 220px;
-            margin: 0 auto 20px;
+            max-width: 150px;
+            margin: 0 auto 14px;
             position: relative;
             animation: heroReveal 1s cubic-bezier(0.2, 0.8, 0.2, 1);
         }
@@ -360,49 +360,75 @@
             text-shadow: 0 0 10px rgba(212, 175, 55, 0.3);
         }
 
-        /* Main Tabs - Physical Switches */
+        .setup-heading {
+            text-align: center;
+            margin: 4px auto 18px;
+            max-width: 620px;
+        }
+
+        .setup-heading-title {
+            font-family: 'Cormorant Garamond', serif;
+            color: var(--text-main);
+            font-size: clamp(1.45rem, 2.8vw, 2rem);
+            line-height: 1.1;
+            margin-bottom: 8px;
+        }
+
+        .setup-heading-copy {
+            color: #8d8d8d;
+            font-size: 0.78rem;
+            line-height: 1.55;
+        }
+
+        /* Tool picker */
         .tabs {
-            display: flex;
-            justify-content: center;
-            gap: 6px;
-            margin-bottom: 40px;
-            background: #080808;
-            padding: 6px;
-            border-radius: 50px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+            gap: 8px;
+            margin: 0 auto 34px;
+            background: linear-gradient(180deg, #090909, #060606);
+            padding: 8px;
+            border: 1px solid #1b1b1b;
+            border-radius: 18px;
             box-shadow: var(--inset-shadow);
-            max-width: 580px;
-            margin-left: auto;
-            margin-right: auto;
+            max-width: 900px;
         }
 
         .tab {
             cursor: pointer;
-            font-size: 0.7rem;
+            min-height: 42px;
+            font-size: 0.66rem;
             text-transform: uppercase;
-            color: #555;
-            padding: 8px 14px;
-            border-radius: 40px;
-            transition: all 0.3s ease;
+            color: #696969;
+            padding: 9px 10px;
+            border: 1px solid transparent;
+            border-radius: 12px;
+            transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
             display: flex;
             align-items: center;
-            gap: 6px;
+            justify-content: center;
+            gap: 7px;
             font-weight: 700;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.08em;
+            white-space: nowrap;
         }
 
-        .tab svg { width: 16px; height: 16px; fill: currentColor; opacity: 0.7; }
+        .tab svg { width: 15px; height: 15px; fill: currentColor; opacity: 0.78; flex: 0 0 auto; }
 
-        .tab.active { 
-            color: #000;
+        .tab.active {
+            color: #070707;
             background: var(--metallic-gradient);
-            box-shadow: 
-                0 2px 10px rgba(0,0,0,0.5),
+            border-color: rgba(255,255,255,0.12);
+            box-shadow:
+                0 8px 24px rgba(0,0,0,0.35),
                 inset 0 1px 0 rgba(255,255,255,0.4);
             text-shadow: none;
         }
-        
+
         .tab:hover:not(.active) {
-            color: #999;
+            color: #b7b7b7;
+            border-color: #2a2a2a;
+            background: rgba(255,255,255,0.025);
         }
 
         .tab-content { display: none; animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
@@ -486,6 +512,67 @@
             margin-right: 10px;
             border-radius: 50%;
             box-shadow: 0 0 5px var(--gold-dim);
+        }
+
+        .api-summary {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 18px 0 4px;
+        }
+
+        .api-card {
+            background: linear-gradient(180deg, #101010, #090909);
+            border: 1px solid #202020;
+            border-radius: 8px;
+            padding: 14px;
+            min-height: 84px;
+        }
+
+        .api-card-title {
+            color: var(--gold-bright);
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            margin-bottom: 8px;
+        }
+
+        .api-card p {
+            margin: 0;
+            color: #888;
+            font-size: 0.76rem;
+            line-height: 1.45;
+        }
+
+        .model-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .model-pill {
+            padding: 3px 10px;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-family: 'Space Mono', monospace;
+        }
+
+        .model-pill.claude { background: rgba(139,92,246,0.1); color: #a78bfa; }
+        .model-pill.openai { background: rgba(16,185,129,0.1); color: #34d399; }
+        .model-pill.other { background: rgba(59,130,246,0.1); color: #60a5fa; }
+        .model-pill.warn { background: rgba(245,158,11,0.1); color: #fbbf24; }
+        .model-pill.red { background: rgba(239,68,68,0.1); color: #f87171; }
+
+        .api-note {
+            color: #888;
+            font-size: 0.76rem;
+            line-height: 1.55;
+            background: rgba(212, 175, 55, 0.04);
+            border: 1px solid rgba(212, 175, 55, 0.12);
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin: 0 0 18px;
         }
 
         /* Code Blocks */
@@ -652,27 +739,51 @@
         
         /* Responsive */
         @media (max-width: 600px) {
-            .container { padding: 25px 20px; }
+            body { padding: 12px; align-items: flex-start; }
+            .container { padding: 24px 16px; }
             .friend-badge {
                 position: static;
                 text-align: center;
                 margin-bottom: 15px;
             }
-            .hero-wrapper, .success-wrapper {
+            .hero-wrapper {
                 max-width: 140px;
             }
+            .success-wrapper {
+                max-width: 108px;
+                margin-bottom: 10px;
+            }
+            .success-wrapper .hero-label {
+                font-size: 0.68rem;
+                letter-spacing: 0.22em;
+            }
             h1 { font-size: 1.8rem; }
+            .setup-heading {
+                margin-bottom: 14px;
+            }
+            .setup-heading-copy {
+                font-size: 0.74rem;
+            }
             .tabs {
-                flex-wrap: wrap;
-                gap: 8px;
-                border-radius: 12px;
-                padding: 10px;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 7px;
+                border-radius: 14px;
+                padding: 8px;
                 max-width: 100%;
+                margin-bottom: 24px;
             }
             .tab {
-                flex: 1 1 45%;
-                justify-content: center;
-                padding: 10px 12px;
+                min-height: 44px;
+                font-size: 0.62rem;
+                padding: 9px 8px;
+                gap: 5px;
+            }
+            .tab svg { width: 14px; height: 14px; }
+            .sub-tabs {
+                flex-wrap: wrap;
+            }
+            .api-summary {
+                grid-template-columns: 1fr;
             }
         }
 
@@ -715,6 +826,11 @@
                     <div class="hero-label">AI Pool</div>
                 </div>
 
+                <div class="setup-heading">
+                    <div class="setup-heading-title">Choose your setup path</div>
+                    <div class="setup-heading-copy">Start with the CLI you actually use. Each panel gives you the automatic installer first, then the raw files if you want to inspect or paste by hand.</div>
+                </div>
+
                 <div class="tabs">
                     <div class="tab active" data-tab="codex">
                         <!-- Codex Icon -->
@@ -725,6 +841,11 @@
                         <!-- Claude Icon -->
                         <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="currentColor"/></svg>
                         Claude
+                    </div>
+                    <div class="tab" data-tab="anthropic-api">
+                        <!-- Anthropic API Icon -->
+                        <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6zm2 3h8v2H8V9zm0 4h5v2H8v-2z" fill="currentColor"/></svg>
+                        Anthropic API
                     </div>
                     <div class="tab" data-tab="gemini">
                         <!-- Gemini Icon -->
@@ -740,6 +861,10 @@
                         <!-- Pi Icon -->
                         <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm5 4h2v10H9V9zm4 0h2v10h-2V9zm-6 8h10v2H7v-2z" fill="currentColor"/></svg>
                         Pi
+                    </div>
+                    <div class="tab" data-tab="cute-code">
+                        <svg viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5l-2 3-2-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm2 4v2h2V8H7zm4 0v2h6V8h-6zm-4 4v2h6v-2H7zm8 0v2h2v-2h-2z" fill="currentColor"/></svg>
+                        Cute Code
                     </div>
                     <div class="tab" data-tab="stats">
                         <!-- Stats Icon -->
@@ -1006,6 +1131,95 @@ brew install claude-code</pre>
                     </div>
                 </div>
 
+                <!-- ANTHROPIC API -->
+                <div id="tab-anthropic-api" class="tab-content">
+                    <div class="install-section">
+                        <div class="section-header">
+                            <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6zm2 3h8v2H8V9zm0 4h5v2H8v-2z" fill="currentColor"/></svg>
+                            Anthropic-Compatible API
+                        </div>
+                        <p style="color: #999; font-size: 0.8rem; margin-bottom: 15px; line-height: 1.6;">
+                            Use the pool token as an Anthropic API key. Official Anthropic clients send it as <code>x-api-key</code>, and the pool routes Claude models natively while translating GPT/Kimi/MiniMax/GLM models through the same <code>/v1/messages</code> interface.
+                        </p>
+                        <div class="api-summary">
+                            <div class="api-card">
+                                <div class="api-card-title">Base URL</div>
+                                <p><code id="anthropic-api-base-label"></code></p>
+                            </div>
+                            <div class="api-card">
+                                <div class="api-card-title">Auth</div>
+                                <p><code>ANTHROPIC_API_KEY</code> can be the pool token.</p>
+                            </div>
+                            <div class="api-card">
+                                <div class="api-card-title">Models</div>
+                                <p>Claude models plus GPT/Kimi/MiniMax/GLM via translation.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="sub-tabs">
+                        <div class="sub-tab active" onclick="switchSubTab('anthropic-api', 'python')">Anthropic SDK</div>
+                        <div class="sub-tab" onclick="switchSubTab('anthropic-api', 'claude')">Claude Agent SDK</div>
+                        <div class="sub-tab" onclick="switchSubTab('anthropic-api', 'env')">Env + curl</div>
+                    </div>
+
+                    <div id="anthropic-api-python" class="sub-tab-content active">
+                        <div class="step-label">01 // Install</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('anthropic-python-install', this)">Copy</button>
+                            <div class="code-block"><pre id="anthropic-python-install">pip install anthropic</pre></div>
+                        </div>
+                        <div class="step-label">02 // Messages API</div>
+                        <p class="api-note">This is the normal Anthropic Python SDK. The only difference is <code>base_url</code> and the pool token.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('anthropic-python-example', this)">Copy</button>
+                            <div class="code-block"><pre id="anthropic-python-example"></pre></div>
+                        </div>
+                    </div>
+
+                    <div id="anthropic-api-claude" class="sub-tab-content">
+                        <div class="step-label">01 // Install</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-agent-sdk-install', this)">Copy</button>
+                            <div class="code-block"><pre id="claude-agent-sdk-install">npm install @anthropic-ai/claude-agent-sdk</pre></div>
+                        </div>
+                        <div class="step-label">02 // Claude Agent SDK</div>
+                        <p class="api-note">Use this when you want Claude Code's agent loop programmatically. It reads <code>ANTHROPIC_BASE_URL</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code>.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('claude-agent-sdk-example', this)">Copy</button>
+                            <div class="code-block"><pre id="claude-agent-sdk-example"></pre></div>
+                        </div>
+                    </div>
+
+                    <div id="anthropic-api-env" class="sub-tab-content">
+                        <div class="step-label">01 // Environment</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('anthropic-api-env-unix', this)">Copy</button>
+                            <div class="code-block"><pre id="anthropic-api-env-unix"></pre></div>
+                        </div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('anthropic-api-env-windows', this)">Copy</button>
+                            <div class="code-block"><pre id="anthropic-api-env-windows"></pre></div>
+                        </div>
+                        <div class="step-label">02 // curl</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('anthropic-api-curl-example', this)">Copy</button>
+                            <div class="code-block"><pre id="anthropic-api-curl-example"></pre></div>
+                        </div>
+                    </div>
+
+                    <div class="step-label">Model Names</div>
+                    <div class="model-pills">
+                        <span class="model-pill claude">claude-sonnet-4-6</span>
+                        <span class="model-pill claude">claude-opus-4-7</span>
+                        <span class="model-pill openai">gpt-5.5</span>
+                        <span class="model-pill openai">gpt-5.4</span>
+                        <span class="model-pill other">k2p5</span>
+                        <span class="model-pill warn">MiniMax-M2.7</span>
+                        <span class="model-pill red">glm-5.1</span>
+                    </div>
+                </div>
+
                 <!-- OPENAI-COMPATIBLE -->
                 <div id="tab-openai" class="tab-content">
                     <div class="install-section">
@@ -1013,73 +1227,98 @@ brew install claude-code</pre>
                             <svg viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z" fill="currentColor"/></svg>
                             OpenAI-Compatible API
                         </div>
-                        <p style="color: #999; font-size: 0.8rem; margin-bottom: 15px;">
-                            Use this pool with any OpenAI-compatible client: Cursor, Continue, Aider, LiteLLM, or custom scripts.
-                            Requests are automatically translated between formats, so you can access Claude models through the OpenAI API.
+                        <p style="color: #999; font-size: 0.8rem; margin-bottom: 15px; line-height: 1.6;">
+                            Use the pool with the official OpenAI SDK, the OpenAI Agents SDK, Cursor, Continue, Aider, LiteLLM, or any OpenAI-compatible client. Chat Completions and Responses both work; model names route to the right provider automatically.
                         </p>
+                        <div class="api-summary">
+                            <div class="api-card">
+                                <div class="api-card-title">Base URL</div>
+                                <p><code id="openai-api-base-label"></code></p>
+                            </div>
+                            <div class="api-card">
+                                <div class="api-card-title">Auth</div>
+                                <p><code>OPENAI_API_KEY</code> is the same pool token.</p>
+                            </div>
+                            <div class="api-card">
+                                <div class="api-card-title">Interfaces</div>
+                                <p><code>chat.completions</code>, <code>responses</code>, and Agents SDK models.</p>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="step-label">01 // Environment Variables</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Set these in your shell or tool config. Any client that reads <code>OPENAI_API_KEY</code> and <code>OPENAI_BASE_URL</code> will work.</p>
-                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
-                        macOS / Linux (bash/zsh)
-                    </p>
+                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Set these in your shell or tool config.</p>
+                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">macOS / Linux (bash/zsh)</p>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('openai-env-unix', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="openai-env-unix"></pre>
-                        </div>
+                        <div class="code-block"><pre id="openai-env-unix"></pre></div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
-                        Windows (PowerShell)
-                    </p>
+                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">Windows (PowerShell)</p>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('openai-env-windows', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="openai-env-windows"></pre>
+                        <div class="code-block"><pre id="openai-env-windows"></pre></div>
+                    </div>
+
+                    <div class="sub-tabs">
+                        <div class="sub-tab active" onclick="switchSubTab('openai', 'sdk')">OpenAI SDK</div>
+                        <div class="sub-tab" onclick="switchSubTab('openai', 'agents')">Agents SDK</div>
+                        <div class="sub-tab" onclick="switchSubTab('openai', 'curl')">curl</div>
+                    </div>
+
+                    <div id="openai-sdk" class="sub-tab-content active">
+                        <div class="step-label">02 // Install</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-python-install', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-python-install">pip install openai</pre></div>
+                        </div>
+                        <div class="step-label">03 // Chat Completions</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-python-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-python-example"></pre></div>
+                        </div>
+                        <div class="step-label">04 // Responses API</div>
+                        <p class="api-note">The proxy normalizes the official SDK's Responses payload into the Codex backend shape and returns normal non-streaming Responses JSON.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-responses-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-responses-example"></pre></div>
                         </div>
                     </div>
 
-                    <div class="step-label">02 // Python Example</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Works with the official <code>openai</code> Python package.</p>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('openai-python-example', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="openai-python-example"></pre>
+                    <div id="openai-agents" class="sub-tab-content">
+                        <div class="step-label">02 // Install</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-agents-install', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-agents-install">pip install openai-agents</pre></div>
+                        </div>
+                        <div class="step-label">03 // OpenAI Agents SDK</div>
+                        <p class="api-note">Use <code>OpenAIResponsesModel</code> for the normal Agents path. <code>OpenAIChatCompletionsModel</code> also works if a project is built around chat completions.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-agents-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-agents-example"></pre></div>
                         </div>
                     </div>
 
-                    <div class="step-label">03 // curl Example</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('openai-curl-example', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="openai-curl-example"></pre>
+                    <div id="openai-curl" class="sub-tab-content">
+                        <div class="step-label">02 // curl</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-curl-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-curl-example"></pre></div>
                         </div>
                     </div>
 
-                    <div class="step-label">04 // Available Models</div>
+                    <div class="step-label">Model Names</div>
                     <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Use any model name. Requests are auto-routed to the right provider and translated if needed.</p>
-                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-4-6</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-haiku-4-5</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-7</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-6</span>
+                    <div class="model-pills">
+                        <span class="model-pill openai">gpt-5.5</span>
+                        <span class="model-pill openai">gpt-5.4</span>
+                        <span class="model-pill openai">gpt-5.3-codex</span>
+                        <span class="model-pill claude">claude-sonnet-4-6</span>
+                        <span class="model-pill claude">claude-opus-4-7</span>
+                        <span class="model-pill other">k2p5</span>
+                        <span class="model-pill warn">MiniMax-M2.7</span>
+                        <span class="model-pill red">glm-5.1</span>
                     </div>
-                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
-                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.4</span>
-                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.3-codex</span>
-                        <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">gpt-5.1-codex-mini</span>
-                    </div>
-                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px;">
-                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
-                        <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
-                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.1</span>
-                    </div>
-                    <p style="color: #888; font-size: 0.75rem; font-style: italic;">
-                        Claude models sent to /v1/chat/completions are auto-translated to the Anthropic Messages API and back.
-                        OpenAI models sent to /v1/messages are auto-translated to the Chat Completions API and back.
-                    </p>
-
+                    <p style="color: #888; font-size: 0.75rem; font-style: italic;">Claude models sent to <code>/v1/chat/completions</code> are translated to Anthropic Messages and back. OpenAI models sent to <code>/v1/messages</code> are translated to Codex Responses and back.</p>
                 </div>
 
                 <!-- PI -->
@@ -1145,6 +1384,51 @@ brew install claude-code</pre>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">
                         Replace the file, then fully restart Pi so it reloads the provider list.
+                    </p>
+                </div>
+
+                <!-- CUTE CODE -->
+                <div id="tab-cute-code" class="tab-content">
+                    <div class="install-section">
+                        <div class="section-header">
+                            <svg viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5l-2 3-2-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm2 4v2h2V8H7zm4 0v2h6V8h-6zm-4 4v2h6v-2H7zm8 0v2h2v-2h-2z" fill="currentColor"/></svg>
+                            Cute Code Setup
+                        </div>
+                        <p style="color: #999; font-size: 0.8rem; margin-bottom: 15px;">
+                            Installs cute-code, writes pool settings to <code>~/.claude/settings.json</code>, and registers Codex/OpenAI, Claude, Kimi, MiniMax, and GLM models.
+                        </p>
+                    </div>
+
+                    <div class="step-label">01 // Install and configure</div>
+                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        macOS / Linux (bash/zsh)
+                    </p>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('cute-code-install-unix', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="cute-code-install-unix"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        Windows (PowerShell)
+                    </p>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('cute-code-install-windows', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="cute-code-install-windows"></pre>
+                        </div>
+                    </div>
+
+                    <div class="step-label">02 // Generated settings.json</div>
+                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.claude/settings.json</code></p>
+                    <div class="code-wrapper">
+                        <button class="copy-btn" onclick="copyToClipboard('cute-code-settings-json', this)">Copy</button>
+                        <div class="code-block">
+                            <pre id="cute-code-settings-json"></pre>
+                        </div>
+                    </div>
+                    <p style="color: #888; font-size: 0.75rem; font-style: italic;">
+                        After setup, run <code>cute-code --model gpt-5.5</code> or pick any configured model in the model selector.
                     </p>
                 </div>
 
@@ -1591,6 +1875,129 @@ brew install claude-code</pre>
             }
         });
 
+        function setText(id, text) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        }
+
+        function populateApiDocs(publicUrl, apiKey) {
+            const key = apiKey || '';
+            setText('anthropic-api-base-label', publicUrl);
+            setText('openai-api-base-label', `${publicUrl}/v1`);
+            if (!key) {
+                [
+                    'anthropic-api-env-unix', 'anthropic-api-env-windows', 'anthropic-python-example',
+                    'anthropic-api-curl-example', 'claude-agent-sdk-example', 'openai-env-unix',
+                    'openai-env-windows', 'openai-python-example', 'openai-responses-example',
+                    'openai-agents-example', 'openai-curl-example'
+                ].forEach(id => setText(id, '# Log in first to get your API key'));
+                return;
+            }
+
+            setText('anthropic-api-env-unix', `export ANTHROPIC_BASE_URL="${publicUrl}"
+export ANTHROPIC_API_KEY="${key}"`);
+            setText('anthropic-api-env-windows', `$env:ANTHROPIC_BASE_URL = "${publicUrl}"
+$env:ANTHROPIC_API_KEY = "${key}"`);
+            setText('anthropic-python-example', `import os
+from anthropic import Anthropic
+
+client = Anthropic(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    base_url=os.environ["ANTHROPIC_BASE_URL"],
+)
+
+message = client.messages.create(
+    model="claude-sonnet-4-6",  # or gpt-5.5, k2p5, MiniMax-M2.7, glm-5.1
+    max_tokens=128,
+    messages=[{"role": "user", "content": "Hello from the pool"}],
+)
+print(message.content[0].text)`);
+            setText('anthropic-api-curl-example', `curl ${publicUrl}/v1/messages \\
+  -H "Content-Type: application/json" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "x-api-key: ${key}" \\
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "max_tokens": 128,
+    "messages": [{"role": "user", "content": "Hello from the pool"}]
+  }'`);
+            setText('claude-agent-sdk-example', `import { query } from "@anthropic-ai/claude-agent-sdk";
+
+const q = query({
+  prompt: "Reply with exactly: pool ok",
+  options: {
+    model: "claude-sonnet-4-6", // or gpt-5.5
+    maxTurns: 1,
+    tools: [],
+    env: {
+      ...process.env,
+      ANTHROPIC_BASE_URL: "${publicUrl}",
+      CLAUDE_CODE_OAUTH_TOKEN: "${key}",
+    },
+  },
+});
+
+for await (const message of q) {
+  if (message.type === "result") console.log(message.subtype);
+}`);
+
+            setText('openai-env-unix', `export OPENAI_API_KEY="${key}"
+export OPENAI_BASE_URL="${publicUrl}/v1"`);
+            setText('openai-env-windows', `$env:OPENAI_API_KEY = "${key}"
+$env:OPENAI_BASE_URL = "${publicUrl}/v1"`);
+            setText('openai-python-example', `import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ["OPENAI_BASE_URL"],
+)
+
+response = client.chat.completions.create(
+    model="gpt-5.5",  # or claude-sonnet-4-6, k2p5, MiniMax-M2.7
+    messages=[{"role": "user", "content": "Hello from the pool"}],
+)
+print(response.choices[0].message.content)`);
+            setText('openai-responses-example', `import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ["OPENAI_BASE_URL"],
+)
+
+response = client.responses.create(
+    model="gpt-5.5",
+    input="Reply with exactly: pool responses ok",
+    reasoning={"effort": "medium"},
+)
+print(response.output_text)`);
+            setText('openai-agents-example', `import os
+from openai import AsyncOpenAI
+from agents import Agent, Runner, OpenAIResponsesModel
+
+client = AsyncOpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ["OPENAI_BASE_URL"],
+)
+
+agent = Agent(
+    name="Pool Agent",
+    instructions="Reply with exactly what the user asks for, no extra text.",
+    model=OpenAIResponsesModel(model="gpt-5.5", openai_client=client),
+)
+
+result = Runner.run_sync(agent, "Reply with exactly: pool agents ok", max_turns=1)
+print(result.final_output)`);
+            setText('openai-curl-example', `curl ${publicUrl}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${key}" \\
+  -d '{
+    "model": "gpt-5.5",
+    "messages": [{"role": "user", "content": "Hello from the pool"}]
+  }'`);
+        }
+
         async function setupSuccessState(publicUrl, downloadToken, friendCode) {
             const loginSec = document.getElementById('login-section');
             const successSec = document.getElementById('success-section');
@@ -1602,6 +2009,7 @@ brew install claude-code</pre>
             let geminiApiKey = '';
             let claudeApiKey = '';
             let piModelsJson = '# Loading...';
+            let cuteCodeSettingsJson = '# Loading...';
 
             if (friendCode) {
                 try {
@@ -1617,6 +2025,7 @@ brew install claude-code</pre>
                         geminiApiKey = result.gemini_api_key || '';
                         claudeApiKey = result.claude_api_key || '';
                         piModelsJson = result.pi_models_json || '# Unable to fetch';
+                        cuteCodeSettingsJson = result.cute_code_settings_json || '# Unable to fetch';
                     }
                 } catch (e) {
                     console.error('Failed to fetch auth data:', e);
@@ -1723,32 +2132,13 @@ $env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
                 document.getElementById('claude-env-windows').textContent = `# Run the one-liner above to configure automatically`;
             }
 
-            // Populate OpenAI-Compatible
-            const openaiKey = claudeApiKey || '';
-            if (openaiKey) {
-                document.getElementById('openai-env-unix').textContent = `export OPENAI_API_KEY="${openaiKey}"
-export OPENAI_BASE_URL="${publicUrl}/v1"`;
-                document.getElementById('openai-env-windows').textContent = `$env:OPENAI_API_KEY = "${openaiKey}"
-$env:OPENAI_BASE_URL = "${publicUrl}/v1"`;
-                document.getElementById('openai-python-example').textContent = `from openai import OpenAI
+            const cuteCodeScriptUrl = `${publicUrl}/setup/cute-code/${downloadToken}`;
+            document.getElementById('cute-code-install-unix').textContent = `curl -sL "${cuteCodeScriptUrl}" | bash`;
+            document.getElementById('cute-code-install-windows').textContent = `irm "${cuteCodeScriptUrl}?shell=powershell" | iex`;
+            document.getElementById('cute-code-settings-json').textContent = cuteCodeSettingsJson;
 
-client = OpenAI(
-    api_key="${openaiKey}",
-    base_url="${publicUrl}/v1",
-)
-
-response = client.chat.completions.create(
-    model="gpt-5.4",  # or claude-sonnet-4-6, k2p5, MiniMax-M2.7, etc.
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)`;
-                document.getElementById('openai-curl-example').textContent = `curl ${publicUrl}/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${openaiKey}" \\
-  -d '{
-    "model": "gpt-5.4",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'`;
+            populateApiDocs(publicUrl, claudeApiKey || '');
+            if (claudeApiKey) {
                 document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
 curl -sL "${publicUrl}/config/pi/${downloadToken}" -o ~/.pi/agent/models.json
 chmod 600 ~/.pi/agent/models.json`;
@@ -1756,10 +2146,6 @@ chmod 600 ~/.pi/agent/models.json`;
 Invoke-WebRequest -UseBasicParsing -Uri "${publicUrl}/config/pi/${downloadToken}" -OutFile "$HOME\\.pi\\agent\\models.json"`;
                 document.getElementById('pi-models-json').textContent = piModelsJson;
             } else {
-                document.getElementById('openai-env-unix').textContent = `# Log in first to get your API key`;
-                document.getElementById('openai-env-windows').textContent = `# Log in first to get your API key`;
-                document.getElementById('openai-python-example').textContent = `# Log in first to get your API key`;
-                document.getElementById('openai-curl-example').textContent = `# Log in first to get your API key`;
                 document.getElementById('pi-install-unix').textContent = `# Log in first to get your Pi models.json`;
                 document.getElementById('pi-install-windows').textContent = `# Log in first to get your Pi models.json`;
                 document.getElementById('pi-models-json').textContent = `# Log in first to get your Pi models.json`;
@@ -1837,6 +2223,7 @@ args = ["~/.codex/model_sync.sh", "${result.public_url}"]`;
                 // Populate Gemini (API key mode - bypasses OAuth)
                 const geminiApiKey = result.gemini_api_key || '';
                 const piModelsJson = result.pi_models_json || '';
+                const cuteCodeSettingsJson = result.cute_code_settings_json || '';
                 const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
                 document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
                 document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
@@ -1904,32 +2291,13 @@ export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
                 document.getElementById('claude-env-windows').textContent = `$env:ANTHROPIC_BASE_URL = "${result.public_url}"
 $env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
 
-                // Populate OpenAI-Compatible
-                const openaiKey2 = claudeApiKey || '';
-                if (openaiKey2) {
-                    document.getElementById('openai-env-unix').textContent = `export OPENAI_API_KEY="${openaiKey2}"
-export OPENAI_BASE_URL="${result.public_url}/v1"`;
-                    document.getElementById('openai-env-windows').textContent = `$env:OPENAI_API_KEY = "${openaiKey2}"
-$env:OPENAI_BASE_URL = "${result.public_url}/v1"`;
-                    document.getElementById('openai-python-example').textContent = `from openai import OpenAI
+                const cuteCodeScriptUrl = `${result.public_url}/setup/cute-code/${result.download_token}`;
+                document.getElementById('cute-code-install-unix').textContent = `curl -sL "${cuteCodeScriptUrl}" | bash`;
+                document.getElementById('cute-code-install-windows').textContent = `irm "${cuteCodeScriptUrl}?shell=powershell" | iex`;
+                document.getElementById('cute-code-settings-json').textContent = cuteCodeSettingsJson;
 
-client = OpenAI(
-    api_key="${openaiKey2}",
-    base_url="${result.public_url}/v1",
-)
-
-response = client.chat.completions.create(
-    model="gpt-5.4",  # or claude-sonnet-4-6, k2p5, MiniMax-M2.7, etc.
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)`;
-                    document.getElementById('openai-curl-example').textContent = `curl ${result.public_url}/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${openaiKey2}" \\
-  -d '{
-    "model": "gpt-5.4",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'`;
+                populateApiDocs(result.public_url, claudeApiKey || '');
+                if (claudeApiKey) {
                     document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
 curl -sL "${result.public_url}/config/pi/${result.download_token}" -o ~/.pi/agent/models.json
 chmod 600 ~/.pi/agent/models.json`;

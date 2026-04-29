@@ -103,6 +103,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/":
 		h.serveFriendLanding(w, r)
 		return
+	case "/cute-code":
+		h.serveCuteCodeLanding(w, r)
+		return
 	case "/status":
 		h.serveStatusPage(w, r)
 		return
@@ -290,6 +293,14 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(r.URL.Path, "/setup/claude/") {
 		h.serveClaudeSetupScript(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/setup/cute-code/") {
+		h.serveCuteCodeSetupScript(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/config/cute-code/") {
+		h.serveCuteCodeSettingsConfig(w, r)
 		return
 	}
 

@@ -33,6 +33,29 @@ type piModelCost struct {
 	CacheWrite float64 `json:"cacheWrite"`
 }
 
+type cuteCodeSettings struct {
+	Model            string                `json:"model,omitempty"`
+	OpenAIBaseURL    string                `json:"openaiBaseUrl"`
+	OpenAIAPIKey     string                `json:"openaiApiKey"`
+	AnthropicBaseURL string                `json:"anthropicBaseUrl"`
+	AnthropicAPIKey  string                `json:"anthropicApiKey"`
+	CustomModels     []cuteCodeModelConfig `json:"customModels"`
+	CodexPool        cuteCodePoolConfig    `json:"codexPool"`
+}
+
+type cuteCodePoolConfig struct {
+	URL string `json:"url"`
+}
+
+type cuteCodeModelConfig struct {
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Protocol      string `json:"protocol"`
+	BaseURL       string `json:"baseUrl,omitempty"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
+	Description   string `json:"description,omitempty"`
+}
+
 func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
 	cfg := piModelsConfig{
@@ -42,13 +65,14 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				APIKey:  codexAPIKey,
 				API:     "openai-codex-responses",
 				Models: []piModelConfig{
-					piTextModel("gpt-5.4", "GPT-5.4", true, 1050000, 128000),
-					piTextModel("gpt-5.3-codex", "GPT-5.3 Codex", true, 400000, 128000),
+					piTextModel("gpt-5.5", "GPT-5.5", true, 272000, 128000),
+					piTextModel("gpt-5.4", "GPT-5.4", true, 1000000, 128000),
+					piTextModel("gpt-5.3-codex", "GPT-5.3 Codex", true, 272000, 128000),
 					piTextModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", true, 128000, 128000),
-					piTextModel("gpt-5.2-codex", "GPT-5.2 Codex", true, 400000, 128000),
-					piTextModel("gpt-5.1-codex-max", "GPT-5.1 Codex Max", true, 400000, 128000),
-					piTextModel("gpt-5.2", "GPT-5.2", true, 400000, 128000),
-					piTextModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", true, 400000, 128000),
+					piTextModel("gpt-5.2-codex", "GPT-5.2 Codex", true, 272000, 128000),
+					piTextModel("gpt-5.1-codex-max", "GPT-5.1 Codex Max", true, 272000, 128000),
+					piTextModel("gpt-5.2", "GPT-5.2", true, 272000, 128000),
+					piTextModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", true, 272000, 128000),
 				},
 			},
 			"claude": {
@@ -145,6 +169,65 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 	}
 
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	settings := cuteCodeSettings{
+		Model:            "gpt-5.5",
+		OpenAIBaseURL:    baseURL,
+		OpenAIAPIKey:     apiKey,
+		AnthropicBaseURL: baseURL,
+		AnthropicAPIKey:  apiKey,
+		CodexPool: cuteCodePoolConfig{
+			URL: baseURL,
+		},
+		CustomModels: []cuteCodeModelConfig{
+			cuteOpenAIModel(baseURL, "gpt-5.5", "GPT-5.5", 272000, "Default GPT/Codex pool model"),
+			cuteOpenAIModel(baseURL, "gpt-5.4", "GPT-5.4", 1000000, "Long-context GPT model for remote compaction and large tasks"),
+			cuteOpenAIModel(baseURL, "gpt-5.3-codex", "GPT-5.3 Codex", 272000, "Codex reasoning model"),
+			cuteOpenAIModel(baseURL, "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, "Fast Codex model"),
+			cuteOpenAIModel(baseURL, "gpt-5.2-codex", "GPT-5.2 Codex", 272000, "Codex reasoning model"),
+			cuteOpenAIModel(baseURL, "gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, "High-capability Codex model"),
+			cuteOpenAIModel(baseURL, "gpt-5.2", "GPT-5.2", 272000, "GPT reasoning model"),
+			cuteOpenAIModel(baseURL, "gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, "Small Codex model"),
+			cuteAnthropicModel(baseURL, "claude-haiku-4-5", "Claude Haiku 4.5", 200000, "Fast Claude model through the pool"),
+			cuteAnthropicModel(baseURL, "claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, "Claude Sonnet through the pool"),
+			cuteAnthropicModel(baseURL, "claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
+			cuteAnthropicModel(baseURL, "claude-opus-4-7", "Claude Opus 4.7", 1000000, "Claude Opus through the pool"),
+			cuteAnthropicModel(baseURL, "claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, "Claude Opus with 1m context routing"),
+			cuteAnthropicModel(baseURL, "claude-opus-4-6", "Claude Opus 4.6", 1000000, "Claude Opus through the pool"),
+			cuteAnthropicModel(baseURL, "claude-opus-4-6 [1m]", "Claude Opus 4.6 [1m]", 1000000, "Claude Opus with 1m context routing"),
+			cuteAnthropicModel(baseURL, "k2p5", "Kimi K2.5", 262144, "Kimi model routed through Anthropic-compatible pool API"),
+			cuteAnthropicModel(baseURL, "kimi-k2-thinking", "Kimi K2 Thinking", 262144, "Kimi thinking model routed through the pool"),
+			cuteAnthropicModel(baseURL, "MiniMax-M2.7", "MiniMax M2.7", 204800, "MiniMax model routed through the pool"),
+			cuteAnthropicModel(baseURL, "MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, "High-speed MiniMax route through the pool"),
+			cuteAnthropicModel(baseURL, "glm-5.1", "GLM 5.1", 128000, "GLM model routed through the pool"),
+		},
+	}
+	return json.MarshalIndent(settings, "", "  ")
+}
+
+func cuteOpenAIModel(baseURL, id, name string, contextWindow int, description string) cuteCodeModelConfig {
+	return cuteCodeModelConfig{
+		ID:            id,
+		Name:          name,
+		Protocol:      "openai",
+		BaseURL:       baseURL,
+		ContextWindow: contextWindow,
+		Description:   description,
+	}
+}
+
+func cuteAnthropicModel(baseURL, id, name string, contextWindow int, description string) cuteCodeModelConfig {
+	return cuteCodeModelConfig{
+		ID:            id,
+		Name:          name,
+		Protocol:      "anthropic",
+		BaseURL:       baseURL,
+		ContextWindow: contextWindow,
+		Description:   description,
+	}
 }
 
 func piTextModel(id, name string, reasoning bool, contextWindow, maxTokens int) piModelConfig {

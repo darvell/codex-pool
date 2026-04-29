@@ -16,8 +16,27 @@ import (
 	"time"
 )
 
-//go:embed templates/friend_landing.html templates/local_landing.html templates/og-image.png templates/og-image-transparent.png
+//go:embed templates/friend_landing.html templates/local_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.png
 var friendContent embed.FS
+
+func (h *proxyHandler) serveCuteCodeLanding(w http.ResponseWriter, r *http.Request) {
+	data, err := friendContent.ReadFile("templates/cute_code_landing.html")
+	if err != nil {
+		http.Error(w, "internal error: template missing", http.StatusInternalServerError)
+		return
+	}
+
+	publicURL := h.getEffectivePublicURL(r)
+	tmpl, err := template.New("cute-code").Parse(string(data))
+	if err != nil {
+		http.Error(w, "internal error: template parse failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	_ = tmpl.Execute(w, map[string]string{"PublicURL": publicURL})
+}
 
 func (h *proxyHandler) serveFriendLanding(w http.ResponseWriter, r *http.Request) {
 	var templateFile string
@@ -198,6 +217,11 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		respondJSONError(w, http.StatusInternalServerError, "Failed to generate pi models config.")
 		return
 	}
+	cuteCodeSettingsJSON, err := generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuthData.AccessToken)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate cute-code config.")
+		return
+	}
 
 	// Generate Gemini API key for API key mode (bypasses OAuth)
 	geminiAPIKey := generateGeminiAPIKey(secret, newUser)
@@ -206,13 +230,14 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"public_url":       publicURL,
-		"download_token":   newUser.Token,
-		"auth_json":        string(authJSONBytes),
-		"gemini_auth_json": string(geminiJSONBytes),
-		"gemini_api_key":   geminiAPIKey,               // API key for Gemini CLI API key mode
-		"claude_api_key":   claudeAuthData.AccessToken, // JWT token to use as API key
-		"pi_models_json":   string(piModelsJSON),
+		"public_url":              publicURL,
+		"download_token":          newUser.Token,
+		"auth_json":               string(authJSONBytes),
+		"gemini_auth_json":        string(geminiJSONBytes),
+		"gemini_api_key":          geminiAPIKey,               // API key for Gemini CLI API key mode
+		"claude_api_key":          claudeAuthData.AccessToken, // JWT token to use as API key
+		"pi_models_json":          string(piModelsJSON),
+		"cute_code_settings_json": string(cuteCodeSettingsJSON),
 	})
 }
 
@@ -239,6 +264,155 @@ func wantsPowerShell(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+func (h *proxyHandler) generateCuteCodeSettingsForToken(token string, r *http.Request) ([]byte, error) {
+	if h.poolUsers == nil {
+		return nil, fmt.Errorf("pool users not configured")
+	}
+	user := h.poolUsers.GetByToken(token)
+	if user == nil {
+		return nil, fmt.Errorf("invalid token")
+	}
+	if user.Disabled {
+		return nil, fmt.Errorf("user disabled")
+	}
+	secret := getPoolJWTSecret()
+	if secret == "" {
+		return nil, fmt.Errorf("JWT secret not configured")
+	}
+	claudeAuth, err := generateClaudeAuth(secret, user)
+	if err != nil {
+		return nil, err
+	}
+	return generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuth.AccessToken)
+}
+
+func (h *proxyHandler) serveCuteCodeSettingsConfig(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/config/cute-code/")
+	if token == "" || strings.Contains(token, "/") {
+		http.Error(w, "invalid token", http.StatusBadRequest)
+		return
+	}
+	settingsJSON, err := h.generateCuteCodeSettingsForToken(token, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(settingsJSON)
+}
+
+func (h *proxyHandler) serveCuteCodeSetupScript(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/setup/cute-code/")
+	if token == "" || strings.Contains(token, "/") {
+		http.Error(w, "invalid token", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.generateCuteCodeSettingsForToken(token, r); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	publicURL := h.getEffectivePublicURL(r)
+
+	if wantsPowerShell(r) {
+		script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$ConfigUrl = '%s/config/cute-code/%s'
+
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
+Write-Host 'Installing cute-code...'
+try {
+  Invoke-Expression (Invoke-RestMethod 'https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.ps1')
+} catch {
+  Write-Host "Warning: cute-code installer failed or was already installed: $_"
+}
+
+Write-Host 'Configuring cute-code for Codex Pool...'
+$claudeDir = $env:CLAUDE_CONFIG_DIR
+if ([string]::IsNullOrWhiteSpace($claudeDir)) { $claudeDir = Join-Path $HOME '.claude' }
+New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+$settingsFile = Join-Path $claudeDir 'settings.json'
+
+$incoming = Invoke-RestMethod -Uri $ConfigUrl
+$settings = $null
+try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch {}
+if ($null -eq $settings) { $settings = New-Object PSObject }
+
+foreach ($prop in $incoming.PSObject.Properties) {
+  $settings | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+}
+
+Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 20)
+Write-Host "cute-code pool settings saved to $settingsFile"
+Write-Host 'Run: cute-code --model gpt-5.5'
+`, publicURL, token)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(script))
+		return
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+CONFIG_URL="%s/config/cute-code/%s"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+TMP_FILE="$(mktemp)"
+
+mkdir -p "$CLAUDE_DIR"
+
+printf 'Installing cute-code...\n'
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash || true
+fi
+
+curl -fsSL "$CONFIG_URL" -o "$TMP_FILE"
+
+if command -v node >/dev/null 2>&1; then
+    SETTINGS_FILE="$SETTINGS_FILE" TMP_FILE="$TMP_FILE" node << 'NODE_SCRIPT'
+const fs = require('fs');
+const settingsFile = process.env.SETTINGS_FILE;
+const tmpFile = process.env.TMP_FILE;
+let settings = {};
+let incoming = {};
+try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
+incoming = JSON.parse(fs.readFileSync(tmpFile, 'utf8'));
+settings = { ...settings, ...incoming };
+fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+NODE_SCRIPT
+elif command -v python3 >/dev/null 2>&1; then
+    SETTINGS_FILE="$SETTINGS_FILE" TMP_FILE="$TMP_FILE" python3 << 'PYTHON_SCRIPT'
+import json, os
+settings_file = os.environ['SETTINGS_FILE']
+tmp_file = os.environ['TMP_FILE']
+try:
+    with open(settings_file) as f: settings = json.load(f)
+except Exception:
+    settings = {}
+with open(tmp_file) as f: incoming = json.load(f)
+settings.update(incoming)
+with open(settings_file, 'w') as f:
+    json.dump(settings, f, indent=2)
+    f.write('\n')
+PYTHON_SCRIPT
+else
+    cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak" 2>/dev/null || true
+    cp "$TMP_FILE" "$SETTINGS_FILE"
+fi
+
+rm -f "$TMP_FILE"
+printf 'cute-code pool settings saved to %%s\n' "$SETTINGS_FILE"
+printf 'Run: cute-code --model gpt-5.5\n'
+`, publicURL, token)
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.Write([]byte(script))
 }
 
 func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +488,7 @@ try {
     $accessToken = [string]$auth.access_token
   }
   if (-not [string]::IsNullOrWhiteSpace($accessToken)) {
-    $modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0'
+    $modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
     $headers = @{ Authorization = "Bearer $accessToken" }
     $tmp = [System.IO.Path]::GetTempFileName()
     try {
@@ -378,7 +552,7 @@ function Refresh-ModelCatalog {
   }
   if ([string]::IsNullOrWhiteSpace($token)) { return }
 
-  $modelsUrl = $Url.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0'
+  $modelsUrl = $Url.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
   $headers = @{ Authorization = "Bearer $token" }
 
   try {
@@ -620,7 +794,7 @@ ACCESS_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/
 if [ -n "${ACCESS_TOKEN:-}" ]; then
     curl --connect-timeout 5 --max-time 10 -fsSL \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
-        "$BASE_URL/backend-api/codex/models?client_version=0.106.0" \
+        "$BASE_URL/backend-api/codex/models?client_version=0.125.0" \
         -o "$MODEL_CATALOG" 2>/dev/null && chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
 fi
 
@@ -633,7 +807,7 @@ BASE_URL="${1:-}"
 AUTH_DIR="${HOME}/.codex"
 AUTH_FILE="$AUTH_DIR/auth.json"
 MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
-CLIENT_VERSION="0.106.0"
+CLIENT_VERSION="0.125.0"
 
 refresh_model_catalog() {
     if [ -z "$BASE_URL" ] || [ ! -f "$AUTH_FILE" ]; then
@@ -1058,14 +1232,57 @@ function Set-Utf8NoBom {
   [System.IO.File]::WriteAllText($Path, $Value, $utf8)
 }
 
+function Read-JsonObject {
+  param([string]$Path)
+  if (-not (Test-Path $Path)) { return (New-Object PSObject) }
+  try {
+    $raw = Get-Content -Path $Path -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) { return (New-Object PSObject) }
+    $obj = $raw | ConvertFrom-Json
+    if ($null -eq $obj) { return (New-Object PSObject) }
+    return $obj
+  } catch {
+    $backup = $Path + '.bak'
+    Copy-Item -Path $Path -Destination $backup -Force -ErrorAction SilentlyContinue
+    Write-Host ("Warning: could not parse " + $Path + "; backed it up to " + $backup + " and recreated it.")
+    return (New-Object PSObject)
+  }
+}
+
+function Remove-ObjectProperty {
+  param([object]$Object, [string]$Name)
+  if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name) {
+    $Object.PSObject.Properties.Remove($Name)
+  }
+}
+
 Write-Host 'Configuring Claude Code for pool access...'
 Write-Host ''
 
-# Set env vars for the current session
+$conflictingEnvVars = @(
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'ANTHROPIC_UNIX_SOCKET',
+  'CLAUDE_CODE_SIMPLE'
+)
+
+# Claude Code disables Claude.ai OAuth mode when these auth/provider vars are present.
+foreach ($name in $conflictingEnvVars) {
+  Remove-Item -Path ("Env:" + $name) -ErrorAction SilentlyContinue
+  [Environment]::SetEnvironmentVariable($name, $null, 'User')
+}
+
+# Set env vars for this process and the user's default Windows environment.
 $env:ANTHROPIC_BASE_URL = $BaseUrl
 $env:CLAUDE_CODE_OAUTH_TOKEN = $OAuthToken
+[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $BaseUrl, 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', $OAuthToken, 'User')
 
-# Persist env vars for future PowerShell sessions
+# Persist env vars for future PowerShell sessions.
 $profilePath = $PROFILE.CurrentUserAllHosts
 New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
 if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force -Path $profilePath | Out-Null }
@@ -1075,6 +1292,14 @@ $end = '# <<< Claude Code Pool Configuration <<<'
 $nl = [Environment]::NewLine
 $blockLines = @(
   $start,
+  'Remove-Item Env:\ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\CLAUDE_CODE_USE_BEDROCK -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\CLAUDE_CODE_USE_VERTEX -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\CLAUDE_CODE_USE_FOUNDRY -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\ANTHROPIC_UNIX_SOCKET -ErrorAction SilentlyContinue',
+  'Remove-Item Env:\CLAUDE_CODE_SIMPLE -ErrorAction SilentlyContinue',
   ('$env:ANTHROPIC_BASE_URL = "' + $BaseUrl + '"'),
   ('$env:CLAUDE_CODE_OAUTH_TOKEN = "' + $OAuthToken + '"'),
   $end
@@ -1095,19 +1320,19 @@ if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]
 Set-Utf8NoBom -Path $profilePath -Value $updated
 Write-Host ("Added Claude Code pool config to " + $profilePath)
 
-# Ensure Claude config directory exists
-$claudeDir = Join-Path $HOME '.claude'
+# Claude Code reads user settings from CLAUDE_CONFIG_DIR when set, otherwise ~/.claude.
+$claudeDir = $env:CLAUDE_CONFIG_DIR
+if ([string]::IsNullOrWhiteSpace($claudeDir)) { $claudeDir = Join-Path $HOME '.claude' }
 New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
 
-# Update ~/.claude/settings.json
+# Update settings.json with pool env and remove auth/provider settings that override OAuth.
 $settingsFile = Join-Path $claudeDir 'settings.json'
-$settings = $null
-try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch {}
-if ($null -eq $settings) { $settings = New-Object PSObject }
-# Build the env object with pool values
+$settings = Read-JsonObject -Path $settingsFile
+Remove-ObjectProperty -Object $settings -Name 'apiKeyHelper'
 $envObj = $null
-try { $envObj = $settings.env } catch {}
+if ($settings.PSObject.Properties.Name -contains 'env') { $envObj = $settings.env }
 if ($null -eq $envObj) { $envObj = New-Object PSObject }
+foreach ($name in $conflictingEnvVars) { Remove-ObjectProperty -Object $envObj -Name $name }
 $envObj | Add-Member -MemberType NoteProperty -Name ANTHROPIC_BASE_URL -Value $BaseUrl -Force
 $envObj | Add-Member -MemberType NoteProperty -Name CLAUDE_CODE_OAUTH_TOKEN -Value $OAuthToken -Force
 $settings | Add-Member -MemberType NoteProperty -Name env -Value $envObj -Force
@@ -1116,9 +1341,7 @@ Write-Host ("Updated " + $settingsFile)
 
 # Update ~/.claude.json (skip onboarding)
 $claudeJsonFile = Join-Path $HOME '.claude.json'
-$claudeJson = $null
-try { $claudeJson = Get-Content -Path $claudeJsonFile -Raw | ConvertFrom-Json } catch {}
-if ($null -eq $claudeJson) { $claudeJson = New-Object PSObject }
+$claudeJson = Read-JsonObject -Path $claudeJsonFile
 $claudeJson | Add-Member -MemberType NoteProperty -Name hasCompletedOnboarding -Value $true -Force
 Set-Utf8NoBom -Path $claudeJsonFile -Value ($claudeJson | ConvertTo-Json -Depth 10)
 Write-Host ("Updated " + $claudeJsonFile)
@@ -1152,6 +1375,22 @@ OAUTH_TOKEN="%s"
 echo "Configuring Claude Code for pool access..."
 echo ""
 
+CONFLICTING_ENV_VARS=(
+    ANTHROPIC_AUTH_TOKEN
+    ANTHROPIC_API_KEY
+    CLAUDE_CODE_USE_BEDROCK
+    CLAUDE_CODE_USE_VERTEX
+    CLAUDE_CODE_USE_FOUNDRY
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+    ANTHROPIC_UNIX_SOCKET
+    CLAUDE_CODE_SIMPLE
+)
+
+# Claude Code disables Claude.ai OAuth mode when these auth/provider vars are present.
+for name in "${CONFLICTING_ENV_VARS[@]}"; do
+    unset "$name"
+done
+
 # Set env vars in the current shell if this script is sourced
 export ANTHROPIC_BASE_URL="$BASE_URL"
 export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH_TOKEN"
@@ -1160,16 +1399,26 @@ export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH_TOKEN"
 add_to_profile() {
     for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$profile" ]; then
-            # Remove old Claude pool-related env vars
-            grep -v "CLAUDE_CODE_OAUTH_TOKEN=" "$profile" 2>/dev/null | \
-            grep -v "ANTHROPIC_BASE_URL=" "$profile" 2>/dev/null | \
-            grep -v "ANTHROPIC_AUTH_TOKEN=" "$profile" 2>/dev/null > "$profile.tmp" || true
-            mv "$profile.tmp" "$profile"
+            tmp="$profile.tmp"
+            cp "$profile" "$tmp"
+            for name in ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN "${CONFLICTING_ENV_VARS[@]}"; do
+                grep -v -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$tmp" > "$tmp.next" || true
+                mv "$tmp.next" "$tmp"
+            done
+            mv "$tmp" "$profile"
 
             # Add pool configuration
             cat >> "$profile" << 'ENVEOF'
 
 # Claude Code Pool Configuration
+unset ANTHROPIC_AUTH_TOKEN
+unset ANTHROPIC_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset CLAUDE_CODE_USE_FOUNDRY
+unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+unset ANTHROPIC_UNIX_SOCKET
+unset CLAUDE_CODE_SIMPLE
 export ANTHROPIC_BASE_URL="%s"
 export CLAUDE_CODE_OAUTH_TOKEN="%s"
 ENVEOF
@@ -1182,14 +1431,23 @@ ENVEOF
     cat >> "$HOME/.zshrc" << 'ENVEOF'
 
 # Claude Code Pool Configuration
+unset ANTHROPIC_AUTH_TOKEN
+unset ANTHROPIC_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK
+unset CLAUDE_CODE_USE_VERTEX
+unset CLAUDE_CODE_USE_FOUNDRY
+unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
+unset ANTHROPIC_UNIX_SOCKET
+unset CLAUDE_CODE_SIMPLE
 export ANTHROPIC_BASE_URL="%s"
 export CLAUDE_CODE_OAUTH_TOKEN="%s"
 ENVEOF
     echo "✓ Created ~/.zshrc with Claude Code pool config"
 }
 
-mkdir -p "$HOME/.claude"
-SETTINGS_FILE="$HOME/.claude/settings.json"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+mkdir -p "$CLAUDE_DIR"
+SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 CLAUDE_JSON="$HOME/.claude.json"
 
 # Update settings.json with env vars
@@ -1198,10 +1456,23 @@ update_settings() {
         node << 'NODE_SCRIPT'
 const fs = require('fs');
 const path = require('path');
-const file = path.join(process.env.HOME, '.claude', 'settings.json');
+const dir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude');
+const file = path.join(dir, 'settings.json');
+const conflictingEnvVars = [
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'ANTHROPIC_UNIX_SOCKET',
+  'CLAUDE_CODE_SIMPLE',
+];
 let settings = {};
 try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+delete settings.apiKeyHelper;
 settings.env = settings.env || {};
+for (const name of conflictingEnvVars) delete settings.env[name];
 settings.env.ANTHROPIC_BASE_URL = '%s';
 settings.env.CLAUDE_CODE_OAUTH_TOKEN = '%s';
 fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
@@ -1210,11 +1481,25 @@ NODE_SCRIPT
     elif command -v python3 &> /dev/null; then
         python3 << 'PYTHON_SCRIPT'
 import json, os
-file = os.path.expanduser("~/.claude/settings.json")
+dir = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude')
+file = os.path.join(dir, 'settings.json')
+conflicting_env_vars = [
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+    'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+    'ANTHROPIC_UNIX_SOCKET',
+    'CLAUDE_CODE_SIMPLE',
+]
 try:
     with open(file) as f: settings = json.load(f)
 except: settings = {}
+settings.pop('apiKeyHelper', None)
 settings.setdefault('env', {})
+for name in conflicting_env_vars:
+    settings['env'].pop(name, None)
 settings['env']['ANTHROPIC_BASE_URL'] = '%s'
 settings['env']['CLAUDE_CODE_OAUTH_TOKEN'] = '%s'
 with open(file, 'w') as f: json.dump(settings, f, indent=2); f.write('\n')

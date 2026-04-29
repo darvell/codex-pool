@@ -58,8 +58,9 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		contextWindow int
 		maxTokens     int
 	}{
-		"gpt-5.4":             {contextWindow: 1050000, maxTokens: 128000},
-		"gpt-5.3-codex":       {contextWindow: 400000, maxTokens: 128000},
+		"gpt-5.5":             {contextWindow: 272000, maxTokens: 128000},
+		"gpt-5.4":             {contextWindow: 1000000, maxTokens: 128000},
+		"gpt-5.3-codex":       {contextWindow: 272000, maxTokens: 128000},
 		"gpt-5.3-codex-spark": {contextWindow: 128000, maxTokens: 128000},
 	}
 	for _, model := range cfg.Providers["codex"].Models {

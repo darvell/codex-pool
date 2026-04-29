@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cute-code pool setup</title>
+  <style>
+    :root { color-scheme: dark; --bg:#120f17; --panel:#1b1624; --ink:#fff7fb; --muted:#b8aabe; --pink:#ff8bd3; --violet:#a78bfa; --line:#342844; --ok:#9cffcb; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: radial-gradient(circle at 20% 0%, #432048 0, transparent 34rem), radial-gradient(circle at 100% 20%, #233c6f 0, transparent 28rem), var(--bg); color:var(--ink); }
+    main { width:min(980px, calc(100vw - 32px)); margin:0 auto; padding:56px 0; }
+    .hero { border:1px solid var(--line); border-radius:28px; padding:34px; background:linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.025)); box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+    .eyebrow { color:var(--pink); letter-spacing:.16em; text-transform:uppercase; font-size:12px; }
+    h1 { font-size: clamp(44px, 8vw, 92px); line-height:.92; margin:18px 0; letter-spacing:-.08em; }
+    .lead { color:var(--muted); font-size:18px; line-height:1.6; max-width:760px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:16px; margin-top:22px; }
+    .card { border:1px solid var(--line); border-radius:20px; padding:18px; background:rgba(14,11,20,.72); }
+    .card h2 { margin:0 0 10px; font-size:15px; color:var(--ok); }
+    .card p { color:var(--muted); margin:0; line-height:1.5; font-size:14px; }
+    form { margin-top:28px; display:flex; gap:10px; flex-wrap:wrap; }
+    input { flex:1 1 240px; border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:#0d0a12; color:var(--ink); font:inherit; }
+    button { border:0; border-radius:14px; padding:14px 18px; font:inherit; color:#180b16; background:linear-gradient(135deg, var(--pink), var(--violet)); cursor:pointer; }
+    .results { display:none; margin-top:24px; }
+    pre { white-space:pre-wrap; word-break:break-word; margin:10px 0 0; padding:16px; border-radius:16px; border:1px solid var(--line); background:#08060b; color:#f8d7ff; font-size:13px; line-height:1.45; }
+    .tabs { display:flex; gap:8px; margin-top:16px; flex-wrap:wrap; }
+    .tab { background:#21182d; color:var(--ink); border:1px solid var(--line); }
+    .tab.active { background:var(--ink); color:#160d19; }
+    a { color:var(--pink); }
+    .status { margin-top:14px; color:var(--muted); min-height:1.4em; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">codex pool + cute-code</div>
+      <h1>cute-code gets the whole toy box.</h1>
+      <p class="lead">Install cute-code, attach it to this pool, and get GPT/Codex models, Claude, Kimi, MiniMax, GLM, remote compaction, web sessions, and the extra runtime pieces cute-code ships with.</p>
+      <div class="grid">
+        <div class="card"><h2>GPT/Codex models</h2><p>Configured through the pool as OpenAI-style models, with WebSocket/SSE Responses support.</p></div>
+        <div class="card"><h2>Claude + friends</h2><p>Claude, Kimi, MiniMax, and GLM are registered as Anthropic-compatible custom models.</p></div>
+        <div class="card"><h2>One settings file</h2><p>The setup writes cute-code-compatible keys into <code>~/.claude/settings.json</code>.</p></div>
+      </div>
+      <form id="claim-form">
+        <input id="friend-code" name="friend_code" placeholder="friend code" autocomplete="off" required>
+        <button type="submit">Generate setup</button>
+      </form>
+      <div class="status" id="status"></div>
+      <div class="results" id="results">
+        <div class="tabs">
+          <button class="tab active" type="button" data-tab="maclinux">macOS / Linux</button>
+          <button class="tab" type="button" data-tab="windows">Windows</button>
+          <button class="tab" type="button" data-tab="settings">settings.json</button>
+        </div>
+        <pre id="maclinux"></pre>
+        <pre id="windows" style="display:none"></pre>
+        <pre id="settings" style="display:none"></pre>
+      </div>
+      <p class="lead" style="font-size:14px;margin-top:24px">cute-code installer source: <a href="https://git.irrigate.cc/pp/cute-code">git.irrigate.cc/pp/cute-code</a></p>
+    </section>
+  </main>
+  <script>
+    const publicUrl = {{printf "%q" .PublicURL}};
+    const form = document.getElementById('claim-form');
+    const statusEl = document.getElementById('status');
+    const results = document.getElementById('results');
+    const maclinux = document.getElementById('maclinux');
+    const windows = document.getElementById('windows');
+    const settings = document.getElementById('settings');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      statusEl.textContent = 'Claiming pool credentials...';
+      results.style.display = 'none';
+      const friendCode = document.getElementById('friend-code').value.trim();
+      try {
+        const response = await fetch('/api/friend/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ friend_code: friendCode })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const result = await response.json();
+        const url = result.public_url || publicUrl;
+        const token = result.download_token;
+        maclinux.textContent = `curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash\ncurl -fsSL "${url}/setup/cute-code/${token}" | bash\ncute-code --model gpt-5.5`;
+        windows.textContent = `irm https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.ps1 | iex\nirm "${url}/setup/cute-code/${token}?shell=powershell" | iex\ncute-code --model gpt-5.5`;
+        settings.textContent = result.cute_code_settings_json || '';
+        statusEl.textContent = 'Ready.';
+        results.style.display = 'block';
+      } catch (error) {
+        statusEl.textContent = 'Setup failed: ' + (error && error.message ? error.message : String(error));
+      }
+    });
+
+    for (const button of document.querySelectorAll('.tab')) {
+      button.addEventListener('click', () => {
+        for (const other of document.querySelectorAll('.tab')) other.classList.remove('active');
+        button.classList.add('active');
+        for (const id of ['maclinux', 'windows', 'settings']) document.getElementById(id).style.display = id === button.dataset.tab ? 'block' : 'none';
+      });
+    }
+  </script>
+</body>
+</html>
