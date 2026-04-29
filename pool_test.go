@@ -167,6 +167,20 @@ func TestCandidatePrefersCodexProEvenWhenTierTwoScoresBetter(t *testing.T) {
 	}
 }
 
+func TestCandidateWithCyberAccessOnlyReturnsMarkedAccounts(t *testing.T) {
+	ordinary := &Account{ID: "ordinary", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.01, SecondaryUsedPercent: 0.01}}
+	cyber := &Account{ID: "cyber", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true, Usage: UsageSnapshot{PrimaryUsedPercent: 0.2, SecondaryUsedPercent: 0.2}}
+	p := newPoolState([]*Account{ordinary, cyber}, false)
+
+	got := p.candidateWithCyberAccess(nil, AccountTypeCodex, "", "")
+	if got == nil || got.ID != "cyber" {
+		t.Fatalf("expected cyber access account, got %+v", got)
+	}
+	if got := p.candidateWithCyberAccess(map[string]bool{"cyber": true}, AccountTypeCodex, "", ""); got != nil {
+		t.Fatalf("expected no cyber access account after exclusion, got %+v", got)
+	}
+}
+
 func TestCandidateSkipsAccountWhenClientIPNotAllowed(t *testing.T) {
 	restricted := &Account{ID: "restricted", Type: AccountTypeCodex, PlanType: "pro", AllowedSourceIPs: []string{"199.45.144.95"}, Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
 	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
@@ -232,6 +246,7 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 			},
 		},
 		"allowed_ip":   "199.45.144.95",
+		"cyber_access": true,
 		"last_refresh": "2025-12-01T00:00:00Z",
 		"extra_top":    []any{1, 2, 3},
 		"meta": map[string]any{
@@ -254,6 +269,7 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 		IDToken:          "new-id",
 		AccountID:        "acct_123",
 		AllowedSourceIPs: []string{"199.45.144.95"},
+		CyberAccess:      true,
 		LastRefresh:      time.Date(2025, 12, 17, 0, 0, 0, 0, time.UTC),
 	}
 	if err := saveAccount(acc); err != nil {
@@ -275,6 +291,9 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 	}
 	if _, ok := after["meta"]; !ok {
 		t.Fatalf("expected meta preserved")
+	}
+	if after["cyber_access"] != true {
+		t.Fatalf("expected cyber_access preserved")
 	}
 
 	// Token fields updated, unknown token fields preserved.

@@ -1,10 +1,102 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 )
+
+func shouldNoopCodexPath(path string) bool {
+	switch path {
+	case "/.well-known/oauth-authorization-server/mcp",
+		"/connectors/directory/list",
+		"/connectors/directory/list_workspace",
+		"/codex/analytics-events/events",
+		"/plugins/featured",
+		"/plugins/list",
+		"/api/codex/apps",
+		"/backend-api/wham/apps",
+		"/backend-api/plugins/featured",
+		"/backend-api/codex/analytics-events/events":
+		return true
+	default:
+		return false
+	}
+}
+
+func serveNoopCodexPath(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/.well-known/oauth-authorization-server/mcp":
+		respondJSON(w, map[string]any{
+			"authorization_endpoint": "",
+			"token_endpoint":         "",
+			"scopes_supported":       []string{""},
+		})
+	case "/connectors/directory/list", "/connectors/directory/list_workspace":
+		respondJSON(w, map[string]any{
+			"apps":      []any{},
+			"nextToken": nil,
+		})
+	case "/api/codex/apps", "/backend-api/wham/apps":
+		serveNoopCodexAppsMCP(w, r)
+	default:
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func serveNoopCodexAppsMCP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	_ = json.Unmarshal(body, &req)
+	if len(req.ID) == 0 || string(req.ID) == "null" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	result := map[string]any{}
+	switch req.Method {
+	case "initialize":
+		result = map[string]any{
+			"protocolVersion": "2025-11-25",
+			"capabilities": map[string]any{
+				"tools":     map[string]any{"listChanged": false},
+				"resources": map[string]any{"listChanged": false},
+			},
+			"serverInfo": map[string]any{"name": "codex_apps", "version": "0.0.0"},
+		}
+	case "tools/list":
+		result = map[string]any{"tools": []any{}, "nextCursor": nil}
+	case "resources/list":
+		result = map[string]any{"resources": []any{}, "nextCursor": nil}
+	case "resources/templates/list":
+		result = map[string]any{"resourceTemplates": []any{}, "nextCursor": nil}
+	case "ping":
+		result = map[string]any{}
+	default:
+		respondJSON(w, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"error": map[string]any{
+				"code":    -32601,
+				"message": "Method not found",
+			},
+		})
+		return
+	}
+
+	respondJSON(w, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"result":  result,
+	})
+}
 
 // checkAdminAuth verifies the admin token from header or query param.
 // Returns true if authorized, false if not (and sends 401 response).
@@ -387,6 +479,11 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if isClaudeUsageRequest(r) {
 		h.handleClaudeUsage(w, r)
+		return
+	}
+
+	if shouldNoopCodexPath(r.URL.Path) {
+		serveNoopCodexPath(w, r)
 		return
 	}
 

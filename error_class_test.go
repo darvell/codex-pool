@@ -43,3 +43,14 @@ func TestIsClaudeOrganizationDisabled(t *testing.T) {
 		})
 	}
 }
+
+func TestIsCyberPolicyError(t *testing.T) {
+	t.Parallel()
+
+	if !isCyberPolicyError([]byte(`{"error":{"code":"cyber_policy"}}`)) {
+		t.Fatal("expected cyber_policy code to be detected")
+	}
+	if isCyberPolicyError([]byte(`{"error":{"code":"invalid_request"}}`)) {
+		t.Fatal("did not expect unrelated invalid request to be detected")
+	}
+}

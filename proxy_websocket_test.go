@@ -37,25 +37,27 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	type upstreamReq struct {
-		path       string
-		auth       string
-		accountID  string
-		sessionID  string
-		connection string
-		upgrade    string
+		path            string
+		auth            string
+		accountID       string
+		sessionID       string
+		clientRequestID string
+		connection      string
+		upgrade         string
 	}
 
 	upstreamReqCh := make(chan upstreamReq, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamReqCh <- upstreamReq{
-			path:       r.URL.Path,
-			auth:       r.Header.Get("Authorization"),
-			accountID:  r.Header.Get("ChatGPT-Account-ID"),
-			sessionID:  r.Header.Get("session_id"),
-			connection: r.Header.Get("Connection"),
-			upgrade:    r.Header.Get("Upgrade"),
+			path:            r.URL.Path,
+			auth:            r.Header.Get("Authorization"),
+			accountID:       r.Header.Get("ChatGPT-Account-ID"),
+			sessionID:       r.Header.Get("session_id"),
+			clientRequestID: r.Header.Get("x-client-request-id"),
+			connection:      r.Header.Get("Connection"),
+			upgrade:         r.Header.Get("Upgrade"),
 		}
-		writeWebSocketSwitchingProtocolsResponse(w, r)
+		writeWebSocketSwitchingProtocolsResponseWithHeaders(w, r, http.Header{"x-codex-turn-state": []string{"turn-from-ws-upgrade"}})
 	}))
 	defer upstream.Close()
 
@@ -93,8 +95,9 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 	defer proxy.Close()
 
 	statusLine := performRawWebSocketHandshake(t, proxy.URL, "/responses", map[string]string{
-		"Authorization": "Bearer " + generateClaudePoolToken("test-secret", "ws-user"),
-		"session_id":    "thread-ws-1",
+		"Authorization":       "Bearer " + generateClaudePoolToken("test-secret", "ws-user"),
+		"session_id":          "thread-ws-1",
+		"x-client-request-id": "thread-ws-1",
 	})
 	if !strings.Contains(statusLine, "101") {
 		t.Fatalf("expected 101 response, got %q", statusLine)
@@ -114,6 +117,9 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 		if got.sessionID != "thread-ws-1" {
 			t.Fatalf("upstream session_id = %q, want %q", got.sessionID, "thread-ws-1")
 		}
+		if got.clientRequestID != "thread-ws-1" {
+			t.Fatalf("upstream x-client-request-id = %q, want %q", got.clientRequestID, "thread-ws-1")
+		}
 		if !strings.EqualFold(got.upgrade, "websocket") {
 			t.Fatalf("upstream Upgrade = %q, want websocket", got.upgrade)
 		}
@@ -124,8 +130,65 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 		t.Fatalf("timed out waiting for upstream websocket request")
 	}
 
+	if acc.CodexTurnState != "turn-from-ws-upgrade" {
+		t.Fatalf("CodexTurnState = %q, want turn-from-ws-upgrade", acc.CodexTurnState)
+	}
 	if got := extractConversationIDFromHeaders(http.Header{"Session_id": []string{"thread-ws-1"}}); got != "thread-ws-1" {
 		t.Fatalf("extractConversationIDFromHeaders = %q, want %q", got, "thread-ws-1")
+	}
+}
+
+func TestProxyWebSocketUsesPinnedAccountBeforeCyberPolicy(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	upstreamAccountID := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAccountID <- r.Header.Get("ChatGPT-Account-ID")
+		writeWebSocketSwitchingProtocolsResponse(w, r)
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	ordinary := &Account{Type: AccountTypeCodex, ID: "ordinary", AccessToken: "ordinary-token", AccountID: "acct_ordinary", PlanType: "pro"}
+	cyber := &Account{Type: AccountTypeCodex, ID: "cyber", AccessToken: "cyber-token", AccountID: "acct_cyber", PlanType: "pro", CyberAccess: true}
+	pool := newPoolState([]*Account{ordinary, cyber}, false)
+	pool.pin("thread-ws-cyber", "ordinary")
+
+	h := &proxyHandler{
+		cfg:       &config{requestTimeout: 5 * time.Second, maxInMemoryBodyBytes: 1024},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	statusLine := performRawWebSocketHandshake(t, proxy.URL, "/responses", map[string]string{
+		"Authorization": "Bearer " + generateClaudePoolToken("test-secret", "ws-user"),
+		"session_id":    "thread-ws-cyber",
+	})
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101 response, got %q", statusLine)
+	}
+
+	select {
+	case got := <-upstreamAccountID:
+		if got != "acct_ordinary" {
+			t.Fatalf("upstream ChatGPT-Account-ID = %q, want pinned ordinary account", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for upstream websocket request")
 	}
 }
 
@@ -209,7 +272,7 @@ func TestProxyWebSocketPinsMaxPlanWhen1MHeaderPresent(t *testing.T) {
 	pool := newPoolState([]*Account{pro, max}, false)
 
 	h := &proxyHandler{
-		cfg: &config{requestTimeout: 5 * time.Second, maxInMemoryBodyBytes: 1024},
+		cfg:       &config{requestTimeout: 5 * time.Second, maxInMemoryBodyBytes: 1024},
 		transport: http.DefaultTransport,
 		pool:      pool,
 		registry:  registry,
@@ -293,6 +356,10 @@ func performRawWebSocketHandshake(
 }
 
 func writeWebSocketSwitchingProtocolsResponse(w http.ResponseWriter, r *http.Request) {
+	writeWebSocketSwitchingProtocolsResponseWithHeaders(w, r, nil)
+}
+
+func writeWebSocketSwitchingProtocolsResponseWithHeaders(w http.ResponseWriter, r *http.Request, headers http.Header) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
@@ -313,6 +380,11 @@ func writeWebSocketSwitchingProtocolsResponse(w http.ResponseWriter, r *http.Req
 	_, _ = rw.WriteString("Upgrade: websocket\r\n")
 	_, _ = rw.WriteString("Connection: Upgrade\r\n")
 	_, _ = rw.WriteString("Sec-WebSocket-Accept: " + accept + "\r\n")
+	for key, values := range headers {
+		for _, value := range values {
+			_, _ = rw.WriteString(key + ": " + value + "\r\n")
+		}
+	}
 	_, _ = rw.WriteString("\r\n")
 	_ = rw.Flush()
 }

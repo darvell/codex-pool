@@ -273,9 +273,10 @@ func ccInjectSystemBlocks(bodyObj map[string]any, bodyBytes []byte) []byte {
 
 	// Construct the block array matching Claude Code's format:
 	//   [attribution (no cache), prefix (cached), ...rest (cached)]
+	oneHourCache := map[string]any{"type": "ephemeral", "ttl": "1h"}
 	blocks := []any{
 		map[string]any{"type": "text", "text": attrHeader},
-		map[string]any{"type": "text", "text": ccSystemPrefix, "cache_control": map[string]any{"type": "ephemeral"}},
+		map[string]any{"type": "text", "text": ccSystemPrefix, "cache_control": oneHourCache},
 	}
 
 	if existingBlocks != nil {
@@ -286,7 +287,7 @@ func ccInjectSystemBlocks(bodyObj map[string]any, bodyBytes []byte) []byte {
 		blocks = append(blocks, map[string]any{
 			"type":          "text",
 			"text":          existingSystem,
-			"cache_control": map[string]any{"type": "ephemeral"},
+			"cache_control": oneHourCache,
 		})
 	}
 

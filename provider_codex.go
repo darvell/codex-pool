@@ -77,6 +77,10 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		acc.LastRefresh = *aj.LastRefresh
 	}
 	acc.Dead = aj.Dead
+	acc.CyberAccess = aj.CyberAccess
+	if len(aj.CodexCookies) > 0 {
+		acc.CodexCookies = aj.CodexCookies
+	}
 	return acc, nil
 }
 
@@ -90,6 +94,7 @@ func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	if chatgptAccID != "" {
 		req.Header.Set("ChatGPT-Account-ID", chatgptAccID)
 	}
+	applyCodexRequestFingerprint(req, acc)
 }
 
 func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
@@ -320,6 +325,9 @@ func (p *CodexProvider) NormalizePath(path string) string {
 	// Map /v1/responses/* and /responses/* to the correct upstream path
 	if strings.HasPrefix(path, "/v1/responses") || strings.HasPrefix(path, "/responses") {
 		return mapResponsesPath(path)
+	}
+	if strings.HasPrefix(path, "/v1/models") {
+		return "/models"
 	}
 	// If caller already included /backend-api in the request path, avoid
 	// duplicating it when we join against upstreams that also include /backend-api.

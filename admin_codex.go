@@ -82,6 +82,7 @@ func (h *proxyHandler) handleCodexList(w http.ResponseWriter, r *http.Request) {
 		PlanType    string    `json:"plan_type"`
 		Dead        bool      `json:"dead"`
 		Disabled    bool      `json:"disabled"`
+		CyberAccess bool      `json:"cyber_access,omitempty"`
 		ExpiresAt   time.Time `json:"expires_at,omitempty"`
 		LastRefresh time.Time `json:"last_refresh,omitempty"`
 	}
@@ -94,6 +95,7 @@ func (h *proxyHandler) handleCodexList(w http.ResponseWriter, r *http.Request) {
 				PlanType:    acc.PlanType,
 				Dead:        acc.Dead,
 				Disabled:    acc.Disabled,
+				CyberAccess: acc.CyberAccess,
 				ExpiresAt:   acc.ExpiresAt,
 				LastRefresh: acc.LastRefresh,
 			})

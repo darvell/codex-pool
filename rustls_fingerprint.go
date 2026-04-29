@@ -17,9 +17,9 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// rustlsSpec returns a ClientHelloSpec that matches reqwest/rustls fingerprint.
-// JA3: 771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,43-5-10-35-23-51-13-0-16-11-45,29-23-24,0
-// JA3 Hash: 728ee39e0f8f005402bb21b1b01aa910
+// rustlsSpec returns a ClientHelloSpec that matches reqwest/rustls closely enough
+// for Codex Desktop parity. The important difference from the old version is ALPN:
+// reqwest/rustls advertises h2 before http/1.1, while the old proxy forced HTTP/1.1.
 func rustlsSpec() *utls.ClientHelloSpec {
 	return &utls.ClientHelloSpec{
 		TLSVersMin: utls.VersionTLS12,
@@ -178,7 +178,7 @@ func (d *rustlsDialer) DialTLSContext(ctx context.Context, network, addr string)
 func createRustlsTransport() *http.Transport {
 	dialer := newRustlsDialer()
 
-	return &http.Transport{
+	tr := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -190,8 +190,8 @@ func createRustlsTransport() *http.Transport {
 		ExpectContinueTimeout: 5 * time.Second,
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   50,
-		ForceAttemptHTTP2:     false, // rustls uses HTTP/1.1
 	}
+	return tr
 }
 
 // rustlsHybridTransport uses rustls fingerprint for chatgpt.com, standard for others

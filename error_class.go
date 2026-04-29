@@ -115,6 +115,10 @@ func isCloudflareChallenge(body []byte, headers http.Header) bool {
 	return false
 }
 
+func isCyberPolicyError(body []byte) bool {
+	return strings.Contains(strings.ToLower(string(body)), "cyber_policy")
+}
+
 // Retryable returns true if this class should be retried on another account.
 func (c ErrorClass) Retryable() bool {
 	switch c {

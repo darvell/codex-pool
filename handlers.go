@@ -30,6 +30,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		IDTokenChatGPTAccountID string      `json:"id_token_chatgpt_account_id,omitempty"`
 		Disabled                bool        `json:"disabled"`
 		Dead                    bool        `json:"dead"`
+		CyberAccess             bool        `json:"cyber_access,omitempty"`
 		Inflight                int64       `json:"inflight"`
 		ExpiresAt               time.Time   `json:"expires_at,omitempty"`
 		LastRefresh             time.Time   `json:"last_refresh,omitempty"`
@@ -50,6 +51,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		idTokID := a.IDTokenChatGPTAccountID
 		disabled := a.Disabled
 		dead := a.Dead
+		cyberAccess := a.CyberAccess
 		expiresAt := a.ExpiresAt
 		lastRefresh := a.LastRefresh
 		penalty := a.Penalty
@@ -68,6 +70,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 			IDTokenChatGPTAccountID: idTokID,
 			Disabled:                disabled,
 			Dead:                    dead,
+			CyberAccess:             cyberAccess,
 			Inflight:                atomic.LoadInt64(&a.Inflight),
 			ExpiresAt:               expiresAt,
 			LastRefresh:             lastRefresh,

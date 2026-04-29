@@ -54,6 +54,9 @@ type Account struct {
 	RateLimitUntil          time.Time
 	BackoffLevel            int // exponent: cooldown = min(1s * 2^level, 30m)
 	AllowedSourceIPs        []string
+	CyberAccess             bool
+	CodexCookies            map[string]string
+	CodexTurnState          string
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -161,19 +164,19 @@ type UsageSnapshot struct {
 
 // RequestUsage captures per-request token consumption parsed from SSE events.
 type RequestUsage struct {
-	Timestamp              time.Time
-	AccountID              string
-	PlanType               string
-	UserID                 string
-	OriginID               string
-	PromptCacheKey         string
-	RequestID              string
-	InputTokens            int64
-	CachedInputTokens      int64 // cache_read_input_tokens (cheap reads from cache)
-	CacheCreationTokens    int64 // cache_creation_input_tokens (expensive writes to cache)
-	OutputTokens           int64
-	ReasoningTokens        int64
-	BillableTokens         int64
+	Timestamp           time.Time
+	AccountID           string
+	PlanType            string
+	UserID              string
+	OriginID            string
+	PromptCacheKey      string
+	RequestID           string
+	InputTokens         int64
+	CachedInputTokens   int64 // cache_read_input_tokens (cheap reads from cache)
+	CacheCreationTokens int64 // cache_creation_input_tokens (expensive writes to cache)
+	OutputTokens        int64
+	ReasoningTokens     int64
+	BillableTokens      int64
 	// Rate limit snapshot after this request
 	PrimaryUsedPct   float64
 	SecondaryUsedPct float64
@@ -246,12 +249,14 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 
 // CodexAuthJSON is the format for Codex auth.json files.
 type CodexAuthJSON struct {
-	OpenAIKey        *string    `json:"OPENAI_API_KEY"`
-	Tokens           *TokenData `json:"tokens"`
-	LastRefresh      *time.Time `json:"last_refresh"`
-	Dead             bool       `json:"dead"`
-	AllowedIP        string     `json:"allowed_ip"`
-	AllowedSourceIPs []string   `json:"allowed_source_ips"`
+	OpenAIKey        *string           `json:"OPENAI_API_KEY"`
+	Tokens           *TokenData        `json:"tokens"`
+	LastRefresh      *time.Time        `json:"last_refresh"`
+	Dead             bool              `json:"dead"`
+	AllowedIP        string            `json:"allowed_ip"`
+	AllowedSourceIPs []string          `json:"allowed_source_ips"`
+	CyberAccess      bool              `json:"cyber_access"`
+	CodexCookies     map[string]string `json:"cookies"`
 }
 
 type TokenData struct {
@@ -475,6 +480,72 @@ func (p *poolState) nearestCooldown(accountType AccountType, exclude map[string]
 //  6. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
 //  7. If all non-codex candidates are rate-limited, pick the best rate-limited account as fallback
 //     to avoid hard 503 failures during transient exhaustion.
+func (p *poolState) candidateByID(id string, accountType AccountType, requiredPlan string, clientIP string) *Account {
+	if id == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	a := p.getLocked(id)
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
+		return nil
+	}
+	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
+		return nil
+	}
+	if accountPrimaryUsageLocked(a) >= primaryHardExcludeThreshold || accountSecondaryUsageLocked(a) >= secondaryHardExcludeThreshold {
+		return nil
+	}
+	return a
+}
+
+func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountType AccountType, requiredPlan string, clientIP string) *Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	var best *Account
+	bestScore := -1e9
+	for _, a := range p.accounts {
+		if exclude != nil && exclude[a.ID] {
+			continue
+		}
+		a.mu.Lock()
+		if a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
+			a.mu.Unlock()
+			continue
+		}
+		if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
+			a.mu.Unlock()
+			continue
+		}
+		primaryUsed := accountPrimaryUsageLocked(a)
+		secondaryUsed := accountSecondaryUsageLocked(a)
+		if primaryUsed >= primaryHardExcludeThreshold || secondaryUsed >= secondaryHardExcludeThreshold {
+			a.mu.Unlock()
+			continue
+		}
+		score := scoreAccountLocked(a, now)
+		a.mu.Unlock()
+		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
+		if best == nil || score > bestScore {
+			best = a
+			bestScore = score
+		}
+	}
+	if best != nil {
+		p.rr++
+	}
+	return best
+}
+
 func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, clientIP string) *Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1048,6 +1119,18 @@ func saveCodexAccount(a *Account) error {
 	} else {
 		delete(root, "allowed_source_ips")
 		delete(root, "allowed_ip")
+	}
+
+	if a.CyberAccess {
+		root["cyber_access"] = true
+	} else {
+		delete(root, "cyber_access")
+	}
+
+	if len(a.CodexCookies) > 0 {
+		root["cookies"] = a.CodexCookies
+	} else {
+		delete(root, "cookies")
 	}
 
 	// Persist dead flag so accounts stay dead across restarts

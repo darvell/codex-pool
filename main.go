@@ -58,6 +58,7 @@ type config struct {
 	requestTimeout       time.Duration // Timeout for non-streaming requests (0 = no timeout)
 	streamTimeout        time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
 	streamIdleTimeout    time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	websocketIdleTimeout time.Duration // Kill websocket relays idle for this long (0 = no idle timeout)
 	tierThreshold        float64       // Secondary usage % at which we stop preferring a tier (default 0.50)
 }
 
@@ -168,20 +169,22 @@ func buildConfig() *config {
 			cfg.requestTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.streamTimeout = 0 // No timeout for streaming - Claude Code sessions can run indefinitely
+	cfg.streamTimeout = 5 * time.Minute
 	if v := getenv("PROXY_STREAM_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamTimeout = time.Duration(n) * time.Second
 		}
 	}
-	cfg.streamIdleTimeout = 5 * time.Minute // Generous idle timeout — Anthropic API sends event:ping
-	// keepalives during SSE but the interval is unpredictable during extended
-	// thinking. 5 min is well above observed ping gaps while still catching
-	// truly dead connections. TCP keepalives (30s) detect most dead upstreams
-	// faster than this anyway.
+	cfg.streamIdleTimeout = 5 * time.Minute
 	if v := getenv("STREAM_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamIdleTimeout = time.Duration(n) * time.Second
+		}
+	}
+	cfg.websocketIdleTimeout = 5 * time.Minute
+	if v := getenv("WEBSOCKET_IDLE_TIMEOUT_SECONDS", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n >= 0 {
+			cfg.websocketIdleTimeout = time.Duration(n) * time.Second
 		}
 	}
 
@@ -195,6 +198,7 @@ func buildConfig() *config {
 
 func main() {
 	cfg := buildConfig()
+	startCodexFingerprintUpdater()
 
 	// Create provider registry
 	codexProvider := NewCodexProvider(cfg.responsesBase, cfg.whamBase, cfg.refreshBase)
@@ -259,10 +263,13 @@ func main() {
 	}
 	_ = http2.ConfigureTransport(standardTransport)
 
-	// Use hybrid transport: rustls fingerprint for Cloudflare-protected hosts, standard for others
-	// NOTE: rustls fingerprint disabled - Cloudflare started blocking the HTTP/1.1-only fingerprint
-	// with 403 challenge pages. Using standard Go transport with HTTP/2 for all hosts.
+	// Default to the standard Go transport. Set CODEX_TLS_FINGERPRINT=rustls to opt
+	// into the experimental uTLS/rustls hybrid transport for ChatGPT/Auth hosts.
 	var transport http.RoundTripper = standardTransport
+	if strings.EqualFold(os.Getenv("CODEX_TLS_FINGERPRINT"), "rustls") {
+		transport = newRustlsHybridTransport(standardTransport)
+		log.Printf("codex rustls/uTLS hybrid transport enabled")
+	}
 
 	// Create refresh transport - may use a proxy for token refresh operations
 	var refreshTransport http.RoundTripper = transport
@@ -376,8 +383,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -446,19 +453,136 @@ func mapResponsesPath(in string) string {
 	return "/responses"
 }
 
+func codexPassthroughNeedsBodyRewrite(path string) bool {
+	return strings.HasPrefix(path, "/v1/messages") || strings.HasPrefix(path, "/v1/chat/completions")
+}
+
+func ensureCodexResponsesInstructions(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	if _, ok := obj["instructions"]; !ok {
+		obj["instructions"] = "You are a helpful assistant."
+	}
+	obj["store"] = false
+	obj["stream"] = true
+	if input, ok := obj["input"].(string); ok {
+		obj["input"] = []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": input},
+				},
+			},
+		}
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func requestHasImageGenerationTool(body []byte) bool {
+	var obj any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return false
+	}
+	return valueHasImageGenerationTool(obj)
+}
+
+func valueHasImageGenerationTool(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		if typ, _ := x["type"].(string); typ == "image_generation" {
+			return true
+		}
+		for _, child := range x {
+			if valueHasImageGenerationTool(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if valueHasImageGenerationTool(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func codexPassthroughRewrite(path string, body []byte) (rewrittenPath string, rewrittenBody []byte, err error) {
+	switch {
+	case strings.HasPrefix(path, "/v1/messages"):
+		rewritten, err := translateClaudeToResponsesRequest(body)
+		if err != nil {
+			return path, nil, err
+		}
+		return "/v1/responses", rewritten, nil
+	case strings.HasPrefix(path, "/v1/chat/completions"):
+		rewritten, err := translateChatCompletionsToResponses(body)
+		if err != nil {
+			return path, nil, err
+		}
+		return "/v1/responses", rewritten, nil
+	default:
+		return path, body, nil
+	}
+}
+
 func extractConversationIDFromHeaders(headers http.Header) string {
 	for _, key := range []string{
 		"session_id",
+		"Session_id",
 		"Session-Id",
 		"conversation_id",
+		"Conversation_id",
 		"prompt_cache_key",
 		"x-codex-conversation-id",
 	} {
 		if value := strings.TrimSpace(headers.Get(key)); value != "" {
 			return value
 		}
+		for actualKey, values := range headers {
+			if !strings.EqualFold(actualKey, key) {
+				continue
+			}
+			for _, value := range values {
+				if value = strings.TrimSpace(value); value != "" {
+					return value
+				}
+			}
+		}
 	}
 	return ""
+}
+
+func (h *proxyHandler) pinConversationToCyberAccess(conversationID string, accountType AccountType, requiredPlan, clientIP, currentAccountID, reqID string) bool {
+	if conversationID == "" || accountType != AccountTypeCodex {
+		return false
+	}
+	exclude := map[string]bool{}
+	if currentAccountID != "" {
+		exclude[currentAccountID] = true
+	}
+	acc := h.pool.candidateWithCyberAccess(exclude, accountType, requiredPlan, clientIP)
+	if acc == nil {
+		if h.cfg.debug.Load() {
+			log.Printf("[%s] cyber_policy seen for conversation %s, but no cyber_access account is available", reqID, conversationID)
+		}
+		return false
+	}
+	h.pool.pin(conversationID, acc.ID)
+	if h.cfg.debug.Load() {
+		log.Printf("[%s] pinned conversation %s to cyber_access account %s after cyber_policy", reqID, conversationID, acc.ID)
+	}
+	return true
 }
 
 func removeConflictingProxyHeaders(h http.Header) {
@@ -514,14 +638,15 @@ func extractConversationIDFromJSON(blob []byte) string {
 	if err := json.Unmarshal(blob, &obj); err != nil {
 		return ""
 	}
-	// Check top-level keys - prompt_cache_key first for Codex session affinity
+	return extractConversationIDFromObject(obj)
+}
+
+func extractConversationIDFromObject(obj map[string]any) string {
 	for _, key := range []string{"prompt_cache_key", "conversation_id", "conversation", "session_id"} {
 		if v, ok := obj[key].(string); ok && v != "" {
 			return v
 		}
 	}
-	// Some variants may tuck metadata under a sub-object.
-	// Claude Code sends metadata.user_id like "user_..._session_UUID"
 	for _, containerKey := range []string{"metadata", "meta"} {
 		if sub, ok := obj[containerKey].(map[string]any); ok {
 			for _, key := range []string{"conversation_id", "conversation", "prompt_cache_key", "session_id", "user_id"} {
@@ -699,9 +824,17 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	var userID string
 	secret := getPoolJWTSecret()
 
-	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*)
+	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*).
+	// Anthropic SDKs commonly send API-key credentials in x-api-key, so accept
+	// pool Claude tokens there as well as Authorization: Bearer.
+	claudePoolAuthHeader := authHeader
+	if claudePoolAuthHeader == "" {
+		if apiKey := strings.TrimSpace(r.Header.Get("X-Api-Key")); apiKey != "" {
+			claudePoolAuthHeader = "Bearer " + apiKey
+		}
+	}
 	if secret != "" {
-		if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
+		if isClaudePool, uid := isClaudePoolToken(secret, claudePoolAuthHeader); isClaudePool {
 			userID = uid
 			// Check if user is disabled
 			if h.poolUsers != nil {
@@ -841,6 +974,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	inspect = bodyForInspection(r, inspect)
 	conversationID := extractConversationIDFromJSON(inspect)
+	if conversationID == "" {
+		conversationID = extractConversationIDFromHeaders(r.Header)
+	}
 	requestedModel := extractRequestedModelFromJSON(inspect)
 
 	// Resolve model aliases before routing.
@@ -908,17 +1044,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// The Codex upstream (chatgpt.com/backend-api/codex) only speaks Responses API.
 	// Codex always requires streaming, so we track whether the client originally wanted non-streaming.
 	clientWantsNonStreaming := false
-	if translateDir == TranslateNone && sourceFormat == FormatOpenAI && accountType == AccountTypeCodex {
-		translateDir = TranslateChatToResponses
-		// Check if client originally requested non-streaming
-		if len(inspect) > 0 {
-			var obj map[string]any
-			if json.Unmarshal(inspect, &obj) == nil {
-				if s, ok := obj["stream"].(bool); !ok || !s {
-					clientWantsNonStreaming = true
-				}
+	if len(inspect) > 0 {
+		var obj map[string]any
+		if json.Unmarshal(inspect, &obj) == nil {
+			if s, ok := obj["stream"].(bool); !ok || !s {
+				clientWantsNonStreaming = true
 			}
 		}
+	}
+	if translateDir == TranslateNone && sourceFormat == FormatOpenAI && accountType == AccountTypeCodex {
+		translateDir = TranslateChatToResponses
 	}
 	// Special case: Responses API -> Claude Messages API
 	// When client sends /responses (e.g. Codex CLI with -m opus) and provider is Claude.
@@ -926,6 +1061,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		if strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses") {
 			translateDir = TranslateResponsesToClaude
 		}
+	}
+
+	if translateDir == TranslateNone && accountType == AccountTypeCodex && strings.HasPrefix(r.URL.Path, "/v1/responses") {
+		bodyBytes = ensureCodexResponsesInstructions(bodyBytes)
 	}
 
 	if translateDir != TranslateNone {
@@ -1038,12 +1177,34 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	exclude := map[string]bool{}
 	var lastErr error
 	var lastStatus int
+	cyberAccessRetry := false
 	requiredPlan := requiredPlanForRequest(accountType, r, requestedModel)
 
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
+	const preferredImageCodexAccountID = "neon"
+	imageGenerationRequest := accountType == AccountTypeCodex && requestHasImageGenerationTool(bodyBytes)
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan, originIP)
+		var acc *Account
+		if imageGenerationRequest && attempt == 1 {
+			acc = h.pool.candidateByID(preferredImageCodexAccountID, accountType, requiredPlan, originIP)
+			if acc != nil && h.cfg.debug.Load() {
+				log.Printf("[%s] routing image generation request to codex account %s", reqID, acc.ID)
+			}
+		}
+		if acc == nil && cyberAccessRetry {
+			acc = h.pool.candidateWithCyberAccess(exclude, accountType, requiredPlan, originIP)
+			if acc != nil && h.cfg.debug.Load() {
+				log.Printf("[%s] routing cyber_policy retry to %s account %s", reqID, accountType, acc.ID)
+			}
+		}
+		if acc == nil && !cyberAccessRetry {
+			candidateConversationID := conversationID
+			if imageGenerationRequest {
+				candidateConversationID = ""
+			}
+			acc = h.pool.candidate(candidateConversationID, exclude, accountType, requiredPlan, originIP)
+		}
 		if acc == nil {
 			// All accounts excluded or rate-limited. If there are rate-limited
 			// accounts, wait for the shortest cooldown instead of 503 immediately.
@@ -1099,6 +1260,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			continue
 		}
 		lastStatus = resp.StatusCode
+		cyberPinned := false
 
 		// --- Error classification & handling ---
 		errClass := classifyStatus(resp.StatusCode)
@@ -1109,6 +1271,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			resp.Body.Close()
 			errBody = bodyForInspection(nil, errBody)
 			errBodyStr := string(errBody)
+
+			if accountType == AccountTypeCodex && isCyberPolicyError(errBody) && !acc.CyberAccess {
+				cyberAccessRetry = true
+				lastErr = fmt.Errorf("upstream %s from non-cyber-access account %s: %s", resp.Status, acc.ID, errBodyStr)
+				h.recent.add(lastErr.Error())
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] retrying cyber_policy response from account %s on a cyber_access account", reqID, acc.ID)
+				}
+				continue
+			}
 
 			// Refine classification with body content.
 			if acc.Type == AccountTypeClaude && isClaudeOrganizationDisabled(errBody) {
@@ -1258,14 +1430,82 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 
 		// Client wanted non-streaming but Codex requires streaming:
-		// buffer SSE events and assemble a non-streaming Chat Completions response.
-		if clientWantsNonStreaming && isSSE && translateDir == TranslateChatToResponses {
+		// buffer SSE events and assemble a non-streaming response.
+		if clientWantsNonStreaming && isSSE && translateDir == TranslateNone && accountType == AccountTypeCodex && strings.HasPrefix(r.URL.Path, "/v1/responses") {
+			w.Header().Del("Content-Length")
+			w.Header().Set("Content-Type", "application/json")
+
+			bufWriter := &responsesBufferingWriter{model: requestedModel}
+			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] buffering Responses SSE error: %v", reqID, err)
+				}
+			}
+			resp.Body.Close()
+
+			w.WriteHeader(resp.StatusCode)
+			w.Write(bufWriter.Result())
+		} else if clientWantsNonStreaming && isSSE && translateDir == TranslateClaudeToResponses {
 			w.Header().Del("Content-Length")
 			w.Header().Set("Content-Type", "application/json")
 
 			usageCallback := func(data []byte) {
 				if sampleBuf != nil {
 					sampleBuf.Write(data)
+				}
+				if accountType == AccountTypeCodex && !acc.CyberAccess && isCyberPolicyError(data) {
+					if h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, originIP, acc.ID, reqID) {
+						cyberPinned = true
+					}
+					return
+				}
+				var obj map[string]any
+				if json.Unmarshal(data, &obj) == nil {
+					if ru := provider.ParseUsage(obj); ru != nil {
+						if ru.PrimaryUsedPct == 0 && headerPrimaryPct > 0 {
+							ru.PrimaryUsedPct = headerPrimaryPct
+						}
+						if ru.SecondaryUsedPct == 0 && headerSecondaryPct > 0 {
+							ru.SecondaryUsedPct = headerSecondaryPct
+						}
+						ru.UserID = userID
+						ru.OriginID = originID
+						ru.AccountType = acc.Type
+						h.recordUsage(acc, *ru)
+					}
+				}
+			}
+
+			bufWriter := &responsesToClaudeBufferingWriter{
+				callback: usageCallback,
+				debug:    h.cfg.debug.Load(),
+				reqID:    reqID,
+				model:    requestedModel,
+			}
+
+			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] buffering Claude SSE error: %v", reqID, err)
+				}
+			}
+			resp.Body.Close()
+
+			result := bufWriter.Result()
+			w.WriteHeader(resp.StatusCode)
+			w.Write(result)
+		} else if clientWantsNonStreaming && isSSE && translateDir == TranslateChatToResponses {
+			w.Header().Del("Content-Length")
+			w.Header().Set("Content-Type", "application/json")
+
+			usageCallback := func(data []byte) {
+				if sampleBuf != nil {
+					sampleBuf.Write(data)
+				}
+				if accountType == AccountTypeCodex && !acc.CyberAccess && isCyberPolicyError(data) {
+					if h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, originIP, acc.ID, reqID) {
+						cyberPinned = true
+					}
+					return
 				}
 				var obj map[string]any
 				if json.Unmarshal(data, &obj) == nil {
@@ -1379,6 +1619,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			var claudeAccum *RequestUsage
 
 			usageCallback := func(data []byte) {
+				if accountType == AccountTypeCodex && !acc.CyberAccess && isCyberPolicyError(data) {
+					if h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, originIP, acc.ID, reqID) {
+						cyberPinned = true
+						cancel()
+					}
+					return
+				}
 				var obj map[string]any
 				if err := json.Unmarshal(data, &obj); err != nil {
 					var arr []map[string]any
@@ -1549,7 +1796,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					conversationID = extractConversationIDFromSSE(sampleBuf.Bytes())
 				}
 			}
-			if conversationID != "" {
+			if conversationID != "" && !cyberPinned {
 				h.pool.pin(conversationID, acc.ID)
 			}
 			acc.mu.Lock()
@@ -1604,7 +1851,8 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	}
 
 	requiredPlan := requiredPlanForRequest(accountType, r, "")
-	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, requiredPlan, getClientIP(r))
+	clientIP := getClientIP(r)
+	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, requiredPlan, clientIP)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -1669,7 +1917,25 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		log.Printf("[%s] websocket tunnel -> %s (account=%s)", reqID, outURL.String(), acc.ID)
 	}
 
-	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders)
+	cyberPinned := false
+	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, h.cfg.websocketIdleTimeout, func(upstreamResp *http.Response) {
+		captureCodexResponseState(acc, upstreamResp, reqID)
+	}, func(data []byte) bool {
+		if accountType != AccountTypeCodex {
+			return false
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err == nil {
+			if id := extractConversationIDFromObject(obj); id != "" {
+				conversationID = id
+			}
+		}
+		if acc.CyberAccess || !isCyberPolicyError(data) {
+			return false
+		}
+		cyberPinned = h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, clientIP, acc.ID, reqID)
+		return cyberPinned
+	})
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -1698,7 +1964,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			}
 		}
 	} else if statusCode == http.StatusSwitchingProtocols || (statusCode >= 200 && statusCode < 300) {
-		if conversationID != "" {
+		if conversationID != "" && !cyberPinned {
 			h.pool.pin(conversationID, acc.ID)
 		}
 		acc.mu.Lock()
@@ -1755,7 +2021,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 		log.Printf("[%s] passthrough websocket tunnel -> %s", reqID, outURL.String())
 	}
 
-	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders)
+	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, h.cfg.websocketIdleTimeout, nil, nil)
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -1788,6 +2054,9 @@ func relayWebSocket(
 	clientReq *http.Request,
 	upstreamURL *url.URL,
 	upstreamHeaders http.Header,
+	idleTimeout time.Duration,
+	onUpstreamResponse func(*http.Response),
+	onUpstreamMessage func([]byte) bool,
 ) (int, error) {
 	ctx := clientReq.Context()
 
@@ -1820,9 +2089,9 @@ func relayWebSocket(
 	}
 
 	upstreamConn, upstreamResp, err := websocket.Dial(ctx, wsURL.String(), &websocket.DialOptions{
-		HTTPHeader:       dialHeaders,
-		Subprotocols:     subprotocols,
-		CompressionMode:  websocket.CompressionNoContextTakeover,
+		HTTPHeader:      dialHeaders,
+		Subprotocols:    subprotocols,
+		CompressionMode: websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
@@ -1830,6 +2099,9 @@ func relayWebSocket(
 	}
 	defer upstreamConn.CloseNow()
 	upstreamConn.SetReadLimit(64 * 1024 * 1024)
+	if onUpstreamResponse != nil {
+		onUpstreamResponse(upstreamResp)
+	}
 
 	if turnState := upstreamResp.Header.Get("x-codex-turn-state"); turnState != "" {
 		w.Header().Set("x-codex-turn-state", turnState)
@@ -1858,10 +2130,10 @@ func relayWebSocket(
 
 	errc := make(chan error, 2)
 	go func() {
-		errc <- relayMessages(relayCtx, upstreamConn, clientConn, "upstream→client")
+		errc <- relayMessages(relayCtx, upstreamConn, clientConn, "upstream->client", idleTimeout, onUpstreamMessage)
 	}()
 	go func() {
-		errc <- relayMessages(relayCtx, clientConn, upstreamConn, "client→upstream")
+		errc <- relayMessages(relayCtx, clientConn, upstreamConn, "client->upstream", idleTimeout, nil)
 	}()
 
 	relayErr := <-errc
@@ -1889,10 +2161,24 @@ func relayWebSocket(
 }
 
 // relayMessages reads messages from src and writes them to dst until
-// the context is cancelled or an error occurs.
-func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string) error {
+// the context is cancelled or an error occurs. If idleTimeout > 0 the
+// connection is force-closed when no frame arrives within that window.
+//
+// We use a time.AfterFunc watchdog instead of context.WithTimeout because
+// coder/websocket closes the connection when the read context is cancelled,
+// which would tear the relay down on every successful frame.
+func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string, idleTimeout time.Duration, onMessage func([]byte) bool) error {
 	for {
+		var idleTimer *time.Timer
+		if idleTimeout > 0 {
+			idleTimer = time.AfterFunc(idleTimeout, func() {
+				src.Close(websocket.StatusPolicyViolation, fmt.Sprintf("idle for %v", idleTimeout))
+			})
+		}
 		msgType, data, err := src.Read(ctx)
+		if idleTimer != nil {
+			idleTimer.Stop()
+		}
 		if err != nil {
 			return fmt.Errorf("%s read: %w", label, err)
 		}
@@ -1902,8 +2188,12 @@ func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string) 
 			summary = summary[:200] + "..."
 		}
 		log.Printf("[ws-relay] %s: type=%v len=%d %s", label, msgType, len(data), summary)
+		shouldStop := onMessage != nil && onMessage(data)
 		if err := dst.Write(ctx, msgType, data); err != nil {
 			return fmt.Errorf("%s write: %w", label, err)
+		}
+		if shouldStop {
+			return nil
 		}
 	}
 }
@@ -1913,7 +2203,8 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	accountType := provider.Type()
 
 	requiredPlan := requiredPlanForRequest(accountType, r, "")
-	acc := h.pool.candidate("", map[string]bool{}, accountType, requiredPlan, getClientIP(r))
+	clientIP := getClientIP(r)
+	acc := h.pool.candidate("", map[string]bool{}, accountType, requiredPlan, clientIP)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -2031,6 +2322,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	}
 
 	resp, err := h.transport.RoundTrip(outReq)
+	captureCodexResponseState(acc, resp, reqID)
 	if err != nil {
 		acc.mu.Lock()
 		acc.Penalty += 0.2
@@ -2117,11 +2409,20 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	// Accumulate them into a single RequestUsage before recording.
 	// Declared outside the if-block so it can be flushed after io.Copy completes.
 	var claudeAccum2 *RequestUsage
+	cyberPinned := false
+	conversationID := extractConversationIDFromHeaders(r.Header)
 
 	if isSSE {
 		writer = &sseInterceptWriter{
 			w: writer,
 			callback: func(data []byte) {
+				if accountType == AccountTypeCodex && !acc.CyberAccess && isCyberPolicyError(data) {
+					if h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, clientIP, acc.ID, reqID) {
+						cyberPinned = true
+						cancel()
+					}
+					return
+				}
 				var obj map[string]any
 				if err := json.Unmarshal(data, &obj); err != nil {
 					var arr []map[string]any
@@ -2233,11 +2534,10 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		conversationID := ""
-		if len(respSample) > 0 {
+		if conversationID == "" && len(respSample) > 0 {
 			conversationID = extractConversationIDFromSSE(respSample)
 		}
-		if conversationID != "" {
+		if conversationID != "" && !cyberPinned {
 			h.pool.pin(conversationID, acc.ID)
 		}
 		acc.mu.Lock()
@@ -2261,12 +2561,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 // clientOrDefaultTimeout picks the request timeout. If the client sent X-Stainless-Timeout
 // (Anthropic SDK), use that. Otherwise fall back to streaming vs non-streaming defaults.
 func clientOrDefaultTimeout(r *http.Request, reqTimeout, streamTimeout time.Duration, body []byte) time.Duration {
-	// Honour the SDK's requested timeout when present.
-	if v := r.Header.Get("X-Stainless-Timeout"); v != "" {
-		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
-			return time.Duration(secs * float64(time.Second))
-		}
-	}
+	const codexExpectedStreamTimeout = 5 * time.Minute
 
 	isStreaming := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
 	if !isStreaming && len(body) > 0 {
@@ -2277,8 +2572,26 @@ func clientOrDefaultTimeout(r *http.Request, reqTimeout, streamTimeout time.Dura
 			}
 		}
 	}
+	isImageGeneration := len(body) > 0 && requestHasImageGenerationTool(body)
+
+	// Honour SDK/client-requested timeouts, but do not let short 60s/120s
+	// client defaults cut off Codex streams or image-generation streams before
+	// Codex's expected 300s window.
+	if v := r.Header.Get("X-Stainless-Timeout"); v != "" {
+		if secs, err := strconv.ParseFloat(v, 64); err == nil && secs > 0 {
+			requested := time.Duration(secs * float64(time.Second))
+			if (isStreaming || isImageGeneration) && requested < codexExpectedStreamTimeout {
+				return codexExpectedStreamTimeout
+			}
+			return requested
+		}
+	}
+
 	if isStreaming {
-		return streamTimeout // 0 means no timeout
+		return streamTimeout
+	}
+	if isImageGeneration && reqTimeout > 0 && reqTimeout < codexExpectedStreamTimeout {
+		return codexExpectedStreamTimeout
 	}
 	return reqTimeout
 }
@@ -2520,12 +2833,23 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	targetBase := provider.UpstreamURL(r.URL.Path)
+	path := r.URL.Path
+	if providerType == AccountTypeCodex {
+		if shouldNoopCodexPath(path) {
+			serveNoopCodexPath(w, r)
+			return
+		}
+	}
+
+	targetBase := provider.UpstreamURL(path)
 	if isWebSocketUpgradeRequest(r) {
 		h.proxyPassthroughWebSocket(w, r, reqID, providerType, provider, targetBase, start)
 		return
 	}
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
+	if providerType == AccountTypeCodex && codexPassthroughNeedsBodyRewrite(path) {
+		streamBody = false
+	}
 	if streamBody {
 		if h.cfg.debug.Load() {
 			log.Printf("[%s] passthrough streaming body: method=%s path=%s provider=%s content-length=%d",
@@ -2539,6 +2863,17 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if providerType == AccountTypeCodex {
+		path, bodyBytes, err = codexPassthroughRewrite(path, bodyBytes)
+		if err != nil {
+			http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		targetBase = provider.UpstreamURL(path)
+		r = r.Clone(r.Context())
+		r.URL.Path = path
 	}
 
 	if h.cfg.debug.Load() {
@@ -2813,6 +3148,8 @@ func (h *proxyHandler) tryOnce(
 		outURL.RawQuery = q.Encode()
 	}
 
+	var claudeToolNameMapper map[string]string
+
 	buildReq := func() (*http.Request, error) {
 		var body io.Reader
 		if len(bodyBytes) > 0 {
@@ -2845,6 +3182,48 @@ func (h *proxyHandler) tryOnce(
 
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
+
+		if provider.Type() == AccountTypeClaude && translateDir == TranslateNone {
+			transformedBody, mapper := transformClaudeSDKRequest(bodyBytes)
+			bodyBytes = transformedBody
+			claudeToolNameMapper = mapper
+			outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			outReq.ContentLength = int64(len(bodyBytes))
+			outReq.Header.Del("Content-Length")
+
+			isOAuth := strings.HasPrefix(access, "sk-ant-oat")
+			is1M := strings.Contains(strings.ToLower(requestedModel), "[1m]")
+			acceptHeader := "application/json"
+			isFastMode := false
+			var bodyObj map[string]any
+			if json.Unmarshal(bodyBytes, &bodyObj) == nil {
+				if s, ok := bodyObj["stream"].(bool); ok && s {
+					acceptHeader = "text/event-stream"
+				}
+				if sp, ok := bodyObj["speed"].(string); ok && sp == "fast" {
+					isFastMode = true
+				}
+			}
+			bodyModel := requestedModel
+			if bodyObj != nil {
+				if m, ok := bodyObj["model"].(string); ok && m != "" {
+					bodyModel = m
+				}
+			}
+			hasStructuredOutputs := ccRequestHasStructuredOutputs(bodyObj)
+			hasTaskBudget := ccRequestHasTaskBudget(bodyObj)
+			outReq.Header.Set("anthropic-version", ccAnthropicVersion)
+			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode, hasStructuredOutputs, hasTaskBudget))
+			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+			outReq.Header.Set("User-Agent", ccUserAgent())
+			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
+			outReq.Header.Set("X-App", "cli")
+			outReq.Header.Set("Accept", acceptHeader)
+			outReq.Header.Set("Accept-Language", "*")
+			outReq.Header.Set("Content-Type", "application/json")
+			outReq.Header.Set("Sec-Fetch-Mode", "cors")
+			ccStainlessHeaders(outReq.Header.Set)
+		}
 
 		// When translating, body size changes — remove the client's Content-Length
 		// so Go's HTTP client recalculates it from the actual body.
@@ -2971,6 +3350,11 @@ func (h *proxyHandler) tryOnce(
 	}
 
 	resp, err := h.transport.RoundTrip(outReq)
+	captureCodexResponseState(acc, resp, reqID)
+	if resp != nil && len(claudeToolNameMapper) > 0 {
+		resp.Header.Del("Content-Length")
+		resp.Body = newClaudeToolNameReadCloser(resp.Body, claudeToolNameMapper)
+	}
 	if err != nil {
 		acc.mu.Lock()
 		acc.Penalty += 0.2
@@ -3003,6 +3387,11 @@ func (h *proxyHandler) tryOnce(
 					acc.mu.Unlock()
 				}
 				resp, err = h.transport.RoundTrip(outReq)
+				captureCodexResponseState(acc, resp, reqID)
+				if resp != nil && len(claudeToolNameMapper) > 0 {
+					resp.Header.Del("Content-Length")
+					resp.Body = newClaudeToolNameReadCloser(resp.Body, claudeToolNameMapper)
+				}
 				if err != nil {
 					acc.mu.Lock()
 					acc.Penalty += 0.2

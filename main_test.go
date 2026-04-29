@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,6 +44,13 @@ func TestCodexProviderNormalizePathBackendAPIPathStripsPrefix(t *testing.T) {
 	}
 }
 
+func TestCodexProviderNormalizePathV1Models(t *testing.T) {
+	provider := &CodexProvider{}
+	if got := provider.NormalizePath("/v1/models"); got != "/models" {
+		t.Fatalf("NormalizePath(/v1/models) = %q", got)
+	}
+}
+
 func TestModelRouteOverrideOpenAIModelKeepsBackendAPIBase(t *testing.T) {
 	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
 	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
@@ -64,6 +74,363 @@ func TestModelRouteOverrideOpenAIModelKeepsBackendAPIBase(t *testing.T) {
 	}
 	if got := base.String(); got != whamBase.String() {
 		t.Fatalf("expected wham base %s, got %s", whamBase, got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type chunkedReadCloser struct {
+	chunks []string
+	index  int
+}
+
+func (r *chunkedReadCloser) Read(p []byte) (int, error) {
+	if r.index >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[r.index])
+	r.chunks[r.index] = r.chunks[r.index][n:]
+	if r.chunks[r.index] == "" {
+		r.index++
+	}
+	return n, nil
+}
+
+func (r *chunkedReadCloser) Close() error { return nil }
+
+func TestClaudeToolNameReadCloserRestoresSplitNames(t *testing.T) {
+	body := &chunkedReadCloser{chunks: []string{`{"content":[{"name":"t_123`, `45678"}]}`}}
+	reader := newClaudeToolNameReadCloser(body, map[string]string{"t_12345678": "Bash"})
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if strings.Contains(string(out), "t_12345678") || !strings.Contains(string(out), `"name":"Bash"`) {
+		t.Fatalf("tool name was not restored across chunks: %s", out)
+	}
+}
+
+func TestClaudePoolTokenAcceptedViaXAPIKeyAndShapesClaudeOAuthRequest(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	base, _ := url.Parse("https://api.anthropic.com")
+	acc := &Account{Type: AccountTypeClaude, ID: "claude", AccessToken: "sk-ant-oat-upstream", PlanType: "max"}
+	var upstreamBody map[string]any
+	var upstreamAuth string
+	var upstreamAPIKey string
+	var upstreamBeta string
+	var obfuscatedToolName string
+
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool:    newPoolState([]*Account{acc}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
+			upstreamAPIKey = req.Header.Get("X-Api-Key")
+			upstreamBeta = req.Header.Get("anthropic-beta")
+			body, _ := io.ReadAll(req.Body)
+			if err := json.Unmarshal(body, &upstreamBody); err != nil {
+				t.Fatalf("unmarshal upstream body: %v\n%s", err, body)
+			}
+			tools, _ := upstreamBody["tools"].([]any)
+			tool, _ := tools[0].(map[string]any)
+			obfuscatedToolName, _ = tool["name"].(string)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewBufferString(`{"content":[{"type":"tool_use","name":"` + obfuscatedToolName + `"}]}`)),
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"claude-sonnet-4-6",
+		"max_tokens":128,
+		"system":"be helpful",
+		"tools":[{"name":"Bash","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "sdk-user"))
+	rr := httptest.NewRecorder()
+	h.proxyRequest(rr, req, "req-sdk")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamAuth != "Bearer sk-ant-oat-upstream" {
+		t.Fatalf("upstream Authorization = %q", upstreamAuth)
+	}
+	if upstreamAPIKey != "" {
+		t.Fatalf("upstream X-Api-Key leaked pool token: %q", upstreamAPIKey)
+	}
+	if !strings.Contains(upstreamBeta, betaOAuth) || !strings.Contains(upstreamBeta, betaClaudeCode) {
+		t.Fatalf("upstream anthropic-beta = %q", upstreamBeta)
+	}
+	if obfuscatedToolName == "Bash" || !strings.HasPrefix(obfuscatedToolName, "t_") {
+		t.Fatalf("tool name was not obfuscated: %q", obfuscatedToolName)
+	}
+	system, _ := upstreamBody["system"].([]any)
+	if len(system) != 2 {
+		t.Fatalf("system blocks = %#v, want billing + identity only", system)
+	}
+	identity, _ := system[1].(map[string]any)
+	cache, _ := identity["cache_control"].(map[string]any)
+	if cache["ttl"] != "1h" {
+		t.Fatalf("identity cache ttl = %#v, want 1h", cache)
+	}
+	messages, _ := upstreamBody["messages"].([]any)
+	first, _ := messages[0].(map[string]any)
+	content, _ := first["content"].(string)
+	if !strings.Contains(content, "be helpful") || !strings.Contains(content, "hello") {
+		t.Fatalf("first user content did not absorb system text: %#v", first["content"])
+	}
+	if !strings.Contains(rr.Body.String(), `"name":"Bash"`) {
+		t.Fatalf("response tool name was not restored: %s", rr.Body.String())
+	}
+}
+
+func TestClaudeSDKRequestToGPTMapsReasoningEffort(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	wham, _ := url.Parse("https://chatgpt.com/backend-api")
+	acc := &Account{Type: AccountTypeCodex, ID: "codex", AccessToken: "codex-token", AccountID: "acct_codex", PlanType: "pro"}
+	var upstreamPath string
+	var upstreamBody map[string]any
+
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool:    newPoolState([]*Account{acc}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, wham, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamPath = req.URL.Path
+			body, _ := io.ReadAll(req.Body)
+			if err := json.Unmarshal(body, &upstreamBody); err != nil {
+				t.Fatalf("unmarshal upstream body: %v\n%s", err, body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(bytes.NewBufferString("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[]}}\n\n")),
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5.5",
+		"max_tokens":128,
+		"thinking":{"type":"enabled","budget_tokens":8192},
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "sdk-user"))
+	rr := httptest.NewRecorder()
+	h.proxyRequest(rr, req, "req-gpt")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("non-streaming Claude client got SSE response: %s", rr.Body.String())
+	}
+	var translated map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &translated); err != nil {
+		t.Fatalf("non-streaming Claude response was not JSON: %v\n%s", err, rr.Body.String())
+	}
+	if translated["type"] != "message" || translated["model"] != "gpt-5.5" {
+		t.Fatalf("unexpected translated Claude response: %#v", translated)
+	}
+	if upstreamPath != "/backend-api/codex/responses" {
+		t.Fatalf("upstream path = %q", upstreamPath)
+	}
+	reasoning, _ := upstreamBody["reasoning"].(map[string]any)
+	if got := reasoning["effort"]; got != "medium" {
+		t.Fatalf("reasoning effort = %#v, body=%#v", got, upstreamBody)
+	}
+}
+
+func TestCyberPolicyStreamPinsConversationToCyberAccessAccount(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	ordinary := &Account{Type: AccountTypeCodex, ID: "ordinary", AccessToken: "ordinary-token", AccountID: "acct_ordinary", PlanType: "pro"}
+	cyber := &Account{Type: AccountTypeCodex, ID: "cyber", AccessToken: "cyber-token", AccountID: "acct_cyber", PlanType: "pro", CyberAccess: true}
+	var accounts []string
+
+	h := &proxyHandler{
+		cfg: &config{
+			maxAttempts:          2,
+			maxInMemoryBodyBytes: 1024,
+		},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			accountID := req.Header.Get("ChatGPT-Account-ID")
+			accounts = append(accounts, accountID)
+			if len(accounts) == 1 {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(bytes.NewBufferString("data: {\"type\":\"error\",\"error\":{\"code\":\"cyber_policy\",\"message\":\"blocked\"}}\n\n")),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewBufferString(`{"ok":true}`)),
+			}, nil
+		}),
+		refreshTransport: http.DefaultTransport,
+		pool:             newPoolState([]*Account{ordinary, cyber}, false),
+		registry:         NewProviderRegistry(NewCodexProvider(base, base, base), NewClaudeProvider(base), NewGeminiProvider(base, base)),
+		metrics:          newMetrics(),
+		recent:           newRecentErrors(5),
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hi"}`))
+		req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "user-1"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("session_id", "thread-cyber")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d status=%d body=%s", i+1, rr.Code, rr.Body.String())
+		}
+	}
+
+	if len(accounts) != 2 || accounts[0] != "acct_ordinary" || accounts[1] != "acct_cyber" {
+		t.Fatalf("accounts = %#v, want ordinary then cyber", accounts)
+	}
+}
+
+func TestCyberPolicyErrorRetriesOnCyberAccessAccount(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	ordinary := &Account{Type: AccountTypeCodex, ID: "ordinary", AccessToken: "ordinary-token", AccountID: "acct_ordinary", PlanType: "pro"}
+	cyber := &Account{Type: AccountTypeCodex, ID: "cyber", AccessToken: "cyber-token", AccountID: "acct_cyber", PlanType: "pro", CyberAccess: true}
+	var accounts []string
+
+	h := &proxyHandler{
+		cfg: &config{
+			maxAttempts:          2,
+			maxInMemoryBodyBytes: 1024,
+		},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			accountID := req.Header.Get("ChatGPT-Account-ID")
+			accounts = append(accounts, accountID)
+			if accountID == "acct_ordinary" {
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Status:     "400 Bad Request",
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewBufferString(`{"ok":true}`)),
+			}, nil
+		}),
+		refreshTransport: http.DefaultTransport,
+		pool:             newPoolState([]*Account{ordinary, cyber}, false),
+		registry:         NewProviderRegistry(NewCodexProvider(base, base, base), NewClaudeProvider(base), NewGeminiProvider(base, base)),
+		metrics:          newMetrics(),
+		recent:           newRecentErrors(5),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/test", bytes.NewBufferString(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "user-1"))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(accounts) != 2 || accounts[0] != "acct_ordinary" || accounts[1] != "acct_cyber" {
+		t.Fatalf("accounts = %#v, want ordinary then cyber", accounts)
+	}
+}
+
+func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"models":[{"slug":"gpt-5.4","display_name":"gpt-5.4","description":"template","context_window":272000,"max_context_window":1000000,"visibility":"list","supported_in_api":true,"supported_reasoning_levels":[{"effort":"high"}]}]}`)
+	out := injectClaudeModels(body)
+
+	var catalog map[string]any
+	if err := json.Unmarshal(out, &catalog); err != nil {
+		t.Fatalf("unmarshal injected catalog: %v", err)
+	}
+	models, ok := catalog["models"].([]any)
+	if !ok {
+		t.Fatalf("models missing from catalog: %#v", catalog)
+	}
+
+	var found map[string]any
+	for _, model := range models {
+		m, ok := model.(map[string]any)
+		if ok && m["slug"] == "gpt-5.5" {
+			found = m
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("missing gpt-5.5 in injected catalog: %#v", models)
+	}
+	if got := int(found["context_window"].(float64)); got != 272000 {
+		t.Fatalf("gpt-5.5 context_window = %d", got)
+	}
+	if got := found["display_name"]; got != "gpt-5.5" {
+		t.Fatalf("gpt-5.5 display_name = %#v", got)
+	}
+}
+
+func TestInjectClaudeModelsDoesNotDuplicateExistingCodexFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"models":[{"slug":"gpt-5.5","display_name":"gpt-5.5"}]}`)
+	out := injectClaudeModels(body)
+
+	var catalog map[string]any
+	if err := json.Unmarshal(out, &catalog); err != nil {
+		t.Fatalf("unmarshal injected catalog: %v", err)
+	}
+	models := catalog["models"].([]any)
+	count := 0
+	for _, model := range models {
+		m, ok := model.(map[string]any)
+		if ok && m["slug"] == "gpt-5.5" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("gpt-5.5 count = %d, want 1", count)
 	}
 }
 
@@ -269,6 +636,166 @@ func TestInferClaudeWindowReset(t *testing.T) {
 	want := prev.Add(5 * time.Hour)
 	if got.UTC().Unix() != want.Unix() {
 		t.Fatalf("prev reset = %v want %v", got.UTC(), want.UTC())
+	}
+}
+
+func TestServeHTTPNoopsNoisyCodexPaths(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{}}
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/codex/analytics-events/events"},
+		{method: http.MethodGet, path: "/plugins/featured"},
+		{method: http.MethodGet, path: "/plugins/list"},
+		{method: http.MethodGet, path: "/backend-api/plugins/featured"},
+		{method: http.MethodPost, path: "/backend-api/codex/analytics-events/events"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s %s status=%d want %d", tc.method, tc.path, rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("%s %s body length=%d want 0", tc.method, tc.path, rr.Body.Len())
+		}
+	}
+}
+
+func TestServeHTTPCodexAppsMCPInitializeReturnsJSON(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{}}
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/wham/apps", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d", rr.Code, http.StatusOK)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type=%q want application/json", got)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	result, ok := response["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing result: %#v", response)
+	}
+	if got := result["protocolVersion"]; got != "2025-11-25" {
+		t.Fatalf("protocolVersion=%#v", got)
+	}
+}
+
+func TestServeHTTPCodexConnectorsDirectoryReturnsEmptyList(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{}}
+	req := httptest.NewRequest(http.MethodGet, "/connectors/directory/list?external_logos=true", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d", rr.Code, http.StatusOK)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	apps, ok := response["apps"].([]any)
+	if !ok || len(apps) != 0 {
+		t.Fatalf("apps=%#v want empty array", response["apps"])
+	}
+}
+
+func TestRequestHasImageGenerationTool(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation"}]}`)
+	if !requestHasImageGenerationTool(body) {
+		t.Fatal("expected image_generation tool to be detected")
+	}
+	if requestHasImageGenerationTool([]byte(`{"tools":[{"type":"function"}]}`)) {
+		t.Fatal("did not expect function tool to be detected as image generation")
+	}
+}
+
+func TestClientOrDefaultTimeoutClampsCodexStreamTimeouts(t *testing.T) {
+	t.Parallel()
+
+	streamReq := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	streamReq.Header.Set("X-Stainless-Timeout", "60")
+	streamBody := []byte(`{"stream":true}`)
+	if got := clientOrDefaultTimeout(streamReq, 10*time.Second, 0, streamBody); got != 5*time.Minute {
+		t.Fatalf("stream timeout = %v, want 5m", got)
+	}
+
+	imageReq := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	imageReq.Header.Set("X-Stainless-Timeout", "120")
+	imageBody := []byte(`{"tools":[{"type":"image_generation"}]}`)
+	if got := clientOrDefaultTimeout(imageReq, 10*time.Second, 0, imageBody); got != 5*time.Minute {
+		t.Fatalf("image timeout = %v, want 5m", got)
+	}
+
+	plainReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	plainReq.Header.Set("X-Stainless-Timeout", "60")
+	if got := clientOrDefaultTimeout(plainReq, 10*time.Second, 0, []byte(`{"stream":false}`)); got != time.Minute {
+		t.Fatalf("plain timeout = %v, want 1m", got)
+	}
+}
+
+func TestCodexPassthroughNeedsBodyRewrite(t *testing.T) {
+	t.Parallel()
+
+	if !codexPassthroughNeedsBodyRewrite("/v1/messages") {
+		t.Fatal("expected /v1/messages to require rewrite")
+	}
+	if !codexPassthroughNeedsBodyRewrite("/v1/chat/completions") {
+		t.Fatal("expected /v1/chat/completions to require rewrite")
+	}
+	if codexPassthroughNeedsBodyRewrite("/v1/models") {
+		t.Fatal("did not expect /v1/models to require body rewrite")
+	}
+}
+
+func TestCodexPassthroughRewrite(t *testing.T) {
+	t.Parallel()
+
+	claudeBody := []byte(`{"model":"gpt-5.4","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`)
+	path, rewritten, err := codexPassthroughRewrite("/v1/messages", claudeBody)
+	if err != nil {
+		t.Fatalf("rewrite /v1/messages: %v", err)
+	}
+	if path != "/v1/responses" {
+		t.Fatalf("rewritten path = %q", path)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(rewritten, &obj); err != nil {
+		t.Fatalf("unmarshal rewritten claude body: %v", err)
+	}
+	if stream, _ := obj["stream"].(bool); !stream {
+		t.Fatalf("expected rewritten claude request to force stream=true, got %#v", obj["stream"])
+	}
+
+	chatBody := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`)
+	path, rewritten, err = codexPassthroughRewrite("/v1/chat/completions", chatBody)
+	if err != nil {
+		t.Fatalf("rewrite /v1/chat/completions: %v", err)
+	}
+	if path != "/v1/responses" {
+		t.Fatalf("rewritten chat path = %q", path)
+	}
+	if err := json.Unmarshal(rewritten, &obj); err != nil {
+		t.Fatalf("unmarshal rewritten chat body: %v", err)
+	}
+	if stream, _ := obj["stream"].(bool); !stream {
+		t.Fatalf("expected rewritten chat request to force stream=true, got %#v", obj["stream"])
 	}
 }
 

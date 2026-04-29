@@ -1379,8 +1379,24 @@ func claudeModelEntry(slug, displayName string, contextWindow int) map[string]an
 	}
 }
 
-// injectClaudeModels adds Claude model entries to the Codex model catalog response
-// so that `codex -m opus` (and sonnet/haiku) don't produce "Model metadata not found" warnings.
+type codexCatalogModel struct {
+	slug          string
+	displayName   string
+	description   string
+	contextWindow int
+}
+
+var codexCatalogFallbackModels = []codexCatalogModel{
+	{
+		slug:          "gpt-5.5",
+		displayName:   "gpt-5.5",
+		description:   "Strong model for complex coding tasks.",
+		contextWindow: 272000,
+	},
+}
+
+// injectClaudeModels adds local pool model entries to the Codex model catalog response
+// so the Codex CLI can select models that the pool routes but upstream omits.
 func injectClaudeModels(body []byte) []byte {
 	// Decompress gzip if needed (upstream may return compressed data when
 	// client's Accept-Encoding header is forwarded)
@@ -1405,6 +1421,8 @@ func injectClaudeModels(body []byte) []byte {
 		return body
 	}
 
+	models = injectMissingCodexCatalogModels(models)
+
 	claudeModels := []map[string]any{
 		claudeModelEntry("opus", "Claude Opus 4.7", 200000),
 		claudeModelEntry("opus[1m]", "Claude Opus 4.7 [1m]", 1000000),
@@ -1423,4 +1441,61 @@ func injectClaudeModels(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func injectMissingCodexCatalogModels(models []any) []any {
+	existing := make(map[string]bool, len(models))
+	var template map[string]any
+	for _, model := range models {
+		m, ok := model.(map[string]any)
+		if !ok {
+			continue
+		}
+		slug, _ := m["slug"].(string)
+		if slug == "" {
+			continue
+		}
+		existing[slug] = true
+		if template == nil && strings.HasPrefix(slug, "gpt-") {
+			template = m
+		}
+	}
+
+	for _, fallback := range codexCatalogFallbackModels {
+		if existing[fallback.slug] {
+			continue
+		}
+		models = append(models, codexCatalogFallbackEntry(fallback, template))
+	}
+	return models
+}
+
+func codexCatalogFallbackEntry(model codexCatalogModel, template map[string]any) map[string]any {
+	entry := cloneCatalogEntry(template)
+	if entry == nil {
+		entry = map[string]any{}
+	}
+	entry["slug"] = model.slug
+	entry["display_name"] = model.displayName
+	entry["description"] = model.description
+	entry["context_window"] = model.contextWindow
+	entry["max_context_window"] = model.contextWindow
+	entry["visibility"] = "list"
+	entry["supported_in_api"] = true
+	return entry
+}
+
+func cloneCatalogEntry(entry map[string]any) map[string]any {
+	if entry == nil {
+		return nil
+	}
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return nil
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(b, &cloned); err != nil {
+		return nil
+	}
+	return cloned
 }

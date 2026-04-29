@@ -52,20 +52,16 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 			input = append(input, item)
 
 		case "assistant":
-			// Check for tool_calls
+			if text := extractTextContent(m); text != "" {
+				input = append(input, map[string]any{
+					"type": "message",
+					"role": "assistant",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": text},
+					},
+				})
+			}
 			if toolCalls, ok := m["tool_calls"].([]any); ok && len(toolCalls) > 0 {
-				// First add the assistant message if it has text content
-				if text := extractTextContent(m); text != "" {
-					item := map[string]any{
-						"type": "message",
-						"role": "assistant",
-						"content": []any{
-							map[string]any{"type": "output_text", "text": text},
-						},
-					}
-					input = append(input, item)
-				}
-				// Then add function_call items for each tool call
 				for _, tc := range toolCalls {
 					call, ok := tc.(map[string]any)
 					if !ok {
@@ -85,15 +81,21 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 						"arguments": args,
 					})
 				}
-			} else {
-				// Regular assistant message
-				item := map[string]any{
-					"type": "message",
-					"role": "assistant",
-				}
-				content := convertOAIContentToResponsesContent(m["content"])
-				item["content"] = content
-				input = append(input, item)
+			} else if fn, ok := m["function_call"].(map[string]any); ok && fn != nil {
+				name, _ := fn["name"].(string)
+				args, _ := fn["arguments"].(string)
+				input = append(input, map[string]any{
+					"type":      "function_call",
+					"call_id":   "fc_" + name,
+					"name":      name,
+					"arguments": args,
+				})
+			} else if extractTextContent(m) == "" {
+				input = append(input, map[string]any{
+					"type":    "message",
+					"role":    "assistant",
+					"content": convertOAIContentToResponsesContent(m["content"]),
+				})
 			}
 
 		case "tool":
@@ -103,6 +105,14 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 			input = append(input, map[string]any{
 				"type":    "function_call_output",
 				"call_id": callID,
+				"output":  text,
+			})
+		case "function":
+			name, _ := m["name"].(string)
+			text := extractTextContent(m)
+			input = append(input, map[string]any{
+				"type":    "function_call_output",
+				"call_id": "fc_" + name,
 				"output":  text,
 			})
 		}
@@ -131,39 +141,16 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 	// NOTE: max_tokens / max_completion_tokens intentionally NOT mapped to
 	// max_output_tokens — the Codex backend rejects that parameter.
 
-	// tools -> tools (reformat)
-	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
-		var responsesTools []any
-		for _, t := range tools {
-			tool, ok := t.(map[string]any)
-			if !ok {
-				continue
-			}
-			fn, _ := tool["function"].(map[string]any)
-			if fn == nil {
-				continue
-			}
-			name, _ := fn["name"].(string)
-			desc, _ := fn["description"].(string)
-			params, _ := fn["parameters"].(map[string]any)
-			rt := map[string]any{
-				"type": "function",
-				"name": name,
-			}
-			if desc != "" {
-				rt["description"] = desc
-			}
-			if params != nil {
-				rt["parameters"] = params
-			}
-			responsesTools = append(responsesTools, rt)
-		}
+	// tools/functions -> Responses tools
+	if responsesTools := convertOpenAIToolsToResponses(req); len(responsesTools) > 0 {
 		out["tools"] = responsesTools
 	}
 
-	// tool_choice -> tool_choice (pass through, format is similar)
+	// tool_choice -> Responses tool_choice
 	if v, ok := req["tool_choice"]; ok {
-		out["tool_choice"] = v
+		if choice := convertOpenAIToolChoiceToResponses(v); choice != nil {
+			out["tool_choice"] = choice
+		}
 	}
 
 	// stop -> stop (pass through if present, but Responses API doesn't typically use it)
@@ -179,6 +166,107 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+func convertOpenAIToolsToResponses(req map[string]any) []any {
+	var responsesTools []any
+	if tools, ok := req["tools"].([]any); ok {
+		for _, t := range tools {
+			tool, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			if hosted := normalizeOpenAIHostedWebSearchTool(tool); hosted != nil {
+				responsesTools = append(responsesTools, hosted)
+				continue
+			}
+			if typ, _ := tool["type"].(string); typ != "function" {
+				continue
+			}
+			fn, _ := tool["function"].(map[string]any)
+			if fn == nil {
+				continue
+			}
+			if rt := convertOpenAIFunctionTool(fn); rt != nil {
+				responsesTools = append(responsesTools, rt)
+			}
+		}
+	}
+	if functions, ok := req["functions"].([]any); ok {
+		for _, raw := range functions {
+			fn, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if rt := convertOpenAIFunctionTool(fn); rt != nil {
+				responsesTools = append(responsesTools, rt)
+			}
+		}
+	}
+	return responsesTools
+}
+
+func convertOpenAIFunctionTool(fn map[string]any) map[string]any {
+	name, _ := fn["name"].(string)
+	if name == "" {
+		return nil
+	}
+	rt := map[string]any{"type": "function", "name": name}
+	if desc, _ := fn["description"].(string); desc != "" {
+		rt["description"] = desc
+	}
+	if params, _ := fn["parameters"].(map[string]any); params != nil {
+		rt["parameters"] = normalizeOpenAIToolSchema(params)
+	}
+	return rt
+}
+
+func normalizeOpenAIToolSchema(schema map[string]any) map[string]any {
+	if typ, _ := schema["type"].(string); typ == "object" {
+		if _, ok := schema["properties"]; !ok {
+			copy := make(map[string]any, len(schema)+1)
+			for k, v := range schema {
+				copy[k] = v
+			}
+			copy["properties"] = map[string]any{}
+			return copy
+		}
+	}
+	return schema
+}
+
+func normalizeOpenAIHostedWebSearchTool(tool map[string]any) map[string]any {
+	typ, _ := tool["type"].(string)
+	if typ != "web_search" && typ != "web_search_preview" {
+		return nil
+	}
+	out := map[string]any{"type": "web_search"}
+	if size, _ := tool["search_context_size"].(string); size == "low" || size == "medium" || size == "high" {
+		out["search_context_size"] = size
+	}
+	if loc, ok := tool["user_location"].(map[string]any); ok {
+		out["user_location"] = loc
+	}
+	return out
+}
+
+func convertOpenAIToolChoiceToResponses(choice any) any {
+	switch c := choice.(type) {
+	case string:
+		return c
+	case map[string]any:
+		if typ, _ := c["type"].(string); typ == "web_search" || typ == "web_search_preview" {
+			return map[string]any{"type": "web_search"}
+		}
+		fn, _ := c["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if name == "" {
+			return nil
+		}
+		return map[string]any{"type": "function", "name": name}
+	default:
+		return nil
+	}
 }
 
 // convertOAIContentToResponsesContent converts OpenAI message content to Responses API content format.
@@ -201,9 +289,14 @@ func convertOAIContentToResponsesContent(content any) []any {
 				text, _ := p["text"].(string)
 				result = append(result, map[string]any{"type": "input_text", "text": text})
 			case "image_url":
-				imageURL, _ := p["image_url"].(map[string]any)
-				if imageURL != nil {
-					url, _ := imageURL["url"].(string)
+				var url string
+				switch imageURL := p["image_url"].(type) {
+				case string:
+					url = imageURL
+				case map[string]any:
+					url, _ = imageURL["url"].(string)
+				}
+				if url != "" {
 					result = append(result, map[string]any{
 						"type":      "input_image",
 						"image_url": url,
@@ -313,9 +406,9 @@ func translateResponsesToChatCompletions(body []byte) ([]byte, error) {
 	}
 
 	out := map[string]any{
-		"id":      id,
-		"object":  "chat.completion",
-		"model":   model,
+		"id":     id,
+		"object": "chat.completion",
+		"model":  model,
 		"choices": []any{
 			map[string]any{
 				"index":         0,
@@ -800,6 +893,10 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 		out["top_p"] = v
 	}
 
+	if effort := extractClaudeReasoningEffort(claude); effort != "" {
+		out["reasoning"] = map[string]any{"effort": effort}
+	}
+
 	// tools -> convert from Claude format to Responses API format
 	if tools, ok := claude["tools"].([]any); ok && len(tools) > 0 {
 		var responsesTools []any
@@ -833,6 +930,69 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 	out["store"] = false
 
 	return json.Marshal(out)
+}
+
+func extractClaudeReasoningEffort(claude map[string]any) string {
+	if effort, ok := claude["reasoning_effort"].(string); ok {
+		return normalizeResponsesReasoningEffort(effort)
+	}
+	if reasoning, ok := claude["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok {
+			return normalizeResponsesReasoningEffort(effort)
+		}
+	}
+	if outputConfig, ok := claude["output_config"].(map[string]any); ok {
+		if effort, ok := outputConfig["effort"].(string); ok {
+			return normalizeResponsesReasoningEffort(effort)
+		}
+	}
+	if thinking, ok := claude["thinking"].(map[string]any); ok {
+		if effort, ok := thinking["effort"].(string); ok {
+			return normalizeResponsesReasoningEffort(effort)
+		}
+		if budget := numericAny(thinking["budget_tokens"]); budget > 0 {
+			return reasoningEffortFromBudget(budget)
+		}
+	}
+	return ""
+}
+
+func normalizeResponsesReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
+}
+
+func reasoningEffortFromBudget(budget float64) string {
+	switch {
+	case budget >= 10000:
+		return "high"
+	case budget <= 2000:
+		return "low"
+	default:
+		return "medium"
+	}
+}
+
+func numericAny(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	default:
+		return 0
+	}
 }
 
 // convertClaudeContentToResponsesInput converts Claude message content
@@ -909,7 +1069,7 @@ func extractTextContent(msg map[string]any) string {
 			}
 		}
 		if len(texts) > 0 {
-			return texts[0]
+			return strings.Join(texts, "\n")
 		}
 	}
 	return ""

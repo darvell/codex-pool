@@ -9,6 +9,141 @@ import (
 	"strings"
 )
 
+type responsesBufferingWriter struct {
+	buf          []byte
+	id           string
+	model        string
+	contentText  string
+	inputTokens  int64
+	outputTokens int64
+	status       string
+}
+
+func (bw *responsesBufferingWriter) Write(p []byte) (int, error) {
+	origLen := len(p)
+	bw.buf = append(bw.buf, p...)
+	bw.scanEvents()
+	return origLen, nil
+}
+
+func (bw *responsesBufferingWriter) scanEvents() {
+	for {
+		idx := bytes.Index(bw.buf, []byte("\n\n"))
+		advance := 2
+		if idx < 0 {
+			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
+			advance = 4
+			if idx < 0 {
+				return
+			}
+		}
+		event := bw.buf[:idx]
+		bw.buf = bw.buf[idx+advance:]
+		bw.processEvent(event)
+	}
+}
+
+func (bw *responsesBufferingWriter) processEvent(event []byte) {
+	var eventType string
+	var data []byte
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(line[6:]))
+		} else if bytes.HasPrefix(line, []byte("data: ")) {
+			data = bytes.TrimSpace(line[6:])
+		} else if bytes.HasPrefix(line, []byte("data:")) {
+			data = bytes.TrimSpace(line[5:])
+		}
+	}
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return
+	}
+	if eventType == "" {
+		eventType, _ = obj["type"].(string)
+	}
+	switch eventType {
+	case "response.created":
+		bw.applyResponse(obj)
+	case "response.output_text.delta":
+		if delta, _ := obj["delta"].(string); delta != "" {
+			bw.contentText += delta
+		}
+	case "response.completed":
+		bw.applyResponse(obj)
+		if bw.status == "" {
+			bw.status = "completed"
+		}
+	case "response.failed":
+		bw.applyResponse(obj)
+		bw.status = "failed"
+	}
+}
+
+func (bw *responsesBufferingWriter) applyResponse(obj map[string]any) {
+	resp, _ := obj["response"].(map[string]any)
+	if resp == nil {
+		return
+	}
+	if id, _ := resp["id"].(string); id != "" {
+		bw.id = id
+	}
+	if model, _ := resp["model"].(string); model != "" {
+		bw.model = model
+	}
+	if status, _ := resp["status"].(string); status != "" {
+		bw.status = status
+	}
+	if usage, _ := resp["usage"].(map[string]any); usage != nil {
+		bw.inputTokens = toInt64(usage["input_tokens"])
+		bw.outputTokens = toInt64(usage["output_tokens"])
+	}
+}
+
+func (bw *responsesBufferingWriter) Result() []byte {
+	id := bw.id
+	if id == "" {
+		id = "resp_translated"
+	}
+	model := bw.model
+	if model == "" {
+		model = "unknown"
+	}
+	status := bw.status
+	if status == "" {
+		status = "completed"
+	}
+	out := map[string]any{
+		"id":         id,
+		"object":     "response",
+		"created_at": float64(0),
+		"status":     status,
+		"model":      model,
+		"output": []any{
+			map[string]any{
+				"id":     "msg_" + id,
+				"type":   "message",
+				"status": status,
+				"role":   "assistant",
+				"content": []any{
+					map[string]any{"type": "output_text", "text": bw.contentText, "annotations": []any{}},
+				},
+			},
+		},
+		"usage": map[string]any{
+			"input_tokens":  bw.inputTokens,
+			"output_tokens": bw.outputTokens,
+			"total_tokens":  bw.inputTokens + bw.outputTokens,
+		},
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
 // responsesToChatCompletionsWriter intercepts upstream Responses API SSE events
 // and translates them to OpenAI Chat Completions streaming format.
 type responsesToChatCompletionsWriter struct {
@@ -19,12 +154,15 @@ type responsesToChatCompletionsWriter struct {
 	reqID    string
 
 	// State tracking
-	id             string
-	model          string
-	started        bool
-	toolCallIndex  int
-	inputTokens    int64
-	outputTokens   int64
+	id                  string
+	model               string
+	started             bool
+	toolCallIndex       int
+	toolCallIDToIndex   map[string]int
+	itemIDToToolCallID  map[string]string
+	toolCallHasArgDelta map[string]bool
+	inputTokens         int64
+	outputTokens        int64
 }
 
 func (rw *responsesToChatCompletionsWriter) Write(p []byte) (int, error) {
@@ -116,11 +254,16 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 		switch itemType {
 		case "function_call":
 			callID, _ := item["call_id"].(string)
+			itemID, _ := item["id"].(string)
+			if callID == "" {
+				callID = itemID
+			}
 			name, _ := item["name"].(string)
+			idx := rw.registerToolCall(itemID, callID)
 			rw.emitChunk(map[string]any{
 				"tool_calls": []any{
 					map[string]any{
-						"index": rw.toolCallIndex,
+						"index": idx,
 						"id":    callID,
 						"type":  "function",
 						"function": map[string]any{
@@ -130,7 +273,6 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 					},
 				},
 			}, "", nil)
-			rw.toolCallIndex++
 		}
 
 	case "response.output_text.delta":
@@ -148,9 +290,13 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 	case "response.function_call_arguments.delta":
 		delta, _ := obj["delta"].(string)
 		if delta != "" {
-			idx := rw.toolCallIndex - 1
-			if idx < 0 {
-				idx = 0
+			callID := rw.resolveToolCallID(obj)
+			idx := rw.toolCallIndexForID(callID)
+			if callID != "" {
+				if rw.toolCallHasArgDelta == nil {
+					rw.toolCallHasArgDelta = map[string]bool{}
+				}
+				rw.toolCallHasArgDelta[callID] = true
 			}
 			rw.emitChunk(map[string]any{
 				"tool_calls": []any{
@@ -164,8 +310,38 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 			}, "", nil)
 		}
 
+	case "response.function_call_arguments.done":
+		callID := rw.resolveToolCallID(obj)
+		args, _ := obj["arguments"].(string)
+		if args != "" && callID != "" && !rw.toolCallHasArgDelta[callID] {
+			rw.emitChunk(map[string]any{
+				"tool_calls": []any{
+					map[string]any{
+						"index": rw.toolCallIndexForID(callID),
+						"function": map[string]any{
+							"arguments": args,
+						},
+					},
+				},
+			}, "", nil)
+		}
+
 	case "response.output_item.done":
-		// No action needed for chat completions format
+		item, _ := obj["item"].(map[string]any)
+		callID := rw.resolveToolCallIDFromItem(item)
+		args, _ := item["arguments"].(string)
+		if args != "" && callID != "" && !rw.toolCallHasArgDelta[callID] {
+			rw.emitChunk(map[string]any{
+				"tool_calls": []any{
+					map[string]any{
+						"index": rw.toolCallIndexForID(callID),
+						"function": map[string]any{
+							"arguments": args,
+						},
+					},
+				},
+			}, "", nil)
+		}
 
 	case "response.completed":
 		resp, _ := obj["response"].(map[string]any)
@@ -220,8 +396,7 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 
 	case "response.output_text.done", "response.content_part.done",
 		"response.content_part.added", "response.reasoning_text.done",
-		"response.reasoning_summary_text.done", "response.function_call_arguments.done",
-		"response.in_progress":
+		"response.reasoning_summary_text.done", "response.in_progress":
 		// Informational events, no action needed
 
 	default:
@@ -229,6 +404,71 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 			log.Printf("[%s] responses->chat: unhandled event type: %s", rw.reqID, eventType)
 		}
 	}
+}
+
+func (rw *responsesToChatCompletionsWriter) registerToolCall(itemID, callID string) int {
+	if rw.toolCallIDToIndex == nil {
+		rw.toolCallIDToIndex = map[string]int{}
+	}
+	if rw.itemIDToToolCallID == nil {
+		rw.itemIDToToolCallID = map[string]string{}
+	}
+	if callID == "" {
+		callID = itemID
+	}
+	if itemID != "" && callID != "" {
+		rw.itemIDToToolCallID[itemID] = callID
+	}
+	if callID != "" {
+		if idx, ok := rw.toolCallIDToIndex[callID]; ok {
+			return idx
+		}
+	}
+	idx := rw.toolCallIndex
+	rw.toolCallIndex++
+	if callID != "" {
+		rw.toolCallIDToIndex[callID] = idx
+	}
+	return idx
+}
+
+func (rw *responsesToChatCompletionsWriter) resolveToolCallID(obj map[string]any) string {
+	callID, _ := obj["call_id"].(string)
+	if callID == "" {
+		callID, _ = obj["item_id"].(string)
+	}
+	if callID == "" {
+		return ""
+	}
+	if resolved := rw.itemIDToToolCallID[callID]; resolved != "" {
+		return resolved
+	}
+	return callID
+}
+
+func (rw *responsesToChatCompletionsWriter) resolveToolCallIDFromItem(item map[string]any) string {
+	if item == nil {
+		return ""
+	}
+	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		callID, _ = item["id"].(string)
+	}
+	if resolved := rw.itemIDToToolCallID[callID]; resolved != "" {
+		return resolved
+	}
+	return callID
+}
+
+func (rw *responsesToChatCompletionsWriter) toolCallIndexForID(callID string) int {
+	if idx, ok := rw.toolCallIDToIndex[callID]; ok {
+		return idx
+	}
+	idx := rw.toolCallIndex - 1
+	if idx < 0 {
+		return 0
+	}
+	return idx
 }
 
 func (rw *responsesToChatCompletionsWriter) emitChunk(delta map[string]any, finishReason string, usage map[string]any) {
@@ -287,15 +527,18 @@ type responsesToChatCompletionsBufferingWriter struct {
 	reqID    string
 
 	// State accumulated from SSE events
-	id            string
-	model         string
-	contentText   string
-	toolCalls     []any
-	toolCallIndex int
-	inputTokens   int64
-	outputTokens  int64
-	finishReason  string
-	errMsg        string
+	id                  string
+	model               string
+	contentText         string
+	toolCalls           []any
+	toolCallIndex       int
+	toolCallIDToIndex   map[string]int
+	itemIDToToolCallID  map[string]string
+	toolCallHasArgDelta map[string]bool
+	inputTokens         int64
+	outputTokens        int64
+	finishReason        string
+	errMsg              string
 }
 
 func (bw *responsesToChatCompletionsBufferingWriter) Write(p []byte) (int, error) {
@@ -381,25 +624,56 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 		}
 		if itemType, _ := item["type"].(string); itemType == "function_call" {
 			callID, _ := item["call_id"].(string)
+			itemID, _ := item["id"].(string)
+			if callID == "" {
+				callID = itemID
+			}
 			name, _ := item["name"].(string)
+			idx := bw.registerToolCall(itemID, callID)
 			bw.toolCalls = append(bw.toolCalls, map[string]any{
 				"id":    callID,
 				"type":  "function",
-				"index": bw.toolCallIndex,
+				"index": idx,
 				"function": map[string]any{
 					"name":      name,
 					"arguments": "",
 				},
 			})
-			bw.toolCallIndex++
 		}
 
 	case "response.function_call_arguments.delta":
 		delta, _ := obj["delta"].(string)
 		if delta != "" && len(bw.toolCalls) > 0 {
-			tc := bw.toolCalls[len(bw.toolCalls)-1].(map[string]any)
+			callID := bw.resolveToolCallID(obj)
+			idx := bw.toolCallIndexForID(callID)
+			if callID != "" {
+				if bw.toolCallHasArgDelta == nil {
+					bw.toolCallHasArgDelta = map[string]bool{}
+				}
+				bw.toolCallHasArgDelta[callID] = true
+			}
+			tc := bw.toolCalls[idx].(map[string]any)
 			fn := tc["function"].(map[string]any)
 			fn["arguments"] = fn["arguments"].(string) + delta
+		}
+
+	case "response.function_call_arguments.done":
+		callID := bw.resolveToolCallID(obj)
+		args, _ := obj["arguments"].(string)
+		if args != "" && callID != "" && !bw.toolCallHasArgDelta[callID] && len(bw.toolCalls) > 0 {
+			tc := bw.toolCalls[bw.toolCallIndexForID(callID)].(map[string]any)
+			fn := tc["function"].(map[string]any)
+			fn["arguments"] = args
+		}
+
+	case "response.output_item.done":
+		item, _ := obj["item"].(map[string]any)
+		callID := bw.resolveToolCallIDFromItem(item)
+		args, _ := item["arguments"].(string)
+		if args != "" && callID != "" && !bw.toolCallHasArgDelta[callID] && len(bw.toolCalls) > 0 {
+			tc := bw.toolCalls[bw.toolCallIndexForID(callID)].(map[string]any)
+			fn := tc["function"].(map[string]any)
+			fn["arguments"] = args
 		}
 
 	case "response.completed":
@@ -439,6 +713,71 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 		}
 		bw.finishReason = "stop"
 	}
+}
+
+func (bw *responsesToChatCompletionsBufferingWriter) registerToolCall(itemID, callID string) int {
+	if bw.toolCallIDToIndex == nil {
+		bw.toolCallIDToIndex = map[string]int{}
+	}
+	if bw.itemIDToToolCallID == nil {
+		bw.itemIDToToolCallID = map[string]string{}
+	}
+	if callID == "" {
+		callID = itemID
+	}
+	if itemID != "" && callID != "" {
+		bw.itemIDToToolCallID[itemID] = callID
+	}
+	if callID != "" {
+		if idx, ok := bw.toolCallIDToIndex[callID]; ok {
+			return idx
+		}
+	}
+	idx := bw.toolCallIndex
+	bw.toolCallIndex++
+	if callID != "" {
+		bw.toolCallIDToIndex[callID] = idx
+	}
+	return idx
+}
+
+func (bw *responsesToChatCompletionsBufferingWriter) resolveToolCallID(obj map[string]any) string {
+	callID, _ := obj["call_id"].(string)
+	if callID == "" {
+		callID, _ = obj["item_id"].(string)
+	}
+	if resolved := bw.itemIDToToolCallID[callID]; resolved != "" {
+		return resolved
+	}
+	return callID
+}
+
+func (bw *responsesToChatCompletionsBufferingWriter) resolveToolCallIDFromItem(item map[string]any) string {
+	if item == nil {
+		return ""
+	}
+	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		callID, _ = item["id"].(string)
+	}
+	if resolved := bw.itemIDToToolCallID[callID]; resolved != "" {
+		return resolved
+	}
+	return callID
+}
+
+func (bw *responsesToChatCompletionsBufferingWriter) toolCallIndexForID(callID string) int {
+	if idx, ok := bw.toolCallIDToIndex[callID]; ok {
+		return idx
+	}
+	idx := bw.toolCallIndex - 1
+	if idx < 0 {
+		return 0
+	}
+	if idx >= len(bw.toolCalls) {
+		return len(bw.toolCalls) - 1
+	}
+	return idx
 }
 
 // Result returns the assembled non-streaming Chat Completions JSON response.
@@ -491,6 +830,231 @@ func (bw *responsesToChatCompletionsBufferingWriter) Result() []byte {
 		}
 	}
 
+	b, _ := json.Marshal(out)
+	return b
+}
+
+// responsesToClaudeBufferingWriter buffers Responses API SSE events into a
+// non-streaming Claude Messages API response.
+type responsesToClaudeBufferingWriter struct {
+	buf      []byte
+	callback func([]byte)
+	debug    bool
+	reqID    string
+
+	id           string
+	model        string
+	contentText  string
+	toolUses     []map[string]any
+	inputTokens  int64
+	outputTokens int64
+	stopReason   string
+	errMsg       string
+}
+
+func (bw *responsesToClaudeBufferingWriter) Write(p []byte) (int, error) {
+	origLen := len(p)
+	bw.buf = append(bw.buf, p...)
+	bw.scanEvents()
+	return origLen, nil
+}
+
+func (bw *responsesToClaudeBufferingWriter) scanEvents() {
+	for {
+		idx := bytes.Index(bw.buf, []byte("\n\n"))
+		advance := 2
+		if idx < 0 {
+			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
+			advance = 4
+			if idx < 0 {
+				return
+			}
+		}
+		event := bw.buf[:idx]
+		bw.buf = bw.buf[idx+advance:]
+		bw.processEvent(event)
+	}
+}
+
+func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
+	var eventType string
+	var data []byte
+
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(line[6:]))
+		} else if bytes.HasPrefix(line, []byte("data: ")) {
+			data = bytes.TrimSpace(line[6:])
+		} else if bytes.HasPrefix(line, []byte("data:")) {
+			data = bytes.TrimSpace(line[5:])
+		}
+	}
+
+	if len(data) > 0 && bw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
+		bw.callback(data)
+	}
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		if bw.debug {
+			log.Printf("[%s] responses->claude buffer: JSON parse error for event %q: %v", bw.reqID, eventType, err)
+		}
+		return
+	}
+	if eventType == "" {
+		if t, ok := obj["type"].(string); ok {
+			eventType = t
+		}
+	}
+
+	switch eventType {
+	case "response.created":
+		resp, _ := obj["response"].(map[string]any)
+		if resp != nil {
+			if id, ok := resp["id"].(string); ok {
+				bw.id = id
+			}
+			if model, ok := resp["model"].(string); ok {
+				bw.model = model
+			}
+			if usage, ok := resp["usage"].(map[string]any); ok {
+				bw.inputTokens = toInt64(usage["input_tokens"])
+			}
+		}
+	case "response.output_text.delta":
+		if delta, _ := obj["delta"].(string); delta != "" {
+			bw.contentText += delta
+		}
+	case "response.output_item.added":
+		item, _ := obj["item"].(map[string]any)
+		if item == nil {
+			return
+		}
+		if itemType, _ := item["type"].(string); itemType == "function_call" {
+			callID, _ := item["call_id"].(string)
+			name, _ := item["name"].(string)
+			bw.toolUses = append(bw.toolUses, map[string]any{
+				"type":  "tool_use",
+				"id":    callID,
+				"name":  name,
+				"input": map[string]any{},
+				"_args": "",
+			})
+		}
+	case "response.function_call_arguments.delta":
+		if delta, _ := obj["delta"].(string); delta != "" && len(bw.toolUses) > 0 {
+			last := bw.toolUses[len(bw.toolUses)-1]
+			last["_args"] = last["_args"].(string) + delta
+		}
+	case "response.output_item.done":
+		bw.finishToolUse()
+	case "response.completed":
+		resp, _ := obj["response"].(map[string]any)
+		if resp != nil {
+			if id, ok := resp["id"].(string); ok && bw.id == "" {
+				bw.id = id
+			}
+			if model, ok := resp["model"].(string); ok && bw.model == "" {
+				bw.model = model
+			}
+			if usage, ok := resp["usage"].(map[string]any); ok {
+				bw.inputTokens = toInt64(usage["input_tokens"])
+				bw.outputTokens = toInt64(usage["output_tokens"])
+			}
+			if status, ok := resp["status"].(string); ok && status == "incomplete" {
+				bw.stopReason = "max_tokens"
+			}
+		}
+		if bw.stopReason == "" {
+			bw.stopReason = "end_turn"
+		}
+		if len(bw.toolUses) > 0 {
+			bw.stopReason = "tool_use"
+		}
+	case "response.failed":
+		resp, _ := obj["response"].(map[string]any)
+		bw.errMsg = "response failed"
+		if resp != nil {
+			if e, ok := resp["error"].(map[string]any); ok {
+				if msg, _ := e["message"].(string); msg != "" {
+					bw.errMsg = msg
+				}
+			}
+		}
+		bw.stopReason = "end_turn"
+	}
+}
+
+func (bw *responsesToClaudeBufferingWriter) finishToolUse() {
+	if len(bw.toolUses) == 0 {
+		return
+	}
+	last := bw.toolUses[len(bw.toolUses)-1]
+	args, _ := last["_args"].(string)
+	delete(last, "_args")
+	if args == "" {
+		return
+	}
+	var input map[string]any
+	if json.Unmarshal([]byte(args), &input) == nil {
+		last["input"] = input
+	}
+}
+
+func (bw *responsesToClaudeBufferingWriter) Result() []byte {
+	for i := range bw.toolUses {
+		args, _ := bw.toolUses[i]["_args"].(string)
+		if args != "" {
+			var input map[string]any
+			if json.Unmarshal([]byte(args), &input) == nil {
+				bw.toolUses[i]["input"] = input
+			}
+		}
+		delete(bw.toolUses[i], "_args")
+	}
+
+	content := make([]any, 0, 1+len(bw.toolUses))
+	text := bw.contentText
+	if bw.errMsg != "" {
+		text = "[Error: " + bw.errMsg + "]"
+	}
+	if text != "" {
+		content = append(content, map[string]any{"type": "text", "text": text})
+	}
+	for _, toolUse := range bw.toolUses {
+		content = append(content, toolUse)
+	}
+
+	stopReason := bw.stopReason
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
+	id := bw.id
+	if id == "" {
+		id = "msg_translated"
+	}
+	model := bw.model
+	if model == "" {
+		model = "unknown"
+	}
+
+	out := map[string]any{
+		"id":            id,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       content,
+		"stop_reason":   stopReason,
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  bw.inputTokens,
+			"output_tokens": bw.outputTokens,
+		},
+	}
 	b, _ := json.Marshal(out)
 	return b
 }
@@ -856,8 +1420,8 @@ type responsesToClaudeWriter struct {
 	started           bool
 	contentBlockIndex int
 	toolCallIndex     int
-	sentText          bool   // whether we've emitted a text content_block_start
-	sentThinking      bool   // whether we've emitted a thinking content_block_start
+	sentText          bool // whether we've emitted a text content_block_start
+	sentThinking      bool // whether we've emitted a thinking content_block_start
 	finishReason      string
 	inputTokens       int64
 	outputTokens      int64
