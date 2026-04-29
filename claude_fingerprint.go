@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -54,10 +55,56 @@ const (
 )
 
 var (
-	ccSessionID = uuid.NewString()
-	ccDeviceID  = uuid.NewString()
-	ccMetaMu    sync.Mutex
+	ccProcessSessionID = uuid.NewString()
+	ccProcessDeviceID  = uuid.NewString()
+	ccMetaMu           sync.Mutex
 )
+
+// ccDerivedID returns a stable deterministic UUID-style identifier derived from
+// a per-user seed and a label. We use this so the same pool user emits the same
+// device_id / session_id every time without leaking a single shared value
+// across the whole pool. Empty seed falls back to the process-wide value.
+func ccDerivedID(seed, label, fallback string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return fallback
+	}
+	h := sha256.Sum256([]byte("codex-pool/" + label + "/" + seed))
+	return formatUUIDFromHash(h[:16])
+}
+
+func formatUUIDFromHash(b []byte) string {
+	if len(b) < 16 {
+		return ""
+	}
+	// Stamp variant + version 4 bits so the result reads as a valid UUID.
+	clone := make([]byte, 16)
+	copy(clone, b[:16])
+	clone[6] = (clone[6] & 0x0f) | 0x40
+	clone[8] = (clone[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", clone[0:4], clone[4:6], clone[6:8], clone[8:10], clone[10:16])
+}
+
+// ccUserDeviceID returns a stable device id for the given pool user.
+func ccUserDeviceID(userID string) string {
+	return ccDerivedID(userID, "device", ccProcessDeviceID)
+}
+
+// ccUserFallbackSessionID returns a stable per-user session id used only when
+// the client did not supply its own session id. Real Claude Code clients send
+// X-Claude-Code-Session-Id; for everything else we want a stable value rather
+// than a random per-request one so traffic still looks like one user with many
+// turns instead of thousands of one-shot strangers.
+func ccUserFallbackSessionID(userID string) string {
+	return ccDerivedID(userID, "session", ccProcessSessionID)
+}
+
+// ccAccountSessionID returns a stable per-account session id, used for internal
+// proxy-originated calls (profile fetch, usage poll, OAuth refresh) where there
+// is no downstream user.
+func ccAccountSessionID(accountID string) string {
+	return ccDerivedID(accountID, "account-session", ccProcessSessionID)
+}
 
 // ccUserAgent returns the User-Agent string matching Claude Code's format.
 func ccUserAgent() string {
@@ -123,32 +170,49 @@ func ccRequestHasTaskBudget(bodyObj map[string]any) bool {
 	return false
 }
 
-func ccSessionHeader() string {
-	return ccSessionID
+func ccSessionHeader(req *http.Request, userID string) string {
+	if req != nil {
+		for _, key := range []string{"X-Claude-Code-Session-Id", "x-claude-code-session-id", "X-Anthropic-Session-Id", "anthropic-session-id"} {
+			if v := strings.TrimSpace(req.Header.Get(key)); v != "" {
+				return v
+			}
+		}
+	}
+	return ccUserFallbackSessionID(userID)
 }
 
-func ccInjectMetadata(bodyObj map[string]any, accountUUID string) {
+func ccInjectMetadata(bodyObj map[string]any, accountUUID, userID, sessionID string) {
 	if bodyObj == nil {
-		return
-	}
-	if _, exists := bodyObj["metadata"]; exists {
 		return
 	}
 
 	ccMetaMu.Lock()
 	defer ccMetaMu.Unlock()
 
-	payload := map[string]string{
-		"device_id":    ccDeviceID,
-		"account_uuid": accountUUID,
-		"session_id":   ccSessionID,
+	deviceID := ccUserDeviceID(userID)
+	if sessionID == "" {
+		sessionID = ccUserFallbackSessionID(userID)
 	}
-	userID, err := json.Marshal(payload)
+
+	// Honour an existing metadata.user_id but always carry a session id forward
+	// so we don't ship a metadata blob without one.
+	if existing, ok := bodyObj["metadata"].(map[string]any); ok {
+		if _, hasUser := existing["user_id"]; hasUser {
+			return
+		}
+	}
+
+	payload := map[string]string{
+		"device_id":    deviceID,
+		"account_uuid": accountUUID,
+		"session_id":   sessionID,
+	}
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
 	bodyObj["metadata"] = map[string]any{
-		"user_id": string(userID),
+		"user_id": string(encoded),
 	}
 }
 

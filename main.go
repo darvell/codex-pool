@@ -1240,7 +1240,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
 
-		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel)
+		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID)
 
 		atomic.AddInt64(&acc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
@@ -3117,6 +3117,7 @@ func (h *proxyHandler) tryOnce(
 	reqID string,
 	translateDir TranslateDirection,
 	requestedModel string,
+	userID string,
 ) (*http.Response, *bytes.Buffer, bool, error) {
 	if acc == nil {
 		return nil, nil, false, errors.New("nil account")
@@ -3184,7 +3185,8 @@ func (h *proxyHandler) tryOnce(
 		provider.SetAuthHeaders(outReq, acc)
 
 		if provider.Type() == AccountTypeClaude && translateDir == TranslateNone {
-			transformedBody, mapper := transformClaudeSDKRequest(bodyBytes)
+			sessionID := ccSessionHeader(in, userID)
+			transformedBody, mapper := transformClaudeSDKRequest(bodyBytes, userID, sessionID)
 			bodyBytes = transformedBody
 			claudeToolNameMapper = mapper
 			outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -3216,7 +3218,7 @@ func (h *proxyHandler) tryOnce(
 			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode, hasStructuredOutputs, hasTaskBudget))
 			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
 			outReq.Header.Set("User-Agent", ccUserAgent())
-			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
+			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader(in, userID))
 			outReq.Header.Set("X-App", "cli")
 			outReq.Header.Set("Accept", acceptHeader)
 			outReq.Header.Set("Accept-Language", "*")
@@ -3295,7 +3297,8 @@ func (h *proxyHandler) tryOnce(
 			// "system" field, converting it to the block-array format that real
 			// Claude Code uses. This must happen before we set Content-Length.
 			if bodyObj != nil {
-				ccInjectMetadata(bodyObj, "")
+				sessionID := ccSessionHeader(in, userID)
+				ccInjectMetadata(bodyObj, "", userID, sessionID)
 				bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
 				bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
 				outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -3308,7 +3311,7 @@ func (h *proxyHandler) tryOnce(
 			outReq.Header.Set("anthropic-beta", ccBetaHeader(bodyModel, isOAuth, is1M, isFastMode, hasStructuredOutputs, hasTaskBudget))
 			outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
 			outReq.Header.Set("User-Agent", ccUserAgent())
-			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
+			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader(in, userID))
 			outReq.Header.Set("X-App", "cli")
 			outReq.Header.Set("Accept", acceptHeader)
 			outReq.Header.Set("Accept-Language", "*")

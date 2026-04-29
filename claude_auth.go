@@ -215,7 +215,7 @@ func FetchClaudeProfile(accessToken string) (*ClaudeProfileInfo, error) {
 	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
 	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
 	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
-	req.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader())
+	req.Header.Set("X-Claude-Code-Session-Id", ccAccountSessionID(accessToken))
 	req.Header.Set("X-App", "cli")
 	req.Header.Set("Accept", "application/json")
 	ccStainlessHeaders(req.Header.Set)

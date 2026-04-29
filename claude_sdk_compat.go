@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func transformClaudeSDKRequest(body []byte) ([]byte, map[string]string) {
+func transformClaudeSDKRequest(body []byte, userID, sessionID string) ([]byte, map[string]string) {
 	if len(body) == 0 {
 		return body, nil
 	}
@@ -20,7 +20,7 @@ func transformClaudeSDKRequest(body []byte) ([]byte, map[string]string) {
 
 	moveNonCoreSystemToFirstUser(obj)
 	mapper := obfuscateClaudeToolNames(obj)
-	ccInjectMetadata(obj, "")
+	ccInjectMetadata(obj, "", userID, sessionID)
 	out := ccInjectSystemBlocks(obj, body)
 	out = ccReplaceCCHPlaceholder(out)
 	return out, mapper
