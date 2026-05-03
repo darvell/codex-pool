@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 const testWebSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -130,9 +133,6 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 		t.Fatalf("timed out waiting for upstream websocket request")
 	}
 
-	if acc.CodexTurnState != "turn-from-ws-upgrade" {
-		t.Fatalf("CodexTurnState = %q, want turn-from-ws-upgrade", acc.CodexTurnState)
-	}
 	if got := extractConversationIDFromHeaders(http.Header{"Session_id": []string{"thread-ws-1"}}); got != "thread-ws-1" {
 		t.Fatalf("extractConversationIDFromHeaders = %q, want %q", got, "thread-ws-1")
 	}
@@ -304,12 +304,239 @@ func TestProxyWebSocketPinsMaxPlanWhen1MHeaderPresent(t *testing.T) {
 	}
 }
 
+func TestProxyWebSocketForwardsTurnStateBothWays(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	type upstreamReq struct {
+		turnState string
+	}
+	upstreamReqCh := make(chan upstreamReq, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamReqCh <- upstreamReq{turnState: r.Header.Get("x-codex-turn-state")}
+		writeWebSocketSwitchingProtocolsResponseWithHeaders(w, r, http.Header{"x-codex-turn-state": []string{"turn-from-upstream"}})
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	acc := &Account{Type: AccountTypeCodex, ID: "codex_pool_1", AccessToken: "pool-access-token", AccountID: "acct_pool_1", PlanType: "pro"}
+	h := &proxyHandler{
+		cfg:       &config{requestTimeout: 5 * time.Second, maxInMemoryBodyBytes: 1024, websocketReadLimit: 128 * 1024 * 1024},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{acc}, false),
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	statusLine, headers := performRawWebSocketHandshakeWithResponseHeaders(t, proxy.URL, "/responses", map[string]string{
+		"Authorization":       "Bearer " + generateClaudePoolToken("test-secret", "ws-user"),
+		"session_id":          "thread-ws-turn-state",
+		"x-codex-turn-state":  "turn-from-client",
+		"x-client-request-id": "thread-ws-turn-state",
+		"conversation_id":     "thread-ws-turn-state",
+		"ChatGPT-Account-ID":  "client-account-should-be-overwritten",
+		"Sec-WebSocket-Dummy": "ignored-by-helper",
+	})
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101 response, got %q", statusLine)
+	}
+	if got := headers.Get("x-codex-turn-state"); got != "turn-from-upstream" {
+		t.Fatalf("downstream x-codex-turn-state = %q, want turn-from-upstream", got)
+	}
+
+	select {
+	case got := <-upstreamReqCh:
+		if got.turnState != "turn-from-client" {
+			t.Fatalf("upstream x-codex-turn-state = %q, want turn-from-client", got.turnState)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for upstream websocket request")
+	}
+}
+
+func TestProxyWebSocketRelaysFrameLargerThanOld64MiBLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const payloadSize = 65 * 1024 * 1024
+	largePayload := strings.Repeat("x", payloadSize)
+	largeMessage := `{"type":"response.output_text.delta","delta":"` + largePayload + `"}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		_ = conn.Write(ctx, websocket.MessageText, []byte(largeMessage))
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:             5 * time.Second,
+			maxInMemoryBodyBytes:       1024,
+			websocketHeartbeatInterval: 0,
+			websocketReadLimit:         128 * 1024 * 1024,
+		},
+		transport: http.DefaultTransport,
+		pool:      newPoolState(nil, false),
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	proxyURL.Scheme = "ws"
+	proxyURL.Path = "/responses"
+
+	conn, _, err := websocket.Dial(ctx, proxyURL.String(), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer sk-proj-test-passthrough"}},
+	})
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer conn.CloseNow()
+	conn.SetReadLimit(128 * 1024 * 1024)
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.5"}`)); err != nil {
+		t.Fatalf("write response.create: %v", err)
+	}
+
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read large proxied websocket message: %v", err)
+	}
+	if len(data) != len(largeMessage) {
+		t.Fatalf("large message len = %d, want %d", len(data), len(largeMessage))
+	}
+}
+
+func TestProxyWebSocketKeepsCodexConnectionAliveDuringSilentUpstream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"response.created","response":{"id":"resp_keepalive","status":"in_progress"}}`)); err != nil {
+			return
+		}
+		time.Sleep(80 * time.Millisecond)
+		_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"response.completed","response":{"id":"resp_keepalive","status":"completed"}}`))
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:             5 * time.Second,
+			maxInMemoryBodyBytes:       1024,
+			websocketHeartbeatInterval: 20 * time.Millisecond,
+			websocketReadLimit:         128 * 1024 * 1024,
+		},
+		transport: http.DefaultTransport,
+		pool:      newPoolState(nil, false),
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	proxyURL.Scheme = "ws"
+	proxyURL.Path = "/responses"
+
+	conn, _, err := websocket.Dial(ctx, proxyURL.String(), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer sk-proj-test-passthrough"}},
+	})
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.5"}`)); err != nil {
+		t.Fatalf("write response.create: %v", err)
+	}
+
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read proxied websocket message: %v", err)
+		}
+		if strings.Contains(string(data), "response.completed") {
+			break
+		}
+	}
+}
+
 func performRawWebSocketHandshake(
 	t *testing.T,
 	serverURL string,
 	path string,
 	headers map[string]string,
 ) string {
+	t.Helper()
+	statusLine, _ := performRawWebSocketHandshakeWithResponseHeaders(t, serverURL, path, headers)
+	return statusLine
+}
+
+func performRawWebSocketHandshakeWithResponseHeaders(
+	t *testing.T,
+	serverURL string,
+	path string,
+	headers map[string]string,
+) (string, http.Header) {
 	t.Helper()
 
 	u, err := url.Parse(serverURL)
@@ -343,16 +570,22 @@ func performRawWebSocketHandshake(
 	if err != nil {
 		t.Fatalf("read websocket status line: %v", err)
 	}
+	responseHeaders := make(http.Header)
 	for {
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil {
 			t.Fatalf("read websocket response header: %v", readErr)
 		}
-		if strings.TrimSpace(line) == "" {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			break
 		}
+		name, value, ok := strings.Cut(line, ":")
+		if ok {
+			responseHeaders.Add(strings.TrimSpace(name), strings.TrimSpace(value))
+		}
 	}
-	return strings.TrimSpace(statusLine)
+	return strings.TrimSpace(statusLine), responseHeaders
 }
 
 func writeWebSocketSwitchingProtocolsResponse(w http.ResponseWriter, r *http.Request) {

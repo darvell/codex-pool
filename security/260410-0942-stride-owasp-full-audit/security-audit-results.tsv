@@ -1,0 +1,33 @@
+iteration	vector	severity	owasp	stride	confidence	location	description
+0	-	-	-	-	-	-	baseline -- no automated security tooling in project; govulncheck not installed
+1	oauth-callback	Info	A08	EoP	Confirmed	router.go:307	/admin/claude/callback unauthenticated by design -- echoes params only, no state change
+2	admin-token-query	High	A02,A05	InfoDisc	Confirmed	router.go:26-33	Admin token accepted via query param (log/referer leak) + debug mode logs configured token
+3	friend-code-escalation	High	A01	EoP	Confirmed	router.go:307-350	Friend code grants access to account management (add/refresh/exchange) across all providers
+4	pkce-state-leak	Medium	A07	Spoofing	Likely	claude_auth.go:78-79	PKCE verifier passed as OAuth state parameter (visible in redirect URL)
+5	no-user-rate-limit	Medium	A04	DoS	Confirmed	main.go:673-900	No per-user rate limiting on proxy requests; one user can exhaust all accounts
+6	raw-ip-storage	Medium	A09	InfoDisc	Confirmed	storage.go:420	Raw client IP stored alongside hashed origin ID in BoltDB
+7	debug-token-log	High	A05	InfoDisc	Confirmed	router.go:31-33	Debug mode logs both provided and configured admin tokens in plaintext
+8	refresh-token-forgery	Critical	A07	Spoofing	Confirmed	handlers.go:347-354	Refresh token random part never validated; any valid user ID -> full credentials
+9	no-csrf	Medium	A04	Tampering	Possible	frontend.go:83	State-changing POST endpoints lack CSRF protection (mitigated by JSON Content-Type)
+10	no-token-expiry	High	A07	Spoofing	Confirmed	pool_users.go:589-637	Claude pool tokens never expire; Codex tokens expire in 10 years
+11	weak-jwt-secret	Low	A02	Spoofing	Confirmed	config.toml:19	JWT secret "bigfarts" in sample config (local file only, not in git)
+12	proxy-creds-plaintext	Low	A02	InfoDisc	Confirmed	config.toml:8	Refresh proxy credentials in plaintext URL (local config only)
+13	xff-spoofing	Low	A01	Spoofing	Possible	utils.go:30-53	Proxy headers trusted without validation when not behind Cloudflare
+14	config-token-url	Medium	A02	InfoDisc	Confirmed	admin_pool_users.go:128-131	Pool user token in URL path for config download (browser history/log exposure)
+15	unbounded-json-body	Medium	A04	DoS	Confirmed	frontend.go:103+	JSON body decoded without size limits on admin/friend endpoints
+16	no-audit-logging	Low	A09	Repudiation	Confirmed	multiple	No structured audit logging; admin actions logged to stdout only
+17	ssrf-clean	-	A10	-	-	-	No user-controllable URLs in server-side requests
+18	deps-ok	-	A06	-	-	-	Dependencies appear current; govulncheck unavailable for automated scan
+19	alg-none-jwt	Info	A08	Tampering	Confirmed	handlers.go:336	Fake OAuth generates alg:none JWT; no security impact (always replaced before upstream)
+20	toctou-friend-claim	Low	A04	Tampering	Confirmed	frontend.go:149-163	Race condition in friend claim: concurrent requests may create duplicate users
+21	attack-chain	Critical	A07,A01	Spoofing,EoP	Confirmed	multiple	Friend code -> user ID enumeration -> refresh forgery -> full account takeover
+22	user-id-enumeration	Medium	A01	InfoDisc	Confirmed	frontend.go:1750	Pool user IDs exposed via /api/pool/users (friend code auth)
+23	ws-no-origin-check	Low	A05	Spoofing	Confirmed	main.go:1781	WebSocket InsecureSkipVerify:true (intentional for CLI clients)
+24	pool-stats-exposure	Medium	A01	InfoDisc	Confirmed	frontend.go:1392	Pool stats expose account IDs, plan types, usage with friend code auth
+25	missing-security-headers	Medium	A05	InfoDisc	Confirmed	all handlers	No CSP, X-Frame-Options, X-Content-Type-Options, HSTS, Referrer-Policy
+26	predictable-ids	Info	A04	-	-	frontend.go:155	User IDs are random hex but exposed via API (predictability is moot)
+27	passthrough-anon-relay	Low	A04	Repudiation	Confirmed	main.go:760-766	Passthrough mode allows proxy use as anonymizing relay with own credentials
+28	memory-exhaustion	Low	A04	DoS	Possible	utils.go:108	readBodyForReplay reads up to 16MB per request into memory
+29	sig-truncation	Info	A02	-	-	pool_users.go:414	Gemini API key HMAC truncated to 96 bits (still adequate)
+30	open-when-unconfigured	Medium	A01	EoP	Confirmed	router.go:58-61	All friend-auth endpoints open when no admin_token and no friend_code configured
+31	claude-trace-secrets	Medium	A09	InfoDisc	Confirmed	claude_trace.go:122-124	Claude trace can capture auth headers to disk when TRACE_INCLUDE_SECRETS=1

@@ -62,7 +62,7 @@ func TestCodexProviderPreservesClientRequestID(t *testing.T) {
 	}
 }
 
-func TestCaptureCodexResponseStatePersistsCloudflareCookiesAndTurnState(t *testing.T) {
+func TestCaptureCodexResponseStatePersistsCloudflareCookies(t *testing.T) {
 	acc := &Account{Type: AccountTypeCodex, ID: "test", CodexCookies: map[string]string{}}
 	resp := &http.Response{Header: make(http.Header)}
 	resp.Header.Set("x-codex-turn-state", "turn-1")
@@ -70,9 +70,6 @@ func TestCaptureCodexResponseStatePersistsCloudflareCookiesAndTurnState(t *testi
 	resp.Header.Add("Set-Cookie", "session=skip; Path=/")
 
 	captureCodexResponseState(acc, resp, "test")
-	if acc.CodexTurnState != "turn-1" {
-		t.Fatalf("CodexTurnState = %q, want turn-1", acc.CodexTurnState)
-	}
 	if got := acc.CodexCookies["cf_clearance"]; got != "abc" {
 		t.Fatalf("cf_clearance = %q, want abc", got)
 	}

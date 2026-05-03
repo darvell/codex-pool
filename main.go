@@ -41,25 +41,27 @@ type config struct {
 	disableRefresh  bool
 	refreshProxyURL string // HTTP proxy URL for refresh operations
 
-	debug                atomic.Bool
-	logBodies            bool
-	bodyLogLimit         int64
-	claudeTraceDir       string
-	claudeTraceBodyLimit int64
-	claudeTraceSecrets   bool
-	maxInMemoryBodyBytes int64
-	flushInterval        time.Duration
-	usageRefresh         time.Duration
-	maxAttempts          int
-	storePath            string
-	retentionDays        int
-	friendCode           string
-	adminToken           string
-	requestTimeout       time.Duration // Timeout for non-streaming requests (0 = no timeout)
-	streamTimeout        time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
-	streamIdleTimeout    time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
-	websocketIdleTimeout time.Duration // Kill websocket relays idle for this long (0 = no idle timeout)
-	tierThreshold        float64       // Secondary usage % at which we stop preferring a tier (default 0.50)
+	debug                      atomic.Bool
+	logBodies                  bool
+	bodyLogLimit               int64
+	claudeTraceDir             string
+	claudeTraceBodyLimit       int64
+	claudeTraceSecrets         bool
+	maxInMemoryBodyBytes       int64
+	flushInterval              time.Duration
+	usageRefresh               time.Duration
+	maxAttempts                int
+	storePath                  string
+	retentionDays              int
+	friendCode                 string
+	adminToken                 string
+	requestTimeout             time.Duration // Timeout for non-streaming requests (0 = no timeout)
+	streamTimeout              time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
+	streamIdleTimeout          time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	websocketIdleTimeout       time.Duration // Kill websocket relays idle for this long (0 = no idle timeout)
+	websocketHeartbeatInterval time.Duration // Send downstream app-level websocket heartbeats this often (0 = disabled)
+	websocketReadLimit         int64         // Maximum websocket message size
+	tierThreshold              float64       // Secondary usage % at which we stop preferring a tier (default 0.50)
 }
 
 func getenv(key, def string) string {
@@ -185,6 +187,18 @@ func buildConfig() *config {
 	if v := getenv("WEBSOCKET_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.websocketIdleTimeout = time.Duration(n) * time.Second
+		}
+	}
+	cfg.websocketHeartbeatInterval = heartbeatInterval
+	if v := getenv("WEBSOCKET_HEARTBEAT_SECONDS", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n >= 0 {
+			cfg.websocketHeartbeatInterval = time.Duration(n) * time.Second
+		}
+	}
+	cfg.websocketReadLimit = 64 * 1024 * 1024
+	if v := getenv("WEBSOCKET_READ_LIMIT_BYTES", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n > 0 {
+			cfg.websocketReadLimit = n
 		}
 	}
 
@@ -383,8 +397,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -677,9 +691,11 @@ func modelRequiresCodexPro(model string) bool {
 	return strings.EqualFold(strings.TrimSpace(model), "gpt-5.3-codex-spark")
 }
 
-func claudeRequestRequiresMax(r *http.Request, model string) bool {
+const requiredPlanClaudePremium = "claude_premium"
+
+func claudeRequestRequiresPremium(r *http.Request, model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	if strings.Contains(model, "[1m]") {
+	if strings.Contains(model, "opus") || strings.Contains(model, "[1m]") {
 		return true
 	}
 	if r == nil {
@@ -697,8 +713,8 @@ func requiredPlanForRequest(accountType AccountType, r *http.Request, requestedM
 	if accountType == AccountTypeCodex && modelRequiresCodexPro(requestedModel) {
 		return "pro"
 	}
-	if accountType == AccountTypeClaude && claudeRequestRequiresMax(r, requestedModel) {
-		return "max"
+	if accountType == AccountTypeClaude && claudeRequestRequiresPremium(r, requestedModel) {
+		return requiredPlanClaudePremium
 	}
 	return ""
 }
@@ -1240,7 +1256,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
 
-		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID, originID)
+		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID, originID, conversationID)
 
 		atomic.AddInt64(&acc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
@@ -1852,7 +1868,18 @@ func (h *proxyHandler) proxyRequestWebSocket(
 
 	requiredPlan := requiredPlanForRequest(accountType, r, "")
 	clientIP := getClientIP(r)
-	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, requiredPlan, clientIP)
+	selectionConversationID := conversationID
+	if selectionConversationID == "" && accountType == AccountTypeCodex {
+		fallbackID := userID
+		if fallbackID == "" {
+			fallbackID = originID
+		}
+		if fallbackID == "" {
+			fallbackID = clientIP
+		}
+		selectionConversationID = "cyber-fallback:" + fallbackID
+	}
+	acc := h.pool.candidate(selectionConversationID, map[string]bool{}, accountType, requiredPlan, clientIP)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -1918,23 +1945,34 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	}
 
 	cyberPinned := false
-	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, h.cfg.websocketIdleTimeout, func(upstreamResp *http.Response) {
-		captureCodexResponseState(acc, upstreamResp, reqID)
-	}, func(data []byte) bool {
-		if accountType != AccountTypeCodex {
-			return false
-		}
-		var obj map[string]any
-		if err := json.Unmarshal(data, &obj); err == nil {
-			if id := extractConversationIDFromObject(obj); id != "" {
-				conversationID = id
+	relayLabel := fmt.Sprintf("%s account=%s", reqID, acc.ID)
+	readLimit := effectiveWebSocketReadLimit(accountType, h.cfg.websocketReadLimit)
+	downstreamHeartbeatInterval := time.Duration(0)
+	if accountType == AccountTypeCodex {
+		downstreamHeartbeatInterval = h.cfg.websocketHeartbeatInterval
+	}
+	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
+		IdleTimeout:                 h.cfg.websocketIdleTimeout,
+		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
+		ReadLimit:                   readLimit,
+		LogLabel:                    relayLabel,
+		OnUpstreamResponse: func(upstreamResp *http.Response) {
+			captureCodexResponseState(acc, upstreamResp, reqID)
+		},
+		OnUpstreamMessage: func(data []byte) error {
+			if accountType != AccountTypeCodex || acc.CyberAccess || !isCyberPolicyError(data) {
+				return nil
 			}
-		}
-		if acc.CyberAccess || !isCyberPolicyError(data) {
-			return false
-		}
-		cyberPinned = h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, clientIP, acc.ID, reqID)
-		return cyberPinned
+			pinID := conversationID
+			if pinID == "" {
+				pinID = extractConversationIDFromJSON(data)
+			}
+			if h.pinConversationToCyberAccess(pinID, accountType, requiredPlan, clientIP, acc.ID, reqID) {
+				cyberPinned = true
+				return websocket.CloseError{Code: websocket.StatusTryAgainLater, Reason: "retry on cyber access account"}
+			}
+			return nil
+		},
 	})
 
 	if err != nil {
@@ -2021,7 +2059,17 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 		log.Printf("[%s] passthrough websocket tunnel -> %s", reqID, outURL.String())
 	}
 
-	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, h.cfg.websocketIdleTimeout, nil, nil)
+	readLimit := effectiveWebSocketReadLimit(providerType, h.cfg.websocketReadLimit)
+	downstreamHeartbeatInterval := time.Duration(0)
+	if providerType == AccountTypeCodex {
+		downstreamHeartbeatInterval = h.cfg.websocketHeartbeatInterval
+	}
+	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
+		IdleTimeout:                 h.cfg.websocketIdleTimeout,
+		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
+		ReadLimit:                   readLimit,
+		LogLabel:                    reqID + " passthrough",
+	})
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -2049,14 +2097,34 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 //  1. Dial upstream WS first so we can mirror selected handshake state.
 //  2. Accept the client WS upgrade with the negotiated subprotocol.
 //  3. Relay messages bidirectionally until either side closes.
+type webSocketRelayOptions struct {
+	IdleTimeout                 time.Duration
+	DownstreamHeartbeatInterval time.Duration
+	ReadLimit                   int64
+	LogLabel                    string
+	OnUpstreamResponse          func(*http.Response)
+	OnUpstreamMessage           func([]byte) error
+	OnClientMessage             func([]byte) error
+}
+
+const codexWebSocketReadLimit = 512 * 1024 * 1024
+
+func effectiveWebSocketReadLimit(accountType AccountType, configured int64) int64 {
+	if configured <= 0 {
+		configured = 64 * 1024 * 1024
+	}
+	if accountType == AccountTypeCodex && configured < codexWebSocketReadLimit {
+		return codexWebSocketReadLimit
+	}
+	return configured
+}
+
 func relayWebSocket(
 	w http.ResponseWriter,
 	clientReq *http.Request,
 	upstreamURL *url.URL,
 	upstreamHeaders http.Header,
-	idleTimeout time.Duration,
-	onUpstreamResponse func(*http.Response),
-	onUpstreamMessage func([]byte) bool,
+	opts webSocketRelayOptions,
 ) (int, error) {
 	ctx := clientReq.Context()
 
@@ -2067,15 +2135,16 @@ func relayWebSocket(
 		wsURL.Scheme = "ws"
 	}
 
-	dialHeaders := make(http.Header)
-	for key, vals := range upstreamHeaders {
-		lk := strings.ToLower(key)
-		if lk == "connection" || lk == "upgrade" || lk == "sec-websocket-key" ||
-			lk == "sec-websocket-version" || lk == "sec-websocket-extensions" ||
-			lk == "sec-websocket-protocol" || lk == "sec-websocket-accept" {
-			continue
-		}
-		dialHeaders[key] = vals
+	dialHeaders := cloneHeader(upstreamHeaders)
+	removeHopByHopHeaders(dialHeaders)
+	for _, key := range []string{
+		"Sec-WebSocket-Key",
+		"Sec-WebSocket-Version",
+		"Sec-WebSocket-Extensions",
+		"Sec-WebSocket-Protocol",
+		"Sec-WebSocket-Accept",
+	} {
+		dialHeaders.Del(key)
 	}
 
 	var subprotocols []string
@@ -2098,9 +2167,9 @@ func relayWebSocket(
 		return 0, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
 	}
 	defer upstreamConn.CloseNow()
-	upstreamConn.SetReadLimit(64 * 1024 * 1024)
-	if onUpstreamResponse != nil {
-		onUpstreamResponse(upstreamResp)
+	upstreamConn.SetReadLimit(opts.ReadLimit)
+	if opts.OnUpstreamResponse != nil {
+		opts.OnUpstreamResponse(upstreamResp)
 	}
 
 	if turnState := upstreamResp.Header.Get("x-codex-turn-state"); turnState != "" {
@@ -2121,19 +2190,25 @@ func relayWebSocket(
 		return 0, fmt.Errorf("accept client WS: %w", err)
 	}
 	defer clientConn.CloseNow()
-	clientConn.SetReadLimit(64 * 1024 * 1024)
+	clientConn.SetReadLimit(opts.ReadLimit)
 
-	log.Printf("[ws-relay] connected to %s, relaying messages", wsURL.Host)
+	log.Printf("[ws-relay %s] connected to %s, relaying messages", opts.LogLabel, wsURL.Host)
 
 	relayCtx, relayCancel := context.WithCancel(ctx)
 	defer relayCancel()
 
+	clientWriter := &webSocketWriter{conn: clientConn}
+	upstreamWriter := &webSocketWriter{conn: upstreamConn}
+
 	errc := make(chan error, 2)
+	stopHeartbeat := startWebSocketHeartbeat(relayCtx, clientWriter, opts.DownstreamHeartbeatInterval)
+	defer stopHeartbeat()
+
 	go func() {
-		errc <- relayMessages(relayCtx, upstreamConn, clientConn, "upstream->client", idleTimeout, onUpstreamMessage)
+		errc <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.OnUpstreamMessage)
 	}()
 	go func() {
-		errc <- relayMessages(relayCtx, clientConn, upstreamConn, "client->upstream", idleTimeout, nil)
+		errc <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, opts.OnClientMessage)
 	}()
 
 	relayErr := <-errc
@@ -2154,10 +2229,54 @@ func relayWebSocket(
 	upstreamConn.Close(closeCode, closeMsg)
 
 	if relayErr != nil && !errors.Is(relayErr, context.Canceled) &&
-		!strings.Contains(relayErr.Error(), "closed") && websocket.CloseStatus(relayErr) == -1 {
+		!strings.Contains(relayErr.Error(), "closed") &&
+		!strings.Contains(relayErr.Error(), "EOF") &&
+		websocket.CloseStatus(relayErr) == -1 {
 		return 101, relayErr
 	}
 	return 101, nil
+}
+
+type webSocketWriter struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (w *webSocketWriter) Write(ctx context.Context, msgType websocket.MessageType, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.Write(ctx, msgType, data)
+}
+
+func (w *webSocketWriter) Ping(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.Ping(ctx)
+}
+
+func startWebSocketHeartbeat(ctx context.Context, dst *webSocketWriter, interval time.Duration) func() {
+	if interval <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-timer.C:
+				if err := dst.Ping(ctx); err != nil {
+					return
+				}
+				timer.Reset(interval)
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // relayMessages reads messages from src and writes them to dst until
@@ -2167,7 +2286,7 @@ func relayWebSocket(
 // We use a time.AfterFunc watchdog instead of context.WithTimeout because
 // coder/websocket closes the connection when the read context is cancelled,
 // which would tear the relay down on every successful frame.
-func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string, idleTimeout time.Duration, onMessage func([]byte) bool) error {
+func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, onMessage func([]byte) error) error {
 	for {
 		var idleTimer *time.Timer
 		if idleTimeout > 0 {
@@ -2183,17 +2302,24 @@ func relayMessages(ctx context.Context, src, dst *websocket.Conn, label string, 
 			return fmt.Errorf("%s read: %w", label, err)
 		}
 		// Log message summary (truncate large payloads)
-		summary := string(data)
-		if len(summary) > 200 {
-			summary = summary[:200] + "..."
+		summaryData := data
+		truncated := false
+		if len(summaryData) > 200 {
+			summaryData = summaryData[:200]
+			truncated = true
 		}
-		log.Printf("[ws-relay] %s: type=%v len=%d %s", label, msgType, len(data), summary)
-		shouldStop := onMessage != nil && onMessage(data)
+		summary := string(summaryData)
+		if truncated {
+			summary += "..."
+		}
+		log.Printf("[ws-relay %s] %s: type=%v len=%d %s", logLabel, label, msgType, len(data), summary)
+		if onMessage != nil {
+			if err := onMessage(data); err != nil {
+				return err
+			}
+		}
 		if err := dst.Write(ctx, msgType, data); err != nil {
 			return fmt.Errorf("%s write: %w", label, err)
-		}
-		if shouldStop {
-			return nil
 		}
 	}
 }
@@ -3146,6 +3272,7 @@ func (h *proxyHandler) tryOnce(
 	requestedModel string,
 	userID string,
 	originID string,
+	conversationID string,
 ) (*http.Response, *bytes.Buffer, bool, error) {
 	if acc == nil {
 		return nil, nil, false, errors.New("nil account")

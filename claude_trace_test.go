@@ -93,7 +93,7 @@ func TestClaudeTraceWritesFileForPooledRequest(t *testing.T) {
 	proxy := httptest.NewServer(h)
 	defer proxy.Close()
 
-	body := []byte(`{"model":"claude-opus-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
@@ -145,7 +145,7 @@ func TestClaudeTraceWritesFileForPooledRequest(t *testing.T) {
 	if got := traceHeaderLookup(record.Upstream.Headers, "X-Api-Key"); len(got) != 1 || got[0] != "<redacted>" {
 		t.Fatalf("upstream x-api-key = %v", got)
 	}
-	if record.Incoming.Body == "" || !bytes.Contains([]byte(record.Incoming.Body), []byte("claude-opus-4-6")) {
+	if record.Incoming.Body == "" || !bytes.Contains([]byte(record.Incoming.Body), []byte("claude-sonnet-4-6")) {
 		t.Fatalf("incoming body missing model: %q", record.Incoming.Body)
 	}
 	if got := record.Response.Headers[":status_code"]; len(got) != 1 || got[0] != "200" {
@@ -190,7 +190,7 @@ func TestClaudeTraceWritesFileForPooledRoundTripError(t *testing.T) {
 	proxy := httptest.NewServer(h)
 	defer proxy.Close()
 
-	body := []byte(`{"model":"claude-opus-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
@@ -240,10 +240,10 @@ func TestClaudeTraceWritesFileForPooledRoundTripError(t *testing.T) {
 	if record.Response != nil {
 		t.Fatalf("response should be absent on round trip failure")
 	}
-	if !bytes.Contains([]byte(record.Incoming.Body), []byte("claude-opus-4-6")) {
+	if !bytes.Contains([]byte(record.Incoming.Body), []byte("claude-sonnet-4-6")) {
 		t.Fatalf("incoming body missing model: %q", record.Incoming.Body)
 	}
-	if !bytes.Contains([]byte(record.Upstream.Body), []byte("claude-opus-4-6")) {
+	if !bytes.Contains([]byte(record.Upstream.Body), []byte("claude-sonnet-4-6")) {
 		t.Fatalf("upstream body missing model: %q", record.Upstream.Body)
 	}
 }

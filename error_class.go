@@ -70,8 +70,8 @@ func classifyStatus(statusCode int) ErrorClass {
 	case statusCode == http.StatusTooManyRequests: // 429
 		return ErrorClassRateLimit
 
-	case statusCode == 529: // Anthropic overloaded — treat as rate limit
-		return ErrorClassRateLimit
+	case statusCode == 529: // Anthropic overloaded — retry elsewhere without cooling down the account
+		return ErrorClassTransient
 
 	case statusCode >= 500 && statusCode <= 599:
 		return ErrorClassTransient

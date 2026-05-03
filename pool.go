@@ -56,7 +56,6 @@ type Account struct {
 	AllowedSourceIPs        []string
 	CyberAccess             bool
 	CodexCookies            map[string]string
-	CodexTurnState          string
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -797,7 +796,12 @@ func planMatchesRequired(planType, requiredPlan string) bool {
 	if requiredPlan == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(planType), strings.TrimSpace(requiredPlan))
+	plan := strings.ToLower(strings.TrimSpace(planType))
+	required := strings.ToLower(strings.TrimSpace(requiredPlan))
+	if required == requiredPlanClaudePremium {
+		return strings.HasPrefix(plan, "max") || strings.HasPrefix(plan, "team")
+	}
+	return plan == required
 }
 
 // countByType returns the number of accounts of a given type (or all if empty).
@@ -1132,7 +1136,6 @@ func saveCodexAccount(a *Account) error {
 	} else {
 		delete(root, "cookies")
 	}
-
 	// Persist dead flag so accounts stay dead across restarts
 	if a.Dead {
 		root["dead"] = true

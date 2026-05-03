@@ -158,9 +158,9 @@ func TestClaudePoolTokenAcceptedViaXAPIKeyPreservesNativeClaudeRequest(t *testin
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"claude-sonnet-4-6",
 		"max_tokens":128,
-		"system":"be helpful",
-		"tools":[{"name":"Bash","input_schema":{"type":"object"}}],
-		"messages":[{"role":"user","content":"hello"}]
+		"system":[{"type":"text","text":"be helpful","cache_control":{"type":"ephemeral","ttl":"5m"}}],
+		"tools":[{"name":"Bash","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"5m"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]
 	}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "sdk-user"))
@@ -182,14 +182,25 @@ func TestClaudePoolTokenAcceptedViaXAPIKeyPreservesNativeClaudeRequest(t *testin
 	if obfuscatedToolName != "Bash" {
 		t.Fatalf("tool name should be preserved, got %q", obfuscatedToolName)
 	}
-	if upstreamBody["system"] != "be helpful" {
-		t.Fatalf("system was rewritten: %#v", upstreamBody["system"])
+	system, _ := upstreamBody["system"].([]any)
+	systemBlock, _ := system[0].(map[string]any)
+	systemCache, _ := systemBlock["cache_control"].(map[string]any)
+	if systemBlock["text"] != "be helpful" || systemCache["ttl"] != "5m" {
+		t.Fatalf("system cache block was rewritten: %#v", systemBlock)
+	}
+	tools, _ := upstreamBody["tools"].([]any)
+	tool, _ := tools[0].(map[string]any)
+	toolCache, _ := tool["cache_control"].(map[string]any)
+	if tool["name"] != "Bash" || toolCache["ttl"] != "5m" {
+		t.Fatalf("tool cache block was rewritten: %#v", tool)
 	}
 	messages, _ := upstreamBody["messages"].([]any)
 	first, _ := messages[0].(map[string]any)
-	content, _ := first["content"].(string)
-	if content != "hello" {
-		t.Fatalf("first user content was rewritten: %#v", first["content"])
+	content, _ := first["content"].([]any)
+	textBlock, _ := content[0].(map[string]any)
+	messageCache, _ := textBlock["cache_control"].(map[string]any)
+	if textBlock["text"] != "hello" || messageCache["ttl"] != "1h" {
+		t.Fatalf("message cache block was rewritten: %#v", textBlock)
 	}
 	if !strings.Contains(rr.Body.String(), `"name":"Bash"`) {
 		t.Fatalf("response body changed unexpectedly: %s", rr.Body.String())
@@ -477,19 +488,57 @@ func TestExtractRequestedModelFromJSON(t *testing.T) {
 	}
 }
 
-func TestClaudeRequestRequiresMax(t *testing.T) {
+func TestPlanMatchesClaudePremium(t *testing.T) {
 	t.Parallel()
 
-	if !claudeRequestRequiresMax(nil, "claude-opus-4-6 [1m]") {
-		t.Fatal("expected [1m] model suffix to require max")
+	for _, plan := range []string{"max", "max_x5", "max_x20", "team", "team_enterprise", "max_team", " Max "} {
+		if !planMatchesRequired(plan, "claude_premium") {
+			t.Fatalf("expected plan %q to match claude_premium", plan)
+		}
+	}
+	for _, plan := range []string{"", "pro", "free", "enterprise"} {
+		if planMatchesRequired(plan, "claude_premium") {
+			t.Fatalf("did not expect plan %q to match claude_premium", plan)
+		}
+	}
+}
+
+func TestClaudeRequestRequiresPremium(t *testing.T) {
+	t.Parallel()
+
+	if !claudeRequestRequiresPremium(nil, "claude-opus-4-7") {
+		t.Fatal("expected opus model to require a premium Claude account")
+	}
+	if !claudeRequestRequiresPremium(nil, "opus") {
+		t.Fatal("expected opus alias to require a premium Claude account")
+	}
+	if !claudeRequestRequiresPremium(nil, "claude-sonnet-4-6 [1m]") {
+		t.Fatal("expected [1m] model suffix to require a premium Claude account")
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	req.Header.Set("anthropic-beta", "context-1m-2025-08-07")
-	if !claudeRequestRequiresMax(req, "claude-opus-4-6") {
-		t.Fatal("expected 1m beta header to require max")
+	if !claudeRequestRequiresPremium(req, "claude-sonnet-4-6") {
+		t.Fatal("expected 1m beta header to require a premium Claude account")
 	}
-	if claudeRequestRequiresMax(nil, "claude-opus-4-6") {
-		t.Fatal("did not expect regular claude model to require max")
+	if claudeRequestRequiresPremium(nil, "claude-sonnet-4-6") {
+		t.Fatal("did not expect regular sonnet model to require a premium Claude account")
+	}
+}
+
+func TestClaudePremiumRequestSkipsPinnedProAccount(t *testing.T) {
+	t.Parallel()
+
+	pro := &Account{Type: AccountTypeClaude, ID: "pro", PlanType: "pro"}
+	team := &Account{Type: AccountTypeClaude, ID: "team", PlanType: "team"}
+	pool := newPoolState([]*Account{pro, team}, false)
+	pool.pin("conv", pro.ID)
+
+	got := pool.candidate("conv", nil, AccountTypeClaude, "claude_premium", "")
+	if got == nil {
+		t.Fatal("expected a premium Claude account")
+	}
+	if got.ID != team.ID {
+		t.Fatalf("candidate = %q, want team account", got.ID)
 	}
 }
 

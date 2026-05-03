@@ -2,6 +2,14 @@ package main
 
 import "testing"
 
+func TestClassifyAnthropicOverloadedAsTransient(t *testing.T) {
+	t.Parallel()
+
+	if got := classifyStatus(529); got != ErrorClassTransient {
+		t.Fatalf("classifyStatus(529) = %s, want %s", got, ErrorClassTransient)
+	}
+}
+
 func TestIsClaudeOrganizationDisabled(t *testing.T) {
 	t.Parallel()
 

@@ -100,14 +100,6 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 	if req.Header.Get("x-client-request-id") == "" {
 		req.Header.Set("x-client-request-id", uuid.NewString())
 	}
-	if req.Header.Get("x-codex-turn-state") == "" {
-		acc.mu.Lock()
-		turnState := acc.CodexTurnState
-		acc.mu.Unlock()
-		if turnState != "" {
-			req.Header.Set("x-codex-turn-state", turnState)
-		}
-	}
 	req.Header.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
 	req.Header.Set("User-Agent", codexDesktopUserAgent(fp))
 	req.Header.Set("sec-ch-ua", fmt.Sprintf(`"Chromium";v="%s", "Not?A_Brand";v="24"`, fp.ChromiumVersion))
@@ -174,9 +166,6 @@ func captureCodexResponseState(acc *Account, resp *http.Response, reqID string) 
 	}
 	changed := false
 	acc.mu.Lock()
-	if turnState := strings.TrimSpace(resp.Header.Get("x-codex-turn-state")); turnState != "" && turnState != acc.CodexTurnState {
-		acc.CodexTurnState = turnState
-	}
 	for _, c := range resp.Cookies() {
 		if !isPersistedCodexCookie(c.Name) || c.Value == "" {
 			continue
