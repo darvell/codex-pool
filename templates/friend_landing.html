@@ -2174,7 +2174,7 @@ const client = new OpenAI({
 setDefaultOpenAIClient(client);
 setOpenAIAPI("responses");
 setTraceProcessors([
-  new BatchTraceProcessor(new OpenAITracingExporter({ endpoint: `${process.env.OPENAI_BASE_URL}/traces/ingest` })),
+  new BatchTraceProcessor(new OpenAITracingExporter({ endpoint: process.env.OPENAI_BASE_URL + "/traces/ingest" })),
 ]);
 
 const lookupOrder = tool({
@@ -2227,7 +2227,7 @@ Implementation requirements:
 3. Keep normal OpenAI SDK method calls intact where possible. The proxy supports Responses, Chat Completions, legacy Completions, Images generate/edit, tool/function calls, structured outputs, and OpenAI Agents SDK usage.
 4. Use gpt-5.4-mini as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-4-6, claude-opus-4-7, k2p5, MiniMax-M2.7, and glm-5.1.
 5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
-6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.4-mini") or new OpenAIChatCompletionsModel(client, "gpt-5.4-mini") depending on the existing agent path. Point OpenAITracingExporter at `${process.env.OPENAI_BASE_URL}/traces/ingest` or disable tracing.
+6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.4-mini") or new OpenAIChatCompletionsModel(client, "gpt-5.4-mini") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
 7. Update README, .env.example, deployment config, tests, and CI secrets documentation so future runs use the proxy settings instead of api.openai.com.
 8. Run the project's most direct smoke test against the proxy. At minimum, verify one request returns a real model response using gpt-5.4-mini. If the project has agent/tool-call behavior, verify one tool-call path too. If it uses Images, verify images.generate or images.edit against the proxy rather than mocking it.
 
