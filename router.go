@@ -14,6 +14,7 @@ func shouldNoopCodexPath(path string) bool {
 		"/connectors/directory/list",
 		"/connectors/directory/list_workspace",
 		"/codex/analytics-events/events",
+		"/v1/traces/ingest",
 		"/plugins/featured",
 		"/plugins/list",
 		"/api/codex/apps",
@@ -41,6 +42,8 @@ func serveNoopCodexPath(w http.ResponseWriter, r *http.Request) {
 		})
 	case "/api/codex/apps", "/backend-api/wham/apps":
 		serveNoopCodexAppsMCP(w, r)
+	case "/v1/traces/ingest":
+		respondJSON(w, map[string]any{"ok": true})
 	default:
 		w.WriteHeader(http.StatusOK)
 	}

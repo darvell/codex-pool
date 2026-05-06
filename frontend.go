@@ -707,6 +707,7 @@ if (-not (Test-Path $configFile)) {
 
 $existing = ''
 try { $existing = Get-Content -Path $configFile -Raw } catch {}
+if ($null -eq $existing) { $existing = '' }
 
 if ($existing -notmatch 'codex-pool') {
   $new = @"
@@ -1094,6 +1095,7 @@ $block = $blockLines -join $nl
 
 $existing = ''
 try { $existing = Get-Content -Path $profilePath -Raw } catch {}
+if ($null -eq $existing) { $existing = '' }
 
 $pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
 if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
@@ -1249,11 +1251,34 @@ function Read-JsonObject {
   }
 }
 
+function Has-Property {
+  param($Obj, [string]$Name)
+  if ($null -eq $Obj) { return $false }
+  if ($Obj -is [System.Collections.IDictionary]) { return $Obj.Contains($Name) }
+  $prop = $null
+  try { $prop = $Obj.PSObject.Properties[$Name] } catch { return $false }
+  return ($null -ne $prop)
+}
+
+function Get-Property {
+  param($Obj, [string]$Name)
+  if (-not (Has-Property $Obj $Name)) { return $null }
+  if ($Obj -is [System.Collections.IDictionary]) { return $Obj[$Name] }
+  return $Obj.PSObject.Properties[$Name].Value
+}
+
 function Remove-ObjectProperty {
   param([object]$Object, [string]$Name)
-  if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name) {
-    $Object.PSObject.Properties.Remove($Name)
+  if ($null -eq $Object) { return }
+  if ($Object -is [System.Collections.IDictionary]) {
+    if ($Object.Contains($Name)) { $Object.Remove($Name) | Out-Null }
+    return
   }
+  try {
+    if ($Object.PSObject.Properties[$Name]) {
+      $Object.PSObject.Properties.Remove($Name)
+    }
+  } catch {}
 }
 
 Write-Host 'Configuring Claude Code for pool access...'
@@ -1308,6 +1333,7 @@ $block = $blockLines -join $nl
 
 $existing = ''
 try { $existing = Get-Content -Path $profilePath -Raw } catch {}
+if ($null -eq $existing) { $existing = '' }
 
 $pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
 if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
@@ -1329,8 +1355,7 @@ New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
 $settingsFile = Join-Path $claudeDir 'settings.json'
 $settings = Read-JsonObject -Path $settingsFile
 Remove-ObjectProperty -Object $settings -Name 'apiKeyHelper'
-$envObj = $null
-if ($settings.PSObject.Properties.Name -contains 'env') { $envObj = $settings.env }
+$envObj = Get-Property $settings 'env'
 if ($null -eq $envObj) { $envObj = New-Object PSObject }
 foreach ($name in $conflictingEnvVars) { Remove-ObjectProperty -Object $envObj -Name $name }
 $envObj | Add-Member -MemberType NoteProperty -Name ANTHROPIC_BASE_URL -Value $BaseUrl -Force

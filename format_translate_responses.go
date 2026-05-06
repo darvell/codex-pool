@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -128,18 +130,10 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 	// non-streaming by buffering SSE events and assembling a final response.
 	out["stream"] = true
 
-	// temperature -> temperature
-	if v, ok := req["temperature"]; ok {
-		out["temperature"] = v
-	}
-
-	// top_p -> top_p
-	if v, ok := req["top_p"]; ok {
-		out["top_p"] = v
-	}
-
-	// NOTE: max_tokens / max_completion_tokens intentionally NOT mapped to
-	// max_output_tokens — the Codex backend rejects that parameter.
+	// NOTE: max_tokens / max_completion_tokens and sampling params like
+	// temperature/top_p are intentionally not forwarded. The ChatGPT Codex
+	// backend rejects those OpenAI API fields instead of ignoring them.
+	sanitizeCodexResponsesParams(out)
 
 	// tools/functions -> Responses tools
 	if responsesTools := convertOpenAIToolsToResponses(req); len(responsesTools) > 0 {
@@ -153,6 +147,10 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 		}
 	}
 
+	if format := convertOpenAIResponseFormatToResponses(req["response_format"]); format != nil {
+		out["text"] = map[string]any{"format": format}
+	}
+
 	// stop -> stop (pass through if present, but Responses API doesn't typically use it)
 
 	// Codex backend requires store=false
@@ -164,8 +162,33 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 			out[key] = v
 		}
 	}
+	ensurePromptCacheKey(out, req)
 
 	return json.Marshal(out)
+}
+
+func ensurePromptCacheKey(out, source map[string]any) {
+	if _, ok := out["prompt_cache_key"]; ok {
+		return
+	}
+	seed := map[string]any{}
+	for _, key := range []string{"model", "instructions", "messages", "prompt", "input", "tools", "functions"} {
+		if v, ok := source[key]; ok {
+			seed[key] = v
+		}
+	}
+	if scope, _ := source["prompt_cache_scope"].(string); scope != "" {
+		seed["scope"] = scope
+	}
+	if len(seed) == 0 {
+		return
+	}
+	b, err := json.Marshal(seed)
+	if err != nil {
+		return
+	}
+	sum := sha256.Sum256(b)
+	out["prompt_cache_key"] = "pc_" + hex.EncodeToString(sum[:8])
 }
 
 func convertOpenAIToolsToResponses(req map[string]any) []any {
@@ -216,23 +239,76 @@ func convertOpenAIFunctionTool(fn map[string]any) map[string]any {
 		rt["description"] = desc
 	}
 	if params, _ := fn["parameters"].(map[string]any); params != nil {
-		rt["parameters"] = normalizeOpenAIToolSchema(params)
+		rt["parameters"] = prepareCodexJSONSchema(params)
+	}
+	if strict, ok := fn["strict"].(bool); ok {
+		rt["strict"] = strict
 	}
 	return rt
 }
 
-func normalizeOpenAIToolSchema(schema map[string]any) map[string]any {
-	if typ, _ := schema["type"].(string); typ == "object" {
-		if _, ok := schema["properties"]; !ok {
-			copy := make(map[string]any, len(schema)+1)
-			for k, v := range schema {
-				copy[k] = v
-			}
-			copy["properties"] = map[string]any{}
-			return copy
-		}
+func convertOpenAIResponseFormatToResponses(raw any) map[string]any {
+	format, ok := raw.(map[string]any)
+	if !ok {
+		return nil
 	}
-	return schema
+	typ, _ := format["type"].(string)
+	switch typ {
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	case "json_schema":
+		jsonSchema, _ := format["json_schema"].(map[string]any)
+		if jsonSchema == nil {
+			return nil
+		}
+		out := map[string]any{"type": "json_schema"}
+		for _, key := range []string{"name", "description", "strict"} {
+			if v, ok := jsonSchema[key]; ok {
+				out[key] = v
+			}
+		}
+		if schema, _ := jsonSchema["schema"].(map[string]any); schema != nil {
+			out["schema"] = prepareCodexJSONSchema(schema)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func normalizeOpenAIToolSchema(schema map[string]any) map[string]any {
+	return prepareCodexJSONSchema(schema)
+}
+
+func prepareCodexJSONSchema(schema map[string]any) map[string]any {
+	return prepareCodexJSONSchemaValue(schema).(map[string]any)
+}
+
+func prepareCodexJSONSchemaValue(v any) any {
+	switch node := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(node)+2)
+		for k, child := range node {
+			out[k] = prepareCodexJSONSchemaValue(child)
+		}
+		if typ, _ := out["type"].(string); typ == "object" {
+			if _, ok := out["properties"]; !ok {
+				out["properties"] = map[string]any{}
+			}
+			if _, ok := out["additionalProperties"]; !ok {
+				out["additionalProperties"] = false
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(node))
+		for i, child := range node {
+			out[i] = prepareCodexJSONSchemaValue(child)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func normalizeOpenAIHostedWebSearchTool(tool map[string]any) map[string]any {
@@ -311,6 +387,175 @@ func convertOAIContentToResponsesContent(content any) []any {
 	default:
 		return []any{}
 	}
+}
+
+func translateCompletionsToResponses(body []byte) ([]byte, error) {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("parse completions request: %w", err)
+	}
+
+	out := map[string]any{}
+	if m, ok := req["model"].(string); ok {
+		out["model"] = m
+	}
+	out["instructions"] = ""
+	out["input"] = completionsPromptToInput(req["prompt"])
+	out["stream"] = true
+	out["store"] = false
+
+	for _, key := range []string{"user", "conversation_id", "prompt_cache_key", "previous_response_id"} {
+		if v, ok := req[key]; ok {
+			out[key] = v
+		}
+	}
+	ensurePromptCacheKey(out, req)
+
+	return json.Marshal(out)
+}
+
+func completionsPromptToInput(prompt any) []any {
+	toItem := func(text string) map[string]any {
+		return map[string]any{
+			"type": "message",
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "input_text", "text": text},
+			},
+		}
+	}
+
+	switch p := prompt.(type) {
+	case string:
+		return []any{toItem(p)}
+	case []any:
+		var input []any
+		for _, raw := range p {
+			switch v := raw.(type) {
+			case string:
+				input = append(input, toItem(v))
+			case float64:
+				input = append(input, toItem(fmt.Sprintf("%g", v)))
+			case []any:
+				var parts []string
+				for _, token := range v {
+					parts = append(parts, fmt.Sprint(token))
+				}
+				input = append(input, toItem(strings.Join(parts, " ")))
+			}
+		}
+		if len(input) > 0 {
+			return input
+		}
+	}
+	return []any{toItem("")}
+}
+
+func translateResponsesToCompletions(body []byte) ([]byte, error) {
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse responses api response: %w", err)
+	}
+
+	text, finishReason := responseTextAndFinishReason(resp)
+	usage := completionsUsageFromResponses(resp)
+	out := map[string]any{
+		"id":      stringField(resp, "id", "cmpl-translated"),
+		"object":  "text_completion",
+		"created": toInt64(resp["created_at"]),
+		"model":   stringField(resp, "model", "unknown"),
+		"choices": []any{
+			map[string]any{
+				"text":          text,
+				"index":         0,
+				"logprobs":      nil,
+				"finish_reason": finishReason,
+			},
+		},
+	}
+	if usage != nil {
+		out["usage"] = usage
+	}
+	return json.Marshal(out)
+}
+
+func responseTextAndFinishReason(resp map[string]any) (string, string) {
+	var text string
+	if output, ok := resp["output"].([]any); ok {
+		for _, item := range output {
+			o, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if content, ok := o["content"].([]any); ok {
+				for _, raw := range content {
+					block, ok := raw.(map[string]any)
+					if !ok {
+						continue
+					}
+					if blockType, _ := block["type"].(string); blockType == "output_text" {
+						if s, ok := block["text"].(string); ok {
+							text += s
+						}
+					}
+				}
+			}
+		}
+	}
+
+	finishReason := "stop"
+	if status, ok := resp["status"].(string); ok && status == "incomplete" {
+		if details, ok := resp["incomplete_details"].(map[string]any); ok {
+			if reason, _ := details["reason"].(string); reason == "max_output_tokens" {
+				finishReason = "length"
+			}
+		}
+	}
+	return text, finishReason
+}
+
+func completionsUsageFromResponses(resp map[string]any) map[string]any {
+	u, ok := resp["usage"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return openAIUsageFromResponsesUsage(u)
+}
+
+func openAIUsageFromResponsesUsage(u map[string]any) map[string]any {
+	promptTokens := toInt64(u["input_tokens"])
+	completionTokens := toInt64(u["output_tokens"])
+	totalTokens := toInt64(u["total_tokens"])
+	if totalTokens == 0 {
+		totalTokens = promptTokens + completionTokens
+	}
+	usage := map[string]any{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      totalTokens,
+	}
+	if details, ok := u["input_tokens_details"].(map[string]any); ok {
+		if cached := toInt64(details["cached_tokens"]); cached > 0 {
+			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
+		}
+	}
+	if details, ok := u["output_tokens_details"].(map[string]any); ok {
+		outDetails := map[string]any{}
+		if reasoning := toInt64(details["reasoning_tokens"]); reasoning > 0 {
+			outDetails["reasoning_tokens"] = reasoning
+		}
+		if len(outDetails) > 0 {
+			usage["completion_tokens_details"] = outDetails
+		}
+	}
+	return usage
+}
+
+func stringField(m map[string]any, key, fallback string) string {
+	if v, _ := m[key].(string); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // translateResponsesToChatCompletions converts a non-streaming Responses API response
@@ -398,17 +643,14 @@ func translateResponsesToChatCompletions(body []byte) ([]byte, error) {
 	// Build usage
 	var usage map[string]any
 	if u, ok := resp["usage"].(map[string]any); ok {
-		usage = map[string]any{
-			"prompt_tokens":     toInt64(u["input_tokens"]),
-			"completion_tokens": toInt64(u["output_tokens"]),
-			"total_tokens":      toInt64(u["total_tokens"]),
-		}
+		usage = openAIUsageFromResponsesUsage(u)
 	}
 
 	out := map[string]any{
-		"id":     id,
-		"object": "chat.completion",
-		"model":  model,
+		"id":      id,
+		"object":  "chat.completion",
+		"created": toInt64(resp["created_at"]),
+		"model":   model,
 		"choices": []any{
 			map[string]any{
 				"index":         0,

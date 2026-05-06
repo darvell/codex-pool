@@ -102,7 +102,7 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 	}
 	req.Header.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
 	req.Header.Set("User-Agent", codexDesktopUserAgent(fp))
-	req.Header.Set("sec-ch-ua", fmt.Sprintf(`"Chromium";v="%s", "Not?A_Brand";v="24"`, fp.ChromiumVersion))
+	req.Header.Set("sec-ch-ua", fmt.Sprintf(`"Chromium";v="%s", "Not:A-Brand";v="24"`, fp.ChromiumVersion))
 	req.Header.Set("sec-ch-ua-mobile", "?0")
 	req.Header.Set("sec-ch-ua-platform", fmt.Sprintf(`"%s"`, codexSecCHPlatform(fp.Platform)))
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")

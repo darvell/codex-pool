@@ -322,9 +322,14 @@ func (p *CodexProvider) MatchesPath(path string) bool {
 }
 
 func (p *CodexProvider) NormalizePath(path string) string {
-	// Map /v1/responses/* and /responses/* to the correct upstream path
-	if strings.HasPrefix(path, "/v1/responses") || strings.HasPrefix(path, "/responses") {
-		return mapResponsesPath(path)
+	if mapped := mapResponsesPath(path); mapped != "" {
+		return mapped
+	}
+	if strings.HasPrefix(path, "/v1/responses/") {
+		return strings.TrimPrefix(path, "/v1")
+	}
+	if strings.HasPrefix(path, "/responses/") {
+		return path
 	}
 	if strings.HasPrefix(path, "/v1/models") {
 		return "/models"
@@ -342,11 +347,14 @@ func (p *CodexProvider) NormalizePath(path string) string {
 }
 
 func (p *CodexProvider) DetectsSSE(path string, contentType string) bool {
-	// Responses paths are always SSE
-	if strings.HasPrefix(path, "/responses/") || strings.HasPrefix(path, "/v1/") {
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "text/event-stream") {
 		return true
 	}
-	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
+	if strings.Contains(ct, "application/json") || strings.Contains(ct, "text/plain") {
+		return false
+	}
+	return path == "/responses" || path == "/v1/responses" || strings.HasPrefix(path, "/responses/compact") || strings.HasPrefix(path, "/v1/responses/compact")
 }
 
 // parseCodexClaims extracts claims from a Codex JWT ID token.

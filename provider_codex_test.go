@@ -1,6 +1,41 @@
 package main
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
+
+func TestCodexProviderNormalizeResponsesPaths(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	provider := NewCodexProvider(base, base, base)
+
+	cases := map[string]string{
+		"/v1/responses":                      "/responses",
+		"/responses":                         "/responses",
+		"/v1/responses/compact":              "/responses/compact",
+		"/v1/responses/resp_123":             "/responses/resp_123",
+		"/v1/responses/resp_123/cancel":      "/responses/resp_123/cancel",
+		"/v1/responses/resp_123/input_items": "/responses/resp_123/input_items",
+	}
+	for in, want := range cases {
+		if got := provider.NormalizePath(in); got != want {
+			t.Fatalf("NormalizePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCodexProviderDetectsSSEFromContentType(t *testing.T) {
+	provider := &CodexProvider{}
+	if provider.DetectsSSE("/v1/models", "application/json") {
+		t.Fatal("JSON /v1 response should not be treated as SSE")
+	}
+	if !provider.DetectsSSE("/v1/responses", "") {
+		t.Fatal("empty content-type /v1/responses should still default to SSE")
+	}
+	if !provider.DetectsSSE("/v1/models", "text/event-stream") {
+		t.Fatal("text/event-stream should be treated as SSE")
+	}
+}
 
 func TestCodexProviderLoadAccountReadsCyberAccess(t *testing.T) {
 	provider := &CodexProvider{}

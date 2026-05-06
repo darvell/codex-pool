@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"math"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -757,6 +758,141 @@ func TestServeHTTPCodexConnectorsDirectoryReturnsEmptyList(t *testing.T) {
 	}
 }
 
+func TestStripCodexModelSuffixes(t *testing.T) {
+	base, effort, tier := stripCodexModelSuffixes("gpt-5.4-mini-high-fast")
+	if base != "gpt-5.4-mini" || effort != "high" || tier != "priority" {
+		t.Fatalf("suffix parse = %q %q %q", base, effort, tier)
+	}
+}
+
+func TestEnsureCodexResponsesCompactBodyDoesNotForceStream(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4-mini-high-fast","input":"summarize","stream":false,"store":true,"temperature":0,"parallel_tool_calls":true,"reasoning":{"summary":"auto"}}`)
+	body, _ = applyCodexModelSuffixControls(body, "gpt-5.4-mini-high-fast")
+	out := ensureCodexResponsesCompactBody(body)
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := got["stream"]; ok {
+		t.Fatalf("compact body should not force stream: %#v", got)
+	}
+	if _, ok := got["store"]; ok {
+		t.Fatalf("compact body should not preserve store: %#v", got)
+	}
+	if got["parallel_tool_calls"] != true {
+		t.Fatalf("compact body should preserve parallel_tool_calls: %#v", got)
+	}
+	reasoning := got["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" {
+		t.Fatalf("reasoning suffix not applied: %#v", reasoning)
+	}
+	if got["service_tier"] != "priority" {
+		t.Fatalf("service_tier suffix not applied: %#v", got)
+	}
+}
+
+func TestEnsureCodexResponsesInstructionsStripsUnsupportedParams(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"gpt-5.4-mini","input":"hi","temperature":0,"max_output_tokens":10,"parallel_tool_calls":true}`)
+	out := ensureCodexResponsesInstructions(body)
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	for _, key := range []string{"temperature", "max_output_tokens"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s should not be forwarded to Codex: %#v", key, got)
+		}
+	}
+	if got["instructions"] == "" {
+		t.Fatalf("instructions missing: %#v", got)
+	}
+	if stream, _ := got["stream"].(bool); !stream {
+		t.Fatalf("stream = %#v, want true", got["stream"])
+	}
+	if key, _ := got["prompt_cache_key"].(string); !strings.HasPrefix(key, "pc_") {
+		t.Fatalf("prompt_cache_key missing: %#v", got)
+	}
+}
+
+func TestTranslateImagesGenerationToResponses(t *testing.T) {
+	body := []byte(`{"model":"gpt-image-1","prompt":"draw a cat","size":"1024x1024","output_format":"webp","response_format":"b64_json"}`)
+	out, responseFormat, err := translateImagesGenerationToResponses(body)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if responseFormat != "b64_json" {
+		t.Fatalf("response format = %q", responseFormat)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tools := got["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	if got["model"] != "gpt-5.4-mini" {
+		t.Fatalf("image model should map to host responses model: %#v", got["model"])
+	}
+	if tool["type"] != "image_generation" || tool["size"] != "1024x1024" || tool["output_format"] != "webp" {
+		t.Fatalf("bad image tool: %#v", tool)
+	}
+	if got["stream"] != true || got["store"] != false {
+		t.Fatalf("bad responses controls: %#v", got)
+	}
+}
+
+func TestTranslateImagesEditToResponses(t *testing.T) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("model", "gpt-image-1")
+	mw.WriteField("prompt", "turn this red")
+	mw.WriteField("size", "1024x1024")
+	part, err := mw.CreateFormFile("image", "in.png")
+	if err != nil {
+		t.Fatalf("create image part: %v", err)
+	}
+	part.Write([]byte("pngbytes"))
+	mw.Close()
+
+	out, responseFormat, err := translateImagesEditToResponses(buf.Bytes(), mw.FormDataContentType())
+	if err != nil {
+		t.Fatalf("translate edit: %v", err)
+	}
+	if responseFormat != "b64_json" {
+		t.Fatalf("bad responseFormat=%q", responseFormat)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal edit: %v", err)
+	}
+	input := got["input"].([]any)[0].(map[string]any)
+	content := input["content"].([]any)
+	if len(content) != 2 || content[0].(map[string]any)["type"] != "input_text" || content[1].(map[string]any)["type"] != "input_image" {
+		t.Fatalf("bad edit content: %#v", content)
+	}
+	if imageURL, _ := content[1].(map[string]any)["image_url"].(string); !strings.HasPrefix(imageURL, "data:image/") {
+		t.Fatalf("bad image url: %q", imageURL)
+	}
+}
+
+func TestTranslateResponsesToImagesGeneration(t *testing.T) {
+	body := []byte(`{"id":"resp_1","created_at":123,"output":[{"type":"image_generation_call","result":"AAAA","revised_prompt":"better cat"}]}`)
+	out, err := translateResponsesToImagesGeneration(body, "b64_json")
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data := got["data"].([]any)
+	entry := data[0].(map[string]any)
+	if entry["b64_json"] != "AAAA" || entry["revised_prompt"] != "better cat" {
+		t.Fatalf("bad image response: %#v", got)
+	}
+}
+
 func TestRequestHasImageGenerationTool(t *testing.T) {
 	t.Parallel()
 
@@ -805,6 +941,9 @@ func TestCodexPassthroughNeedsBodyRewrite(t *testing.T) {
 	if !codexPassthroughNeedsBodyRewrite("/v1/chat/completions") {
 		t.Fatal("expected /v1/chat/completions to require rewrite")
 	}
+	if !codexPassthroughNeedsBodyRewrite("/v1/completions") {
+		t.Fatal("expected /v1/completions to require rewrite")
+	}
 	if codexPassthroughNeedsBodyRewrite("/v1/models") {
 		t.Fatal("did not expect /v1/models to require body rewrite")
 	}
@@ -842,6 +981,21 @@ func TestCodexPassthroughRewrite(t *testing.T) {
 	}
 	if stream, _ := obj["stream"].(bool); !stream {
 		t.Fatalf("expected rewritten chat request to force stream=true, got %#v", obj["stream"])
+	}
+
+	completionBody := []byte(`{"model":"gpt-5.4-mini","prompt":"hi"}`)
+	path, rewritten, err = codexPassthroughRewrite("/v1/completions", completionBody)
+	if err != nil {
+		t.Fatalf("rewrite /v1/completions: %v", err)
+	}
+	if path != "/v1/responses" {
+		t.Fatalf("rewritten completions path = %q", path)
+	}
+	if err := json.Unmarshal(rewritten, &obj); err != nil {
+		t.Fatalf("unmarshal rewritten completions body: %v", err)
+	}
+	if stream, _ := obj["stream"].(bool); !stream {
+		t.Fatalf("expected rewritten completions request to force stream=true, got %#v", obj["stream"])
 	}
 }
 

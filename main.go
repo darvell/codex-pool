@@ -460,15 +460,156 @@ func (h *proxyHandler) pickUpstream(path string, headers http.Header) (Provider,
 	return provider, provider.UpstreamURL(path)
 }
 
-func mapResponsesPath(in string) string {
-	if strings.HasPrefix(in, "/v1/responses/compact") || strings.HasPrefix(in, "/responses/compact") {
-		return "/responses/compact"
+func (h *proxyHandler) handleImagesGenerationFanout(w http.ResponseWriter, r *http.Request, body []byte, n int, reqID string) bool {
+	if n <= 1 {
+		return false
 	}
-	return "/responses"
+	if n > 10 {
+		http.Error(w, "n must be between 1 and 10", http.StatusBadRequest)
+		return true
+	}
+	baseURL := h.getEffectivePublicURL(r)
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/images/generations"
+	oneBody := setImagesGenerationCount(body, 1)
+	ctx := r.Context()
+	client := &http.Client{Timeout: clientOrDefaultTimeout(r, h.cfg.requestTimeout, h.cfg.streamTimeout, oneBody)}
+	type imageFanoutResult struct {
+		index   int
+		body    []byte
+		status  int
+		header  http.Header
+		err     error
+		created int64
+		data    []any
+	}
+	results := make([]imageFanoutResult, n)
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(oneBody))
+			if err != nil {
+				results[i].err = err
+				return
+			}
+			req.Header = cloneHeader(r.Header)
+			removeHopByHopHeaders(req.Header)
+			removeConflictingProxyHeaders(req.Header)
+			req.Header.Del("Accept-Encoding")
+			req.Header.Del("Content-Length")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Codex-Pool-Image-Fanout", "1")
+			resp, err := client.Do(req)
+			if err != nil {
+				results[i].err = err
+				return
+			}
+			defer resp.Body.Close()
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 80*1024*1024))
+			results[i].index = i
+			results[i].status = resp.StatusCode
+			results[i].header = resp.Header.Clone()
+			results[i].body = respBody
+			if readErr != nil {
+				results[i].err = readErr
+				return
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				results[i].err = fmt.Errorf("image fanout request %d failed: %s: %s", i+1, resp.Status, safeText(respBody))
+				return
+			}
+			var data []any
+			data, results[i].created, err = appendImagesGenerationData(nil, respBody, "b64_json")
+			if err != nil {
+				results[i].err = err
+				return
+			}
+			results[i].data = data
+		}()
+	}
+	wg.Wait()
+	mergedData := []any{}
+	created := time.Now().Unix()
+	for _, result := range results {
+		if result.err != nil {
+			if h.cfg.debug.Load() {
+				log.Printf("[%s] image fanout failed: %v", reqID, result.err)
+			}
+			http.Error(w, result.err.Error(), http.StatusBadGateway)
+			return true
+		}
+		if result.created > 0 && (created == 0 || result.created < created) {
+			created = result.created
+		}
+		mergedData = append(mergedData, result.data...)
+	}
+	out, err := json.Marshal(map[string]any{"created": created, "data": mergedData})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(out)
+	return true
+}
+
+func mapResponsesPath(in string) string {
+	switch {
+	case strings.HasPrefix(in, "/v1/responses/compact") || strings.HasPrefix(in, "/responses/compact"):
+		return "/responses/compact"
+	case in == "/v1/responses" || in == "/responses":
+		return "/responses"
+	default:
+		return ""
+	}
 }
 
 func codexPassthroughNeedsBodyRewrite(path string) bool {
-	return strings.HasPrefix(path, "/v1/messages") || strings.HasPrefix(path, "/v1/chat/completions")
+	return strings.HasPrefix(path, "/v1/messages") ||
+		strings.HasPrefix(path, "/v1/chat/completions") ||
+		strings.HasPrefix(path, "/v1/completions")
+}
+
+func ensureCodexResponsesCompactBody(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	out := map[string]any{}
+	for _, key := range []string{"model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "service_tier", "text", "previous_response_id"} {
+		if v, ok := obj[key]; ok {
+			out[key] = v
+		}
+	}
+	if _, ok := out["instructions"]; !ok {
+		out["instructions"] = ""
+	}
+	if input, ok := out["input"].(string); ok {
+		out["input"] = []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": input},
+				},
+			},
+		}
+	}
+	prepareCodexSchemasInBody(out)
+	rewritten, err := json.Marshal(out)
+	if err != nil {
+		return body
+	}
+	return rewritten
 }
 
 func ensureCodexResponsesInstructions(body []byte) []byte {
@@ -484,6 +625,9 @@ func ensureCodexResponsesInstructions(body []byte) []byte {
 	}
 	obj["store"] = false
 	obj["stream"] = true
+	sanitizeCodexResponsesParams(obj)
+	prepareCodexSchemasInBody(obj)
+	ensurePromptCacheKey(obj, obj)
 	if input, ok := obj["input"].(string); ok {
 		obj["input"] = []any{
 			map[string]any{
@@ -500,6 +644,50 @@ func ensureCodexResponsesInstructions(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func prepareCodexSchemasInBody(obj map[string]any) {
+	if text, _ := obj["text"].(map[string]any); text != nil {
+		if format, _ := text["format"].(map[string]any); format != nil {
+			if schema, _ := format["schema"].(map[string]any); schema != nil {
+				format["schema"] = prepareCodexJSONSchema(schema)
+			}
+		}
+	}
+	if tools, ok := obj["tools"].([]any); ok {
+		for _, raw := range tools {
+			tool, _ := raw.(map[string]any)
+			if tool == nil {
+				continue
+			}
+			if params, _ := tool["parameters"].(map[string]any); params != nil {
+				tool["parameters"] = prepareCodexJSONSchema(params)
+			}
+			if fn, _ := tool["function"].(map[string]any); fn != nil {
+				if params, _ := fn["parameters"].(map[string]any); params != nil {
+					fn["parameters"] = prepareCodexJSONSchema(params)
+				}
+			}
+		}
+	}
+}
+
+func sanitizeCodexResponsesParams(obj map[string]any) {
+	for _, key := range []string{
+		"temperature",
+		"top_p",
+		"presence_penalty",
+		"frequency_penalty",
+		"max_tokens",
+		"max_completion_tokens",
+		"max_output_tokens",
+		"seed",
+		"logprobs",
+		"top_logprobs",
+		"metadata",
+	} {
+		delete(obj, key)
+	}
 }
 
 func requestHasImageGenerationTool(body []byte) bool {
@@ -541,6 +729,12 @@ func codexPassthroughRewrite(path string, body []byte) (rewrittenPath string, re
 		return "/v1/responses", rewritten, nil
 	case strings.HasPrefix(path, "/v1/chat/completions"):
 		rewritten, err := translateChatCompletionsToResponses(body)
+		if err != nil {
+			return path, nil, err
+		}
+		return "/v1/responses", rewritten, nil
+	case strings.HasPrefix(path, "/v1/completions"):
+		rewritten, err := translateCompletionsToResponses(body)
 		if err != nil {
 			return path, nil, err
 		}
@@ -655,15 +849,34 @@ func extractConversationIDFromJSON(blob []byte) string {
 	return extractConversationIDFromObject(obj)
 }
 
+func injectPromptCacheScope(body []byte, scope string) []byte {
+	if scope == "" || len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	if _, ok := obj["prompt_cache_key"].(string); !ok {
+		return body
+	}
+	obj["prompt_cache_scope"] = scope
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func extractConversationIDFromObject(obj map[string]any) string {
-	for _, key := range []string{"prompt_cache_key", "conversation_id", "conversation", "session_id"} {
+	for _, key := range []string{"conversation_id", "conversation", "session_id"} {
 		if v, ok := obj[key].(string); ok && v != "" {
 			return v
 		}
 	}
 	for _, containerKey := range []string{"metadata", "meta"} {
 		if sub, ok := obj[containerKey].(map[string]any); ok {
-			for _, key := range []string{"conversation_id", "conversation", "prompt_cache_key", "session_id", "user_id"} {
+			for _, key := range []string{"conversation_id", "conversation", "session_id", "user_id"} {
 				if v, ok := sub[key].(string); ok && v != "" {
 					return v
 				}
@@ -685,6 +898,63 @@ func extractRequestedModelFromJSON(blob []byte) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+func stripCodexModelSuffixes(model string) (base string, reasoningEffort string, serviceTier string) {
+	base = strings.TrimSpace(model)
+	lower := strings.ToLower(base)
+	for _, tier := range []string{"fast", "flex"} {
+		suffix := "-" + tier
+		if strings.HasSuffix(lower, suffix) {
+			serviceTier = tier
+			if serviceTier == "fast" {
+				serviceTier = "priority"
+			}
+			base = strings.TrimSpace(base[:len(base)-len(suffix)])
+			lower = strings.ToLower(base)
+			break
+		}
+	}
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh"} {
+		suffix := "-" + effort
+		if strings.HasSuffix(lower, suffix) {
+			reasoningEffort = effort
+			base = strings.TrimSpace(base[:len(base)-len(suffix)])
+			break
+		}
+	}
+	return base, reasoningEffort, serviceTier
+}
+
+func applyCodexModelSuffixControls(body []byte, originalModel string) ([]byte, string) {
+	base, effort, serviceTier := stripCodexModelSuffixes(originalModel)
+	if base == "" || (base == originalModel && effort == "" && serviceTier == "") {
+		return body, originalModel
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, originalModel
+	}
+	obj["model"] = base
+	if effort != "" {
+		reasoning, _ := obj["reasoning"].(map[string]any)
+		if reasoning == nil {
+			reasoning = map[string]any{}
+		}
+		if _, ok := reasoning["summary"]; !ok {
+			reasoning["summary"] = "auto"
+		}
+		reasoning["effort"] = effort
+		obj["reasoning"] = reasoning
+	}
+	if serviceTier != "" {
+		obj["service_tier"] = serviceTier
+	}
+	rewritten, err := json.Marshal(obj)
+	if err != nil {
+		return body, originalModel
+	}
+	return rewritten, base
 }
 
 func modelRequiresCodexPro(model string) bool {
@@ -982,6 +1252,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/v1/images/generations") {
+		if n := imagesGenerationCount(bodyBytes); n > 1 {
+			if h.handleImagesGenerationFanout(w, r, bodyBytes, n, reqID) {
+				return
+			}
+		}
+	}
 
 	// conversation_id usually comes from request JSON (Codex often includes it).
 	inspect := bodyBytes
@@ -998,6 +1275,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// Resolve model aliases before routing.
 	if requestedModel != "" {
 		requestedModel, bodyBytes = applyModelAlias(h.aliases, requestedModel, bodyBytes, h.cfg.debug.Load(), reqID)
+	}
+
+	if requestedModel != "" && isOpenAIModel(requestedModel) {
+		var baseModel string
+		bodyBytes, baseModel = applyCodexModelSuffixControls(bodyBytes, requestedModel)
+		requestedModel = baseModel
 	}
 
 	// Parse thinking budget suffix before routing (e.g. "claude-sonnet-4-5(16384)").
@@ -1060,6 +1343,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// The Codex upstream (chatgpt.com/backend-api/codex) only speaks Responses API.
 	// Codex always requires streaming, so we track whether the client originally wanted non-streaming.
 	clientWantsNonStreaming := false
+	imagesResponseFormat := ""
 	if len(inspect) > 0 {
 		var obj map[string]any
 		if json.Unmarshal(inspect, &obj) == nil {
@@ -1068,8 +1352,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 		}
 	}
+	if translateDir == TranslateNone && accountType == AccountTypeCodex && (strings.HasPrefix(r.URL.Path, "/v1/images/generations") || strings.HasPrefix(r.URL.Path, "/v1/images/edits")) {
+		translateDir = TranslateImagesToResponses
+		clientWantsNonStreaming = true
+	}
 	if translateDir == TranslateNone && sourceFormat == FormatOpenAI && accountType == AccountTypeCodex {
-		translateDir = TranslateChatToResponses
+		if strings.HasPrefix(r.URL.Path, "/v1/completions") && !strings.HasPrefix(r.URL.Path, "/v1/chat/completions") {
+			translateDir = TranslateCompletionsToResponses
+		} else {
+			translateDir = TranslateChatToResponses
+		}
 	}
 	// Special case: Responses API -> Claude Messages API
 	// When client sends /responses (e.g. Codex CLI with -m opus) and provider is Claude.
@@ -1080,7 +1372,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 
 	if translateDir == TranslateNone && accountType == AccountTypeCodex && strings.HasPrefix(r.URL.Path, "/v1/responses") {
-		bodyBytes = ensureCodexResponsesInstructions(bodyBytes)
+		bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
+		if strings.HasPrefix(r.URL.Path, "/v1/responses/compact") {
+			bodyBytes = ensureCodexResponsesCompactBody(bodyBytes)
+		} else {
+			bodyBytes = ensureCodexResponsesInstructions(bodyBytes)
+		}
 	}
 
 	if translateDir != TranslateNone {
@@ -1102,7 +1399,28 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			r.URL.Path = "/v1/messages"
 		case TranslateChatToResponses:
+			bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
 			bodyBytes, err = translateChatCompletionsToResponses(bodyBytes)
+			if err != nil {
+				http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.URL.Path = "/v1/responses"
+		case TranslateCompletionsToResponses:
+			bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
+			bodyBytes, err = translateCompletionsToResponses(bodyBytes)
+			if err != nil {
+				http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.URL.Path = "/v1/responses"
+		case TranslateImagesToResponses:
+			bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
+			if strings.HasPrefix(r.URL.Path, "/v1/images/edits") {
+				bodyBytes, imagesResponseFormat, err = translateImagesEditToResponses(bodyBytes, r.Header.Get("Content-Type"))
+			} else {
+				bodyBytes, imagesResponseFormat, err = translateImagesGenerationToResponses(bodyBytes)
+			}
 			if err != nil {
 				http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
 				return
@@ -1299,6 +1617,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 
 			// Refine classification with body content.
+			if acc.Type == AccountTypeCodex && errClass == ErrorClassInvalid && isCodexModelUnavailableError(errBody) {
+				errClass = ErrorClassNotFound
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] reclassified codex 400 as model/account mismatch for account %s", reqID, acc.ID)
+				}
+			}
 			if acc.Type == AccountTypeClaude && isClaudeOrganizationDisabled(errBody) {
 				h.disableAccountPermanently(acc, reqID, safeText(errBody))
 				lastErr = fmt.Errorf("claude organization disabled for account %s", acc.ID)
@@ -1435,8 +1759,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		// incorrectly flag non-SSE error responses (plain JSON 4xx/5xx) as SSE.
 		// Check the actual content-type on error responses to avoid feeding
 		// plain JSON through the SSE translator (which would silently drop it).
-		if isSSE && resp.StatusCode >= 400 &&
-			(translateDir == TranslateClaudeToResponses || translateDir == TranslateChatToResponses) {
+		if isSSE && resp.StatusCode >= 400 {
 			if !strings.Contains(strings.ToLower(respContentType), "text/event-stream") {
 				isSSE = false
 			}
@@ -1502,6 +1825,72 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] buffering Claude SSE error: %v", reqID, err)
+				}
+			}
+			resp.Body.Close()
+
+			result := bufWriter.Result()
+			w.WriteHeader(resp.StatusCode)
+			w.Write(result)
+		} else if clientWantsNonStreaming && isSSE && translateDir == TranslateImagesToResponses {
+			w.Header().Del("Content-Length")
+			w.Header().Set("Content-Type", "application/json")
+
+			bufWriter := &responsesBufferingWriter{model: requestedModel}
+			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] buffering Images SSE error: %v", reqID, err)
+				}
+			}
+			resp.Body.Close()
+			result := bufWriter.Result()
+			translated, err := translateResponsesToImagesGeneration(result, imagesResponseFormat)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(resp.StatusCode)
+			w.Write(translated)
+		} else if clientWantsNonStreaming && isSSE && translateDir == TranslateCompletionsToResponses {
+			w.Header().Del("Content-Length")
+			w.Header().Set("Content-Type", "application/json")
+
+			usageCallback := func(data []byte) {
+				if sampleBuf != nil {
+					sampleBuf.Write(data)
+				}
+				if accountType == AccountTypeCodex && !acc.CyberAccess && isCyberPolicyError(data) {
+					if h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, originIP, acc.ID, reqID) {
+						cyberPinned = true
+					}
+					return
+				}
+				var obj map[string]any
+				if json.Unmarshal(data, &obj) == nil {
+					if ru := provider.ParseUsage(obj); ru != nil {
+						if ru.PrimaryUsedPct == 0 && headerPrimaryPct > 0 {
+							ru.PrimaryUsedPct = headerPrimaryPct
+						}
+						if ru.SecondaryUsedPct == 0 && headerSecondaryPct > 0 {
+							ru.SecondaryUsedPct = headerSecondaryPct
+						}
+						ru.UserID = userID
+						ru.OriginID = originID
+						ru.AccountType = acc.Type
+						h.recordUsage(acc, *ru)
+					}
+				}
+			}
+
+			bufWriter := &responsesToCompletionsBufferingWriter{
+				callback: usageCallback,
+				debug:    h.cfg.debug.Load(),
+				reqID:    reqID,
+			}
+
+			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] buffering completions SSE error: %v", reqID, err)
 				}
 			}
 			resp.Body.Close()
@@ -1580,7 +1969,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if translateDir == TranslateClaudeToResponses {
 					// Translate Codex error to Claude error format
 					translated = translateErrorToClaudeFormat(respBody, resp.StatusCode)
-				} else if translateDir == TranslateChatToResponses || translateDir == TranslateResponsesToClaude {
+				} else if translateDir == TranslateChatToResponses || translateDir == TranslateCompletionsToResponses || translateDir == TranslateImagesToResponses || translateDir == TranslateResponsesToClaude {
 					translated = respBody // Pass through error as-is
 				} else {
 					translated = translateErrorBody(respBody, targetFormat, sourceFormat)
@@ -1600,6 +1989,24 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if trErr != nil {
 					if h.cfg.debug.Load() {
 						log.Printf("[%s] responses->chat translation error: %v", reqID, trErr)
+					}
+					translated = respBody
+				}
+			} else if translateDir == TranslateCompletionsToResponses {
+				var trErr error
+				translated, trErr = translateResponsesToCompletions(respBody)
+				if trErr != nil {
+					if h.cfg.debug.Load() {
+						log.Printf("[%s] responses->completions translation error: %v", reqID, trErr)
+					}
+					translated = respBody
+				}
+			} else if translateDir == TranslateImagesToResponses {
+				var trErr error
+				translated, trErr = translateResponsesToImagesGeneration(respBody, imagesResponseFormat)
+				if trErr != nil {
+					if h.cfg.debug.Load() {
+						log.Printf("[%s] responses->images translation error: %v", reqID, trErr)
 					}
 					translated = respBody
 				}
@@ -1701,7 +2108,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 
 			if isSSE {
-				if translateDir == TranslateChatToResponses {
+				if translateDir == TranslateCompletionsToResponses {
+					writer = &responsesToCompletionsWriter{
+						w:        writer,
+						callback: usageCallback,
+						debug:    h.cfg.debug.Load(),
+						reqID:    reqID,
+					}
+				} else if translateDir == TranslateChatToResponses {
 					writer = &responsesToChatCompletionsWriter{
 						w:        writer,
 						callback: usageCallback,
@@ -2962,6 +3376,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	}
 
 	path := r.URL.Path
+	originalPath := path
 	if providerType == AccountTypeCodex {
 		if shouldNoopCodexPath(path) {
 			serveNoopCodexPath(w, r)
@@ -2993,7 +3408,15 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	passthroughTranslateDir := TranslateNone
 	if providerType == AccountTypeCodex {
+		if strings.HasPrefix(originalPath, "/v1/completions") && !strings.HasPrefix(originalPath, "/v1/chat/completions") {
+			passthroughTranslateDir = TranslateCompletionsToResponses
+		} else if strings.HasPrefix(originalPath, "/v1/chat/completions") {
+			passthroughTranslateDir = TranslateChatToResponses
+		} else if strings.HasPrefix(originalPath, "/v1/messages") {
+			passthroughTranslateDir = TranslateClaudeToResponses
+		}
 		path, bodyBytes, err = codexPassthroughRewrite(path, bodyBytes)
 		if err != nil {
 			http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
@@ -3088,22 +3511,84 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		h.attachClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, bodyBytes, outReq, bodyBytes, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
 	}
 
+	respContentType := resp.Header.Get("Content-Type")
+	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
+	if isSSE && resp.StatusCode >= 400 && !strings.Contains(strings.ToLower(respContentType), "text/event-stream") {
+		isSSE = false
+	}
+	clientWantsNonStreaming := true
+	if len(bodyBytes) > 0 {
+		var obj map[string]any
+		if json.Unmarshal(bodyBytes, &obj) == nil {
+			if stream, ok := obj["stream"].(bool); ok && stream {
+				clientWantsNonStreaming = false
+			}
+		}
+	}
+	if passthroughTranslateDir != TranslateNone && resp.StatusCode < 400 && clientWantsNonStreaming && isSSE {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Del("Content-Length")
+		if passthroughTranslateDir == TranslateCompletionsToResponses {
+			bufWriter := &responsesToCompletionsBufferingWriter{debug: h.cfg.debug.Load(), reqID: reqID}
+			_, _ = io.Copy(bufWriter, resp.Body)
+			w.WriteHeader(resp.StatusCode)
+			w.Write(bufWriter.Result())
+			return
+		}
+		if passthroughTranslateDir == TranslateChatToResponses {
+			bufWriter := &responsesToChatCompletionsBufferingWriter{debug: h.cfg.debug.Load(), reqID: reqID}
+			_, _ = io.Copy(bufWriter, resp.Body)
+			w.WriteHeader(resp.StatusCode)
+			w.Write(bufWriter.Result())
+			return
+		}
+	}
+	if passthroughTranslateDir != TranslateNone && resp.StatusCode < 400 && !isSSE {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			http.Error(w, readErr.Error(), http.StatusBadGateway)
+			return
+		}
+		translated := respBody
+		if passthroughTranslateDir == TranslateCompletionsToResponses {
+			if b, err := translateResponsesToCompletions(respBody); err == nil {
+				translated = b
+			}
+		} else if passthroughTranslateDir == TranslateChatToResponses {
+			if b, err := translateResponsesToChatCompletions(respBody); err == nil {
+				translated = b
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Del("Content-Length")
+		w.WriteHeader(resp.StatusCode)
+		w.Write(translated)
+		return
+	}
+
 	// Write response to client
 	copyHeader(w.Header(), resp.Header)
 	removeHopByHopHeaders(w.Header())
 	h.logRateLimitResponseHeaders(reqID, providerType, resp.Header)
 	h.replaceUsageHeaders(w.Header())
+	if isSSE && passthroughTranslateDir != TranslateNone {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Del("Content-Length")
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, _ := w.(http.Flusher)
-	respContentType := resp.Header.Get("Content-Type")
-	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
 
 	var writer io.Writer = w
 	if isSSE && flusher != nil {
 		fw := &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
 		writer = fw
 		defer fw.stop()
+	}
+	if isSSE && passthroughTranslateDir == TranslateCompletionsToResponses {
+		writer = &responsesToCompletionsWriter{w: writer, debug: h.cfg.debug.Load(), reqID: reqID}
+	} else if isSSE && passthroughTranslateDir == TranslateChatToResponses {
+		writer = &responsesToChatCompletionsWriter{w: writer, debug: h.cfg.debug.Load(), reqID: reqID}
 	}
 
 	// Wrap response body with idle timeout to kill zombie SSE connections.
@@ -3383,6 +3868,9 @@ func (h *proxyHandler) tryOnce(
 			if translateDir == TranslateClaudeToResponses {
 				outReq.Header.Set("Accept", "text/event-stream")
 			}
+		} else if translateDir == TranslateChatToResponses || translateDir == TranslateCompletionsToResponses || translateDir == TranslateImagesToResponses {
+			outReq.Header.Set("Accept", "text/event-stream")
+			outReq.Header.Set("Content-Type", "application/json")
 		} else if translateDir == TranslateOAIToClaude || translateDir == TranslateResponsesToClaude {
 			// Client sent OpenAI/Responses format but upstream is Claude — make request
 			// indistinguishable from a native Claude Code request.

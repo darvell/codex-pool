@@ -10,13 +10,21 @@ import (
 )
 
 type responsesBufferingWriter struct {
-	buf          []byte
-	id           string
-	model        string
-	contentText  string
-	inputTokens  int64
-	outputTokens int64
-	status       string
+	buf                 []byte
+	id                  string
+	model               string
+	contentText         string
+	functionCalls       []any
+	imageGenerationCall map[string]any
+	functionCallIndex   int
+	functionCallIDToIdx map[string]int
+	itemIDToCallID      map[string]string
+	callHasArgDelta     map[string]bool
+	inputTokens         int64
+	outputTokens        int64
+	cachedTokens        int64
+	status              string
+	createdAt           int64
 }
 
 func (bw *responsesBufferingWriter) Write(p []byte) (int, error) {
@@ -73,6 +81,41 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 		if delta, _ := obj["delta"].(string); delta != "" {
 			bw.contentText += delta
 		}
+	case "response.output_item.added":
+		item, _ := obj["item"].(map[string]any)
+		if itemType, _ := item["type"].(string); itemType == "function_call" {
+			bw.addFunctionCall(item)
+		} else if itemType == "image_generation_call" {
+			bw.addImageGenerationCall(item)
+		}
+	case "response.function_call_arguments.delta":
+		if delta, _ := obj["delta"].(string); delta != "" {
+			callID := bw.resolveFunctionCallID(obj)
+			if callID != "" {
+				if bw.callHasArgDelta == nil {
+					bw.callHasArgDelta = map[string]bool{}
+				}
+				bw.callHasArgDelta[callID] = true
+			}
+			bw.appendFunctionCallArguments(callID, delta)
+		}
+	case "response.function_call_arguments.done":
+		callID := bw.resolveFunctionCallID(obj)
+		args, _ := obj["arguments"].(string)
+		if args != "" && callID != "" && !bw.callHasArgDelta[callID] {
+			bw.setFunctionCallArguments(callID, args)
+		}
+	case "response.output_item.done":
+		item, _ := obj["item"].(map[string]any)
+		if itemType, _ := item["type"].(string); itemType == "image_generation_call" {
+			bw.addImageGenerationCall(item)
+			break
+		}
+		callID := bw.resolveFunctionCallIDFromItem(item)
+		args, _ := item["arguments"].(string)
+		if args != "" && callID != "" && !bw.callHasArgDelta[callID] {
+			bw.setFunctionCallArguments(callID, args)
+		}
 	case "response.completed":
 		bw.applyResponse(obj)
 		if bw.status == "" {
@@ -98,9 +141,142 @@ func (bw *responsesBufferingWriter) applyResponse(obj map[string]any) {
 	if status, _ := resp["status"].(string); status != "" {
 		bw.status = status
 	}
+	if created := toInt64(resp["created_at"]); created > 0 {
+		bw.createdAt = created
+	}
 	if usage, _ := resp["usage"].(map[string]any); usage != nil {
 		bw.inputTokens = toInt64(usage["input_tokens"])
 		bw.outputTokens = toInt64(usage["output_tokens"])
+		if details, _ := usage["input_tokens_details"].(map[string]any); details != nil {
+			bw.cachedTokens = toInt64(details["cached_tokens"])
+		}
+	}
+}
+
+func (bw *responsesBufferingWriter) addImageGenerationCall(item map[string]any) {
+	if item == nil {
+		return
+	}
+	copy := make(map[string]any, len(item)+1)
+	for k, v := range item {
+		copy[k] = v
+	}
+	if _, ok := copy["status"]; !ok {
+		copy["status"] = "completed"
+	}
+	bw.imageGenerationCall = copy
+}
+
+func (bw *responsesBufferingWriter) addFunctionCall(item map[string]any) {
+	if item == nil {
+		return
+	}
+	callID, _ := item["call_id"].(string)
+	itemID, _ := item["id"].(string)
+	if callID == "" {
+		callID = itemID
+	}
+	name, _ := item["name"].(string)
+	idx := bw.registerFunctionCall(itemID, callID)
+	for len(bw.functionCalls) <= idx {
+		bw.functionCalls = append(bw.functionCalls, nil)
+	}
+	bw.functionCalls[idx] = map[string]any{
+		"type":      "function_call",
+		"id":        itemID,
+		"call_id":   callID,
+		"name":      name,
+		"arguments": "",
+		"status":    "completed",
+	}
+}
+
+func (bw *responsesBufferingWriter) registerFunctionCall(itemID, callID string) int {
+	if bw.functionCallIDToIdx == nil {
+		bw.functionCallIDToIdx = map[string]int{}
+	}
+	if bw.itemIDToCallID == nil {
+		bw.itemIDToCallID = map[string]string{}
+	}
+	if callID == "" {
+		callID = itemID
+	}
+	if itemID != "" && callID != "" {
+		bw.itemIDToCallID[itemID] = callID
+	}
+	if callID != "" {
+		if idx, ok := bw.functionCallIDToIdx[callID]; ok {
+			return idx
+		}
+	}
+	idx := bw.functionCallIndex
+	bw.functionCallIndex++
+	if callID != "" {
+		bw.functionCallIDToIdx[callID] = idx
+	}
+	return idx
+}
+
+func (bw *responsesBufferingWriter) resolveFunctionCallID(obj map[string]any) string {
+	callID, _ := obj["call_id"].(string)
+	if callID == "" {
+		callID, _ = obj["item_id"].(string)
+	}
+	if resolved := bw.itemIDToCallID[callID]; resolved != "" {
+		return resolved
+	}
+	return callID
+}
+
+func (bw *responsesBufferingWriter) resolveFunctionCallIDFromItem(item map[string]any) string {
+	if item == nil {
+		return ""
+	}
+	callID, _ := item["call_id"].(string)
+	if callID == "" {
+		callID, _ = item["id"].(string)
+	}
+	if resolved := bw.itemIDToCallID[callID]; resolved != "" {
+		return resolved
+	}
+	return callID
+}
+
+func (bw *responsesBufferingWriter) functionCallIndexForID(callID string) int {
+	if idx, ok := bw.functionCallIDToIdx[callID]; ok {
+		return idx
+	}
+	idx := bw.functionCallIndex - 1
+	if idx < 0 {
+		return 0
+	}
+	if idx >= len(bw.functionCalls) {
+		return len(bw.functionCalls) - 1
+	}
+	return idx
+}
+
+func (bw *responsesBufferingWriter) appendFunctionCallArguments(callID, delta string) {
+	if len(bw.functionCalls) == 0 {
+		return
+	}
+	idx := bw.functionCallIndexForID(callID)
+	call, _ := bw.functionCalls[idx].(map[string]any)
+	if call == nil {
+		return
+	}
+	args, _ := call["arguments"].(string)
+	call["arguments"] = args + delta
+}
+
+func (bw *responsesBufferingWriter) setFunctionCallArguments(callID, args string) {
+	if len(bw.functionCalls) == 0 {
+		return
+	}
+	idx := bw.functionCallIndexForID(callID)
+	call, _ := bw.functionCalls[idx].(map[string]any)
+	if call != nil {
+		call["arguments"] = args
 	}
 }
 
@@ -117,28 +293,334 @@ func (bw *responsesBufferingWriter) Result() []byte {
 	if status == "" {
 		status = "completed"
 	}
+	output := []any{}
+	if bw.contentText != "" || len(bw.functionCalls) == 0 {
+		output = append(output, map[string]any{
+			"id":     "msg_" + id,
+			"type":   "message",
+			"status": status,
+			"role":   "assistant",
+			"content": []any{
+				map[string]any{"type": "output_text", "text": bw.contentText, "annotations": []any{}},
+			},
+		})
+	}
+	for _, call := range bw.functionCalls {
+		if call != nil {
+			output = append(output, call)
+		}
+	}
+	if bw.imageGenerationCall != nil {
+		output = append(output, bw.imageGenerationCall)
+	}
 	out := map[string]any{
 		"id":         id,
 		"object":     "response",
-		"created_at": float64(0),
+		"created_at": bw.createdAt,
 		"status":     status,
 		"model":      model,
-		"output": []any{
-			map[string]any{
-				"id":     "msg_" + id,
-				"type":   "message",
-				"status": status,
-				"role":   "assistant",
-				"content": []any{
-					map[string]any{"type": "output_text", "text": bw.contentText, "annotations": []any{}},
-				},
-			},
-		},
+		"output":     output,
 		"usage": map[string]any{
 			"input_tokens":  bw.inputTokens,
 			"output_tokens": bw.outputTokens,
 			"total_tokens":  bw.inputTokens + bw.outputTokens,
 		},
+	}
+	if bw.cachedTokens > 0 {
+		out["usage"].(map[string]any)["input_tokens_details"] = map[string]any{"cached_tokens": bw.cachedTokens}
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
+type responsesToCompletionsWriter struct {
+	w         io.Writer
+	buf       []byte
+	callback  func([]byte)
+	debug     bool
+	reqID     string
+	id        string
+	model     string
+	createdAt int64
+}
+
+func (rw *responsesToCompletionsWriter) Write(p []byte) (int, error) {
+	origLen := len(p)
+	rw.buf = append(rw.buf, p...)
+	rw.scanAndTranslate()
+	return origLen, nil
+}
+
+func (rw *responsesToCompletionsWriter) scanAndTranslate() {
+	for {
+		idx := bytes.Index(rw.buf, []byte("\n\n"))
+		advance := 2
+		if idx < 0 {
+			idx = bytes.Index(rw.buf, []byte("\r\n\r\n"))
+			advance = 4
+			if idx < 0 {
+				return
+			}
+		}
+		event := rw.buf[:idx]
+		rw.buf = rw.buf[idx+advance:]
+		rw.processEvent(event)
+	}
+}
+
+func (rw *responsesToCompletionsWriter) processEvent(event []byte) {
+	var eventType string
+	var data []byte
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(line[6:]))
+		} else if bytes.HasPrefix(line, []byte("data: ")) {
+			data = bytes.TrimSpace(line[6:])
+		} else if bytes.HasPrefix(line, []byte("data:")) {
+			data = bytes.TrimSpace(line[5:])
+		}
+	}
+	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
+		rw.callback(data)
+	}
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return
+	}
+	if eventType == "" {
+		eventType, _ = obj["type"].(string)
+	}
+	switch eventType {
+	case "response.created":
+		if resp, _ := obj["response"].(map[string]any); resp != nil {
+			if id, _ := resp["id"].(string); id != "" {
+				rw.id = id
+			}
+			if model, _ := resp["model"].(string); model != "" {
+				rw.model = model
+			}
+			if created := toInt64(resp["created_at"]); created > 0 {
+				rw.createdAt = created
+			}
+		}
+	case "response.output_text.delta":
+		if delta, _ := obj["delta"].(string); delta != "" {
+			rw.emitChunk(delta, "", nil)
+		}
+	case "response.completed":
+		usage := map[string]any(nil)
+		finishReason := "stop"
+		if resp, _ := obj["response"].(map[string]any); resp != nil {
+			if u := completionsUsageFromResponses(resp); u != nil {
+				usage = u
+			}
+			if status, _ := resp["status"].(string); status == "incomplete" {
+				if details, _ := resp["incomplete_details"].(map[string]any); details != nil {
+					if reason, _ := details["reason"].(string); reason == "max_output_tokens" {
+						finishReason = "length"
+					}
+				}
+			}
+		}
+		rw.emitChunk("", finishReason, usage)
+		rw.writeRaw("data: [DONE]\n\n")
+	case "response.failed":
+		rw.emitChunk("[Error: response failed]", "stop", nil)
+		rw.writeRaw("data: [DONE]\n\n")
+	}
+}
+
+func (rw *responsesToCompletionsWriter) emitChunk(text, finishReason string, usage map[string]any) {
+	id := rw.id
+	if id == "" {
+		id = "cmpl-translated"
+	}
+	model := rw.model
+	if model == "" {
+		model = "unknown"
+	}
+	choice := map[string]any{"text": text, "index": 0, "logprobs": nil}
+	if finishReason != "" {
+		choice["finish_reason"] = finishReason
+	} else {
+		choice["finish_reason"] = nil
+	}
+	chunk := map[string]any{"id": id, "object": "text_completion.chunk", "created": rw.createdAt, "model": model, "choices": []any{choice}}
+	if usage != nil {
+		chunk["usage"] = usage
+	}
+	b, err := json.Marshal(chunk)
+	if err != nil {
+		return
+	}
+	rw.writeRaw(fmt.Sprintf("data: %s\n\n", string(b)))
+}
+
+func (rw *responsesToCompletionsWriter) writeRaw(s string) {
+	if _, err := rw.w.Write([]byte(s)); err != nil && rw.debug {
+		log.Printf("[%s] responses->completions write error: %v", rw.reqID, err)
+	}
+}
+
+type responsesToCompletionsBufferingWriter struct {
+	buf          []byte
+	callback     func([]byte)
+	debug        bool
+	reqID        string
+	id           string
+	model        string
+	contentText  string
+	inputTokens  int64
+	outputTokens int64
+	cachedTokens int64
+	createdAt    int64
+	finishReason string
+	errMsg       string
+}
+
+func (bw *responsesToCompletionsBufferingWriter) Write(p []byte) (int, error) {
+	origLen := len(p)
+	bw.buf = append(bw.buf, p...)
+	bw.scanEvents()
+	return origLen, nil
+}
+
+func (bw *responsesToCompletionsBufferingWriter) scanEvents() {
+	for {
+		idx := bytes.Index(bw.buf, []byte("\n\n"))
+		advance := 2
+		if idx < 0 {
+			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
+			advance = 4
+			if idx < 0 {
+				return
+			}
+		}
+		event := bw.buf[:idx]
+		bw.buf = bw.buf[idx+advance:]
+		bw.processEvent(event)
+	}
+}
+
+func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
+	var eventType string
+	var data []byte
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if bytes.HasPrefix(line, []byte("event:")) {
+			eventType = string(bytes.TrimSpace(line[6:]))
+		} else if bytes.HasPrefix(line, []byte("data: ")) {
+			data = bytes.TrimSpace(line[6:])
+		} else if bytes.HasPrefix(line, []byte("data:")) {
+			data = bytes.TrimSpace(line[5:])
+		}
+	}
+	if len(data) > 0 && bw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
+		bw.callback(data)
+	}
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return
+	}
+	if eventType == "" {
+		eventType, _ = obj["type"].(string)
+	}
+	switch eventType {
+	case "response.created":
+		if resp, _ := obj["response"].(map[string]any); resp != nil {
+			if id, _ := resp["id"].(string); id != "" {
+				bw.id = id
+			}
+			if model, _ := resp["model"].(string); model != "" {
+				bw.model = model
+			}
+			if created := toInt64(resp["created_at"]); created > 0 {
+				bw.createdAt = created
+			}
+		}
+	case "response.output_text.delta":
+		if delta, _ := obj["delta"].(string); delta != "" {
+			bw.contentText += delta
+		}
+	case "response.completed":
+		if resp, _ := obj["response"].(map[string]any); resp != nil {
+			if created := toInt64(resp["created_at"]); created > 0 {
+				bw.createdAt = created
+			}
+			if usage, _ := resp["usage"].(map[string]any); usage != nil {
+				bw.inputTokens = toInt64(usage["input_tokens"])
+				bw.outputTokens = toInt64(usage["output_tokens"])
+				if details, _ := usage["input_tokens_details"].(map[string]any); details != nil {
+					bw.cachedTokens = toInt64(details["cached_tokens"])
+				}
+			}
+			if status, _ := resp["status"].(string); status == "incomplete" {
+				if details, _ := resp["incomplete_details"].(map[string]any); details != nil {
+					if reason, _ := details["reason"].(string); reason == "max_output_tokens" {
+						bw.finishReason = "length"
+					}
+				}
+			}
+		}
+		if bw.finishReason == "" {
+			bw.finishReason = "stop"
+		}
+	case "response.failed":
+		bw.errMsg = "response failed"
+		if resp, _ := obj["response"].(map[string]any); resp != nil {
+			if e, _ := resp["error"].(map[string]any); e != nil {
+				if msg, _ := e["message"].(string); msg != "" {
+					bw.errMsg = msg
+				}
+			}
+		}
+		bw.finishReason = "stop"
+	}
+}
+
+func (bw *responsesToCompletionsBufferingWriter) Result() []byte {
+	id := bw.id
+	if id == "" {
+		id = "cmpl-translated"
+	}
+	model := bw.model
+	if model == "" {
+		model = "unknown"
+	}
+	text := bw.contentText
+	if bw.errMsg != "" {
+		text = "[Error: " + bw.errMsg + "]"
+	}
+	finishReason := bw.finishReason
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	out := map[string]any{
+		"id":      id,
+		"object":  "text_completion",
+		"created": bw.createdAt,
+		"model":   model,
+		"choices": []any{
+			map[string]any{"text": text, "index": 0, "logprobs": nil, "finish_reason": finishReason},
+		},
+	}
+	if bw.inputTokens > 0 || bw.outputTokens > 0 {
+		usage := map[string]any{
+			"prompt_tokens":     bw.inputTokens,
+			"completion_tokens": bw.outputTokens,
+			"total_tokens":      bw.inputTokens + bw.outputTokens,
+		}
+		if bw.cachedTokens > 0 {
+			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": bw.cachedTokens}
+		}
+		out["usage"] = usage
 	}
 	b, _ := json.Marshal(out)
 	return b
@@ -163,6 +645,8 @@ type responsesToChatCompletionsWriter struct {
 	toolCallHasArgDelta map[string]bool
 	inputTokens         int64
 	outputTokens        int64
+	cachedTokens        int64
+	createdAt           int64
 }
 
 func (rw *responsesToChatCompletionsWriter) Write(p []byte) (int, error) {
@@ -239,6 +723,9 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 			}
 			if m, ok := resp["model"].(string); ok {
 				rw.model = m
+			}
+			if created := toInt64(resp["created_at"]); created > 0 {
+				rw.createdAt = created
 			}
 		}
 		// Emit initial role chunk
@@ -346,9 +833,15 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 	case "response.completed":
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
+			if created := toInt64(resp["created_at"]); created > 0 {
+				rw.createdAt = created
+			}
 			if usage, ok := resp["usage"].(map[string]any); ok {
 				rw.inputTokens = toInt64(usage["input_tokens"])
 				rw.outputTokens = toInt64(usage["output_tokens"])
+				if details, _ := usage["input_tokens_details"].(map[string]any); details != nil {
+					rw.cachedTokens = toInt64(details["cached_tokens"])
+				}
 			}
 		}
 
@@ -376,6 +869,9 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 			"prompt_tokens":     rw.inputTokens,
 			"completion_tokens": rw.outputTokens,
 			"total_tokens":      rw.inputTokens + rw.outputTokens,
+		}
+		if rw.cachedTokens > 0 {
+			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": rw.cachedTokens}
 		}
 		rw.emitChunk(map[string]any{}, finishReason, usage)
 		rw.writeRaw("data: [DONE]\n\n")
@@ -494,6 +990,7 @@ func (rw *responsesToChatCompletionsWriter) emitChunk(delta map[string]any, fini
 	chunk := map[string]any{
 		"id":      id,
 		"object":  "chat.completion.chunk",
+		"created": rw.createdAt,
 		"model":   model,
 		"choices": []any{choiceObj},
 	}
@@ -537,6 +1034,8 @@ type responsesToChatCompletionsBufferingWriter struct {
 	toolCallHasArgDelta map[string]bool
 	inputTokens         int64
 	outputTokens        int64
+	cachedTokens        int64
+	createdAt           int64
 	finishReason        string
 	errMsg              string
 }

@@ -119,6 +119,17 @@ func isCyberPolicyError(body []byte) bool {
 	return strings.Contains(strings.ToLower(string(body)), "cyber_policy")
 }
 
+func isCodexModelUnavailableError(body []byte) bool {
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "model_not_found") ||
+		strings.Contains(s, "model not found") ||
+		strings.Contains(s, "model_not_supported") ||
+		strings.Contains(s, "model not supported") ||
+		strings.Contains(s, "model is not supported") ||
+		strings.Contains(s, "not available for") ||
+		strings.Contains(s, "does not have access to model")
+}
+
 // Retryable returns true if this class should be retried on another account.
 func (c ErrorClass) Retryable() bool {
 	switch c {

@@ -1316,7 +1316,9 @@ brew install claude-code</pre>
 
                     <div class="sub-tabs">
                         <div class="sub-tab active" onclick="switchSubTab('openai', 'sdk')">OpenAI SDK</div>
-                        <div class="sub-tab" onclick="switchSubTab('openai', 'agents')">Agents SDK</div>
+                        <div class="sub-tab" onclick="switchSubTab('openai', 'agents')">Python Agents</div>
+                        <div class="sub-tab" onclick="switchSubTab('openai', 'agents-ts')">TypeScript Agents</div>
+                        <div class="sub-tab" onclick="switchSubTab('openai', 'integrate')">Copy Paste</div>
                         <div class="sub-tab" onclick="switchSubTab('openai', 'curl')">curl</div>
                     </div>
 
@@ -1331,11 +1333,23 @@ brew install claude-code</pre>
                             <button class="copy-btn" onclick="copyToClipboard('openai-python-example', this)">Copy</button>
                             <div class="code-block"><pre id="openai-python-example"></pre></div>
                         </div>
-                        <div class="step-label">04 // Responses API</div>
+                        <div class="step-label">04 // Legacy Completions</div>
+                        <p class="api-note">Use this for older packages that still call <code>/v1/completions</code>. The pool translates it to Codex Responses and returns normal <code>text_completion</code> JSON.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-completions-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-completions-example"></pre></div>
+                        </div>
+                        <div class="step-label">05 // Responses API</div>
                         <p class="api-note">The proxy normalizes the official SDK's Responses payload into the Codex backend shape and returns normal non-streaming Responses JSON.</p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('openai-responses-example', this)">Copy</button>
                             <div class="code-block"><pre id="openai-responses-example"></pre></div>
+                        </div>
+                        <div class="step-label">06 // Images API</div>
+                        <p class="api-note"><code>images.generate</code> supports <code>n</code> by fanning out through the pool. <code>images.edit</code> accepts the official SDK multipart upload and translates it to the Responses image_generation tool with an input image.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-images-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-images-example"></pre></div>
                         </div>
                     </div>
 
@@ -1345,11 +1359,34 @@ brew install claude-code</pre>
                             <button class="copy-btn" onclick="copyToClipboard('openai-agents-install', this)">Copy</button>
                             <div class="code-block"><pre id="openai-agents-install">pip install openai-agents</pre></div>
                         </div>
-                        <div class="step-label">03 // OpenAI Agents SDK</div>
+                        <div class="step-label">03 // OpenAI Agents SDK for Python</div>
                         <p class="api-note">Use <code>OpenAIResponsesModel</code> for the normal Agents path. <code>OpenAIChatCompletionsModel</code> also works if a project is built around chat completions.</p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('openai-agents-example', this)">Copy</button>
                             <div class="code-block"><pre id="openai-agents-example"></pre></div>
+                        </div>
+                    </div>
+
+                    <div id="openai-agents-ts" class="sub-tab-content">
+                        <div class="step-label">02 // Install</div>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-agents-ts-install', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-agents-ts-install">npm install @openai/agents openai zod</pre></div>
+                        </div>
+                        <div class="step-label">03 // OpenAI Agents SDK for TypeScript</div>
+                        <p class="api-note">This follows the current OpenAI Agents SDK shape: create an OpenAI client with the pool base URL, set it as the default client, then use Responses or Chat Completions models.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-agents-ts-example', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-agents-ts-example"></pre></div>
+                        </div>
+                    </div>
+
+                    <div id="openai-integrate" class="sub-tab-content">
+                        <div class="step-label">To integrate, copy paste this in to your agent:</div>
+                        <p class="api-note">This gives another agent or code assistant the exact base URL, auth header, model names, and endpoint choices it needs to swap an OpenAI client onto the pool.</p>
+                        <div class="code-wrapper">
+                            <button class="copy-btn" onclick="copyToClipboard('openai-agent-copy-paste', this)">Copy</button>
+                            <div class="code-block"><pre id="openai-agent-copy-paste"></pre></div>
                         </div>
                     </div>
 
@@ -1944,8 +1981,9 @@ brew install claude-code</pre>
                 [
                     'anthropic-api-env-unix', 'anthropic-api-env-windows', 'anthropic-python-example',
                     'anthropic-api-curl-example', 'claude-agent-sdk-example', 'openai-env-unix',
-                    'openai-env-windows', 'openai-python-example', 'openai-responses-example',
-                    'openai-agents-example', 'openai-curl-example'
+                    'openai-env-windows', 'openai-python-example', 'openai-completions-example',
+                    'openai-responses-example', 'openai-images-example', 'openai-agents-example', 'openai-agents-ts-example',
+                    'openai-agent-copy-paste', 'openai-curl-example'
                 ].forEach(id => setText(id, '# Log in first to get your API key'));
                 return;
             }
@@ -2010,10 +2048,39 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.5",  # or claude-sonnet-4-6, k2p5, MiniMax-M2.7
+    model="gpt-5.4-mini",  # or gpt-5.5, claude-sonnet-4-6, k2p5, MiniMax-M2.7
     messages=[{"role": "user", "content": "Hello from the pool"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "lookup_order",
+            "description": "Look up a fake order.",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    }],
 )
-print(response.choices[0].message.content)`);
+print(response.choices[0].message)`);
+            setText('openai-completions-example', `import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ["OPENAI_BASE_URL"],
+)
+
+completion = client.completions.create(
+    model="gpt-5.4-mini",
+    prompt="Write a short release-note bullet for: agent routing now supports tool calls.",
+    max_tokens=80,
+    temperature=0,
+)
+print(completion.choices[0].text.strip())`);
             setText('openai-responses-example', `import os
 from openai import OpenAI
 
@@ -2023,28 +2090,161 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-5.5",
-    input="Reply with exactly: pool responses ok",
-    reasoning={"effort": "medium"},
+    model="gpt-5.4-mini",
+    input="Return JSON with marker pool-responses-ok and score 7.",
+    text={
+        "format": {
+            "type": "json_schema",
+            "name": "PoolResult",
+            "schema": {
+                "type": "object",
+                "properties": {"marker": {"type": "string"}, "score": {"type": "number"}},
+                "required": ["marker", "score"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    },
 )
 print(response.output_text)`);
+            setText('openai-images-example', `import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url=os.environ["OPENAI_BASE_URL"],
+    timeout=600,
+)
+
+# Generate four images. The pool fans this out because Codex image_generation
+# creates one image per upstream call.
+result = client.images.generate(
+    model="gpt-image-1",
+    prompt="flat black square with one white diamond, no words",
+    n=4,
+    size="1024x1024",
+    response_format="b64_json",
+)
+print(len(result.data), [len(image.b64_json) for image in result.data])
+
+# Edit an image with the normal OpenAI SDK multipart API.
+with open("input.png", "rb") as image:
+    edited = client.images.edit(
+        model="gpt-image-1",
+        image=image,
+        prompt="keep the black background and change the diamond into a white circle, no words",
+        size="1024x1024",
+        response_format="b64_json",
+    )
+print(len(edited.data[0].b64_json))`);
             setText('openai-agents-example', `import os
 from openai import AsyncOpenAI
-from agents import Agent, Runner, OpenAIResponsesModel
+from agents import Agent, Runner, OpenAIResponsesModel, function_tool, set_trace_processors
+from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor
 
 client = AsyncOpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
     base_url=os.environ["OPENAI_BASE_URL"],
 )
+set_trace_processors([
+    BatchTraceProcessor(BackendSpanExporter(endpoint=os.environ["OPENAI_BASE_URL"] + "/traces/ingest"))
+])
+
+@function_tool
+def lookup_order(order_id: str) -> str:
+    return f"order {order_id}: packed, ETA tomorrow"
 
 agent = Agent(
     name="Pool Agent",
-    instructions="Reply with exactly what the user asks for, no extra text.",
-    model=OpenAIResponsesModel(model="gpt-5.5", openai_client=client),
+    instructions="Use tools when useful. Keep final answers short.",
+    model=OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client),
+    tools=[lookup_order],
 )
 
-result = Runner.run_sync(agent, "Reply with exactly: pool agents ok", max_turns=1)
+result = Runner.run_sync(agent, "Check order EDGE-42, then include marker pool-agents-ok.", max_turns=3)
 print(result.final_output)`);
+            setText('openai-agents-ts-example', `import OpenAI from "openai";
+import { Agent, BatchTraceProcessor, OpenAIChatCompletionsModel, OpenAIResponsesModel, OpenAITracingExporter, run, setDefaultOpenAIClient, setOpenAIAPI, setTraceProcessors, tool } from "@openai/agents";
+import { z } from "zod";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+  baseURL: process.env.OPENAI_BASE_URL!,
+});
+setDefaultOpenAIClient(client);
+setOpenAIAPI("responses");
+setTraceProcessors([
+  new BatchTraceProcessor(new OpenAITracingExporter({ endpoint: `${process.env.OPENAI_BASE_URL}/traces/ingest` })),
+]);
+
+const lookupOrder = tool({
+  name: "lookup_order",
+  description: "Return fake order status.",
+  parameters: z.object({ orderId: z.string(), includeEta: z.boolean().default(true) }),
+  execute: async ({ orderId, includeEta }) => JSON.stringify({
+    orderId,
+    status: "packed",
+    eta: includeEta ? "tomorrow" : null,
+  }),
+});
+
+const responsesAgent = new Agent({
+  name: "Pool Responses Agent",
+  instructions: "Use tools when useful. Keep final answers short.",
+  model: new OpenAIResponsesModel(client, "gpt-5.4-mini"),
+  tools: [lookupOrder],
+});
+
+const responsesResult = await run(
+  responsesAgent,
+  "Check order EDGE-42 with ETA, then include marker pool-ts-responses-ok.",
+  { maxTurns: 3 },
+);
+console.log(responsesResult.finalOutput);
+
+const chatAgent = new Agent({
+  name: "Pool Chat Agent",
+  instructions: "Use tools when useful. Keep final answers short.",
+  model: new OpenAIChatCompletionsModel(client, "gpt-5.4-mini"),
+  tools: [lookupOrder],
+});
+
+const chatResult = await run(
+  chatAgent,
+  "Check order CHAT-99 with ETA, then include marker pool-ts-chat-ok.",
+  { maxTurns: 3 },
+);
+console.log(chatResult.finalOutput);`);
+            setText('openai-agent-copy-paste', `You are being asked to update this project so all OpenAI API usage goes through the company's approved AI proxy instead of the default OpenAI endpoint. Treat the proxy as an OpenAI-compatible API gateway. Do not remove existing OpenAI SDK usage if it can be configured with a custom base URL; prefer the smallest safe config change.
+
+Use these credentials and endpoint:
+OPENAI_BASE_URL=${publicUrl}/v1
+OPENAI_API_KEY=${key}
+
+Implementation requirements:
+1. Find every OpenAI client initialization, raw OpenAI HTTP call, Agents SDK setup, LiteLLM/OpenAI-compatible provider config, and environment example in this repo.
+2. Configure them to use base URL ${publicUrl}/v1 and bearer/API key ${key}. For raw HTTP, send Authorization: Bearer ${key} and Content-Type: application/json.
+3. Keep normal OpenAI SDK method calls intact where possible. The proxy supports Responses, Chat Completions, legacy Completions, Images generate/edit, tool/function calls, structured outputs, and OpenAI Agents SDK usage.
+4. Use gpt-5.4-mini as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-4-6, claude-opus-4-7, k2p5, MiniMax-M2.7, and glm-5.1.
+5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
+6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.4-mini") or new OpenAIChatCompletionsModel(client, "gpt-5.4-mini") depending on the existing agent path. Point OpenAITracingExporter at `${process.env.OPENAI_BASE_URL}/traces/ingest` or disable tracing.
+7. Update README, .env.example, deployment config, tests, and CI secrets documentation so future runs use the proxy settings instead of api.openai.com.
+8. Run the project's most direct smoke test against the proxy. At minimum, verify one request returns a real model response using gpt-5.4-mini. If the project has agent/tool-call behavior, verify one tool-call path too. If it uses Images, verify images.generate or images.edit against the proxy rather than mocking it.
+
+Reference snippets:
+Python OpenAI SDK:
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], base_url=os.environ["OPENAI_BASE_URL"])
+
+TypeScript OpenAI SDK:
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL });
+
+Raw HTTP smoke test:
+curl ${publicUrl}/v1/responses \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"gpt-5.4-mini","input":"Reply with exactly: pool ok"}'
+
+Before you finish, report exactly which files changed and paste the smoke-test output. Do not claim this is complete unless the test actually hit ${publicUrl}/v1.`);
             setText('openai-curl-example', `curl ${publicUrl}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
