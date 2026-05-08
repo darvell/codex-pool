@@ -13,13 +13,11 @@ type metrics struct {
 	accStatus map[string]map[string]int64 // account -> status -> count
 	// cyberPolicy counts cyber_policy-related actions taken by the
 	// proxy. The keys are `(account, action)` pairs. Action is one of:
-	//   suppressed_ws            — WS cyber_policy frame dropped
-	//   suppressed_sse           — streaming SSE cyber_policy dropped
+	//   suppressed_ws            — WS cyber_policy frame seen
+	//   suppressed_sse           — streaming SSE cyber_policy seen
 	//   suppressed_buffered      — buffered translation hit
 	//   swap_succeeded           — WS hot-swap to cyber upstream done
-	//   swap_no_candidate        — suppressed but no cyber candidate
-	//   synthetic_refusal_ws     — WS synthetic refusal turn emitted
-	//   synthetic_refusal_sse    — SSE synthetic refusal emitted
+	//   swap_no_candidate        — saw cyber_policy but no cyber candidate
 	//   retry_buffered           — buffered translation retried on cyber
 	cyberPolicy map[cyberPolicyKey]int64
 }

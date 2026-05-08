@@ -280,10 +280,10 @@ func TestMetadataRecommendationIsNoOp(t *testing.T) {
 }
 
 // 3) cyber_policy that arrives on an account already marked
-// CyberAccess: drop it silently, no swap, no error reported. The
-// client must see a synthetic terminal turn (response.completed) so
-// the codex CLI doesn't loop on reconnects.
-func TestCyberPolicyOnCyberAccountSuppressedWithoutSwap(t *testing.T) {
+// CyberAccess: there's nowhere to swap to, so the upstream's real
+// cyber_policy frame is forwarded to the client unchanged. We never
+// fabricate assistant text. The conversation pin stays put.
+func TestCyberPolicyOnCyberAccountForwardsUpstreamFrame(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	upstream := newFakeCodexUpstream(t)
@@ -309,19 +309,12 @@ func TestCyberPolicyOnCyberAccountSuppressedWithoutSwap(t *testing.T) {
 		t.Fatalf("client write: %v", err)
 	}
 
-	frames := readUntilCompletedOrClose(t, conn, 5*time.Second)
-	if !anyFrame(frames, func(f string) bool { return strings.Contains(f, `"response.completed"`) }) {
-		t.Fatalf("client did not receive synthetic response.completed; got %d frames: %v", len(frames), summaries(frames))
-	}
-	for _, f := range frames {
-		if strings.Contains(f, "cyber_policy") || strings.Contains(f, "cybersecurity") {
-			t.Fatalf("client received policy text: %s", f)
-		}
+	frames := readUntilCyberPolicyOrClose(t, conn, 5*time.Second)
+	if !anyFrame(frames, func(f string) bool { return strings.Contains(f, `"code":"cyber_policy"`) }) {
+		t.Fatalf("expected upstream cyber_policy frame to be forwarded; got %d frames: %v", len(frames), summaries(frames))
 	}
 
-	// Account stayed at darv — no swap occurred. The "websocket done"
-	// log line in production should report cyber_swapped=false here.
-	// We assert the equivalent invariant: pool pin is unchanged.
+	// Account stayed at darv — no swap occurred.
 	fx.handler.pool.mu.RLock()
 	pinned := fx.handler.pool.convPin["conv-cy"]
 	fx.handler.pool.mu.RUnlock()
@@ -329,9 +322,6 @@ func TestCyberPolicyOnCyberAccountSuppressedWithoutSwap(t *testing.T) {
 		t.Fatalf("pool pin = %q, want darv (no swap)", pinned)
 	}
 
-	if got := fx.handler.recent.snapshot(); len(got) != 0 {
-		t.Fatalf("expected no recent errors, got %v", got)
-	}
 	waitForZeroInflight(t, fx.handler, []*Account{darv})
 
 	snap := fx.handler.metrics.cyberPolicySnapshot()
@@ -341,15 +331,12 @@ func TestCyberPolicyOnCyberAccountSuppressedWithoutSwap(t *testing.T) {
 	if snap[cyberPolicyKey{"darv", "swap_no_candidate"}] == 0 {
 		t.Errorf("expected swap_no_candidate counter (already on cyber, no other candidate); snap=%v", snap)
 	}
-	if snap[cyberPolicyKey{"darv", "synthetic_refusal_ws"}] == 0 {
-		t.Errorf("expected synthetic_refusal_ws counter when no swap target; snap=%v", snap)
-	}
 }
 
 // 4) cyber_policy when no cyber candidate exists in the pool: the
-// frame is dropped, the client gets a synthetic refusal turn rather
-// than an abrupt close, and no tunnel error is reported.
-func TestCyberPolicyWithoutCyberCandidateSuppresses(t *testing.T) {
+// upstream's real cyber_policy frame is forwarded to the client (no
+// fabrication), the relay ends cleanly, no tunnel error is reported.
+func TestCyberPolicyWithoutCyberCandidateForwardsUpstreamFrame(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	upstream := newFakeCodexUpstream(t)
@@ -375,27 +362,19 @@ func TestCyberPolicyWithoutCyberCandidateSuppresses(t *testing.T) {
 		t.Fatalf("client write: %v", err)
 	}
 
-	frames := readUntilCompletedOrClose(t, conn, 5*time.Second)
-	if !anyFrame(frames, func(f string) bool { return strings.Contains(f, `"response.completed"`) }) {
-		t.Fatalf("client did not receive synthetic response.completed; got %d frames: %v", len(frames), summaries(frames))
-	}
-	for _, f := range frames {
-		if strings.Contains(f, "cyber_policy") || strings.Contains(f, "cybersecurity") {
-			t.Fatalf("client received policy text: %s", f)
-		}
+	frames := readUntilCyberPolicyOrClose(t, conn, 5*time.Second)
+	if !anyFrame(frames, func(f string) bool { return strings.Contains(f, `"code":"cyber_policy"`) }) {
+		t.Fatalf("expected upstream cyber_policy frame to be forwarded; got %d frames: %v", len(frames), summaries(frames))
 	}
 
-	if got := fx.handler.recent.snapshot(); len(got) != 0 {
-		t.Fatalf("expected no recent errors, got %v", got)
-	}
 	waitForZeroInflight(t, fx.handler, []*Account{shiv})
 }
 
 // TestCyberSwapResultSwappedFlagIsActiveAccountChange verifies the
 // `swapped` field on codexCyberSwapResult is strictly derived from
 // activeAccount != initialAccount, even when the relay terminates
-// because of suppression. Regression: an earlier version hardcoded
-// `swapped=true` whenever errCyberPolicySuppressed bubbled up, which
+// because of a passthrough. Regression: an earlier version hardcoded
+// `swapped=true` whenever the cyber-policy sentinel bubbled up, which
 // produced misleading `cyber_swapped=true` log lines and broke the
 // "skip the post-relay pin because we already pinned to a different
 // account" optimisation.
@@ -410,8 +389,8 @@ func TestCyberSwapResultSwappedFlagIsActiveAccountChange(t *testing.T) {
 		wantSwapped bool
 	}{
 		{"clean close on initial", a, a, nil, false},
-		{"suppressed on initial", a, a, errCyberPolicySuppressed, false},
-		{"suppressed after swap", b, a, errCyberPolicySuppressed, true},
+		{"passthrough on initial", a, a, errCyberPolicyPassthrough, false},
+		{"passthrough after swap", b, a, errCyberPolicyPassthrough, true},
 		{"clean close after swap", b, a, nil, true},
 	}
 	for _, tc := range cases {
@@ -454,10 +433,11 @@ func TestStripPreviousResponseIDNoOp(t *testing.T) {
 	}
 }
 
-// readUntilCompletedOrClose reads frames until response.completed is
-// seen, the connection closes, or timeout elapses. Used by suppression
-// tests that assert the synthetic terminal turn was written.
-func readUntilCompletedOrClose(t *testing.T, conn *websocket.Conn, timeout time.Duration) []string {
+// readUntilCyberPolicyOrClose reads frames until a cyber_policy frame
+// is seen, the connection closes, or the timeout elapses. Used by the
+// passthrough tests that assert the upstream's real cyber_policy frame
+// reaches the client.
+func readUntilCyberPolicyOrClose(t *testing.T, conn *websocket.Conn, timeout time.Duration) []string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var frames []string
@@ -470,7 +450,7 @@ func readUntilCompletedOrClose(t *testing.T, conn *websocket.Conn, timeout time.
 		}
 		s := string(data)
 		frames = append(frames, s)
-		if strings.Contains(s, `"response.completed"`) {
+		if strings.Contains(s, `"code":"cyber_policy"`) {
 			return frames
 		}
 	}
@@ -495,89 +475,6 @@ func summaries(frames []string) []string {
 		out = append(out, f)
 	}
 	return out
-}
-
-// TestSyntheticRefusalTurnIsWellFormed unit-checks the synthesized
-// frames so we know they parse and are in the order the codex CLI
-// expects (created → in_progress → output_item.added → … →
-// response.completed).
-func TestSyntheticRefusalTurnIsWellFormed(t *testing.T) {
-	pair, srv := newSyntheticTurnFixture(t)
-	defer srv.Close()
-	defer pair.client.CloseNow()
-
-	state := &codexRelayState{
-		opts:          codexCyberSwapOptions{ReqID: "synth-test", LogLabel: "synth-test"},
-		ctx:           context.Background(),
-		clientConn:    pair.server, // relay code writes into the server side
-		activeAccount: &Account{ID: "synth"},
-	}
-	state.writeSyntheticRefusalTurn()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	var seen []string
-	for {
-		_, data, err := pair.client.Read(ctx)
-		if err != nil {
-			break
-		}
-		seen = append(seen, string(data))
-		if strings.Contains(string(data), `"response.completed"`) {
-			break
-		}
-	}
-	expectedTypes := []string{
-		`"type":"response.created"`,
-		`"type":"response.in_progress"`,
-		`"type":"response.output_item.added"`,
-		`"type":"response.content_part.added"`,
-		`"type":"response.output_text.delta"`,
-		`"type":"response.output_text.done"`,
-		`"type":"response.content_part.done"`,
-		`"type":"response.output_item.done"`,
-		`"type":"response.completed"`,
-	}
-	joined := strings.Join(seen, "\n")
-	for _, want := range expectedTypes {
-		if !strings.Contains(joined, want) {
-			t.Errorf("missing frame %s in: %v", want, summaries(seen))
-		}
-	}
-	if strings.Contains(joined, "cyber_policy") || strings.Contains(joined, "cybersecurity") {
-		t.Errorf("synthetic turn must not contain policy text")
-	}
-}
-
-type syntheticTurnPair struct {
-	client *websocket.Conn
-	server *websocket.Conn
-}
-
-func newSyntheticTurnFixture(t *testing.T) (syntheticTurnPair, *httptest.Server) {
-	t.Helper()
-	pair := syntheticTurnPair{}
-	srvCh := make(chan *websocket.Conn, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if err != nil {
-			t.Logf("server accept: %v", err)
-			return
-		}
-		srvCh <- c
-		<-r.Context().Done()
-	}))
-	u, _ := url.Parse(srv.URL)
-	u.Scheme = "ws"
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	c, _, err := websocket.Dial(ctx, u.String(), nil)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	pair.client = c
-	pair.server = <-srvCh
-	return pair, srv
 }
 
 func waitForZeroInflight(t *testing.T, h *proxyHandler, accts []*Account) {

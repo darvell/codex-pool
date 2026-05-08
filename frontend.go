@@ -1654,7 +1654,6 @@ type CyberPolicyStats struct {
 	CyberCandidatesAvailable int `json:"cyber_candidates_available"`
 	// Counters by action: "suppressed_ws", "suppressed_sse",
 	// "suppressed_buffered", "swap_succeeded", "swap_no_candidate",
-	// "synthetic_refusal_ws", "synthetic_refusal_sse",
 	// "retry_buffered", "retry_4xx".
 	Counters map[string]int64 `json:"counters"`
 	// PerAccount["shiv_1"]["suppressed_ws"] = 5 — useful when you
@@ -2023,12 +2022,12 @@ func (h *proxyHandler) computeCyberPolicyStats(accounts []*Account) CyberPolicyS
 
 	suppressions := out.Counters["suppressed_ws"] + out.Counters["suppressed_sse"] + out.Counters["suppressed_buffered"]
 	resolutions := out.Counters["swap_succeeded"] + out.Counters["retry_buffered"] + out.Counters["retry_4xx"]
-	syntheticFallbacks := out.Counters["synthetic_refusal_ws"] + out.Counters["synthetic_refusal_sse"]
+	noCandidate := out.Counters["swap_no_candidate"]
 
 	switch {
 	case suppressions == 0:
 		out.Healthy = out.CyberCandidatesAvailable > 0
-	case syntheticFallbacks > 0 || resolutions < suppressions:
+	case noCandidate > 0 || resolutions < suppressions:
 		out.Healthy = false
 	default:
 		out.Healthy = out.CyberCandidatesAvailable > 0

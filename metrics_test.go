@@ -32,9 +32,7 @@ func TestCyberPolicyMetricsExposed(t *testing.T) {
 	m.incCyberPolicy("shiv_1", "suppressed_ws")
 	m.incCyberPolicy("darv", "swap_succeeded")
 	m.incCyberPolicy("shiv_1", "swap_no_candidate")
-	m.incCyberPolicy("shiv_1", "synthetic_refusal_ws")
 	m.incCyberPolicy("shiv_1", "suppressed_sse")
-	m.incCyberPolicy("shiv_1", "synthetic_refusal_sse")
 	m.incCyberPolicy("shiv_1", "suppressed_buffered")
 	m.incCyberPolicy("shiv_1", "retry_buffered")
 	m.incCyberPolicy("shiv_1", "retry_4xx")
@@ -48,9 +46,7 @@ func TestCyberPolicyMetricsExposed(t *testing.T) {
 		`codexpool_cyber_policy_actions_total{account="darv",action="swap_succeeded"} 1`,
 		`codexpool_cyber_policy_actions_total{account="shiv_1",action="suppressed_ws"} 2`,
 		`codexpool_cyber_policy_actions_total{account="shiv_1",action="swap_no_candidate"} 1`,
-		`codexpool_cyber_policy_actions_total{account="shiv_1",action="synthetic_refusal_ws"} 1`,
 		`codexpool_cyber_policy_actions_total{account="shiv_1",action="suppressed_sse"} 1`,
-		`codexpool_cyber_policy_actions_total{account="shiv_1",action="synthetic_refusal_sse"} 1`,
 		`codexpool_cyber_policy_actions_total{account="shiv_1",action="suppressed_buffered"} 1`,
 		`codexpool_cyber_policy_actions_total{account="shiv_1",action="retry_buffered"} 1`,
 		`codexpool_cyber_policy_actions_total{account="shiv_1",action="retry_4xx"} 1`,
@@ -120,18 +116,6 @@ func TestComputeCyberPolicyStatsHealthSignals(t *testing.T) {
 			wantHealthy:      true,
 			wantCandidates:   1,
 			wantSuppressedWS: 3,
-		},
-		{
-			name:     "synthetic refusal fired -> degraded",
-			accounts: []*Account{plain, cyberLive},
-			bumps: map[string]map[string]int{
-				"suppressed_ws":        {"plain": 1},
-				"synthetic_refusal_ws": {"plain": 1},
-				"swap_no_candidate":    {"plain": 1},
-			},
-			wantHealthy:      false,
-			wantCandidates:   1,
-			wantSuppressedWS: 1,
 		},
 		{
 			name:     "suppressions outpace resolutions -> degraded",

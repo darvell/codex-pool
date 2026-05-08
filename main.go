@@ -2239,15 +2239,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					}
 					if accountType == AccountTypeCodex && !acc.CyberAccess {
 						suppressor := &cyberPolicyHTTPSuppressor{
-							h:               h,
-							reqID:           reqID,
-							conversationID:  conversationID,
-							requiredPlan:    requiredPlan,
-							clientIP:        originIP,
-							accountID:       acc.ID,
-							underlyingWrite: writer,
-							cancel:          cancel,
-							pinned:          &cyberPinned,
+							h:              h,
+							reqID:          reqID,
+							conversationID: conversationID,
+							requiredPlan:   requiredPlan,
+							clientIP:       originIP,
+							accountID:      acc.ID,
+							pinned:         &cyberPinned,
 						}
 						interceptWriter.onEvent = suppressor.onEvent
 					}
@@ -3126,15 +3124,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		}
 		if accountType == AccountTypeCodex && !acc.CyberAccess {
 			suppressor := &cyberPolicyHTTPSuppressor{
-				h:               h,
-				reqID:           reqID,
-				conversationID:  conversationID,
-				requiredPlan:    requiredPlan,
-				clientIP:        clientIP,
-				accountID:       acc.ID,
-				underlyingWrite: writer,
-				cancel:          cancel,
-				pinned:          &cyberPinned,
+				h:              h,
+				reqID:          reqID,
+				conversationID: conversationID,
+				requiredPlan:   requiredPlan,
+				clientIP:       clientIP,
+				accountID:      acc.ID,
+				pinned:         &cyberPinned,
 			}
 			interceptWriter.onEvent = suppressor.onEvent
 		}

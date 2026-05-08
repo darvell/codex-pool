@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -58,17 +57,22 @@ type codexCyberSwapResult struct {
 	finalAccount *Account
 }
 
-// errCyberPolicySuppressed is the relay's "happy enough" termination
-// sentinel: a cyber_policy frame was swallowed, the relay is over, but
-// no error should be reported to the user-facing logs/metrics.
-var errCyberPolicySuppressed = errors.New("cyber_policy suppressed")
+// errCyberPolicyPassthrough is returned when an upstream cyber_policy
+// frame should be forwarded to the client unchanged. Used when no
+// cyber_access candidate is available to swap to: the right answer is
+// to surface the real upstream error rather than fabricate text.
+var errCyberPolicyPassthrough = errors.New("cyber_policy passthrough")
 
 // swapPendingErr is returned from the upstream pump when a cyber_policy
 // hit should trigger a swap. The relay loop is the single owner of
 // next; carrying it on the error keeps shared mutable state out of the
-// relay state struct.
+// relay state struct. frame is the original cyber_policy upstream
+// payload — the relay forwards it to the client only if the swap
+// dial fails (so the user sees the real upstream error rather than a
+// fabricated message).
 type swapPendingErr struct {
-	next *Account
+	next  *Account
+	frame []byte
 }
 
 func (e *swapPendingErr) Error() string {
@@ -177,18 +181,23 @@ func (s *codexRelayState) run() (int, error) {
 		switch {
 		case err == nil:
 			return 101, nil
-		case errors.Is(err, errCyberPolicySuppressed):
+		case errors.Is(err, errCyberPolicyPassthrough):
+			// We saw cyber_policy but had nowhere to swap to. The
+			// frame has already been forwarded to the client; the
+			// upstream typically closes the socket immediately
+			// after, which we treat as a clean end-of-turn.
 			s.legacyPin()
-			s.writeSyntheticRefusalTurn()
-			return 101, errCyberPolicySuppressed
+			return 101, nil
 		}
 		var swap *swapPendingErr
 		if errors.As(err, &swap) {
 			if doErr := s.doSwap(swap.next); doErr != nil {
-				log.Printf("[%s] cyber swap dial failed: %v; sending synthetic refusal", s.opts.ReqID, doErr)
+				log.Printf("[%s] cyber swap dial failed: %v; forwarding upstream cyber_policy frame", s.opts.ReqID, doErr)
+				if writeErr := s.clientConn.Write(s.ctx, websocket.MessageText, swap.frame); writeErr != nil {
+					log.Printf("[%s] forward cyber_policy frame failed: %v", s.opts.ReqID, writeErr)
+				}
 				s.legacyPin()
-				s.writeSyntheticRefusalTurn()
-				return 101, errCyberPolicySuppressed
+				return 101, nil
 			}
 			continue
 		}
@@ -233,7 +242,7 @@ func (s *codexRelayState) relayOnce() error {
 
 // pumpFrames forwards frames from src to dst, calling inspect on each
 // frame before writing. inspect can return a sentinel error (e.g.
-// errCyberPolicySuppressed or *swapPendingErr) to abort the relay
+// errCyberPolicyPassthrough or *swapPendingErr) to abort the relay
 // without writing the frame.
 func pumpFrames(
 	ctx context.Context,
@@ -280,21 +289,30 @@ func (s *codexRelayState) inspectUpstream(data []byte) error {
 	if !isCyberPolicyError(data) {
 		return nil
 	}
-	log.Printf("[%s] suppressing cyber_policy frame from account %s", s.opts.ReqID, s.activeAccount.ID)
+	log.Printf("[%s] cyber_policy frame from account %s", s.opts.ReqID, s.activeAccount.ID)
 	if s.h != nil && s.h.metrics != nil {
 		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "suppressed_ws")
 	}
 	if !s.swapDone && s.lastResponseCreate != nil {
 		if cand := s.pickCyberAccessCandidate(); cand != nil {
 			s.swapDone = true
-			return &swapPendingErr{next: cand}
+			// Drop this frame. doSwap replays the request on the
+			// cyber-access account; the new upstream's response.completed
+			// closes the turn cleanly. The client never sees cyber_policy.
+			return &swapPendingErr{next: cand, frame: append([]byte(nil), data...)}
 		}
 	}
 	s.swapDone = true
 	if s.h != nil && s.h.metrics != nil {
 		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "swap_no_candidate")
 	}
-	return errCyberPolicySuppressed
+	// No swap target: write the upstream's real cyber_policy frame
+	// through to the client and end the relay cleanly. We deliberately
+	// don't fabricate text — the client sees the actual error.
+	if err := s.clientConn.Write(s.ctx, websocket.MessageText, data); err != nil {
+		log.Printf("[%s] forward cyber_policy frame to client failed: %v", s.opts.ReqID, err)
+	}
+	return errCyberPolicyPassthrough
 }
 
 func (s *codexRelayState) inspectClient(data []byte) error {
@@ -359,153 +377,6 @@ func (s *codexRelayState) legacyPin() {
 	s.h.pinConversationToCyberAccess(s.opts.ConversationID, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, s.activeAccount.ID, s.opts.ReqID)
 }
 
-// syntheticRefusalText is what we render to the client when we can't
-// route the turn through any account. The codex CLI prints this as a
-// normal assistant message; the user gets a clear cue without ever
-// seeing the upstream's cyber_policy text.
-const syntheticRefusalText = "I can't help with that request right now. Try rephrasing it, splitting it into smaller pieces, or rewording the security-sensitive parts as a higher-level question."
-
-// writeSyntheticRefusalTurn fabricates a complete OpenAI Responses
-// websocket turn (response.created → … → response.completed) so the
-// client's parser sees a clean turn end. Without this, the client sees
-// a TCP-level close mid-stream and infinitely retries the same request,
-// which on a flagged prompt loops forever against the same suppressed
-// upstream.
-func (s *codexRelayState) writeSyntheticRefusalTurn() {
-	respID := newSyntheticID("resp")
-	itemID := newSyntheticID("msg")
-	createdAt := time.Now().Unix()
-
-	respShellInProgress := map[string]any{
-		"id":           respID,
-		"object":       "response",
-		"created_at":   createdAt,
-		"status":       "in_progress",
-		"background":   false,
-		"output":       []any{},
-		"model":        "gpt-5.5",
-		"text":         map[string]any{"format": map[string]any{"type": "text"}},
-		"usage":        nil,
-		"error":        nil,
-		"incomplete_details": nil,
-	}
-	respShellCompleted := cloneJSONMap(respShellInProgress)
-	respShellCompleted["status"] = "completed"
-	respShellCompleted["output"] = []any{
-		map[string]any{
-			"id":     itemID,
-			"type":   "message",
-			"status": "completed",
-			"role":   "assistant",
-			"content": []any{
-				map[string]any{
-					"type":        "output_text",
-					"text":        syntheticRefusalText,
-					"annotations": []any{},
-					"logprobs":    []any{},
-				},
-			},
-		},
-	}
-
-	frames := []map[string]any{
-		{"type": "response.created", "response": respShellInProgress, "sequence_number": 0},
-		{"type": "response.in_progress", "response": respShellInProgress, "sequence_number": 1},
-		{
-			"type":          "response.output_item.added",
-			"output_index":  0,
-			"sequence_number": 2,
-			"item": map[string]any{
-				"id":      itemID,
-				"type":    "message",
-				"status":  "in_progress",
-				"role":    "assistant",
-				"content": []any{},
-			},
-		},
-		{
-			"type":           "response.content_part.added",
-			"output_index":   0,
-			"item_id":        itemID,
-			"content_index":  0,
-			"sequence_number": 3,
-			"part": map[string]any{
-				"type":        "output_text",
-				"text":        "",
-				"annotations": []any{},
-				"logprobs":    []any{},
-			},
-		},
-		{
-			"type":            "response.output_text.delta",
-			"output_index":    0,
-			"item_id":         itemID,
-			"content_index":   0,
-			"sequence_number": 4,
-			"delta":           syntheticRefusalText,
-			"logprobs":        []any{},
-		},
-		{
-			"type":            "response.output_text.done",
-			"output_index":    0,
-			"item_id":         itemID,
-			"content_index":   0,
-			"sequence_number": 5,
-			"text":            syntheticRefusalText,
-			"logprobs":        []any{},
-		},
-		{
-			"type":            "response.content_part.done",
-			"output_index":    0,
-			"item_id":         itemID,
-			"content_index":   0,
-			"sequence_number": 6,
-			"part": map[string]any{
-				"type":        "output_text",
-				"text":        syntheticRefusalText,
-				"annotations": []any{},
-				"logprobs":    []any{},
-			},
-		},
-		{
-			"type":            "response.output_item.done",
-			"output_index":    0,
-			"sequence_number": 7,
-			"item": map[string]any{
-				"id":     itemID,
-				"type":   "message",
-				"status": "completed",
-				"role":   "assistant",
-				"content": []any{
-					map[string]any{
-						"type":        "output_text",
-						"text":        syntheticRefusalText,
-						"annotations": []any{},
-						"logprobs":    []any{},
-					},
-				},
-			},
-		},
-		{"type": "response.completed", "response": respShellCompleted, "sequence_number": 8},
-	}
-
-	for _, frame := range frames {
-		data, err := json.Marshal(frame)
-		if err != nil {
-			log.Printf("[%s] synthetic frame marshal failed: %v", s.opts.ReqID, err)
-			return
-		}
-		if writeErr := s.clientConn.Write(s.ctx, websocket.MessageText, data); writeErr != nil {
-			log.Printf("[%s] synthetic frame write failed: %v", s.opts.ReqID, writeErr)
-			return
-		}
-	}
-	log.Printf("[%s] wrote synthetic refusal turn after suppressed cyber_policy", s.opts.ReqID)
-	if s.h != nil && s.h.metrics != nil {
-		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "synthetic_refusal_ws")
-	}
-}
-
 func cloneJSONMap(in map[string]any) map[string]any {
 	raw, _ := json.Marshal(in)
 	var out map[string]any
@@ -514,28 +385,26 @@ func cloneJSONMap(in map[string]any) map[string]any {
 }
 
 // cyberPolicyHTTPSuppressor wires sseInterceptWriter.onEvent so the
-// HTTP/SSE Codex code path stops cyber_policy events from reaching the
-// client and substitutes a synthetic refusal turn instead. underlyingWrite
-// must point at the bytes-to-the-client writer (the same writer that
-// sseInterceptWriter forwards to). cancel ends the upstream copy so the
-// proxy doesn't keep pumping bytes after the synthetic terminal.
+// HTTP/SSE Codex code path can pin the conversation to a cyber_access
+// account on cyber_policy. The event itself is forwarded to the client
+// unchanged — we don't fabricate fake assistant text. The conversation
+// pin steers the next turn through a cyber account so the user just
+// retries and it works.
 type cyberPolicyHTTPSuppressor struct {
-	h               *proxyHandler
-	reqID           string
-	conversationID  string
-	requiredPlan    string
-	clientIP        string
-	accountID       string
-	underlyingWrite io.Writer
-	cancel          context.CancelFunc
-	pinned          *bool
+	h              *proxyHandler
+	reqID          string
+	conversationID string
+	requiredPlan   string
+	clientIP       string
+	accountID      string
+	pinned         *bool
 }
 
 func (c *cyberPolicyHTTPSuppressor) onEvent(eventData []byte) (drop bool, terminate bool) {
 	if !isCyberPolicyError(eventData) {
 		return false, false
 	}
-	log.Printf("[%s] suppressing cyber_policy SSE event from account %s", c.reqID, c.accountID)
+	log.Printf("[%s] cyber_policy SSE event from account %s; pinning conversation, forwarding error", c.reqID, c.accountID)
 	if c.h != nil && c.h.metrics != nil {
 		c.h.metrics.incCyberPolicy(c.accountID, "suppressed_sse")
 	}
@@ -546,115 +415,11 @@ func (c *cyberPolicyHTTPSuppressor) onEvent(eventData []byte) (drop bool, termin
 			}
 		}
 	}
-	if c.underlyingWrite != nil {
-		if _, err := c.underlyingWrite.Write(syntheticRefusalSSEFrames()); err != nil {
-			log.Printf("[%s] synthetic SSE write failed: %v", c.reqID, err)
-		} else {
-			log.Printf("[%s] wrote synthetic SSE refusal turn after suppressed cyber_policy", c.reqID)
-			if c.h != nil && c.h.metrics != nil {
-				c.h.metrics.incCyberPolicy(c.accountID, "synthetic_refusal_sse")
-			}
-		}
-	}
-	if c.cancel != nil {
-		c.cancel()
-	}
-	return true, true
-}
-
-// syntheticRefusalSSEFrames returns the same nine-event Responses turn
-// the websocket relay emits, formatted as SSE `event: …\ndata: …\n\n`
-// blocks. Used by the HTTP/SSE Codex code path so a suppressed
-// cyber_policy upstream still produces a clean response.completed for
-// the client.
-func syntheticRefusalSSEFrames() []byte {
-	respID := newSyntheticID("resp")
-	itemID := newSyntheticID("msg")
-	createdAt := time.Now().Unix()
-
-	respShellInProgress := map[string]any{
-		"id":                 respID,
-		"object":             "response",
-		"created_at":         createdAt,
-		"status":             "in_progress",
-		"background":         false,
-		"output":             []any{},
-		"model":              "gpt-5.5",
-		"text":               map[string]any{"format": map[string]any{"type": "text"}},
-		"usage":              nil,
-		"error":              nil,
-		"incomplete_details": nil,
-	}
-	respShellCompleted := cloneJSONMap(respShellInProgress)
-	respShellCompleted["status"] = "completed"
-	respShellCompleted["output"] = []any{
-		map[string]any{
-			"id":     itemID,
-			"type":   "message",
-			"status": "completed",
-			"role":   "assistant",
-			"content": []any{
-				map[string]any{
-					"type":        "output_text",
-					"text":        syntheticRefusalText,
-					"annotations": []any{},
-					"logprobs":    []any{},
-				},
-			},
-		},
-	}
-
-	events := []struct {
-		eventType string
-		payload   map[string]any
-	}{
-		{"response.created", map[string]any{"type": "response.created", "response": respShellInProgress, "sequence_number": 0}},
-		{"response.in_progress", map[string]any{"type": "response.in_progress", "response": respShellInProgress, "sequence_number": 1}},
-		{"response.output_item.added", map[string]any{
-			"type": "response.output_item.added", "output_index": 0, "sequence_number": 2,
-			"item": map[string]any{"id": itemID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}},
-		}},
-		{"response.content_part.added", map[string]any{
-			"type": "response.content_part.added", "output_index": 0, "item_id": itemID, "content_index": 0, "sequence_number": 3,
-			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}},
-		}},
-		{"response.output_text.delta", map[string]any{
-			"type": "response.output_text.delta", "output_index": 0, "item_id": itemID, "content_index": 0, "sequence_number": 4,
-			"delta": syntheticRefusalText, "logprobs": []any{},
-		}},
-		{"response.output_text.done", map[string]any{
-			"type": "response.output_text.done", "output_index": 0, "item_id": itemID, "content_index": 0, "sequence_number": 5,
-			"text": syntheticRefusalText, "logprobs": []any{},
-		}},
-		{"response.content_part.done", map[string]any{
-			"type": "response.content_part.done", "output_index": 0, "item_id": itemID, "content_index": 0, "sequence_number": 6,
-			"part": map[string]any{"type": "output_text", "text": syntheticRefusalText, "annotations": []any{}, "logprobs": []any{}},
-		}},
-		{"response.output_item.done", map[string]any{
-			"type": "response.output_item.done", "output_index": 0, "sequence_number": 7,
-			"item": map[string]any{
-				"id": itemID, "type": "message", "status": "completed", "role": "assistant",
-				"content": []any{
-					map[string]any{"type": "output_text", "text": syntheticRefusalText, "annotations": []any{}, "logprobs": []any{}},
-				},
-			},
-		}},
-		{"response.completed", map[string]any{"type": "response.completed", "response": respShellCompleted, "sequence_number": 8}},
-	}
-
-	var buf bytes.Buffer
-	for _, ev := range events {
-		data, err := json.Marshal(ev.payload)
-		if err != nil {
-			continue
-		}
-		buf.WriteString("event: ")
-		buf.WriteString(ev.eventType)
-		buf.WriteString("\ndata: ")
-		buf.Write(data)
-		buf.WriteString("\n\n")
-	}
-	return buf.Bytes()
+	// drop=false: pass the upstream's real cyber_policy frame through.
+	// terminate=false: let the upstream complete normally — it usually
+	// emits response.failed/response.completed right after the error,
+	// and forwarding those keeps the client's parser happy.
+	return false, false
 }
 
 func (s *codexRelayState) closeAll() {
@@ -664,11 +429,11 @@ func (s *codexRelayState) closeAll() {
 
 func (s *codexRelayState) result(statusCode int, relayErr error) codexCyberSwapResult {
 	// swapped is strictly "did the active upstream change" — never
-	// inferred from the relay's terminal error class. Suppression
+	// inferred from the relay's terminal error class. A passthrough
 	// without a swap must report swapped=false so the caller's
 	// post-relay bookkeeping (cyberPinned -> skip pin) stays correct.
 	swapped := s.activeAccount != s.opts.InitialAccount
-	if errors.Is(relayErr, errCyberPolicySuppressed) {
+	if errors.Is(relayErr, errCyberPolicyPassthrough) {
 		return codexCyberSwapResult{statusCode: statusCode, swapped: swapped, finalAccount: s.activeAccount}
 	}
 	if relayErr != nil && (errors.Is(relayErr, context.Canceled) ||
