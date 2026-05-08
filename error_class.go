@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -116,7 +118,32 @@ func isCloudflareChallenge(body []byte, headers http.Header) bool {
 }
 
 func isCyberPolicyError(body []byte) bool {
-	return strings.Contains(strings.ToLower(string(body)), "cyber_policy")
+	// Only match the upstream's actual error envelope. Naive substring
+	// matching trips on any assistant output that happens to contain the
+	// literal phrase "cyber_policy" — e.g. an assistant explaining this
+	// very codebase — which would silently replace its reply with a
+	// synthetic refusal. Parse the JSON shape and require code or type
+	// to equal the sentinel.
+	if !bytes.Contains(body, []byte(`"cyber_policy"`)) {
+		return false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var env struct {
+		Type  string `json:"type"`
+		Code  string `json:"code"`
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return false
+	}
+	return env.Code == "cyber_policy" || env.Type == "cyber_policy" ||
+		env.Error.Code == "cyber_policy" || env.Error.Type == "cyber_policy"
 }
 
 func isCodexModelUnavailableError(body []byte) bool {

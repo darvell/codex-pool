@@ -181,6 +181,25 @@ func TestCandidateWithCyberAccessOnlyReturnsMarkedAccounts(t *testing.T) {
 	}
 }
 
+// Regression: when the only cyber-access account has an expired access
+// token, candidateWithCyberAccess must still return it — the caller's
+// dial path will lazy-refresh. Excluding expired accounts here causes
+// cyber_policy errors to leak to the client when the only cyber account
+// has been idle long enough to expire.
+func TestCandidateWithCyberAccessReturnsExpiredAccount(t *testing.T) {
+	expired := &Account{
+		ID: "cyber-expired", Type: AccountTypeCodex, PlanType: "pro",
+		CyberAccess: true,
+		ExpiresAt:   time.Now().Add(-5 * time.Minute),
+		Usage:       UsageSnapshot{PrimaryUsedPercent: 0.05, SecondaryUsedPercent: 0.05},
+	}
+	p := newPoolState([]*Account{expired}, false)
+	got := p.candidateWithCyberAccess(nil, AccountTypeCodex, "", "")
+	if got == nil || got.ID != "cyber-expired" {
+		t.Fatalf("expected expired cyber account to still be picked, got %+v", got)
+	}
+}
+
 func TestCandidateSkipsAccountWhenClientIPNotAllowed(t *testing.T) {
 	restricted := &Account{ID: "restricted", Type: AccountTypeCodex, PlanType: "pro", AllowedSourceIPs: []string{"199.45.144.95"}, Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
 	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}

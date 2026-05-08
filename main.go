@@ -793,6 +793,56 @@ func (h *proxyHandler) pinConversationToCyberAccess(conversationID string, accou
 	return true
 }
 
+// shouldRetryBufferedSSEForCyberPolicy decides whether a buffered
+// SSE-translation response that hit cyber_policy mid-stream should be
+// discarded and retried against a cyber_access account on the next
+// attempt of the request loop. Returns true only when (a) we already
+// pinned the conversation to a cyber account during this attempt's SSE
+// callback (meaning a candidate exists), (b) we actually saw a
+// cyber_policy event (gated by acc not being CyberAccess), and (c) the
+// caller has retries left. The buffered translator output is empty in
+// this case anyway, so retrying is strictly better UX than writing the
+// empty translation.
+func (h *proxyHandler) shouldRetryBufferedSSEForCyberPolicy(cyberPinned bool, attempt, attempts int, acc *Account, reqID, label string) bool {
+	if !cyberPinned || attempt >= attempts || acc == nil || acc.CyberAccess {
+		return false
+	}
+	log.Printf("[%s] buffered %s SSE saw cyber_policy on account %s; retrying on cyber_access account", reqID, label, acc.ID)
+	if h.metrics != nil {
+		h.metrics.incCyberPolicy(acc.ID, "retry_buffered")
+	}
+	return true
+}
+
+// wrapBufferedSSEWithCyberDetector returns a writer that forwards SSE
+// bytes to the buffered translator under, but also drops cyber_policy
+// events and flips *cyberPinned when one is seen. Used by the
+// non-streaming buffered paths where we can't synthesize a refusal
+// inline (the buffered translator owns the final shape) — the loop's
+// retry mechanism then discards the buffer and tries a cyber account.
+func (h *proxyHandler) wrapBufferedSSEWithCyberDetector(under io.Writer, accountType AccountType, acc *Account, conversationID, requiredPlan, originIP, reqID string, cyberPinned *bool) io.Writer {
+	if accountType != AccountTypeCodex || acc == nil || acc.CyberAccess {
+		return under
+	}
+	return &sseInterceptWriter{
+		w: under,
+		onEvent: func(eventData []byte) (bool, bool) {
+			if !isCyberPolicyError(eventData) {
+				return false, false
+			}
+			if h.metrics != nil {
+				h.metrics.incCyberPolicy(acc.ID, "suppressed_buffered")
+			}
+			if h.pinConversationToCyberAccess(conversationID, accountType, requiredPlan, originIP, acc.ID, reqID) {
+				if cyberPinned != nil {
+					*cyberPinned = true
+				}
+			}
+			return true, true
+		},
+	}
+}
+
 func removeConflictingProxyHeaders(h http.Header) {
 	// Remove ALL Cloudflare headers (Cf-*) — our own Cloudflare adds these,
 	// and they confuse upstream Cloudflare (e.g. chatgpt.com) into blocking us.
@@ -1610,6 +1660,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				cyberAccessRetry = true
 				lastErr = fmt.Errorf("upstream %s from non-cyber-access account %s: %s", resp.Status, acc.ID, errBodyStr)
 				h.recent.add(lastErr.Error())
+				if h.metrics != nil {
+					h.metrics.incCyberPolicy(acc.ID, "retry_4xx")
+				}
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] retrying cyber_policy response from account %s on a cyber_access account", reqID, acc.ID)
 				}
@@ -1775,12 +1828,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			w.Header().Set("Content-Type", "application/json")
 
 			bufWriter := &responsesBufferingWriter{model: requestedModel}
-			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
+			inspectWriter := h.wrapBufferedSSEWithCyberDetector(bufWriter, accountType, acc, conversationID, requiredPlan, originIP, reqID, &cyberPinned)
+			if _, err := io.Copy(inspectWriter, resp.Body); err != nil {
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] buffering Responses SSE error: %v", reqID, err)
 				}
 			}
 			resp.Body.Close()
+
+			if h.shouldRetryBufferedSSEForCyberPolicy(cyberPinned, attempt, attempts, acc, reqID, "responses") {
+				cyberAccessRetry = true
+				continue
+			}
 
 			w.WriteHeader(resp.StatusCode)
 			w.Write(bufWriter.Result())
@@ -1829,6 +1888,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			resp.Body.Close()
 
+			if h.shouldRetryBufferedSSEForCyberPolicy(cyberPinned, attempt, attempts, acc, reqID, "claude") {
+				cyberAccessRetry = true
+				continue
+			}
+
 			result := bufWriter.Result()
 			w.WriteHeader(resp.StatusCode)
 			w.Write(result)
@@ -1837,12 +1901,17 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			w.Header().Set("Content-Type", "application/json")
 
 			bufWriter := &responsesBufferingWriter{model: requestedModel}
-			if _, err := io.Copy(bufWriter, resp.Body); err != nil {
+			inspectWriter := h.wrapBufferedSSEWithCyberDetector(bufWriter, accountType, acc, conversationID, requiredPlan, originIP, reqID, &cyberPinned)
+			if _, err := io.Copy(inspectWriter, resp.Body); err != nil {
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] buffering Images SSE error: %v", reqID, err)
 				}
 			}
 			resp.Body.Close()
+			if h.shouldRetryBufferedSSEForCyberPolicy(cyberPinned, attempt, attempts, acc, reqID, "images") {
+				cyberAccessRetry = true
+				continue
+			}
 			result := bufWriter.Result()
 			translated, err := translateResponsesToImagesGeneration(result, imagesResponseFormat)
 			if err != nil {
@@ -1895,6 +1964,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			resp.Body.Close()
 
+			if h.shouldRetryBufferedSSEForCyberPolicy(cyberPinned, attempt, attempts, acc, reqID, "completions") {
+				cyberAccessRetry = true
+				continue
+			}
+
 			result := bufWriter.Result()
 			w.WriteHeader(resp.StatusCode)
 			w.Write(result)
@@ -1941,6 +2015,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 			}
 			resp.Body.Close()
+
+			if h.shouldRetryBufferedSSEForCyberPolicy(cyberPinned, attempt, attempts, acc, reqID, "chat") {
+				cyberAccessRetry = true
+				continue
+			}
 
 			result := bufWriter.Result()
 			w.WriteHeader(resp.StatusCode)
@@ -2154,10 +2233,25 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						reqID:     reqID,
 					}
 				} else {
-					writer = &sseInterceptWriter{
+					interceptWriter := &sseInterceptWriter{
 						w:        writer,
 						callback: usageCallback,
 					}
+					if accountType == AccountTypeCodex && !acc.CyberAccess {
+						suppressor := &cyberPolicyHTTPSuppressor{
+							h:               h,
+							reqID:           reqID,
+							conversationID:  conversationID,
+							requiredPlan:    requiredPlan,
+							clientIP:        originIP,
+							accountID:       acc.ID,
+							underlyingWrite: writer,
+							cancel:          cancel,
+							pinned:          &cyberPinned,
+						}
+						interceptWriter.onEvent = suppressor.onEvent
+					}
+					writer = interceptWriter
 				}
 			}
 
@@ -2301,8 +2395,13 @@ func (h *proxyHandler) proxyRequestWebSocket(
 
 	atomic.AddInt64(&acc.Inflight, 1)
 	atomic.AddInt64(&h.inflight, 1)
+	// inflightAcc tracks the account that currently owns the inflight
+	// credit. The codex websocket relay swaps it to a cyber-access
+	// account on cyber_policy; we transfer the credit at that moment
+	// so the deferred decrement still touches the right account.
+	inflightAcc := acc
 	defer func() {
-		atomic.AddInt64(&acc.Inflight, -1)
+		atomic.AddInt64(&inflightAcc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
 	}()
 
@@ -2365,28 +2464,62 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	if accountType == AccountTypeCodex {
 		downstreamHeartbeatInterval = h.cfg.websocketHeartbeatInterval
 	}
+
+	// Every Codex websocket goes through the cyber-aware relay so we can
+	// universally suppress cyber_policy frames before they reach the
+	// client. Non-cyber accounts additionally get a one-shot hot-swap to
+	// a cyber_access account on the first cyber_policy hit.
+	if accountType == AccountTypeCodex {
+		swap := h.relayCodexWithCyberSwap(w, r, codexCyberSwapOptions{
+			ReqID:                       reqID,
+			Provider:                    provider,
+			InitialAccount:              acc,
+			InitialOutURL:               outURL,
+			InitialUpstreamHeaders:      upstreamHeaders,
+			ConversationID:              conversationID,
+			RequiredPlan:                requiredPlan,
+			ClientIP:                    clientIP,
+			IdleTimeout:                 h.cfg.websocketIdleTimeout,
+			DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
+			ReadLimit:                   readLimit,
+			LogLabel:                    relayLabel,
+			SetActiveAccount: func(next *Account) {
+				prev := inflightAcc
+				if prev == next || next == nil {
+					return
+				}
+				atomic.AddInt64(&next.Inflight, 1)
+				atomic.AddInt64(&prev.Inflight, -1)
+				inflightAcc = next
+			},
+		})
+		finalAcc := acc
+		if swap.finalAccount != nil {
+			finalAcc = swap.finalAccount
+		}
+		if swap.err != nil {
+			h.recent.add(swap.err.Error())
+			h.metrics.inc("error", finalAcc.ID)
+			if h.cfg.debug.Load() {
+				log.Printf("[%s] websocket tunnel error (account=%s): %v", reqID, finalAcc.ID, swap.err)
+			}
+			return
+		}
+		if swap.statusCode != 0 {
+			h.metrics.inc(strconv.Itoa(swap.statusCode), finalAcc.ID)
+		}
+		h.applyWebSocketStatusEffects(reqID, finalAcc, conversationID, swap.swapped, refreshFailed, swap.statusCode)
+		if h.cfg.debug.Load() {
+			log.Printf("[%s] websocket done status=%d account=%s user=%s origin=%s duration_ms=%d cyber_swapped=%v", reqID, swap.statusCode, finalAcc.ID, userID, originID, time.Since(start).Milliseconds(), swap.swapped)
+		}
+		return
+	}
+
 	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		LogLabel:                    relayLabel,
-		OnUpstreamResponse: func(upstreamResp *http.Response) {
-			captureCodexResponseState(acc, upstreamResp, reqID)
-		},
-		OnUpstreamMessage: func(data []byte) error {
-			if accountType != AccountTypeCodex || acc.CyberAccess || !isCyberPolicyError(data) {
-				return nil
-			}
-			pinID := conversationID
-			if pinID == "" {
-				pinID = extractConversationIDFromJSON(data)
-			}
-			if h.pinConversationToCyberAccess(pinID, accountType, requiredPlan, clientIP, acc.ID, reqID) {
-				cyberPinned = true
-				return websocket.CloseError{Code: websocket.StatusTryAgainLater, Reason: "retry on cyber access account"}
-			}
-			return nil
-		},
 	})
 
 	if err != nil {
@@ -2402,20 +2535,32 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
 	}
 
-	// Handle status-based side effects (same as before).
-	if statusCode == http.StatusTooManyRequests {
+	h.applyWebSocketStatusEffects(reqID, acc, conversationID, cyberPinned, refreshFailed, statusCode)
+
+	if h.cfg.debug.Load() {
+		log.Printf("[%s] websocket done status=%d account=%s user=%s origin=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, originID, time.Since(start).Milliseconds())
+	}
+}
+
+// applyWebSocketStatusEffects runs the post-relay account bookkeeping
+// (rate-limit cooldown, auth-failure marking, success-path penalty
+// decay, conversation pinning) shared between the Codex cyber-aware
+// relay and the legacy passthrough/Claude/Gemini relay.
+func (h *proxyHandler) applyWebSocketStatusEffects(reqID string, acc *Account, conversationID string, cyberPinned, refreshFailed bool, statusCode int) {
+	switch {
+	case statusCode == http.StatusTooManyRequests:
 		h.applyRateLimit(acc, nil)
 		acc.mu.Lock()
 		acc.Penalty += 1.0
 		acc.mu.Unlock()
-	} else if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		markedDead, _ := applyProxyAuthFailure(acc, refreshFailed)
 		if markedDead {
 			if err := saveAccount(acc); err != nil {
 				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 			}
 		}
-	} else if statusCode == http.StatusSwitchingProtocols || (statusCode >= 200 && statusCode < 300) {
+	case statusCode == http.StatusSwitchingProtocols || (statusCode >= 200 && statusCode < 300):
 		if conversationID != "" && !cyberPinned {
 			h.pool.pin(conversationID, acc.ID)
 		}
@@ -2429,10 +2574,6 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			}
 		}
 		acc.mu.Unlock()
-	}
-
-	if h.cfg.debug.Load() {
-		log.Printf("[%s] websocket done status=%d account=%s user=%s origin=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, originID, time.Since(start).Milliseconds())
 	}
 }
 
@@ -2543,45 +2684,12 @@ func relayWebSocket(
 	ctx := clientReq.Context()
 
 	wsURL := *upstreamURL
-	if wsURL.Scheme == "https" {
-		wsURL.Scheme = "wss"
-	} else if wsURL.Scheme == "http" {
-		wsURL.Scheme = "ws"
-	}
-
-	dialHeaders := cloneHeader(upstreamHeaders)
-	removeHopByHopHeaders(dialHeaders)
-	for _, key := range []string{
-		"Sec-WebSocket-Key",
-		"Sec-WebSocket-Version",
-		"Sec-WebSocket-Extensions",
-		"Sec-WebSocket-Protocol",
-		"Sec-WebSocket-Accept",
-	} {
-		dialHeaders.Del(key)
-	}
-
-	var subprotocols []string
-	for _, raw := range clientReq.Header.Values("Sec-WebSocket-Protocol") {
-		for _, part := range strings.Split(raw, ",") {
-			part = strings.TrimSpace(part)
-			if part != "" {
-				subprotocols = append(subprotocols, part)
-			}
-		}
-	}
-
-	upstreamConn, upstreamResp, err := websocket.Dial(ctx, wsURL.String(), &websocket.DialOptions{
-		HTTPHeader:      dialHeaders,
-		Subprotocols:    subprotocols,
-		CompressionMode: websocket.CompressionNoContextTakeover,
-	})
+	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(ctx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return 0, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
+		return 0, err
 	}
 	defer upstreamConn.CloseNow()
-	upstreamConn.SetReadLimit(opts.ReadLimit)
 	if opts.OnUpstreamResponse != nil {
 		opts.OnUpstreamResponse(upstreamResp)
 	}
@@ -2953,7 +3061,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	conversationID := extractConversationIDFromHeaders(r.Header)
 
 	if isSSE {
-		writer = &sseInterceptWriter{
+		interceptWriter := &sseInterceptWriter{
 			w: writer,
 			callback: func(data []byte) {
 				if accountType == AccountTypeCodex && !acc.CyberAccess && isCyberPolicyError(data) {
@@ -3016,6 +3124,21 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 				h.recordUsage(acc, *ru)
 			},
 		}
+		if accountType == AccountTypeCodex && !acc.CyberAccess {
+			suppressor := &cyberPolicyHTTPSuppressor{
+				h:               h,
+				reqID:           reqID,
+				conversationID:  conversationID,
+				requiredPlan:    requiredPlan,
+				clientIP:        clientIP,
+				accountID:       acc.ID,
+				underlyingWrite: writer,
+				cancel:          cancel,
+				pinned:          &cyberPinned,
+			}
+			interceptWriter.onEvent = suppressor.onEvent
+		}
+		writer = interceptWriter
 	}
 
 	// Wrap response body with idle timeout to kill zombie SSE connections.

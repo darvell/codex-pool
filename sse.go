@@ -123,60 +123,124 @@ func (fw *flushWriter) stop() {}
 
 // sseInterceptWriter wraps a writer and scans the SSE stream for token_count events.
 // It passes all data through to the underlying writer while extracting token data inline.
+//
+// The optional onEvent hook can divert the stream: returning drop=true
+// causes the offending event's bytes to be withheld from the output;
+// returning terminate=true tells the writer to stop forwarding any
+// further upstream bytes (the writer's caller is responsible for
+// emitting any synthetic terminal events directly to the wrapped
+// writer afterwards). When onEvent is set the writer buffers each
+// event boundary before flushing, so a drop decision actually
+// suppresses the bytes rather than chasing them after they're on the
+// wire.
 type sseInterceptWriter struct {
-	w        io.Writer
-	buf      []byte
-	callback func(eventData []byte)
+	w         io.Writer
+	buf       []byte
+	callback  func(eventData []byte)
+	onEvent   func(eventData []byte) (drop bool, terminate bool)
+	terminated bool
 }
 
 func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
-	// Always write to underlying writer first
-	n, err := sw.w.Write(p)
+	if sw.onEvent == nil {
+		// Legacy mode: write-through, then scan after the fact. This
+		// matches the long-standing behavior used by every non-Codex
+		// caller that just wants usage extraction.
+		n, err := sw.w.Write(p)
+		sw.buf = append(sw.buf, p[:n]...)
+		sw.scanForEventsLegacy()
+		return n, err
+	}
 
-	// Append to our buffer for scanning
-	sw.buf = append(sw.buf, p[:n]...)
-
-	// Look for complete SSE events (separated by \n\n)
-	sw.scanForEvents()
-
-	return n, err
+	// Suppression mode: buffer the bytes first, scan for full event
+	// boundaries, and only forward the bytes the inspector approves.
+	if sw.terminated {
+		// We already decided to stop forwarding; pretend we wrote
+		// everything so the upstream copy loop drains and ends
+		// without back-pressure stalling the relay.
+		return len(p), nil
+	}
+	sw.buf = append(sw.buf, p...)
+	for {
+		event, advance, ok := sw.takeNextEvent()
+		if !ok {
+			break
+		}
+		eventBytes := append([]byte(nil), sw.buf[:advance]...)
+		sw.buf = sw.buf[advance:]
+		drop, terminate := sw.invokeInspect(event)
+		if !drop {
+			if _, err := sw.w.Write(eventBytes); err != nil {
+				return len(p), err
+			}
+		}
+		if terminate {
+			sw.terminated = true
+			sw.buf = nil
+			return len(p), nil
+		}
+	}
+	return len(p), nil
 }
 
-func (sw *sseInterceptWriter) scanForEvents() {
-	for {
-		// Find double newline which marks end of SSE event
-		idx := bytes.Index(sw.buf, []byte("\n\n"))
-		if idx < 0 {
-			// Also check for \r\n\r\n
-			idx = bytes.Index(sw.buf, []byte("\r\n\r\n"))
-			if idx < 0 {
-				// Keep buffer bounded - if it gets too big without events, truncate front
-				if len(sw.buf) > 32*1024 {
-					cutPoint := len(sw.buf) - 16*1024
-					// Advance past any partial UTF-8 sequence at the cut point
-					for cutPoint < len(sw.buf) && cutPoint > 0 && sw.buf[cutPoint]&0xC0 == 0x80 {
-						cutPoint++
-					}
-					sw.buf = sw.buf[cutPoint:]
-				}
-				return
-			}
-			// Extract and consume the event
-			event := sw.buf[:idx]
-			sw.buf = sw.buf[idx+4:] // Skip \r\n\r\n
-			sw.processEvent(event)
-			continue
-		}
+// takeNextEvent locates the next \n\n or \r\n\r\n boundary in the
+// remaining buffer and returns the event payload bytes plus the number
+// of buffer bytes the event occupies (including its terminator).
+func (sw *sseInterceptWriter) takeNextEvent() (event []byte, advance int, ok bool) {
+	idx := bytes.Index(sw.buf, []byte("\n\n"))
+	if idx >= 0 {
+		return sw.buf[:idx], idx + 2, true
+	}
+	idx = bytes.Index(sw.buf, []byte("\r\n\r\n"))
+	if idx >= 0 {
+		return sw.buf[:idx], idx + 4, true
+	}
+	return nil, 0, false
+}
 
-		// Extract and consume the event
-		event := sw.buf[:idx]
-		sw.buf = sw.buf[idx+2:] // Skip \n\n
+func (sw *sseInterceptWriter) invokeInspect(event []byte) (drop, terminate bool) {
+	data := extractSSEEventData(event)
+	if len(data) == 0 {
+		return false, false
+	}
+	if sw.callback != nil {
+		sw.callback(data)
+	}
+	if sw.onEvent != nil {
+		drop, terminate = sw.onEvent(data)
+	}
+	return drop, terminate
+}
+
+func (sw *sseInterceptWriter) scanForEventsLegacy() {
+	for {
+		event, advance, ok := sw.takeNextEvent()
+		if !ok {
+			if len(sw.buf) > 32*1024 {
+				cutPoint := len(sw.buf) - 16*1024
+				for cutPoint < len(sw.buf) && cutPoint > 0 && sw.buf[cutPoint]&0xC0 == 0x80 {
+					cutPoint++
+				}
+				sw.buf = sw.buf[cutPoint:]
+			}
+			return
+		}
 		sw.processEvent(event)
+		sw.buf = sw.buf[advance:]
 	}
 }
 
 func (sw *sseInterceptWriter) processEvent(event []byte) {
-	// Find the data: prefix and extract JSON from there
+	if sw.callback == nil {
+		return
+	}
+	data := extractSSEEventData(event)
+	if len(data) > 0 {
+		sw.callback(data)
+	}
+}
+
+func extractSSEEventData(event []byte) []byte {
 	dataIdx := bytes.Index(event, []byte("data: "))
 	if dataIdx < 0 {
 		dataIdx = bytes.Index(event, []byte("data:"))
@@ -184,7 +248,6 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 
 	var data []byte
 	if dataIdx >= 0 {
-		// Standard SSE format with data: prefix
 		data = event[dataIdx:]
 		if bytes.HasPrefix(data, []byte("data: ")) {
 			data = data[6:]
@@ -192,18 +255,12 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 			data = data[5:]
 		}
 	} else {
-		// Gemini may send JSON array directly without data: prefix
-		// Look for JSON starting with [ or {
 		trimmed := bytes.TrimSpace(event)
 		if len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
 			data = trimmed
 		} else {
-			return
+			return nil
 		}
 	}
-	data = bytes.TrimSpace(data)
-
-	if len(data) > 0 && sw.callback != nil {
-		sw.callback(data)
-	}
+	return bytes.TrimSpace(data)
 }

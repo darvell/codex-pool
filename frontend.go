@@ -1634,7 +1634,33 @@ type PoolStats struct {
 	CapacityAnalysis *CapacityAnalysis `json:"capacity_analysis,omitempty"`
 	Last24hTokens    int64             `json:"last_24h_tokens"`
 	DailyCosts       []DailyCostEntry  `json:"daily_costs,omitempty"`
+	CyberPolicy      CyberPolicyStats  `json:"cyber_policy"`
 	GeneratedAt      time.Time         `json:"generated_at"`
+}
+
+// CyberPolicyStats summarizes how often the cyber_policy safety net
+// has fired since process start. Operators read this to alert when
+// suppressions happen without successful swaps (i.e. the cyber pool
+// is depleted) or when synthetic refusals are being emitted.
+type CyberPolicyStats struct {
+	// Healthy is true when there's been at least one cyber_policy
+	// detection AND every detection was paired with either a
+	// successful swap or a buffered/4xx retry. False when suppressions
+	// fell back to synthetic refusal (no cyber candidate available).
+	Healthy bool `json:"healthy"`
+	// CyberCandidatesAvailable is the count of live, non-disabled
+	// cyber_access accounts in the pool right now. Zero means the
+	// next cyber_policy hit will fall back to a synthetic refusal.
+	CyberCandidatesAvailable int `json:"cyber_candidates_available"`
+	// Counters by action: "suppressed_ws", "suppressed_sse",
+	// "suppressed_buffered", "swap_succeeded", "swap_no_candidate",
+	// "synthetic_refusal_ws", "synthetic_refusal_sse",
+	// "retry_buffered", "retry_4xx".
+	Counters map[string]int64 `json:"counters"`
+	// PerAccount["shiv_1"]["suppressed_ws"] = 5 — useful when you
+	// want to see which non-cyber account is hitting the policy
+	// classifier most often.
+	PerAccount map[string]map[string]int64 `json:"per_account,omitempty"`
 }
 
 type AccountStats struct {
@@ -1950,8 +1976,64 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	stats.CyberPolicy = h.computeCyberPolicyStats(accounts)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// computeCyberPolicyStats summarises the metrics counters for the
+// pool-stats UI/API. Healthy means: either no suppressions fired yet,
+// or every suppression event was paired with a successful swap or a
+// buffered/4xx retry — i.e. no synthetic-refusal fallbacks AND there's
+// still a cyber candidate available for the next hit.
+func (h *proxyHandler) computeCyberPolicyStats(accounts []*Account) CyberPolicyStats {
+	out := CyberPolicyStats{
+		Counters:   map[string]int64{},
+		PerAccount: map[string]map[string]int64{},
+	}
+
+	now := time.Now()
+	for _, a := range accounts {
+		a.mu.Lock()
+		if a.CyberAccess && !a.Dead && !a.Disabled &&
+			(a.ExpiresAt.IsZero() || a.ExpiresAt.After(now) || h.cfg.disableRefresh) {
+			out.CyberCandidatesAvailable++
+		}
+		a.mu.Unlock()
+	}
+
+	if h.metrics == nil {
+		out.Healthy = out.CyberCandidatesAvailable > 0
+		return out
+	}
+
+	snap := h.metrics.cyberPolicySnapshot()
+	for k, v := range snap {
+		out.Counters[k.action] += v
+		if k.account != "" {
+			perAcc, ok := out.PerAccount[k.account]
+			if !ok {
+				perAcc = map[string]int64{}
+				out.PerAccount[k.account] = perAcc
+			}
+			perAcc[k.action] += v
+		}
+	}
+
+	suppressions := out.Counters["suppressed_ws"] + out.Counters["suppressed_sse"] + out.Counters["suppressed_buffered"]
+	resolutions := out.Counters["swap_succeeded"] + out.Counters["retry_buffered"] + out.Counters["retry_4xx"]
+	syntheticFallbacks := out.Counters["synthetic_refusal_ws"] + out.Counters["synthetic_refusal_sse"]
+
+	switch {
+	case suppressions == 0:
+		out.Healthy = out.CyberCandidatesAvailable > 0
+	case syntheticFallbacks > 0 || resolutions < suppressions:
+		out.Healthy = false
+	default:
+		out.Healthy = out.CyberCandidatesAvailable > 0
+	}
+	return out
 }
 
 // accountPlanForSubscription normalizes plan type strings for subscription cost lookup.

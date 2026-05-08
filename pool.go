@@ -521,10 +521,13 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 			a.mu.Unlock()
 			continue
 		}
-		if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
-			a.mu.Unlock()
-			continue
-		}
+		// Note: we deliberately do NOT skip accounts with an expired
+		// access_token here. The cyber-access pool is small (often a
+		// single account) and idle expirations are common; the
+		// caller's request flow will lazy-refresh the token before
+		// using it. Skipping expired accounts here would leak
+		// cyber_policy errors to the client when the only cyber
+		// account happens to have just expired.
 		primaryUsed := accountPrimaryUsageLocked(a)
 		secondaryUsed := accountSecondaryUsageLocked(a)
 		if primaryUsed >= primaryHardExcludeThreshold || secondaryUsed >= secondaryHardExcludeThreshold {
