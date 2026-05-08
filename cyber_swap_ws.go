@@ -207,11 +207,12 @@ func (s *codexRelayState) relayOnce() error {
 	upstreamErrCh := make(chan error, 1)
 	clientErrCh := make(chan error, 1)
 
+	debug := s.h != nil && s.h.cfg != nil && s.h.cfg.debug.Load()
 	go func() {
-		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", s.inspectUpstream)
+		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream)
 	}()
 	go func() {
-		clientErrCh <- pumpFrames(roundCtx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", s.inspectClient)
+		clientErrCh <- pumpFrames(roundCtx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient)
 	}()
 
 	select {
@@ -234,6 +235,7 @@ func pumpFrames(
 	src <-chan wsFrame,
 	dst *webSocketWriter,
 	logLabel, label string,
+	debug bool,
 	inspect func([]byte) error,
 ) error {
 	for {
@@ -247,7 +249,9 @@ func pumpFrames(
 			if frame.err != nil {
 				return fmt.Errorf("%s read: %w", label, frame.err)
 			}
-			logFrameSummary(logLabel, label, frame)
+			if debug {
+				logRelayFrame(logLabel, label, frame.msgType, frame.data)
+			}
 			if inspect != nil {
 				if err := inspect(frame.data); err != nil {
 					return err
@@ -258,16 +262,6 @@ func pumpFrames(
 			}
 		}
 	}
-}
-
-func logFrameSummary(logLabel, direction string, frame wsFrame) {
-	summary := frame.data
-	suffix := ""
-	if len(summary) > 200 {
-		summary = summary[:200]
-		suffix = "..."
-	}
-	log.Printf("[ws-relay %s] %s: type=%v len=%d %s%s", logLabel, direction, frame.msgType, len(frame.data), string(summary), suffix)
 }
 
 func (s *codexRelayState) inspectUpstream(data []byte) error {
@@ -521,7 +515,7 @@ func extractWebSocketSubprotocols(h http.Header) []string {
 // function exists: it lets the per-round pump get cancelled (via
 // roundCtx) without affecting the underlying conn.
 func startWebSocketReader(ctx context.Context, conn *websocket.Conn) <-chan wsFrame {
-	ch := make(chan wsFrame, 4)
+	ch := make(chan wsFrame, 64)
 	go func() {
 		defer close(ch)
 		for {

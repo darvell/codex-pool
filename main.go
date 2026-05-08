@@ -140,9 +140,9 @@ func buildConfig() *config {
 			cfg.maxInMemoryBodyBytes = n
 		}
 	}
-	cfg.flushInterval = 200 * time.Millisecond
+	cfg.flushInterval = 0
 	if v := getenv("PROXY_FLUSH_INTERVAL_MS", ""); v != "" {
-		if ms, err := parseInt64(v); err == nil && ms > 0 {
+		if ms, err := parseInt64(v); err == nil && ms >= 0 {
 			cfg.flushInterval = time.Duration(ms) * time.Millisecond
 		}
 	}
@@ -2518,6 +2518,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		LogLabel:                    relayLabel,
+		Debug:                       h.cfg.debug.Load(),
 	})
 
 	if err != nil {
@@ -2622,6 +2623,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		LogLabel:                    reqID + " passthrough",
+		Debug:                       h.cfg.debug.Load(),
 	})
 
 	if err != nil {
@@ -2655,6 +2657,7 @@ type webSocketRelayOptions struct {
 	DownstreamHeartbeatInterval time.Duration
 	ReadLimit                   int64
 	LogLabel                    string
+	Debug                       bool
 	OnUpstreamResponse          func(*http.Response)
 	OnUpstreamMessage           func([]byte) error
 	OnClientMessage             func([]byte) error
@@ -2725,10 +2728,10 @@ func relayWebSocket(
 	defer stopHeartbeat()
 
 	go func() {
-		errc <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.OnUpstreamMessage)
+		errc <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.Debug, opts.OnUpstreamMessage)
 	}()
 	go func() {
-		errc <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, opts.OnClientMessage)
+		errc <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, opts.Debug, opts.OnClientMessage)
 	}()
 
 	relayErr := <-errc
@@ -2806,33 +2809,25 @@ func startWebSocketHeartbeat(ctx context.Context, dst *webSocketWriter, interval
 // We use a time.AfterFunc watchdog instead of context.WithTimeout because
 // coder/websocket closes the connection when the read context is cancelled,
 // which would tear the relay down on every successful frame.
-func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, onMessage func([]byte) error) error {
+func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, debug bool, onMessage func([]byte) error) error {
+	var idleTimer *time.Timer
+	if idleTimeout > 0 {
+		idleTimer = time.AfterFunc(idleTimeout, func() {
+			src.Close(websocket.StatusPolicyViolation, fmt.Sprintf("idle for %v", idleTimeout))
+		})
+		defer idleTimer.Stop()
+	}
 	for {
-		var idleTimer *time.Timer
-		if idleTimeout > 0 {
-			idleTimer = time.AfterFunc(idleTimeout, func() {
-				src.Close(websocket.StatusPolicyViolation, fmt.Sprintf("idle for %v", idleTimeout))
-			})
+		if idleTimer != nil {
+			idleTimer.Reset(idleTimeout)
 		}
 		msgType, data, err := src.Read(ctx)
-		if idleTimer != nil {
-			idleTimer.Stop()
-		}
 		if err != nil {
 			return fmt.Errorf("%s read: %w", label, err)
 		}
-		// Log message summary (truncate large payloads)
-		summaryData := data
-		truncated := false
-		if len(summaryData) > 200 {
-			summaryData = summaryData[:200]
-			truncated = true
+		if debug {
+			logRelayFrame(logLabel, label, msgType, data)
 		}
-		summary := string(summaryData)
-		if truncated {
-			summary += "..."
-		}
-		log.Printf("[ws-relay %s] %s: type=%v len=%d %s", logLabel, label, msgType, len(data), summary)
 		if onMessage != nil {
 			if err := onMessage(data); err != nil {
 				return err
@@ -2842,6 +2837,16 @@ func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWrite
 			return fmt.Errorf("%s write: %w", label, err)
 		}
 	}
+}
+
+func logRelayFrame(logLabel, label string, msgType websocket.MessageType, data []byte) {
+	summary := data
+	suffix := ""
+	if len(summary) > 200 {
+		summary = summary[:200]
+		suffix = "..."
+	}
+	log.Printf("[ws-relay %s] %s: type=%v len=%d %s%s", logLabel, label, msgType, len(data), string(summary), suffix)
 }
 
 func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL) {

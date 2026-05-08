@@ -27,20 +27,17 @@ func newHeartbeatWriter(w io.Writer, flusher http.Flusher) *heartbeatWriter {
 		w:       w,
 		flusher: flusher,
 	}
-	hw.resetTimer()
+	hw.timer = time.AfterFunc(heartbeatInterval, hw.sendHeartbeat)
 	return hw
 }
 
 func (hw *heartbeatWriter) resetTimer() {
 	hw.mu.Lock()
 	defer hw.mu.Unlock()
-	if hw.stopped {
+	if hw.stopped || hw.timer == nil {
 		return
 	}
-	if hw.timer != nil {
-		hw.timer.Stop()
-	}
-	hw.timer = time.AfterFunc(heartbeatInterval, hw.sendHeartbeat)
+	hw.timer.Reset(heartbeatInterval)
 }
 
 func (hw *heartbeatWriter) sendHeartbeat() {
