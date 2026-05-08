@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	cryptorand "crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,17 +14,6 @@ import (
 
 	"github.com/coder/websocket"
 )
-
-var (
-	cryptoRandRead = cryptorand.Read
-	hexEncode      = hex.EncodeToString
-)
-
-func newSyntheticID(prefix string) string {
-	var buf [12]byte
-	_, _ = cryptoRandRead(buf[:])
-	return prefix + "_synth_" + hexEncode(buf[:])
-}
 
 // codexCyberSwapOptions configures the cyber-aware Codex websocket relay.
 type codexCyberSwapOptions struct {
@@ -57,19 +44,11 @@ type codexCyberSwapResult struct {
 	finalAccount *Account
 }
 
-// errCyberPolicyPassthrough is returned when an upstream cyber_policy
-// frame should be forwarded to the client unchanged. Used when no
-// cyber_access candidate is available to swap to: the right answer is
-// to surface the real upstream error rather than fabricate text.
-var errCyberPolicyPassthrough = errors.New("cyber_policy passthrough")
-
-// swapPendingErr is returned from the upstream pump when a cyber_policy
-// hit should trigger a swap. The relay loop is the single owner of
-// next; carrying it on the error keeps shared mutable state out of the
-// relay state struct. frame is the original cyber_policy upstream
-// payload — the relay forwards it to the client only if the swap
-// dial fails (so the user sees the real upstream error rather than a
-// fabricated message).
+// swapPendingErr is returned from the upstream pump on a cyber_policy
+// hit. next is the swap target, or nil when no cyber_access candidate
+// was available; frame is the original upstream payload, forwarded to
+// the client when the swap is skipped or fails so the user sees the
+// real upstream error instead of a fabricated message.
 type swapPendingErr struct {
 	next  *Account
 	frame []byte
@@ -138,6 +117,7 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 		opts:          opts,
 		ctx:           relayCtx,
 		clientConn:    clientConn,
+		clientWriter:  &webSocketWriter{conn: clientConn},
 		upstreamConn:  upstreamConn,
 		activeAccount: opts.InitialAccount,
 		subprotocols:  subprotocols,
@@ -158,6 +138,7 @@ type codexRelayState struct {
 	ctx  context.Context
 
 	clientConn    *websocket.Conn
+	clientWriter  *webSocketWriter
 	upstreamConn  *websocket.Conn
 	activeAccount *Account
 	subprotocols  []string
@@ -178,30 +159,36 @@ type codexRelayState struct {
 func (s *codexRelayState) run() (int, error) {
 	for {
 		err := s.relayOnce()
-		switch {
-		case err == nil:
-			return 101, nil
-		case errors.Is(err, errCyberPolicyPassthrough):
-			// We saw cyber_policy but had nowhere to swap to. The
-			// frame has already been forwarded to the client; the
-			// upstream typically closes the socket immediately
-			// after, which we treat as a clean end-of-turn.
-			s.legacyPin()
+		if err == nil {
 			return 101, nil
 		}
 		var swap *swapPendingErr
 		if errors.As(err, &swap) {
-			if doErr := s.doSwap(swap.next); doErr != nil {
-				log.Printf("[%s] cyber swap dial failed: %v; forwarding upstream cyber_policy frame", s.opts.ReqID, doErr)
-				if writeErr := s.clientConn.Write(s.ctx, websocket.MessageText, swap.frame); writeErr != nil {
-					log.Printf("[%s] forward cyber_policy frame failed: %v", s.opts.ReqID, writeErr)
+			if swap.next != nil {
+				if doErr := s.doSwap(swap.next); doErr != nil {
+					log.Printf("[%s] cyber swap dial failed: %v; forwarding upstream cyber_policy frame", s.opts.ReqID, doErr)
+					s.forwardCyberPolicy(swap.frame)
+					s.legacyPin()
+					return 101, nil
 				}
-				s.legacyPin()
-				return 101, nil
+				continue
 			}
-			continue
+			// No swap target — surface the upstream's real cyber_policy
+			// frame and end the relay cleanly.
+			s.forwardCyberPolicy(swap.frame)
+			s.legacyPin()
+			return 101, nil
 		}
 		return 101, err
+	}
+}
+
+// forwardCyberPolicy writes the upstream cyber_policy frame through to
+// the client. Routed via clientWriter so it serializes against the
+// heartbeat goroutine that may also be writing.
+func (s *codexRelayState) forwardCyberPolicy(frame []byte) {
+	if err := s.clientWriter.Write(s.ctx, websocket.MessageText, frame); err != nil {
+		log.Printf("[%s] forward cyber_policy frame to client failed: %v", s.opts.ReqID, err)
 	}
 }
 
@@ -209,20 +196,19 @@ func (s *codexRelayState) run() (int, error) {
 // current upstream, then returns. The reader goroutines (clientCh,
 // upstreamCh) outlive the round so the client conn survives a swap.
 func (s *codexRelayState) relayOnce() error {
-	clientWriter := &webSocketWriter{conn: s.clientConn}
 	upstreamWriter := &webSocketWriter{conn: s.upstreamConn}
 
 	roundCtx, roundCancel := context.WithCancel(s.ctx)
 	defer roundCancel()
 
-	stopHeartbeat := startWebSocketHeartbeat(roundCtx, clientWriter, s.opts.DownstreamHeartbeatInterval)
+	stopHeartbeat := startWebSocketHeartbeat(roundCtx, s.clientWriter, s.opts.DownstreamHeartbeatInterval)
 	defer stopHeartbeat()
 
 	upstreamErrCh := make(chan error, 1)
 	clientErrCh := make(chan error, 1)
 
 	go func() {
-		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, clientWriter, s.opts.LogLabel, "upstream->client", s.inspectUpstream)
+		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", s.inspectUpstream)
 	}()
 	go func() {
 		clientErrCh <- pumpFrames(roundCtx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", s.inspectClient)
@@ -242,8 +228,7 @@ func (s *codexRelayState) relayOnce() error {
 
 // pumpFrames forwards frames from src to dst, calling inspect on each
 // frame before writing. inspect can return a sentinel error (e.g.
-// errCyberPolicyPassthrough or *swapPendingErr) to abort the relay
-// without writing the frame.
+// *swapPendingErr) to abort the relay without writing the frame.
 func pumpFrames(
 	ctx context.Context,
 	src <-chan wsFrame,
@@ -296,23 +281,14 @@ func (s *codexRelayState) inspectUpstream(data []byte) error {
 	if !s.swapDone && s.lastResponseCreate != nil {
 		if cand := s.pickCyberAccessCandidate(); cand != nil {
 			s.swapDone = true
-			// Drop this frame. doSwap replays the request on the
-			// cyber-access account; the new upstream's response.completed
-			// closes the turn cleanly. The client never sees cyber_policy.
-			return &swapPendingErr{next: cand, frame: append([]byte(nil), data...)}
+			return &swapPendingErr{next: cand, frame: data}
 		}
 	}
 	s.swapDone = true
 	if s.h != nil && s.h.metrics != nil {
 		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "swap_no_candidate")
 	}
-	// No swap target: write the upstream's real cyber_policy frame
-	// through to the client and end the relay cleanly. We deliberately
-	// don't fabricate text — the client sees the actual error.
-	if err := s.clientConn.Write(s.ctx, websocket.MessageText, data); err != nil {
-		log.Printf("[%s] forward cyber_policy frame to client failed: %v", s.opts.ReqID, err)
-	}
-	return errCyberPolicyPassthrough
+	return &swapPendingErr{frame: data}
 }
 
 func (s *codexRelayState) inspectClient(data []byte) error {
@@ -377,13 +353,6 @@ func (s *codexRelayState) legacyPin() {
 	s.h.pinConversationToCyberAccess(s.opts.ConversationID, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, s.activeAccount.ID, s.opts.ReqID)
 }
 
-func cloneJSONMap(in map[string]any) map[string]any {
-	raw, _ := json.Marshal(in)
-	var out map[string]any
-	_ = json.Unmarshal(raw, &out)
-	return out
-}
-
 // cyberPolicyHTTPSuppressor wires sseInterceptWriter.onEvent so the
 // HTTP/SSE Codex code path can pin the conversation to a cyber_access
 // account on cyber_policy. The event itself is forwarded to the client
@@ -428,14 +397,11 @@ func (s *codexRelayState) closeAll() {
 }
 
 func (s *codexRelayState) result(statusCode int, relayErr error) codexCyberSwapResult {
-	// swapped is strictly "did the active upstream change" — never
-	// inferred from the relay's terminal error class. A passthrough
-	// without a swap must report swapped=false so the caller's
-	// post-relay bookkeeping (cyberPinned -> skip pin) stays correct.
+	// swapped reflects whether the active upstream actually changed.
+	// run() always returns nil error on the cyber_policy passthrough
+	// path, so caller bookkeeping (cyberPinned -> skip pin) sees an
+	// honest swapped=false there.
 	swapped := s.activeAccount != s.opts.InitialAccount
-	if errors.Is(relayErr, errCyberPolicyPassthrough) {
-		return codexCyberSwapResult{statusCode: statusCode, swapped: swapped, finalAccount: s.activeAccount}
-	}
 	if relayErr != nil && (errors.Is(relayErr, context.Canceled) ||
 		strings.Contains(relayErr.Error(), "closed") ||
 		strings.Contains(relayErr.Error(), "EOF") ||

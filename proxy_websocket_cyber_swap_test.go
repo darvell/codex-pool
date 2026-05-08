@@ -389,9 +389,9 @@ func TestCyberSwapResultSwappedFlagIsActiveAccountChange(t *testing.T) {
 		wantSwapped bool
 	}{
 		{"clean close on initial", a, a, nil, false},
-		{"passthrough on initial", a, a, errCyberPolicyPassthrough, false},
-		{"passthrough after swap", b, a, errCyberPolicyPassthrough, true},
 		{"clean close after swap", b, a, nil, true},
+		{"non-fatal error on initial", a, a, context.Canceled, false},
+		{"non-fatal error after swap", b, a, context.Canceled, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

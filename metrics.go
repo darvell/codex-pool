@@ -50,8 +50,7 @@ func (m *metrics) inc(status string, account string) {
 }
 
 // incCyberPolicy bumps the (account, action) counter. account may be
-// empty for actions that are not tied to a single account (e.g.
-// synthetic refusal emitted before an account is bound).
+// empty for actions that are not tied to a single account.
 func (m *metrics) incCyberPolicy(account, action string) {
 	if action == "" {
 		return
