@@ -298,6 +298,22 @@ func main() {
 		log.Printf("bun/uTLS transport enabled (all traffic)")
 	}
 
+	// CODEX_ANTHROPIC_PROXY_URL routes Anthropic API traffic through a proxy
+	// so it appears to originate from a different IP. Other traffic goes direct.
+	if anthropicProxy := os.Getenv("CODEX_ANTHROPIC_PROXY_URL"); anthropicProxy != "" {
+		proxyURL, err := url.Parse(anthropicProxy)
+		if err != nil {
+			log.Fatalf("invalid CODEX_ANTHROPIC_PROXY_URL: %v", err)
+		}
+		proxyTransport := standardTransport.Clone()
+		proxyTransport.Proxy = http.ProxyURL(proxyURL)
+		transport = &anthropicHostProxyTransport{
+			anthropic: proxyTransport,
+			direct:    transport,
+		}
+		log.Printf("anthropic proxy enabled: %s", proxyURL.Host)
+	}
+
 	// Create refresh transport - may use a proxy for token refresh operations
 	var refreshTransport http.RoundTripper = transport
 	if cfg.refreshProxyURL != "" {

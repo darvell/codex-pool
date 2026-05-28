@@ -266,3 +266,23 @@ func (h *bunHybridTransport) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 var _ http.RoundTripper = (*bunHybridTransport)(nil)
+
+// anthropicHostProxyTransport routes api.anthropic.com traffic through a proxy
+// so it appears to originate from a different IP. All other traffic goes direct.
+type anthropicHostProxyTransport struct {
+	anthropic http.RoundTripper
+	direct    http.RoundTripper
+}
+
+func (h *anthropicHostProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := strings.ToLower(req.URL.Hostname())
+	if host == "" {
+		host = strings.ToLower(req.URL.Host)
+	}
+	if host == "api.anthropic.com" || strings.HasSuffix(host, ".api.anthropic.com") {
+		return h.anthropic.RoundTrip(req)
+	}
+	return h.direct.RoundTrip(req)
+}
+
+var _ http.RoundTripper = (*anthropicHostProxyTransport)(nil)
