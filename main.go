@@ -4339,27 +4339,31 @@ func (h *proxyHandler) tryOnce(
 				h.pacer.wait(sessionID)
 
 				// Wire fingerprint functions: metadata, system blocks, ordered keys, CCH hash
-				acc.mu.Lock()
-				accUUID := acc.AccountUUID
-				acc.mu.Unlock()
+				// Guarded behind CODEX_INJECT_CLAUDE_FP=1 — disabled by default after
+				// suspected account bans from mismatched billing fingerprints.
+				if os.Getenv("CODEX_INJECT_CLAUDE_FP") == "1" {
+					acc.mu.Lock()
+					accUUID := acc.AccountUUID
+					acc.mu.Unlock()
 
-				// 1. Inject metadata.user_id with account UUID, device ID, session ID
-				ccInjectMetadata(bodyObj, accUUID, userID, sessionID)
+					// 1. Inject metadata.user_id with account UUID, device ID, session ID
+					ccInjectMetadata(bodyObj, accUUID, userID, sessionID)
 
-				// 2. Inject system blocks only if client didn't already send them
-				if !bodyHasClaudeSystemBlocks(bodyObj) {
-					bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
-					// Re-parse after system block injection modified bodyBytes
-					json.Unmarshal(bodyBytes, &bodyObj)
+					// 2. Inject system blocks only if client didn't already send them
+					if !bodyHasClaudeSystemBlocks(bodyObj) {
+						bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
+						// Re-parse after system block injection modified bodyBytes
+						json.Unmarshal(bodyBytes, &bodyObj)
+					}
+
+					// 3. Re-serialize with ordered keys matching Claude Code
+					if reordered, err := orderedMarshal(bodyObj, claudeBodyKeyOrder); err == nil {
+						bodyBytes = reordered
+					}
+
+					// 4. Replace CCH placeholder with computed xxhash
+					bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
 				}
-
-				// 3. Re-serialize with ordered keys matching Claude Code
-				if reordered, err := orderedMarshal(bodyObj, claudeBodyKeyOrder); err == nil {
-					bodyBytes = reordered
-				}
-
-				// 4. Replace CCH placeholder with computed xxhash
-				bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
 			}
 			// Extract the model from the translated body (canonical name)
 			bodyModel := ""
