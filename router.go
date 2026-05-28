@@ -456,6 +456,15 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Xiaomi account admin routes (friend auth - accessible from friend landing page)
+	if strings.HasPrefix(r.URL.Path, "/admin/xiaomi") {
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		h.serveXiaomiAdmin(w, r)
+		return
+	}
+
 	// Config download routes (no auth - token is the auth)
 	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") || strings.HasPrefix(r.URL.Path, "/config/pi/") {
 		h.serveConfigDownload(w, r)

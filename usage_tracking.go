@@ -113,6 +113,11 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
+		// Xiaomi doesn't document a proactive usage endpoint; request usage is parsed from responses.
+		if accType == AccountTypeXiaomi {
+			continue
+		}
+
 		// Claude accounts have their own usage endpoint
 		if accType == AccountTypeClaude {
 			// Proactive refresh for OAuth tokens

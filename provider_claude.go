@@ -77,6 +77,7 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 			acc.PlanType = "claude"
 		}
 		acc.RateLimitTier = cj.ClaudeAiOauth.RateLimitTier
+		acc.AccountUUID = cj.AccountUUID
 		return acc, nil
 	}
 

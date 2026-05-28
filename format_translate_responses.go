@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -162,33 +160,8 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 			out[key] = v
 		}
 	}
-	ensurePromptCacheKey(out, req)
 
 	return json.Marshal(out)
-}
-
-func ensurePromptCacheKey(out, source map[string]any) {
-	if _, ok := out["prompt_cache_key"]; ok {
-		return
-	}
-	seed := map[string]any{}
-	for _, key := range []string{"model", "instructions", "messages", "prompt", "input", "tools", "functions"} {
-		if v, ok := source[key]; ok {
-			seed[key] = v
-		}
-	}
-	if scope, _ := source["prompt_cache_scope"].(string); scope != "" {
-		seed["scope"] = scope
-	}
-	if len(seed) == 0 {
-		return
-	}
-	b, err := json.Marshal(seed)
-	if err != nil {
-		return
-	}
-	sum := sha256.Sum256(b)
-	out["prompt_cache_key"] = "pc_" + hex.EncodeToString(sum[:8])
 }
 
 func convertOpenAIToolsToResponses(req map[string]any) []any {
@@ -409,8 +382,6 @@ func translateCompletionsToResponses(body []byte) ([]byte, error) {
 			out[key] = v
 		}
 	}
-	ensurePromptCacheKey(out, req)
-
 	return json.Marshal(out)
 }
 
@@ -796,23 +767,12 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 	}
 	claude["messages"] = claudeMsgs
 
-	// Set system prompt for Claude Code compatibility.
-	// The developer messages from Codex CLI contain agent instructions that
-	// are useful context, so we prepend the Claude Code identifier and include them.
-	{
-		const claudeCodePrefix = "You are Claude Code, Anthropic's official CLI for Claude."
-		var systemParts []string
-		systemParts = append(systemParts, claudeCodePrefix)
-
-		// Include the original instructions field if present
-		if sysPrompt, ok := claude["system"].(string); ok && sysPrompt != "" {
-			systemParts = append(systemParts, sysPrompt)
-		}
-		// Include developer message content (agent instructions from Codex)
+	if sysPrompt, ok := claude["system"].(string); ok && sysPrompt != "" {
 		if len(developerTexts) > 0 {
-			systemParts = append(systemParts, strings.Join(developerTexts, "\n\n"))
+			claude["system"] = strings.Join(append([]string{sysPrompt}, developerTexts...), "\n\n")
 		}
-		claude["system"] = strings.Join(systemParts, "\n\n")
+	} else if len(developerTexts) > 0 {
+		claude["system"] = strings.Join(developerTexts, "\n\n")
 	}
 
 	// max_output_tokens -> max_tokens
@@ -860,7 +820,7 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 		claude["tools"] = claudeTools
 	}
 
-	return json.Marshal(claude)
+	return claudeOrderedBody(claude)
 }
 
 // convertResponsesContentToClaude converts Responses API content blocks to Claude content blocks.

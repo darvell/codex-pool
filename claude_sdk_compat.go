@@ -3,27 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"sort"
 	"strings"
 )
 
 func transformClaudeSDKRequest(body []byte, userID, sessionID string) ([]byte, map[string]string) {
-	if len(body) == 0 {
-		return body, nil
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body, nil
-	}
-
-	moveNonCoreSystemToFirstUser(obj)
-	mapper := obfuscateClaudeToolNames(obj)
-	ccInjectMetadata(obj, "", userID, sessionID)
-	out := ccInjectSystemBlocks(obj, body)
-	out = ccReplaceCCHPlaceholder(out)
-	return out, mapper
+	return body, nil
 }
 
 func moveNonCoreSystemToFirstUser(obj map[string]any) {

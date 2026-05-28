@@ -22,6 +22,7 @@ const (
 	AccountTypeKimi    AccountType = "kimi"
 	AccountTypeMinimax AccountType = "minimax"
 	AccountTypeZAI     AccountType = "zai"
+	AccountTypeXiaomi  AccountType = "xiaomi"
 )
 
 type Account struct {
@@ -54,6 +55,7 @@ type Account struct {
 	RateLimitUntil          time.Time
 	BackoffLevel            int // exponent: cooldown = min(1s * 2^level, 30m)
 	AllowedSourceIPs        []string
+	AccountUUID             string // Anthropic internal account UUID, learned from /api/claude_cli/bootstrap
 	CyberAccess             bool
 	CodexCookies            map[string]string
 
@@ -290,6 +292,9 @@ type ClaudeAuthJSON struct {
 
 	// OAuth format (from Claude Code keychain)
 	ClaudeAiOauth *ClaudeOAuthData `json:"claudeAiOauth,omitempty"`
+
+	// Learned from Anthropic's bootstrap endpoint
+	AccountUUID string `json:"account_uuid,omitempty"`
 }
 
 // ClaudeOAuthData is the OAuth token structure from Claude Code.
@@ -313,6 +318,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		"kimi":    AccountTypeKimi,
 		"minimax": AccountTypeMinimax,
 		"zai":     AccountTypeZAI,
+		"xiaomi":  AccountTypeXiaomi,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -1071,6 +1077,8 @@ func saveAccount(a *Account) error {
 	case AccountTypeMinimax:
 		return saveAPIKeyAccount(a)
 	case AccountTypeZAI:
+		return saveAPIKeyAccount(a)
+	case AccountTypeXiaomi:
 		return saveAPIKeyAccount(a)
 	default:
 		return saveCodexAccount(a)

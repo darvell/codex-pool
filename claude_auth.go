@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -269,6 +270,64 @@ func extractProfileInfo(profile map[string]any) *ClaudeProfileInfo {
 	return info
 }
 
+// FetchClaudeAccountUUID probes Anthropic's internal bootstrap endpoint to
+// discover the real account UUID for an OAuth token. This UUID is injected
+// into metadata.user_id to match real Claude Code traffic.
+func FetchClaudeAccountUUID(accessToken string, transport http.RoundTripper) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, "https://api.anthropic.com/api/claude_cli/bootstrap", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("anthropic-version", ccAnthropicVersion)
+	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
+	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
+	req.Header.Set("X-Claude-Code-Session-Id", ccAccountSessionID(accessToken))
+	req.Header.Set("X-App", "cli")
+	req.Header.Set("Accept", "application/json")
+	ccStainlessHeaders(req.Header.Set)
+
+	client := &http.Client{Transport: transport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("bootstrap status=%s body=%s", resp.Status, string(body))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", err
+	}
+
+	// Try account_uuid at top level
+	if uuid, ok := payload["account_uuid"].(string); ok && uuid != "" {
+		return uuid, nil
+	}
+	// Try user.uuid
+	if user, ok := payload["user"].(map[string]any); ok {
+		if uuid, ok := user["uuid"].(string); ok && uuid != "" {
+			return uuid, nil
+		}
+	}
+	// Try nested account.uuid
+	if account, ok := payload["account"].(map[string]any); ok {
+		if uuid, ok := account["uuid"].(string); ok && uuid != "" {
+			return uuid, nil
+		}
+	}
+
+	return "", fmt.Errorf("account_uuid not found in bootstrap response")
+}
+
 // SaveClaudeAccount saves a Claude OAuth account to the pool directory.
 func SaveClaudeAccount(poolDir, accountID string, tokens *ClaudeTokenResponse) error {
 	claudeDir := filepath.Join(poolDir, "claude")
@@ -379,6 +438,11 @@ func saveClaudeAccount(a *Account) error {
 		delete(root, "disabled")
 	}
 
+	// Persist learned account UUID
+	if a.AccountUUID != "" {
+		root["account_uuid"] = a.AccountUUID
+	}
+
 	return atomicWriteJSON(a.File, root)
 }
 
@@ -418,6 +482,16 @@ func RefreshClaudeAccountTokens(acc *Account) error {
 		log.Printf("claude account %s: failed to fetch profile on refresh: %v", acc.ID, err)
 	}
 
+	// Re-probe account UUID if we don't have one yet
+	if acc.AccountUUID == "" {
+		if uuid, err := FetchClaudeAccountUUID(acc.AccessToken, http.DefaultTransport); err == nil && uuid != "" {
+			acc.mu.Lock()
+			acc.AccountUUID = uuid
+			acc.mu.Unlock()
+			log.Printf("claude account %s: learned account_uuid=%s", acc.ID, uuid)
+		}
+	}
+
 	return saveClaudeAccount(acc)
 }
 
@@ -448,4 +522,61 @@ func parseScopes(scope string) []string {
 		scopes = append(scopes, scope[start:])
 	}
 	return scopes
+}
+
+// probeClaudeAccountUUIDs iterates all Claude OAuth accounts and probes
+// Anthropic's bootstrap endpoint for any that don't have an AccountUUID yet.
+func (h *proxyHandler) probeClaudeAccountUUIDs() {
+	h.pool.mu.RLock()
+	accounts := make([]*Account, 0, len(h.pool.accounts))
+	for _, acc := range h.pool.accounts {
+		if acc.Type == AccountTypeClaude {
+			accounts = append(accounts, acc)
+		}
+	}
+	h.pool.mu.RUnlock()
+
+	if len(accounts) == 0 {
+		return
+	}
+
+	needsProbe := make([]*Account, 0, len(accounts))
+	for _, acc := range accounts {
+		acc.mu.Lock()
+		if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") && acc.AccountUUID == "" {
+			needsProbe = append(needsProbe, acc)
+		}
+		acc.mu.Unlock()
+	}
+
+	if len(needsProbe) == 0 {
+		return
+	}
+
+	log.Printf("probing account UUIDs for %d claude accounts...", len(needsProbe))
+
+	for _, acc := range needsProbe {
+		acc.mu.Lock()
+		token := acc.AccessToken
+		acc.mu.Unlock()
+
+		uuid, err := FetchClaudeAccountUUID(token, h.transport)
+		if err != nil {
+			log.Printf("claude account %s: failed to probe account_uuid: %v", acc.ID, err)
+			continue
+		}
+
+		acc.mu.Lock()
+		acc.AccountUUID = uuid
+		acc.mu.Unlock()
+
+		if err := saveClaudeAccount(acc); err != nil {
+			log.Printf("claude account %s: failed to persist account_uuid: %v", acc.ID, err)
+		} else {
+			log.Printf("claude account %s: learned account_uuid=%s", acc.ID, uuid)
+		}
+
+		// Rate limit: 1 request per second to avoid hammering Anthropic
+		time.Sleep(time.Second)
+	}
 }

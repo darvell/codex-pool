@@ -725,7 +725,7 @@ func translateOpenAIReqToClaude(body []byte) ([]byte, error) {
 		claude["tool_choice"] = convertOpenAIToolChoiceToClaude(tc)
 	}
 
-	return json.Marshal(claude)
+	return claudeOrderedBody(claude)
 }
 
 func convertOpenAIMsgToClaude(m map[string]any) map[string]any {

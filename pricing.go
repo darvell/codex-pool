@@ -56,6 +56,8 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeMinimax, ""}:                      {5, "MiniMax API"},
 	{AccountTypeZAI, "zai"}:                       {0, "Z.ai Coding Plan"},
 	{AccountTypeZAI, ""}:                          {0, "Z.ai Coding Plan"},
+	{AccountTypeXiaomi, "xiaomi"}:                 {0, "Xiaomi MiMo Token Plan"},
+	{AccountTypeXiaomi, ""}:                       {0, "Xiaomi MiMo Token Plan"},
 }
 
 // getSubscriptionCost returns monthly cost and label for an account.
@@ -211,8 +213,8 @@ func isAllDigits(s string) bool {
 }
 
 // calculateCost computes the estimated API cost for a request.
-// Formula: uncached_input * input_price + cache_read * cache_read_price
-//        + cache_creation * cache_write_price + (output + reasoning) * output_price
+// Formula: uncached_input * input_price + cache_read * cache_read_price plus
+// cache_creation * cache_write_price + (output + reasoning) * output_price.
 // defaultModelForProvider returns a fallback model name when the request didn't include one.
 var defaultModelForProvider = map[AccountType]string{
 	AccountTypeCodex:   "gpt-5.2-codex",
@@ -220,6 +222,7 @@ var defaultModelForProvider = map[AccountType]string{
 	AccountTypeKimi:    "moonshot.kimi-k2-thinking",
 	AccountTypeMinimax: "minimax.minimax-m2",
 	AccountTypeZAI:     "zai.glm-5.1",
+	AccountTypeXiaomi:  "mimo-v2.5-pro",
 }
 
 func (pd *PricingData) calculateCost(ru RequestUsage) float64 {

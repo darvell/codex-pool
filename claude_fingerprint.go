@@ -372,9 +372,44 @@ func ccInjectSystemBlocks(bodyObj map[string]any, bodyBytes []byte) []byte {
 	}
 
 	bodyObj["system"] = blocks
-	out, err := json.Marshal(bodyObj)
+	out, err := orderedMarshal(bodyObj, claudeBodyKeyOrder)
 	if err != nil {
 		return bodyBytes // fallback to original on marshal error
 	}
 	return out
+}
+
+// bodyHasClaudeSystemBlocks checks if the request body already contains
+// Claude Code system blocks (attribution header or identity prefix).
+// Returns true if the body should NOT be modified — the client already
+// sent proper Claude Code system formatting.
+func bodyHasClaudeSystemBlocks(bodyObj map[string]any) bool {
+	if bodyObj == nil {
+		return false
+	}
+
+	sys, ok := bodyObj["system"]
+	if !ok || sys == nil {
+		return false
+	}
+
+	switch v := sys.(type) {
+	case string:
+		// Check if plain string contains Claude Code markers
+		return strings.Contains(v, ccSystemPrefix) || strings.Contains(v, "x-anthropic-billing-header")
+	case []any:
+		// Block array — check each block's text
+		for _, b := range v {
+			block, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, _ := block["text"].(string)
+			if strings.Contains(text, ccSystemPrefix) || strings.Contains(text, "x-anthropic-billing-header") {
+				return true
+			}
+		}
+	}
+
+	return false
 }

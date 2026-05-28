@@ -45,8 +45,8 @@ func TestTranslateCompletionsToResponses(t *testing.T) {
 	if content[0].(map[string]any)["text"] != "say hi" {
 		t.Fatalf("prompt not converted: %#v", got["input"])
 	}
-	if key, _ := got["prompt_cache_key"].(string); !strings.HasPrefix(key, "pc_") {
-		t.Fatalf("prompt_cache_key missing: %#v", got)
+	if _, ok := got["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key should not be synthesized: %#v", got)
 	}
 }
 
@@ -132,8 +132,8 @@ func TestTranslateChatCompletionsToResponsesHandlesLegacyFunctionsAndHostedSearc
 	if got["instructions"] != "one\ntwo" {
 		t.Fatalf("instructions = %#v", got["instructions"])
 	}
-	if key, _ := got["prompt_cache_key"].(string); !strings.HasPrefix(key, "pc_") {
-		t.Fatalf("prompt_cache_key missing: %#v", got)
+	if _, ok := got["prompt_cache_key"]; ok {
+		t.Fatalf("prompt_cache_key should not be synthesized: %#v", got)
 	}
 	input := got["input"].([]any)
 	user := input[0].(map[string]any)

@@ -78,6 +78,114 @@ func TestModelRouteOverrideOpenAIModelKeepsBackendAPIBase(t *testing.T) {
 	}
 }
 
+func TestModelRouteOverrideDoesNotRouteCodexClientPathsToClaude(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	handler := &proxyHandler{
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+	}
+
+	for _, path := range []string{"/v1/responses", "/responses", "/v1/chat/completions", "/v1/completions"} {
+		provider, overrideBase, rewritten := handler.modelRouteOverride(path, "opus", []byte(`{"model":"opus"}`))
+		if provider != nil || overrideBase != nil || rewritten != nil {
+			t.Fatalf("modelRouteOverride(%q, opus) = provider=%v base=%v rewritten=%s, want no Claude override", path, provider, overrideBase, rewritten)
+		}
+	}
+}
+
+func TestCodexClientClaudeModelStaysOnCodexAccount(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	codex := &Account{Type: AccountTypeCodex, ID: "codex", AccessToken: "codex-token", AccountID: "acct_codex", PlanType: "pro"}
+	claude := &Account{Type: AccountTypeClaude, ID: "claude", AccessToken: "sk-ant-api-upstream", PlanType: "max"}
+	var upstreamPath string
+	var codexAccountID string
+	var claudeAPIKey string
+
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool:    newPoolState([]*Account{codex, claude}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamPath = req.URL.Path
+			codexAccountID = req.Header.Get("ChatGPT-Account-ID")
+			claudeAPIKey = req.Header.Get("X-Api-Key")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewBufferString(`{"ok":true}`)),
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"opus","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "codex-user"))
+	rr := httptest.NewRecorder()
+	h.proxyRequest(rr, req, "req-codex-opus")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamPath != "/backend-api/codex/responses" {
+		t.Fatalf("upstream path = %q, want Codex responses path", upstreamPath)
+	}
+	if codexAccountID != "acct_codex" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want Codex account", codexAccountID)
+	}
+	if claudeAPIKey != "" {
+		t.Fatalf("Claude X-Api-Key should not be set, got %q", claudeAPIKey)
+	}
+}
+
+func TestClaudePoolRejectsCodexClientFormatTranslation(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	base, _ := url.Parse("https://api.anthropic.com")
+	claude := &Account{Type: AccountTypeClaude, ID: "claude", AccessToken: "sk-ant-api-upstream", PlanType: "max"}
+	transportCalled := false
+
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool:    newPoolState([]*Account{claude}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			transportCalled = true
+			return nil, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"opus","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "claude-user"))
+	rr := httptest.NewRecorder()
+	h.proxyRequest(rr, req, "req-claude-responses")
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if transportCalled {
+		t.Fatal("transport should not be called for Codex-to-Claude translation")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -794,25 +902,25 @@ func TestEnsureCodexResponsesCompactBodyDoesNotForceStream(t *testing.T) {
 func TestEnsureCodexResponsesInstructionsStripsUnsupportedParams(t *testing.T) {
 	t.Parallel()
 
-	body := []byte(`{"model":"gpt-5.4-mini","input":"hi","temperature":0,"max_output_tokens":10,"parallel_tool_calls":true}`)
+	body := []byte(`{"model":"gpt-5.4-mini","input":"hi","temperature":0,"max_output_tokens":10,"parallel_tool_calls":true,"prompt_cache_key":"pc_client","prompt_cache_scope":"user|origin"}`)
 	out := ensureCodexResponsesInstructions(body)
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("unmarshal output: %v", err)
 	}
-	for _, key := range []string{"temperature", "max_output_tokens"} {
+	for _, key := range []string{"temperature", "max_output_tokens", "prompt_cache_scope"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s should not be forwarded to Codex: %#v", key, got)
 		}
 	}
-	if got["instructions"] == "" {
-		t.Fatalf("instructions missing: %#v", got)
+	if got["instructions"] != "" {
+		t.Fatalf("instructions should not be synthesized: %#v", got)
 	}
 	if stream, _ := got["stream"].(bool); !stream {
 		t.Fatalf("stream = %#v, want true", got["stream"])
 	}
-	if key, _ := got["prompt_cache_key"].(string); !strings.HasPrefix(key, "pc_") {
-		t.Fatalf("prompt_cache_key missing: %#v", got)
+	if key, _ := got["prompt_cache_key"].(string); key != "pc_client" {
+		t.Fatalf("prompt_cache_key = %q, want client value", key)
 	}
 }
 
@@ -839,6 +947,11 @@ func TestTranslateImagesGenerationToResponses(t *testing.T) {
 	}
 	if got["stream"] != true || got["store"] != false {
 		t.Fatalf("bad responses controls: %#v", got)
+	}
+	input := got["input"].([]any)[0].(map[string]any)
+	content := input["content"].([]any)
+	if content[0].(map[string]any)["text"] != "draw a cat" {
+		t.Fatalf("image prompt should be forwarded verbatim: %#v", content[0])
 	}
 }
 
@@ -870,6 +983,9 @@ func TestTranslateImagesEditToResponses(t *testing.T) {
 	content := input["content"].([]any)
 	if len(content) != 2 || content[0].(map[string]any)["type"] != "input_text" || content[1].(map[string]any)["type"] != "input_image" {
 		t.Fatalf("bad edit content: %#v", content)
+	}
+	if content[0].(map[string]any)["text"] != "turn this red" {
+		t.Fatalf("image edit prompt should be forwarded verbatim: %#v", content[0])
 	}
 	if imageURL, _ := content[1].(map[string]any)["image_url"].(string); !strings.HasPrefix(imageURL, "data:image/") {
 		t.Fatalf("bad image url: %q", imageURL)

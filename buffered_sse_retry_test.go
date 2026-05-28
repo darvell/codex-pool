@@ -90,8 +90,8 @@ func TestResponsesNonStreamingBufferedRetriesOnCyberPolicy(t *testing.T) {
 	}, "\n")
 
 	h := &proxyHandler{
-		cfg:              &config{maxAttempts: 3, maxInMemoryBodyBytes: 4096},
-		transport:        roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cfg: &config{maxAttempts: 3, maxInMemoryBodyBytes: 4096},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			accountID := req.Header.Get("ChatGPT-Account-ID")
 			accounts = append(accounts, accountID)
 			body := flaggedSSE
@@ -153,6 +153,7 @@ func TestResponsesNonStreamingBufferedRetriesOnCyberPolicy(t *testing.T) {
 		t.Fatalf("cyber account never dialed; accounts = %#v", accounts)
 	}
 }
+
 // behavioral regression for the "Claude SDK calling a Codex model"
 // pipeline: the proxy buffers the upstream SSE, translates to Claude
 // JSON, and writes once. Before the fix, a cyber_policy event mid-stream

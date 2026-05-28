@@ -36,6 +36,7 @@ type config struct {
 	kimiBase      *url.URL // Kimi API endpoint
 	minimaxBase   *url.URL // MiniMax API endpoint
 	zaiBase       *url.URL // Z.ai Anthropic-compatible endpoint
+	xiaomiBase    *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
 	poolDir       string
 
 	disableRefresh  bool
@@ -112,6 +113,7 @@ func buildConfig() *config {
 	cfg.kimiBase = mustParse(getenv("UPSTREAM_KIMI_BASE", "https://api.kimi.com/coding"))
 	cfg.minimaxBase = mustParse(getenv("UPSTREAM_MINIMAX_BASE", "https://api.minimax.io/anthropic"))
 	cfg.zaiBase = mustParse(getenv("UPSTREAM_ZAI_BASE", "https://api.z.ai/api/anthropic"))
+	cfg.xiaomiBase = mustParse(getenv("UPSTREAM_XIAOMI_BASE", "https://token-plan-sgp.xiaomimimo.com/anthropic"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -221,7 +223,8 @@ func main() {
 	kimiProvider := NewKimiProvider(cfg.kimiBase)
 	minimaxProvider := NewMinimaxProvider(cfg.minimaxBase)
 	zaiProvider := NewZAIProvider(cfg.zaiBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider, zaiProvider)
+	xiaomiProvider := NewXiaomiProvider(cfg.xiaomiBase)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -236,6 +239,7 @@ func main() {
 	kimiCount := pool.countByType(AccountTypeKimi)
 	minimaxCount := pool.countByType(AccountTypeMinimax)
 	zaiCount := pool.countByType(AccountTypeZAI)
+	xiaomiCount := pool.countByType(AccountTypeXiaomi)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
@@ -279,10 +283,18 @@ func main() {
 
 	// Default to the standard Go transport. Set CODEX_TLS_FINGERPRINT=rustls to opt
 	// into the experimental uTLS/rustls hybrid transport for ChatGPT/Auth hosts.
+	// Set CODEX_TLS_FINGERPRINT=bun for Bun 1.3.12 fingerprint (Anthropic traffic only).
 	var transport http.RoundTripper = standardTransport
-	if strings.EqualFold(os.Getenv("CODEX_TLS_FINGERPRINT"), "rustls") {
+	switch strings.ToLower(os.Getenv("CODEX_TLS_FINGERPRINT")) {
+	case "rustls":
 		transport = newRustlsHybridTransport(standardTransport)
 		log.Printf("codex rustls/uTLS hybrid transport enabled")
+	case "bun":
+		transport = newBunHybridTransport(standardTransport)
+		log.Printf("bun/uTLS hybrid transport enabled (Anthropic traffic only)")
+	case "bun-all":
+		transport = createBunTransport()
+		log.Printf("bun/uTLS transport enabled (all traffic)")
 	}
 
 	// Create refresh transport - may use a proxy for token refresh operations
@@ -344,6 +356,18 @@ func main() {
 		aliasesCfg = globalConfigFile.ModelAliases
 	}
 
+	// Initialize request pacer from env var (default 100ms, 0 to disable)
+	paceMs := 100
+	if v := os.Getenv("CODEX_REQUEST_PACE_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			paceMs = n
+		}
+	}
+	var pacer *requestPacer
+	if paceMs > 0 {
+		pacer = newRequestPacer(time.Duration(paceMs) * time.Millisecond)
+	}
+
 	h := &proxyHandler{
 		cfg:              cfg,
 		transport:        transport,
@@ -359,8 +383,23 @@ func main() {
 		metrics:          newMetrics(),
 		recent:           newRecentErrors(50),
 		startTime:        time.Now(),
+		pacer:            pacer,
 	}
 	h.startUsagePoller()
+
+	// Probe account UUIDs for Claude OAuth accounts that don't have one yet.
+	go h.probeClaudeAccountUUIDs()
+
+	// Background cleanup for request pacer (every 5 minutes)
+	if pacer != nil {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				pacer.cleanup(10 * time.Minute)
+			}
+		}()
+	}
 
 	// Start file watcher for hot-reload of pool directory and config.
 	configPath := "config.toml"
@@ -397,8 +436,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -423,6 +462,7 @@ type proxyHandler struct {
 	recent           *recentErrors
 	inflight         int64
 	startTime        time.Time
+	pacer            *requestPacer // Per-session request pacing
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -621,13 +661,12 @@ func ensureCodexResponsesInstructions(body []byte) []byte {
 		return body
 	}
 	if _, ok := obj["instructions"]; !ok {
-		obj["instructions"] = "You are a helpful assistant."
+		obj["instructions"] = ""
 	}
 	obj["store"] = false
 	obj["stream"] = true
-	sanitizeCodexResponsesParams(obj)
 	prepareCodexSchemasInBody(obj)
-	ensurePromptCacheKey(obj, obj)
+	sanitizeCodexResponsesParams(obj)
 	if input, ok := obj["input"].(string); ok {
 		obj["input"] = []any{
 			map[string]any{
@@ -685,6 +724,7 @@ func sanitizeCodexResponsesParams(obj map[string]any) {
 		"logprobs",
 		"top_logprobs",
 		"metadata",
+		"prompt_cache_scope",
 	} {
 		delete(obj, key)
 	}
@@ -899,25 +939,6 @@ func extractConversationIDFromJSON(blob []byte) string {
 	return extractConversationIDFromObject(obj)
 }
 
-func injectPromptCacheScope(body []byte, scope string) []byte {
-	if scope == "" || len(body) == 0 {
-		return body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	if _, ok := obj["prompt_cache_key"].(string); !ok {
-		return body
-	}
-	obj["prompt_cache_scope"] = scope
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
 func extractConversationIDFromObject(obj map[string]any) string {
 	for _, key := range []string{"conversation_id", "conversation", "session_id"} {
 		if v, ok := obj[key].(string); ok && v != "" {
@@ -1039,6 +1060,13 @@ func requiredPlanForRequest(accountType AccountType, r *http.Request, requestedM
 	return ""
 }
 
+func isCodexToClaudeModelOverridePath(path string) bool {
+	if detectRequestFormat(path) == FormatOpenAI {
+		return true
+	}
+	return strings.HasPrefix(path, "/v1/responses") || strings.HasPrefix(path, "/responses")
+}
+
 // modelRouteOverride checks if the requested model should be routed to an external
 // provider (Kimi, MiniMax, etc.) instead of the path-detected provider.
 // Returns (provider, baseURL, rewrittenBody) or (nil, nil, nil) if no override.
@@ -1069,6 +1097,15 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		rewritten := rewriteModelInBody(body, canonical)
 		return p, p.UpstreamURL(path), rewritten
 	}
+	if isXiaomiModel(model) {
+		p := h.registry.ForType(AccountTypeXiaomi)
+		if p == nil {
+			return nil, nil, nil
+		}
+		canonical := xiaomiCanonicalModel(model)
+		rewritten := rewriteModelInBody(body, canonical)
+		return p, p.UpstreamURL(path), rewritten
+	}
 	// Cross-format model routing: detect if the model belongs to a different provider
 	// than the one the request path would normally select.
 	if isOpenAIModel(model) {
@@ -1077,7 +1114,7 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 			return p, p.UpstreamURL(path), nil
 		}
 	}
-	if isClaudeModel(model) {
+	if isClaudeModel(model) && !isCodexToClaudeModelOverridePath(path) {
 		p := h.registry.ForType(AccountTypeClaude)
 		if p != nil {
 			canonical := claudeCanonicalModel(model)
@@ -1086,6 +1123,253 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		}
 	}
 	return nil, nil, nil
+}
+
+const streamedModelRoutePeekBytes = 64 * 1024
+
+func shouldPeekStreamedModelRoute(r *http.Request) bool {
+	if r == nil || r.ContentLength < streamedModelRoutePeekBytes {
+		return false
+	}
+	return r.Method == http.MethodPost && r.URL.Path == "/v1/messages"
+}
+
+func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provider, targetBase *url.URL, reqID string) (Provider, *url.URL, error) {
+	if r == nil || r.Body == nil || h == nil || h.registry == nil {
+		return provider, targetBase, nil
+	}
+	if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+		return provider, targetBase, nil
+	}
+	if strings.TrimSpace(r.Header.Get("Content-Encoding")) != "" {
+		return provider, targetBase, nil
+	}
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+	if contentType != "" && !strings.Contains(contentType, "json") {
+		return provider, targetBase, nil
+	}
+
+	prefix, err := readBodyPrefix(r.Body, streamedModelRoutePeekBytes)
+	if err != nil {
+		r.Body = &prefixReadCloser{r: bytes.NewReader(prefix), c: r.Body}
+		return provider, targetBase, err
+	}
+	restoreBody := func(replacement []byte) {
+		r.Body = &prefixReadCloser{r: io.MultiReader(bytes.NewReader(replacement), r.Body), c: r.Body}
+	}
+
+	model, valueStart, valueEnd, ok := findTopLevelJSONStringField(prefix, "model")
+	if !ok {
+		restoreBody(prefix)
+		return provider, targetBase, nil
+	}
+
+	requestedModel := strings.TrimSpace(model)
+	if resolved, aliased := h.aliases.resolve(requestedModel); aliased {
+		if h.cfg != nil && h.cfg.debug.Load() {
+			log.Printf("[%s] streamed model alias: %s -> %s", reqID, requestedModel, resolved)
+		}
+		requestedModel = resolved
+	}
+	if !isXiaomiModel(requestedModel) {
+		restoreBody(prefix)
+		return provider, targetBase, nil
+	}
+
+	xiaomiProvider := h.registry.ForType(AccountTypeXiaomi)
+	if xiaomiProvider == nil {
+		restoreBody(prefix)
+		return provider, targetBase, nil
+	}
+
+	canonical := xiaomiCanonicalModel(requestedModel)
+	rewrittenPrefix, delta, err := replaceJSONStringToken(prefix, valueStart, valueEnd, canonical)
+	if err != nil {
+		restoreBody(prefix)
+		return provider, targetBase, err
+	}
+	if r.ContentLength >= 0 && delta != 0 {
+		r.ContentLength += int64(delta)
+		r.Header.Del("Content-Length")
+	}
+	restoreBody(rewrittenPrefix)
+	return xiaomiProvider, xiaomiProvider.UpstreamURL(r.URL.Path), nil
+}
+
+func readBodyPrefix(body io.Reader, limit int64) ([]byte, error) {
+	var buf bytes.Buffer
+	_, err := io.CopyN(&buf, body, limit)
+	if err == io.EOF {
+		err = nil
+	}
+	return buf.Bytes(), err
+}
+
+type prefixReadCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (p *prefixReadCloser) Read(b []byte) (int, error) {
+	return p.r.Read(b)
+}
+
+func (p *prefixReadCloser) Close() error {
+	return p.c.Close()
+}
+
+func replaceJSONStringToken(prefix []byte, start, end int, value string) ([]byte, int, error) {
+	if start < 0 || end < start || end > len(prefix) {
+		return nil, 0, fmt.Errorf("invalid JSON string bounds")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]byte, 0, len(prefix)-(end-start)+len(encoded))
+	out = append(out, prefix[:start]...)
+	out = append(out, encoded...)
+	out = append(out, prefix[end:]...)
+	return out, len(encoded) - (end - start), nil
+}
+
+func findTopLevelJSONStringField(blob []byte, field string) (value string, valueStart int, valueEnd int, ok bool) {
+	i := skipJSONWhitespace(blob, 0)
+	if i >= len(blob) || blob[i] != '{' {
+		return "", 0, 0, false
+	}
+	i++
+	for {
+		i = skipJSONWhitespace(blob, i)
+		if i >= len(blob) {
+			return "", 0, 0, false
+		}
+		if blob[i] == '}' {
+			return "", 0, 0, false
+		}
+		if blob[i] == ',' {
+			i++
+			continue
+		}
+		key, _, _, next, ok := readJSONStringToken(blob, i)
+		if !ok {
+			return "", 0, 0, false
+		}
+		i = skipJSONWhitespace(blob, next)
+		if i >= len(blob) || blob[i] != ':' {
+			return "", 0, 0, false
+		}
+		i = skipJSONWhitespace(blob, i+1)
+		if key == field {
+			value, valueStart, valueEnd, _, ok = readJSONStringToken(blob, i)
+			return value, valueStart, valueEnd, ok
+		}
+		next, ok = skipJSONValue(blob, i)
+		if !ok {
+			return "", 0, 0, false
+		}
+		i = next
+	}
+}
+
+func skipJSONWhitespace(blob []byte, i int) int {
+	for i < len(blob) {
+		switch blob[i] {
+		case ' ', '\n', '\r', '\t':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func readJSONStringToken(blob []byte, i int) (value string, start int, end int, next int, ok bool) {
+	if i >= len(blob) || blob[i] != '"' {
+		return "", 0, 0, 0, false
+	}
+	start = i
+	escaped := false
+	for i++; i < len(blob); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch blob[i] {
+		case '\\':
+			escaped = true
+		case '"':
+			end = i + 1
+			if err := json.Unmarshal(blob[start:end], &value); err != nil {
+				return "", 0, 0, 0, false
+			}
+			return value, start, end, end, true
+		}
+	}
+	return "", 0, 0, 0, false
+}
+
+func skipJSONValue(blob []byte, i int) (int, bool) {
+	i = skipJSONWhitespace(blob, i)
+	if i >= len(blob) {
+		return 0, false
+	}
+	if blob[i] == '"' {
+		_, _, _, next, ok := readJSONStringToken(blob, i)
+		return next, ok
+	}
+	if blob[i] != '{' && blob[i] != '[' {
+		for i < len(blob) {
+			switch blob[i] {
+			case ',', '}', ']':
+				return i, true
+			case ' ', '\n', '\r', '\t':
+				return skipJSONWhitespace(blob, i), true
+			default:
+				i++
+			}
+		}
+		return 0, false
+	}
+
+	stack := []byte{blob[i]}
+	escaped := false
+	inString := false
+	for i++; i < len(blob); i++ {
+		c := blob[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch c {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			stack = append(stack, c)
+		case '}', ']':
+			if len(stack) == 0 {
+				return 0, false
+			}
+			open := stack[len(stack)-1]
+			if (open == '{' && c != '}') || (open == '[' && c != ']') {
+				return 0, false
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return i + 1, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // rewriteModelInBody replaces the "model" field in a JSON request body.
@@ -1288,6 +1572,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
+	if streamBody || shouldPeekStreamedModelRoute(r) {
+		var err error
+		provider, targetBase, err = h.applyStreamedModelRoute(r, provider, targetBase, reqID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		accountType = provider.Type()
+		streamBody = streamBody || accountType == AccountTypeXiaomi
+	}
 	if streamBody {
 		if h.cfg.debug.Load() {
 			log.Printf("[%s] streaming request body: method=%s path=%s provider=%s content-length=%d",
@@ -1319,6 +1613,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	conversationID := extractConversationIDFromJSON(inspect)
 	if conversationID == "" {
 		conversationID = extractConversationIDFromHeaders(r.Header)
+	}
+	// Use Claude Code session ID as fallback for conversation stickiness
+	if conversationID == "" {
+		for _, key := range []string{"X-Claude-Code-Session-Id", "x-claude-code-session-id"} {
+			if v := strings.TrimSpace(r.Header.Get(key)); v != "" {
+				conversationID = v
+				break
+			}
+		}
 	}
 	requestedModel := extractRequestedModelFromJSON(inspect)
 
@@ -1375,6 +1678,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// --- Format translation: detect mismatch between client format and provider format ---
 	sourceFormat := detectRequestFormat(r.URL.Path)
 	targetFormat := providerTargetFormat(accountType)
+	if accountType == AccountTypeClaude && (sourceFormat == FormatOpenAI || strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
+		http.Error(w, "OpenAI/Codex request formats cannot be translated to Claude", http.StatusBadRequest)
+		return
+	}
 	translateDir := TranslateNone
 	if sourceFormat != FormatUnknown && targetFormat != FormatUnknown && sourceFormat != targetFormat {
 		if sourceFormat == FormatClaude && targetFormat == FormatOpenAI {
@@ -1421,9 +1728,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 	}
 
-	if translateDir == TranslateNone && accountType == AccountTypeCodex && strings.HasPrefix(r.URL.Path, "/v1/responses") {
-		bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
-		if strings.HasPrefix(r.URL.Path, "/v1/responses/compact") {
+	if translateDir == TranslateNone && accountType == AccountTypeCodex && (strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
+		if strings.HasPrefix(r.URL.Path, "/v1/responses/compact") || strings.HasPrefix(r.URL.Path, "/responses/compact") {
 			bodyBytes = ensureCodexResponsesCompactBody(bodyBytes)
 		} else {
 			bodyBytes = ensureCodexResponsesInstructions(bodyBytes)
@@ -1449,7 +1755,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			r.URL.Path = "/v1/messages"
 		case TranslateChatToResponses:
-			bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
 			bodyBytes, err = translateChatCompletionsToResponses(bodyBytes)
 			if err != nil {
 				http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
@@ -1457,7 +1762,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			r.URL.Path = "/v1/responses"
 		case TranslateCompletionsToResponses:
-			bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
 			bodyBytes, err = translateCompletionsToResponses(bodyBytes)
 			if err != nil {
 				http.Error(w, "format translation error: "+err.Error(), http.StatusBadRequest)
@@ -1465,7 +1769,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			r.URL.Path = "/v1/responses"
 		case TranslateImagesToResponses:
-			bodyBytes = injectPromptCacheScope(bodyBytes, userID+"|"+originID)
 			if strings.HasPrefix(r.URL.Path, "/v1/images/edits") {
 				bodyBytes, imagesResponseFormat, err = translateImagesEditToResponses(bodyBytes, r.Header.Get("Content-Type"))
 			} else {
@@ -2371,6 +2674,15 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	if conversationID == "" {
 		conversationID = extractConversationIDFromHeaders(r.Header)
 	}
+	// Use Claude Code session ID as fallback for conversation stickiness
+	if conversationID == "" {
+		for _, key := range []string{"X-Claude-Code-Session-Id", "x-claude-code-session-id"} {
+			if v := strings.TrimSpace(r.Header.Get(key)); v != "" {
+				conversationID = v
+				break
+			}
+		}
+	}
 
 	requiredPlan := requiredPlanForRequest(accountType, r, "")
 	clientIP := getClientIP(r)
@@ -3062,6 +3374,15 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	var claudeAccum2 *RequestUsage
 	cyberPinned := false
 	conversationID := extractConversationIDFromHeaders(r.Header)
+	// Use Claude Code session ID as fallback for conversation stickiness
+	if conversationID == "" {
+		for _, key := range []string{"X-Claude-Code-Session-Id", "x-claude-code-session-id"} {
+			if v := strings.TrimSpace(r.Header.Get(key)); v != "" {
+				conversationID = v
+				break
+			}
+		}
+	}
 
 	if isSSE {
 		interceptWriter := &sseInterceptWriter{
@@ -4012,6 +4333,33 @@ func (h *proxyHandler) tryOnce(
 				if sp, ok := bodyObj["speed"].(string); ok && sp == "fast" {
 					isFastMode = true
 				}
+
+				// Pace requests per session to avoid burst patterns
+				sessionID := ccSessionHeader(in, userID)
+				h.pacer.wait(sessionID)
+
+				// Wire fingerprint functions: metadata, system blocks, ordered keys, CCH hash
+				acc.mu.Lock()
+				accUUID := acc.AccountUUID
+				acc.mu.Unlock()
+
+				// 1. Inject metadata.user_id with account UUID, device ID, session ID
+				ccInjectMetadata(bodyObj, accUUID, userID, sessionID)
+
+				// 2. Inject system blocks only if client didn't already send them
+				if !bodyHasClaudeSystemBlocks(bodyObj) {
+					bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
+					// Re-parse after system block injection modified bodyBytes
+					json.Unmarshal(bodyBytes, &bodyObj)
+				}
+
+				// 3. Re-serialize with ordered keys matching Claude Code
+				if reordered, err := orderedMarshal(bodyObj, claudeBodyKeyOrder); err == nil {
+					bodyBytes = reordered
+				}
+
+				// 4. Replace CCH placeholder with computed xxhash
+				bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
 			}
 			// Extract the model from the translated body (canonical name)
 			bodyModel := ""
@@ -4020,18 +4368,6 @@ func (h *proxyHandler) tryOnce(
 			}
 			if bodyModel == "" {
 				bodyModel = requestedModel
-			}
-
-			// Inject the CC attribution header and system prefix into the body's
-			// "system" field, converting it to the block-array format that real
-			// Claude Code uses. This must happen before we set Content-Length.
-			if bodyObj != nil {
-				sessionID := ccSessionHeader(in, userID)
-				ccInjectMetadata(bodyObj, "", userID, sessionID)
-				bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
-				bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
-				outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				outReq.ContentLength = int64(len(bodyBytes))
 			}
 
 			outReq.Header.Set("anthropic-version", ccAnthropicVersion)

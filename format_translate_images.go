@@ -51,11 +51,9 @@ func translateImagesGenerationToResponses(body []byte) ([]byte, string, error) {
 	if n := toInt64(req["n"]); n > 1 {
 		return nil, "", errors.New("internal fanout required for n > 1")
 	}
-	out, responseFormat, err := buildImagesResponsesRequest(req, []any{map[string]any{"type": "input_text", "text": imagePromptVerbatimPrefix + prompt}})
+	out, responseFormat, err := buildImagesResponsesRequest(req, []any{map[string]any{"type": "input_text", "text": prompt}})
 	return out, responseFormat, err
 }
-
-const imagePromptVerbatimPrefix = "For the image_generation tool, use the user's image prompt verbatim as the revised_prompt and final generation prompt. Do not rewrite, expand, normalize, translate, summarize, improve, or add details to the prompt. The exact prompt to use is:\n"
 
 func buildImagesResponsesRequest(req map[string]any, content []any) ([]byte, string, error) {
 	model, _ := req["model"].(string)
@@ -103,7 +101,6 @@ func buildImagesResponsesRequest(req map[string]any, content []any) ([]byte, str
 		"stream": true,
 		"store":  false,
 	}
-	ensurePromptCacheKey(out, req)
 	rewritten, err := json.Marshal(out)
 	if err != nil {
 		return nil, "", err
@@ -139,7 +136,7 @@ func translateImagesEditToResponses(body []byte, contentType string) ([]byte, st
 	if n := toInt64(req["n"]); n > 1 {
 		return nil, "", errors.New("internal fanout required for n > 1")
 	}
-	content := []any{map[string]any{"type": "input_text", "text": imagePromptVerbatimPrefix + prompt}}
+	content := []any{map[string]any{"type": "input_text", "text": prompt}}
 	for _, field := range []string{"image", "mask"} {
 		for _, fh := range form.File[field] {
 			imageURL, err := multipartImageDataURL(fh)
