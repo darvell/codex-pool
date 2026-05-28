@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 	"golang.org/x/net/http2"
 )
 
@@ -4382,6 +4383,7 @@ func (h *proxyHandler) tryOnce(
 			outReq.Header.Set("User-Agent", ccUserAgent())
 			outReq.Header.Set("X-Claude-Code-Session-Id", ccSessionHeader(in, userID))
 			outReq.Header.Set("X-App", "cli")
+			outReq.Header.Set("x-client-request-id", uuid.NewString())
 			outReq.Header.Set("Accept", acceptHeader)
 			outReq.Header.Set("Accept-Language", "*")
 			outReq.Header.Set("Content-Type", "application/json")

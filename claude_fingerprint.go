@@ -56,9 +56,13 @@ const (
 
 var (
 	ccProcessSessionID = uuid.NewString()
-	ccProcessDeviceID  = uuid.NewString()
+	ccProcessDeviceID  = hex.EncodeToString([]byte(uuid.New().String() + uuid.New().String()))[:64]
 	ccMetaMu           sync.Mutex
 )
+
+// ccFingerprintSalt is the hardcoded salt from Claude Code's backend validation.
+// See free-code/src/utils/fingerprint.ts FINGERPRINT_SALT.
+const ccFingerprintSalt = "59cf53e54c78"
 
 // ccDerivedID returns a stable deterministic UUID-style identifier derived from
 // a per-user seed and a label. We use this so the same pool user emits the same
@@ -73,6 +77,19 @@ func ccDerivedID(seed, label, fallback string) string {
 	return formatUUIDFromHash(h[:16])
 }
 
+// ccDerivedHexID returns a stable deterministic 64-char hex identifier derived
+// from a per-user seed and a label. Matches Claude Code's device_id format
+// (randomBytes(32).toString('hex')).
+func ccDerivedHexID(seed, label, fallback string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return fallback
+	}
+	h := sha256.Sum256([]byte("codex-pool/" + label + "/" + seed))
+	// Take first 32 bytes as hex = 64 chars
+	return hex.EncodeToString(h[:32])
+}
+
 func formatUUIDFromHash(b []byte) string {
 	if len(b) < 16 {
 		return ""
@@ -85,9 +102,9 @@ func formatUUIDFromHash(b []byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", clone[0:4], clone[4:6], clone[6:8], clone[8:10], clone[10:16])
 }
 
-// ccUserDeviceID returns a stable device id for the given pool user.
+// ccUserDeviceID returns a stable 64-char hex device id for the given pool user.
 func ccUserDeviceID(userID string) string {
-	return ccDerivedID(userID, "device", ccProcessDeviceID)
+	return ccDerivedHexID(userID, "device", ccProcessDeviceID)
 }
 
 // ccUserFallbackSessionID returns a stable per-user session id used only when
@@ -290,16 +307,33 @@ func ccMinimalBetaHeader() string {
 	return betaOAuth
 }
 
+// ccComputeFingerprint computes the 3-char hex fingerprint that Claude Code
+// embeds in the billing header. The algorithm extracts chars at positions
+// [4, 7, 20] from the first user message text, concatenates with a hardcoded
+// salt and version, SHA256 hashes, and takes the first 3 hex chars.
+// See free-code/src/utils/fingerprint.ts computeFingerprint().
+func ccComputeFingerprint(messageText string) string {
+	indices := [3]int{4, 7, 20}
+	chars := make([]byte, 3)
+	for i, idx := range indices {
+		if idx < len(messageText) {
+			chars[i] = messageText[idx]
+		} else {
+			chars[i] = '0'
+		}
+	}
+	input := ccFingerprintSalt + string(chars) + ccVersion
+	h := sha256.Sum256([]byte(input))
+	// hex of first 2 bytes = 4 chars, [:3] = first 3 hex chars of full hash
+	return hex.EncodeToString(h[:2])[:3]
+}
+
 // ccAttributionHeader builds the x-anthropic-billing-header that Claude Code
-// prepends as the first system prompt block. The fingerprint is a short hash
-// derived from the system prompt content + version, matching CC's behavior.
+// prepends as the first system prompt block.
 // See claude-code/src/constants/system.ts getAttributionHeader().
-func ccAttributionHeader(systemText string) string {
-	// CC computes a fingerprint from message chars + version. We approximate
-	// with a truncated SHA-256 of whatever system text the client sent.
-	h := sha256.Sum256([]byte(systemText + ccVersion))
-	fp := hex.EncodeToString(h[:4])
-	return "x-anthropic-billing-header: cc_version=" + ccVersion + "." + fp + "; cc_entrypoint=cli; cch=00000;"
+func ccAttributionHeader(messageText string) string {
+	fp := ccComputeFingerprint(messageText)
+	return "x-anthropic-billing-header: cc_version=" + ccVersion + "." + fp + "; cc_entrypoint=sdk-cli; cch=00000;"
 }
 
 const ccCCHSeed uint64 = 0x6E52736AC806831E
@@ -321,6 +355,46 @@ func ccReplaceCCHPlaceholder(body []byte) []byte {
 
 // ccSystemPrefix is the default Claude Code identity prefix.
 const ccSystemPrefix = "You are Claude Code, Anthropic's official CLI for Claude."
+
+// ccExtractFirstUserMessage extracts the text content of the first user message
+// from a request body object. This is used for fingerprint computation.
+// See free-code/src/utils/fingerprint.ts extractFirstMessageText().
+func ccExtractFirstUserMessage(bodyObj map[string]any) string {
+	if bodyObj == nil {
+		return ""
+	}
+	messages, ok := bodyObj["messages"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, msg := range messages {
+		m, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		if m["role"] != "user" {
+			continue
+		}
+		content := m["content"]
+		switch c := content.(type) {
+		case string:
+			return c
+		case []any:
+			for _, block := range c {
+				b, ok := block.(map[string]any)
+				if !ok {
+					continue
+				}
+				if b["type"] == "text" {
+					if text, ok := b["text"].(string); ok {
+						return text
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
 
 // ccInjectSystemBlocks converts the translated request body's "system" field
 // into the block-array format that real Claude Code sends, prepending the
@@ -347,16 +421,16 @@ func ccInjectSystemBlocks(bodyObj map[string]any, bodyBytes []byte) []byte {
 		}
 	}
 
-	// Build fingerprint from all system content
-	allText := ccSystemPrefix + "\n" + existingSystem
-	attrHeader := ccAttributionHeader(allText)
+	// Build fingerprint from first user message text
+	messageText := ccExtractFirstUserMessage(bodyObj)
+	attrHeader := ccAttributionHeader(messageText)
 
 	// Construct the block array matching Claude Code's format:
-	//   [attribution (no cache), prefix (cached), ...rest (cached)]
-	oneHourCache := map[string]any{"type": "ephemeral", "ttl": "1h"}
+	//   [attribution (no cache), prefix (org scope), ...rest (org scope)]
+	orgCache := map[string]any{"type": "ephemeral", "scope": "org"}
 	blocks := []any{
 		map[string]any{"type": "text", "text": attrHeader},
-		map[string]any{"type": "text", "text": ccSystemPrefix, "cache_control": oneHourCache},
+		map[string]any{"type": "text", "text": ccSystemPrefix, "cache_control": orgCache},
 	}
 
 	if existingBlocks != nil {
@@ -367,7 +441,7 @@ func ccInjectSystemBlocks(bodyObj map[string]any, bodyBytes []byte) []byte {
 		blocks = append(blocks, map[string]any{
 			"type":          "text",
 			"text":          existingSystem,
-			"cache_control": oneHourCache,
+			"cache_control": orgCache,
 		})
 	}
 
