@@ -126,6 +126,7 @@ func (p *MinimaxProvider) DetectsSSE(path string, contentType string) bool {
 // minimaxModels maps request model names to the canonical model name sent upstream.
 var minimaxModels = map[string]string{
 	"minimax":                "MiniMax-M2.5",
+	"minimax-m3":             "MiniMax-M3",
 	"minimax-m2":             "MiniMax-M2",
 	"minimax-m2.1":           "MiniMax-M2.1",
 	"minimax-m2.5":           "MiniMax-M2.5",

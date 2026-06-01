@@ -120,6 +120,15 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				API:     "anthropic-messages",
 				Models: []piModelConfig{
 					{
+						ID:            "MiniMax-M3",
+						Name:          "MiniMax M3",
+						Reasoning:     boolPtr(true),
+						Input:         []string{"text", "image"},
+						ContextWindow: 1000000,
+						MaxTokens:     131072,
+						Cost:          &piModelCost{},
+					},
+					{
 						ID:            "MiniMax-M2.7",
 						Name:          "MiniMax M2.7",
 						Reasoning:     boolPtr(true),
@@ -200,6 +209,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 			cuteAnthropicModel(baseURL, "claude-opus-4-6 [1m]", "Claude Opus 4.6 [1m]", 1000000, "Claude Opus with 1m context routing"),
 			cuteAnthropicModel(baseURL, "k2p5", "Kimi K2.5", 262144, "Kimi model routed through Anthropic-compatible pool API"),
 			cuteAnthropicModel(baseURL, "kimi-k2-thinking", "Kimi K2 Thinking", 262144, "Kimi thinking model routed through the pool"),
+			cuteAnthropicModel(baseURL, "MiniMax-M3", "MiniMax M3", 1000000, "1M-context MiniMax model routed through the pool"),
 			cuteAnthropicModel(baseURL, "MiniMax-M2.7", "MiniMax M2.7", 204800, "MiniMax model routed through the pool"),
 			cuteAnthropicModel(baseURL, "MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, "High-speed MiniMax route through the pool"),
 			cuteAnthropicModel(baseURL, "glm-5.1", "GLM 5.1", 128000, "GLM model routed through the pool"),

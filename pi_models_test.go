@@ -141,10 +141,11 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if minimax.API != "anthropic-messages" {
 		t.Fatalf("minimax api = %q", minimax.API)
 	}
-	if len(minimax.Models) != 2 {
+	if len(minimax.Models) != 3 {
 		t.Fatalf("minimax model count = %d", len(minimax.Models))
 	}
 	needMinimaxIDs := map[string]bool{
+		"MiniMax-M3":             false,
 		"MiniMax-M2.7":           false,
 		"MiniMax-M2.7-highspeed": false,
 	}
@@ -154,6 +155,9 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		}
 		if len(model.Input) != 2 || model.Input[0] != "text" || model.Input[1] != "image" {
 			t.Fatalf("minimax model %q inputs = %#v, want text+image", model.ID, model.Input)
+		}
+		if model.ID == "MiniMax-M3" && model.ContextWindow != 1000000 {
+			t.Fatalf("minimax m3 context window = %d, want 1000000", model.ContextWindow)
 		}
 	}
 	for id, found := range needMinimaxIDs {
@@ -192,6 +196,8 @@ func TestMinimaxCanonicalModelHandlesPiBuiltInIDs(t *testing.T) {
 
 	tests := map[string]string{
 		"minimax":                "MiniMax-M2.5",
+		"minimax-m3":             "MiniMax-M3",
+		"MiniMax-M3":             "MiniMax-M3",
 		"MiniMax-M2":             "MiniMax-M2",
 		"MiniMax-M2.1":           "MiniMax-M2.1",
 		"MiniMax-M2.5":           "MiniMax-M2.5",

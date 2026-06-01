@@ -237,6 +237,7 @@ func TestServeCuteCodeSettingsConfig(t *testing.T) {
 		`"openaiApiKey": "sk-ant-oat01-pool-`,
 		`"id": "gpt-5.5"`,
 		`"id": "claude-opus-4-7"`,
+		`"id": "MiniMax-M3"`,
 		`"id": "MiniMax-M2.7"`,
 		`"id": "glm-5.1"`,
 	} {
