@@ -81,8 +81,11 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				API:     "anthropic-messages",
 				Models: []piModelConfig{
 					piClaudeAlias("claude-haiku-4-5", "Claude Haiku 4.5", 200000, 64000, 1, 5, 0.1, 1.25),
+					piClaudeAlias("claude-sonnet-5", "Claude Sonnet 5", 1000000, 64000, 3, 15, 0.3, 3.75),
+					piClaudeAlias("claude-sonnet-5 [1m]", "Claude Sonnet 5 [1m]", 1000000, 64000, 3, 15, 0.3, 3.75),
 					piClaudeAlias("claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, 64000, 3, 15, 0.3, 3.75),
 					piClaudeAlias("claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, 64000, 3, 15, 0.3, 3.75),
+					piClaudeAlias("claude-fable-5", "Claude Fable 5", 1000000, 128000, 5, 25, 0.5, 6.25),
 					piClaudeAlias("claude-opus-4-7", "Claude Opus 4.7", 1000000, 128000, 5, 25, 0.5, 6.25),
 					piClaudeAlias("claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, 128000, 5, 25, 0.5, 6.25),
 					piClaudeAlias("claude-opus-4-6", "Claude Opus 4.6", 1000000, 128000, 5, 25, 0.5, 6.25),
@@ -172,7 +175,22 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 						MaxTokens:     65536,
 						Cost:          &piModelCost{},
 					},
+					{
+						ID:            "glm-5.2",
+						Name:          "GLM 5.2",
+						Reasoning:     boolPtr(true),
+						Input:         []string{"text", "image"},
+						ContextWindow: 1000000,
+						MaxTokens:     65536,
+						Cost:          &piModelCost{},
+					},
 				},
+			},
+			"grok": {
+				BaseURL: baseURL,
+				APIKey:  codexAPIKey,
+				API:     "openai-responses",
+				Models:  grokPiModels(),
 			},
 		},
 	}
@@ -201,8 +219,11 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 			cuteOpenAIModel(baseURL, "gpt-5.2", "GPT-5.2", 272000, "GPT reasoning model"),
 			cuteOpenAIModel(baseURL, "gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, "Small Codex model"),
 			cuteAnthropicModel(baseURL, "claude-haiku-4-5", "Claude Haiku 4.5", 200000, "Fast Claude model through the pool"),
+			cuteAnthropicModel(baseURL, "claude-sonnet-5", "Claude Sonnet 5", 1000000, "Claude Sonnet through the pool"),
+			cuteAnthropicModel(baseURL, "claude-sonnet-5 [1m]", "Claude Sonnet 5 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
 			cuteAnthropicModel(baseURL, "claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, "Claude Sonnet through the pool"),
 			cuteAnthropicModel(baseURL, "claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
+			cuteAnthropicModel(baseURL, "claude-fable-5", "Claude Fable 5", 1000000, "Claude Fable through the pool"),
 			cuteAnthropicModel(baseURL, "claude-opus-4-7", "Claude Opus 4.7", 1000000, "Claude Opus through the pool"),
 			cuteAnthropicModel(baseURL, "claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, "Claude Opus with 1m context routing"),
 			cuteAnthropicModel(baseURL, "claude-opus-4-6", "Claude Opus 4.6", 1000000, "Claude Opus through the pool"),
@@ -213,9 +234,27 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 			cuteAnthropicModel(baseURL, "MiniMax-M2.7", "MiniMax M2.7", 204800, "MiniMax model routed through the pool"),
 			cuteAnthropicModel(baseURL, "MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, "High-speed MiniMax route through the pool"),
 			cuteAnthropicModel(baseURL, "glm-5.1", "GLM 5.1", 128000, "GLM model routed through the pool"),
+			cuteAnthropicModel(baseURL, "glm-5.2", "GLM 5.2", 1000000, "1M-context GLM model routed through the pool"),
 		},
 	}
+	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL)...)
 	return json.MarshalIndent(settings, "", "  ")
+}
+
+func grokPiModels() []piModelConfig {
+	models := make([]piModelConfig, 0, len(grokModelCatalog))
+	for _, model := range grokModelCatalog {
+		models = append(models, piTextModel(model.ID, model.Name, model.Reasoning, model.ContextWindow, model.MaxTokens))
+	}
+	return models
+}
+
+func grokCuteModels(baseURL string) []cuteCodeModelConfig {
+	models := make([]cuteCodeModelConfig, 0, len(grokModelCatalog))
+	for _, model := range grokModelCatalog {
+		models = append(models, cuteOpenAIModel(baseURL, model.ID, model.Name, model.ContextWindow, "Grok model routed through the pool"))
+	}
+	return models
 }
 
 func cuteOpenAIModel(baseURL, id, name string, contextWindow int, description string) cuteCodeModelConfig {

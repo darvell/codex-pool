@@ -113,8 +113,8 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
-		// Xiaomi doesn't document a proactive usage endpoint; request usage is parsed from responses.
-		if accType == AccountTypeXiaomi {
+		// Xiaomi and Grok don't document proactive usage endpoints; request usage is parsed from responses.
+		if accType == AccountTypeXiaomi || accType == AccountTypeGrok {
 			continue
 		}
 

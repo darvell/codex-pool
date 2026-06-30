@@ -38,6 +38,7 @@ type config struct {
 	minimaxBase   *url.URL // MiniMax API endpoint
 	zaiBase       *url.URL // Z.ai Anthropic-compatible endpoint
 	xiaomiBase    *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
+	grokBase      *url.URL // Grok Code OpenAI-compatible endpoint
 	poolDir       string
 
 	disableRefresh  bool
@@ -63,6 +64,7 @@ type config struct {
 	websocketIdleTimeout       time.Duration // Kill websocket relays idle for this long (0 = no idle timeout)
 	websocketHeartbeatInterval time.Duration // Send downstream app-level websocket heartbeats this often (0 = disabled)
 	websocketReadLimit         int64         // Maximum websocket message size
+	websocketCompression       bool          // Enable per-message websocket compression (off by default for latency)
 	tierThreshold              float64       // Secondary usage % at which we stop preferring a tier (default 0.50)
 }
 
@@ -85,6 +87,21 @@ func parseInt64(s string) (int64, error) {
 	var n int64
 	_, err := fmt.Sscanf(s, "%d", &n)
 	return n, err
+}
+
+func parseBoolEnv(key string, def bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return def
+	}
 }
 
 // Global config file reference for pool users config
@@ -115,6 +132,7 @@ func buildConfig() *config {
 	cfg.minimaxBase = mustParse(getenv("UPSTREAM_MINIMAX_BASE", "https://api.minimax.io/anthropic"))
 	cfg.zaiBase = mustParse(getenv("UPSTREAM_ZAI_BASE", "https://api.z.ai/api/anthropic"))
 	cfg.xiaomiBase = mustParse(getenv("UPSTREAM_XIAOMI_BASE", "https://token-plan-sgp.xiaomimimo.com/anthropic"))
+	cfg.grokBase = mustParse(getConfigString("UPSTREAM_GROK_BASE", fileCfg.GrokBase, "https://cli-chat-proxy.grok.com/v1"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -204,6 +222,7 @@ func buildConfig() *config {
 			cfg.websocketReadLimit = n
 		}
 	}
+	cfg.websocketCompression = parseBoolEnv("WEBSOCKET_COMPRESSION", false)
 
 	// Tier threshold: secondary usage % at which we stop preferring a tier (default 50%)
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.50)
@@ -225,7 +244,8 @@ func main() {
 	minimaxProvider := NewMinimaxProvider(cfg.minimaxBase)
 	zaiProvider := NewZAIProvider(cfg.zaiBase)
 	xiaomiProvider := NewXiaomiProvider(cfg.xiaomiBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider)
+	grokProvider := NewGrokProvider(cfg.grokBase)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -241,6 +261,7 @@ func main() {
 	minimaxCount := pool.countByType(AccountTypeMinimax)
 	zaiCount := pool.countByType(AccountTypeZAI)
 	xiaomiCount := pool.countByType(AccountTypeXiaomi)
+	grokCount := pool.countByType(AccountTypeGrok)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
@@ -373,8 +394,9 @@ func main() {
 		aliasesCfg = globalConfigFile.ModelAliases
 	}
 
-	// Initialize request pacer from env var (default 100ms, 0 to disable)
-	paceMs := 100
+	// Initialize request pacer from env var. Default to disabled so the proxy
+	// does not add inter-turn latency unless an operator opts in.
+	paceMs := 0
 	if v := os.Getenv("CODEX_REQUEST_PACE_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			paceMs = n
@@ -453,8 +475,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -1121,6 +1143,15 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		}
 		canonical := xiaomiCanonicalModel(model)
 		rewritten := rewriteModelInBody(body, canonical)
+		return p, p.UpstreamURL(path), rewritten
+	}
+	if isGrokModel(model) {
+		p := h.registry.ForType(AccountTypeGrok)
+		if p == nil {
+			return nil, nil, nil
+		}
+		canonical := grokCanonicalModel(model)
+		rewritten := rewriteAndSanitizeGrokRequestBody(body, canonical)
 		return p, p.UpstreamURL(path), rewritten
 	}
 	// Cross-format model routing: detect if the model belongs to a different provider
@@ -1813,6 +1844,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 	}
 
+	if accountType == AccountTypeGrok {
+		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
+	}
+
 	if h.cfg.debug.Load() && conversationID == "" && len(inspect) > 0 {
 		// Help debug why conversation id isn't being extracted without dumping the full body.
 		var obj map[string]any
@@ -2136,6 +2171,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if !strings.Contains(strings.ToLower(respContentType), "text/event-stream") {
 				isSSE = false
 			}
+		}
+		if isSSE {
+			applyStreamingResponseHeaders(w.Header())
 		}
 		if h.cfg.debug.Load() {
 			log.Printf("[%s] response: isSSE=%v content-type=%s translateDir=%d status=%d", reqID, isSSE, respContentType, translateDir, resp.StatusCode)
@@ -2553,23 +2591,27 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						reqID:     reqID,
 					}
 				} else {
-					interceptWriter := &sseInterceptWriter{
-						w:        writer,
-						callback: usageCallback,
-					}
-					if accountType == AccountTypeCodex && !acc.CyberAccess {
-						suppressor := &cyberPolicyHTTPSuppressor{
-							h:              h,
-							reqID:          reqID,
-							conversationID: conversationID,
-							requiredPlan:   requiredPlan,
-							clientIP:       originIP,
-							accountID:      acc.ID,
-							pinned:         &cyberPinned,
+					needsPolicyInspection := accountType == AccountTypeCodex && !acc.CyberAccess
+					needsUsageInspection := sampleBuf != nil
+					if needsPolicyInspection || needsUsageInspection {
+						interceptWriter := &sseInterceptWriter{
+							w:        writer,
+							callback: usageCallback,
 						}
-						interceptWriter.onEvent = suppressor.onEvent
+						if needsPolicyInspection {
+							suppressor := &cyberPolicyHTTPSuppressor{
+								h:              h,
+								reqID:          reqID,
+								conversationID: conversationID,
+								requiredPlan:   requiredPlan,
+								clientIP:       originIP,
+								accountID:      acc.ID,
+								pinned:         &cyberPinned,
+							}
+							interceptWriter.onEvent = suppressor.onEvent
+						}
+						writer = interceptWriter
 					}
-					writer = interceptWriter
 				}
 			}
 
@@ -2809,6 +2851,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			IdleTimeout:                 h.cfg.websocketIdleTimeout,
 			DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 			ReadLimit:                   readLimit,
+			CompressionEnabled:          h.cfg.websocketCompression,
 			LogLabel:                    relayLabel,
 			SetActiveAccount: func(next *Account) {
 				prev := inflightAcc
@@ -2846,6 +2889,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
+		CompressionEnabled:          h.cfg.websocketCompression,
 		LogLabel:                    relayLabel,
 		Debug:                       h.cfg.debug.Load(),
 	})
@@ -2951,6 +2995,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
+		CompressionEnabled:          h.cfg.websocketCompression,
 		LogLabel:                    reqID + " passthrough",
 		Debug:                       h.cfg.debug.Load(),
 	})
@@ -2985,6 +3030,7 @@ type webSocketRelayOptions struct {
 	IdleTimeout                 time.Duration
 	DownstreamHeartbeatInterval time.Duration
 	ReadLimit                   int64
+	CompressionEnabled          bool
 	LogLabel                    string
 	Debug                       bool
 	OnUpstreamResponse          func(*http.Response)
@@ -3014,7 +3060,7 @@ func relayWebSocket(
 	ctx := clientReq.Context()
 
 	wsURL := *upstreamURL
-	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(ctx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit)
+	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(ctx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return 0, err
@@ -3030,7 +3076,9 @@ func relayWebSocket(
 
 	acceptOpts := &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
-		CompressionMode:    websocket.CompressionNoContextTakeover,
+	}
+	if opts.CompressionEnabled {
+		acceptOpts.CompressionMode = websocket.CompressionNoContextTakeover
 	}
 	if subprotocol := upstreamConn.Subprotocol(); subprotocol != "" {
 		acceptOpts.Subprotocols = []string{subprotocol}
@@ -3106,6 +3154,21 @@ func (w *webSocketWriter) Ping(ctx context.Context) error {
 	return w.conn.Ping(ctx)
 }
 
+func (w *webSocketWriter) CopyFrom(ctx context.Context, msgType websocket.MessageType, src io.Reader) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	writer, err := w.conn.Writer(ctx, msgType)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.CopyBuffer(writer, src, make([]byte, 32*1024))
+	closeErr := writer.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
 func startWebSocketHeartbeat(ctx context.Context, dst *webSocketWriter, interval time.Duration) func() {
 	if interval <= 0 {
 		return func() {}
@@ -3139,6 +3202,9 @@ func startWebSocketHeartbeat(ctx context.Context, dst *webSocketWriter, interval
 // coder/websocket closes the connection when the read context is cancelled,
 // which would tear the relay down on every successful frame.
 func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, debug bool, onMessage func([]byte) error) error {
+	if !debug && onMessage == nil {
+		return relayMessagesStreaming(ctx, src, dst, label, idleTimeout)
+	}
 	var idleTimer *time.Timer
 	if idleTimeout > 0 {
 		idleTimer = time.AfterFunc(idleTimeout, func() {
@@ -3163,6 +3229,28 @@ func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWrite
 			}
 		}
 		if err := dst.Write(ctx, msgType, data); err != nil {
+			return fmt.Errorf("%s write: %w", label, err)
+		}
+	}
+}
+
+func relayMessagesStreaming(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, label string, idleTimeout time.Duration) error {
+	var idleTimer *time.Timer
+	if idleTimeout > 0 {
+		idleTimer = time.AfterFunc(idleTimeout, func() {
+			src.Close(websocket.StatusPolicyViolation, fmt.Sprintf("idle for %v", idleTimeout))
+		})
+		defer idleTimer.Stop()
+	}
+	for {
+		if idleTimer != nil {
+			idleTimer.Reset(idleTimeout)
+		}
+		msgType, reader, err := src.Reader(ctx)
+		if err != nil {
+			return fmt.Errorf("%s read: %w", label, err)
+		}
+		if err := dst.CopyFrom(ctx, msgType, reader); err != nil {
 			return fmt.Errorf("%s write: %w", label, err)
 		}
 	}
@@ -3356,11 +3444,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	copyHeader(w.Header(), resp.Header)
 	removeHopByHopHeaders(w.Header())
 	h.replaceUsageHeaders(w.Header())
-	w.WriteHeader(resp.StatusCode)
-
 	flusher, _ := w.(http.Flusher)
 	respContentType := resp.Header.Get("Content-Type")
 	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
+	if isSSE {
+		applyStreamingResponseHeaders(w.Header())
+	}
+	w.WriteHeader(resp.StatusCode)
 
 	var writer io.Writer = w
 	var fw *flushWriter
@@ -4226,6 +4316,9 @@ func (h *proxyHandler) tryOnce(
 	}
 	refreshFailed := false // Track if refresh was attempted but failed
 	rawIncomingBody := append([]byte(nil), bodyBytes...)
+	if provider.Type() == AccountTypeGrok {
+		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
+	}
 
 	if !h.cfg.disableRefresh && h.needsRefresh(acc) {
 		if err := h.refreshAccount(ctx, acc); err != nil {
@@ -4286,6 +4379,14 @@ func (h *proxyHandler) tryOnce(
 
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
+		if provider.Type() == AccountTypeGrok {
+			outReq.Header.Set("x-grok-model-override", grokCanonicalModel(requestedModel))
+			outReq.Header.Set("x-grok-context-window", strconv.Itoa(grokModelContextWindow(requestedModel)))
+			outReq.Header.Set("x-grok-max-completion-tokens", strconv.Itoa(grokModelMaxCompletionTokens(requestedModel)))
+			if conversationID != "" {
+				outReq.Header.Set("x-grok-conv-id", conversationID)
+			}
+		}
 
 		if provider.Type() == AccountTypeClaude && translateDir == TranslateNone && strings.HasPrefix(access, "sk-ant-oat") {
 			outReq.Header.Set("anthropic-beta", appendAnthropicBeta(outReq.Header.Get("anthropic-beta"), betaOAuth))
@@ -4539,16 +4640,20 @@ func (h *proxyHandler) tryOnce(
 		}
 	}
 
-	// Always tee a bounded sample of response body for usage extraction and conversation pinning.
+	// Tee a bounded response sample only when later code needs it. Pass-through SSE
+	// stays on the direct upstream->client path so first tokens are not delayed by
+	// accounting-only parsing or sampling.
 	sampleLimit := int64(16 * 1024)
 	if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 		sampleLimit = h.cfg.bodyLogLimit
 	}
 	sampleLimit = h.claudeTraceSampleLimit(sampleLimit)
-	buf := &bytes.Buffer{}
+	var buf *bytes.Buffer
 	if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+		buf = &bytes.Buffer{}
 		h.attachClaudeTrace(reqID, "pool", userID, originID, acc, in, rawIncomingBody, outReq, bodyBytes, resp, translateDir, buf, sampleLimit)
-	} else {
+	} else if shouldSampleResponseBodyForRequest(provider, acc, in.URL.Path, resp, translateDir, conversationID, h.cfg.logBodies) {
+		buf = &bytes.Buffer{}
 		resp.Body = struct {
 			io.Reader
 			io.Closer
@@ -4558,6 +4663,36 @@ func (h *proxyHandler) tryOnce(
 		}
 	}
 	return resp, buf, refreshFailed, nil
+}
+
+func applyStreamingResponseHeaders(header http.Header) {
+	header.Set("X-Accel-Buffering", "no")
+	header.Set("Connection", "keep-alive")
+	cacheControl := header.Get("Cache-Control")
+	if cacheControl == "" {
+		header.Set("Cache-Control", "no-cache, no-transform")
+	} else if !strings.Contains(strings.ToLower(cacheControl), "no-transform") {
+		header.Set("Cache-Control", cacheControl+", no-transform")
+	}
+}
+
+func shouldSampleResponseBodyForRequest(provider Provider, acc *Account, path string, resp *http.Response, translateDir TranslateDirection, conversationID string, logBodies bool) bool {
+	if provider == nil || resp == nil {
+		return true
+	}
+	if logBodies || translateDir != TranslateNone {
+		return true
+	}
+	if !provider.DetectsSSE(path, resp.Header.Get("Content-Type")) {
+		return true
+	}
+	if provider.Type() == AccountTypeCodex {
+		if acc != nil && !acc.CyberAccess {
+			return true
+		}
+		return conversationID == ""
+	}
+	return false
 }
 
 func (h *proxyHandler) needsRefresh(a *Account) bool {

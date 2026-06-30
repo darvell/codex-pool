@@ -9,12 +9,13 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"sonnet":      "claude-sonnet-4-6",
-		"sonnet[1m]":  "claude-sonnet-4-6 [1m]",
-		"sonnet [1m]": "claude-sonnet-4-6 [1m]",
+		"sonnet":      "claude-sonnet-5",
+		"sonnet[1m]":  "claude-sonnet-5 [1m]",
+		"sonnet [1m]": "claude-sonnet-5 [1m]",
 		"opus":        "claude-opus-4-7",
 		"opus[1m]":    "claude-opus-4-7 [1m]",
 		"opus [1m]":   "claude-opus-4-7 [1m]",
+		"fable":       "claude-fable-5",
 		"haiku":       "claude-haiku-4-5-20251001",
 	}
 
@@ -94,8 +95,11 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 
 	needClaudeIDs := map[string]bool{
 		"claude-haiku-4-5":       false,
+		"claude-sonnet-5":        false,
+		"claude-sonnet-5 [1m]":   false,
 		"claude-sonnet-4-6":      false,
 		"claude-sonnet-4-6 [1m]": false,
+		"claude-fable-5":         false,
 		"claude-opus-4-7":        false,
 		"claude-opus-4-7 [1m]":   false,
 		"claude-opus-4-6":        false,
@@ -170,14 +174,52 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if zai.API != "anthropic-messages" {
 		t.Fatalf("zai api = %q", zai.API)
 	}
-	if len(zai.Models) != 1 {
+	if len(zai.Models) != 2 {
 		t.Fatalf("zai model count = %d", len(zai.Models))
 	}
-	if zai.Models[0].ID != "glm-5.1" {
-		t.Fatalf("unexpected zai model id = %q", zai.Models[0].ID)
+	wantZAIContexts := map[string]int{
+		"glm-5.1": 128000,
+		"glm-5.2": 1000000,
 	}
-	if len(zai.Models[0].Input) != 2 || zai.Models[0].Input[0] != "text" || zai.Models[0].Input[1] != "image" {
-		t.Fatalf("zai model inputs = %#v, want text+image", zai.Models[0].Input)
+	for _, model := range zai.Models {
+		wantContext, ok := wantZAIContexts[model.ID]
+		if !ok {
+			t.Fatalf("unexpected zai model id = %q", model.ID)
+		}
+		if model.ContextWindow != wantContext {
+			t.Fatalf("zai model %q context window = %d, want %d", model.ID, model.ContextWindow, wantContext)
+		}
+		if len(model.Input) != 2 || model.Input[0] != "text" || model.Input[1] != "image" {
+			t.Fatalf("zai model %q inputs = %#v, want text+image", model.ID, model.Input)
+		}
+		delete(wantZAIContexts, model.ID)
+	}
+	for id := range wantZAIContexts {
+		t.Fatalf("missing zai model %q", id)
+	}
+
+	grok := cfg.Providers["grok"]
+	if grok.API != "openai-responses" {
+		t.Fatalf("grok api = %q", grok.API)
+	}
+	if grok.BaseURL != "https://pool.example.com" {
+		t.Fatalf("grok baseUrl = %q", grok.BaseURL)
+	}
+	if len(grok.Models) != 6 {
+		t.Fatalf("grok model count = %d", len(grok.Models))
+	}
+	wantGrokContexts := map[string]int{
+		"grok-composer-2.5-fast":       200000,
+		"grok-build":                   512000,
+		"grok-4.3":                     1000000,
+		"grok-4.20-0309-reasoning":     2000000,
+		"grok-4.20-0309-non-reasoning": 2000000,
+		"grok-4.20-multi-agent-0309":   2000000,
+	}
+	for _, model := range grok.Models {
+		if want, ok := wantGrokContexts[model.ID]; !ok || model.ContextWindow != want || model.MaxTokens != 30000 {
+			t.Fatalf("grok model %q limits = (%d, %d)", model.ID, model.ContextWindow, model.MaxTokens)
+		}
 	}
 }
 
@@ -211,6 +253,30 @@ func TestMinimaxCanonicalModelHandlesPiBuiltInIDs(t *testing.T) {
 		}
 		if !isMinimaxModel(input) {
 			t.Fatalf("expected %q to route to minimax", input)
+		}
+	}
+}
+
+func TestGrokCanonicalModelHandlesCodeAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"grok-build":                   "grok-build",
+		"grok-composer-2.5-fast":       "grok-composer-2.5-fast",
+		"grok-composer":                "grok-composer-2.5-fast",
+		"grok-code-fast":               "grok-composer-2.5-fast",
+		"grok-4.3":                     "grok-4.3",
+		"grok-4.20-0309-reasoning":     "grok-4.20-0309-reasoning",
+		"grok-4.20-0309-non-reasoning": "grok-4.20-0309-non-reasoning",
+		"grok-4.20-multi-agent-0309":   "grok-4.20-multi-agent-0309",
+	}
+
+	for input, want := range tests {
+		if got := grokCanonicalModel(input); got != want {
+			t.Fatalf("grokCanonicalModel(%q) = %q, want %q", input, got, want)
+		}
+		if !isGrokModel(input) {
+			t.Fatalf("expected %q to route to grok", input)
 		}
 	}
 }

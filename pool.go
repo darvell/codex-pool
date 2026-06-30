@@ -23,6 +23,7 @@ const (
 	AccountTypeMinimax AccountType = "minimax"
 	AccountTypeZAI     AccountType = "zai"
 	AccountTypeXiaomi  AccountType = "xiaomi"
+	AccountTypeGrok    AccountType = "grok"
 )
 
 type Account struct {
@@ -319,6 +320,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		"minimax": AccountTypeMinimax,
 		"zai":     AccountTypeZAI,
 		"xiaomi":  AccountTypeXiaomi,
+		"grok":    AccountTypeGrok,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -1080,6 +1082,8 @@ func saveAccount(a *Account) error {
 		return saveAPIKeyAccount(a)
 	case AccountTypeXiaomi:
 		return saveAPIKeyAccount(a)
+	case AccountTypeGrok:
+		return saveGrokAccount(a)
 	default:
 		return saveCodexAccount(a)
 	}
@@ -1205,6 +1209,70 @@ func saveAPIKeyAccount(a *Account) error {
 		delete(root, "dead")
 	}
 	return atomicWriteJSON(a.File, root)
+}
+
+func saveGrokAccount(a *Account) error {
+	raw, err := os.ReadFile(a.File)
+	if err != nil {
+		return err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return fmt.Errorf("parse %s: %w", a.File, err)
+	}
+
+	if _, ok := root["access"]; ok {
+		applyGrokTokenFields(root, a, "access", "refresh", "expires", "tokenEndpoint", true)
+		return atomicWriteJSON(a.File, root)
+	}
+
+	if _, ok := root["access_token"]; ok {
+		applyGrokTokenFields(root, a, "access_token", "refresh_token", "expires_at", "token_endpoint", false)
+		return atomicWriteJSON(a.File, root)
+	}
+
+	for key, value := range root {
+		entry, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasKey := entry["key"]; !hasKey {
+			if _, hasRefresh := entry["refresh_token"]; !hasRefresh {
+				continue
+			}
+		}
+		applyGrokTokenFields(entry, a, "key", "refresh_token", "expires_at", "", false)
+		root[key] = entry
+		return atomicWriteJSON(a.File, root)
+	}
+
+	return fmt.Errorf("grok account %s has no recognized token entry", a.ID)
+}
+
+func applyGrokTokenFields(target map[string]any, a *Account, accessKey, refreshKey, expiresKey, endpointKey string, expiresAsMillis bool) {
+	if a.AccessToken != "" {
+		target[accessKey] = a.AccessToken
+	}
+	if a.RefreshToken != "" {
+		target[refreshKey] = a.RefreshToken
+	}
+	if expiresKey != "" && !a.ExpiresAt.IsZero() {
+		if expiresAsMillis {
+			target[expiresKey] = a.ExpiresAt.UnixMilli()
+		} else {
+			target[expiresKey] = a.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	if endpointKey != "" {
+		if endpoint := strings.TrimSpace(a.AccountID); endpoint != "" {
+			target[endpointKey] = endpoint
+		}
+	}
+	if a.Dead {
+		target["dead"] = true
+	} else {
+		delete(target, "dead")
+	}
 }
 
 func atomicWriteJSON(filePath string, data any) error {

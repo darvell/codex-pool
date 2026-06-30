@@ -17,9 +17,9 @@ type heartbeatWriter struct {
 	w       io.Writer
 	flusher http.Flusher
 
-	mu        sync.Mutex
-	timer     *time.Timer
-	stopped   bool
+	mu      sync.Mutex
+	timer   *time.Timer
+	stopped bool
 }
 
 func newHeartbeatWriter(w io.Writer, flusher http.Flusher) *heartbeatWriter {
@@ -31,9 +31,7 @@ func newHeartbeatWriter(w io.Writer, flusher http.Flusher) *heartbeatWriter {
 	return hw
 }
 
-func (hw *heartbeatWriter) resetTimer() {
-	hw.mu.Lock()
-	defer hw.mu.Unlock()
+func (hw *heartbeatWriter) resetTimerLocked() {
 	if hw.stopped || hw.timer == nil {
 		return
 	}
@@ -42,27 +40,27 @@ func (hw *heartbeatWriter) resetTimer() {
 
 func (hw *heartbeatWriter) sendHeartbeat() {
 	hw.mu.Lock()
+	defer hw.mu.Unlock()
 	if hw.stopped {
-		hw.mu.Unlock()
 		return
 	}
-	hw.mu.Unlock()
 
-	// SSE comment line — ignored by all SSE parsers.
-	_, err := hw.w.Write([]byte(": heartbeat\n\n"))
-	if err != nil {
+	// SSE comment line — ignored by all SSE parsers. Hold the same mutex as
+	// Write so heartbeat bytes cannot interleave with upstream event bytes.
+	if _, err := hw.w.Write([]byte(": heartbeat\n\n")); err != nil {
 		return
 	}
 	if hw.flusher != nil {
 		hw.flusher.Flush()
 	}
-	// Schedule next heartbeat.
-	hw.resetTimer()
+	hw.resetTimerLocked()
 }
 
 func (hw *heartbeatWriter) Write(p []byte) (int, error) {
+	hw.mu.Lock()
+	defer hw.mu.Unlock()
 	// Reset heartbeat timer on each real write.
-	hw.resetTimer()
+	hw.resetTimerLocked()
 	return hw.w.Write(p)
 }
 

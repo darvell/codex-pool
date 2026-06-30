@@ -160,7 +160,14 @@ func (pd *PricingData) startPricingRefresh() {
 	}()
 }
 
-// lookupPricing finds pricing for a model. Tries exact match, then prefix match, then provider-type fallback.
+var pricingModelAliases = map[string]string{
+	"claude-sonnet-5":      "claude-sonnet-4-6",
+	"claude-sonnet-5 [1m]": "claude-sonnet-4-6",
+	"claude-sonnet-5[1m]":  "claude-sonnet-4-6",
+}
+
+// lookupPricing finds pricing for a model. Tries exact match, then alias match,
+// then prefix match, then provider-type fallback.
 func (pd *PricingData) lookupPricing(model string) (ModelPricing, bool) {
 	if model == "" {
 		return ModelPricing{}, false
@@ -172,6 +179,11 @@ func (pd *PricingData) lookupPricing(model string) (ModelPricing, bool) {
 	// Exact match
 	if mp, ok := pd.models[model]; ok {
 		return mp, true
+	}
+	if alias, ok := pricingModelAliases[model]; ok {
+		if mp, ok := pd.models[alias]; ok {
+			return mp, true
+		}
 	}
 
 	// Try without date suffix (e.g., "claude-sonnet-4-5-20250929" -> "claude-sonnet-4-5")
@@ -218,7 +230,7 @@ func isAllDigits(s string) bool {
 // defaultModelForProvider returns a fallback model name when the request didn't include one.
 var defaultModelForProvider = map[AccountType]string{
 	AccountTypeCodex:   "gpt-5.2-codex",
-	AccountTypeClaude:  "claude-sonnet-4-5",
+	AccountTypeClaude:  "claude-sonnet-5",
 	AccountTypeKimi:    "moonshot.kimi-k2-thinking",
 	AccountTypeMinimax: "minimax.minimax-m2",
 	AccountTypeZAI:     "zai.glm-5.1",

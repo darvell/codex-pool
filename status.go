@@ -20,6 +20,7 @@ type StatusData struct {
 	KimiCount       int
 	MinimaxCount    int
 	ZAICount        int
+	GrokCount       int
 	PoolUsers       int
 	Accounts        []AccountStatus
 	TokenAnalytics  *TokenAnalytics
@@ -104,6 +105,8 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 			data.MinimaxCount++
 		case AccountTypeZAI:
 			data.ZAICount++
+		case AccountTypeGrok:
+			data.GrokCount++
 		}
 
 		primaryUsed := a.Usage.PrimaryUsedPercent
@@ -414,6 +417,12 @@ const statusHTML = `<!DOCTYPE html>
         <div class="stat">
             <div class="stat-value">{{.ClaudeCount}}</div>
             <div class="stat-label">Claude</div>
+        </div>
+        {{end}}
+        {{if .GrokCount}}
+        <div class="stat">
+            <div class="stat-value">{{.GrokCount}}</div>
+            <div class="stat-label">Grok</div>
         </div>
         {{end}}
         {{if .PoolUsers}}

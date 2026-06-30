@@ -123,6 +123,7 @@ func (p *ZAIProvider) DetectsSSE(path string, contentType string) bool {
 
 var zaiModels = map[string]string{
 	"glm-5.1": "glm-5.1",
+	"glm-5.2": "glm-5.2",
 }
 
 func isZAIModel(model string) bool {

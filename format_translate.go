@@ -1254,8 +1254,10 @@ func claudeCanonicalModel(model string) string {
 		switch baseLower {
 		case "opus":
 			canonical = "claude-opus-4-7"
+		case "fable":
+			canonical = "claude-fable-5"
 		case "sonnet":
-			canonical = "claude-sonnet-4-6"
+			canonical = "claude-sonnet-5"
 		case "haiku":
 			canonical = "claude-haiku-4-5-20251001"
 		default:
@@ -1277,8 +1279,8 @@ func isClaudeModel(model string) bool {
 	if strings.HasPrefix(m, "claude") {
 		return true
 	}
-	// Match tier keywords (sonnet, opus, haiku) that are Claude-specific
-	for _, kw := range []string{"sonnet", "opus", "haiku"} {
+	// Match tier keywords (sonnet, opus, fable, haiku) that are Claude-specific
+	for _, kw := range []string{"sonnet", "opus", "fable", "haiku"} {
 		if strings.Contains(m, kw) {
 			return true
 		}
@@ -1432,8 +1434,10 @@ func injectClaudeModels(body []byte) []byte {
 	claudeModels := []map[string]any{
 		claudeModelEntry("opus", "Claude Opus 4.7", 200000),
 		claudeModelEntry("opus[1m]", "Claude Opus 4.7 [1m]", 1000000),
-		claudeModelEntry("sonnet", "Claude Sonnet 4.6", 200000),
-		claudeModelEntry("sonnet[1m]", "Claude Sonnet 4.6 [1m]", 1000000),
+		claudeModelEntry("sonnet", "Claude Sonnet 5", 200000),
+		claudeModelEntry("sonnet[1m]", "Claude Sonnet 5 [1m]", 1000000),
+		claudeModelEntry("claude-sonnet-5", "Claude Sonnet 5", 200000),
+		claudeModelEntry("claude-sonnet-5[1m]", "Claude Sonnet 5 [1m]", 1000000),
 		claudeModelEntry("haiku", "Claude Haiku 4.5", 200000),
 	}
 

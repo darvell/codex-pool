@@ -133,11 +133,13 @@ func (fw *flushWriter) stop() {}
 // event boundary before flushing, so a drop decision actually
 // suppresses the bytes rather than chasing them after they're on the
 // wire.
+const sseInterceptMaxBufferedBytes = 64 * 1024
+
 type sseInterceptWriter struct {
-	w         io.Writer
-	buf       []byte
-	callback  func(eventData []byte)
-	onEvent   func(eventData []byte) (drop bool, terminate bool)
+	w          io.Writer
+	buf        []byte
+	callback   func(eventData []byte)
+	onEvent    func(eventData []byte) (drop bool, terminate bool)
 	terminated bool
 }
 
@@ -164,6 +166,9 @@ func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
 	for {
 		event, advance, ok := sw.takeNextEvent()
 		if !ok {
+			if len(sw.buf) > sseInterceptMaxBufferedBytes {
+				return len(p), fmt.Errorf("SSE event exceeded %d bytes without a terminator", sseInterceptMaxBufferedBytes)
+			}
 			break
 		}
 		eventBytes := append([]byte(nil), sw.buf[:advance]...)

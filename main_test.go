@@ -78,6 +78,58 @@ func TestModelRouteOverrideOpenAIModelKeepsBackendAPIBase(t *testing.T) {
 	}
 }
 
+func TestModelRouteOverrideRoutesGrokCodeModels(t *testing.T) {
+	base, _ := url.Parse("https://example.test/v1")
+	handler := &proxyHandler{
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+			NewGrokProvider(base),
+		),
+	}
+
+	provider, overrideBase, rewritten := handler.modelRouteOverride("/v1/responses", "grok-composer", []byte(`{"model":"grok-composer","input":"hello"}`))
+	if provider == nil || provider.Type() != AccountTypeGrok {
+		t.Fatalf("provider = %v, want grok", provider)
+	}
+	if overrideBase == nil || overrideBase.String() != base.String() {
+		t.Fatalf("overrideBase = %v, want %v", overrideBase, base)
+	}
+	if !bytes.Contains(rewritten, []byte(`"model":"grok-composer-2.5-fast"`)) {
+		t.Fatalf("rewritten body = %s", rewritten)
+	}
+}
+
+func TestGrokPassThroughSSESkipsResponseSampling(t *testing.T) {
+	base, _ := url.Parse("https://cli-chat-proxy.grok.com/v1")
+	provider := NewGrokProvider(base)
+	resp := &http.Response{Header: http.Header{"Content-Type": []string{"text/event-stream"}}}
+
+	if shouldSampleResponseBodyForRequest(provider, &Account{Type: AccountTypeGrok}, "/v1/responses", resp, TranslateNone, "conv", false) {
+		t.Fatal("grok pass-through SSE should skip response sampling")
+	}
+	if !shouldSampleResponseBodyForRequest(provider, &Account{Type: AccountTypeGrok}, "/v1/responses", resp, TranslateChatToResponses, "conv", false) {
+		t.Fatal("translated SSE should still sample/inspect response body")
+	}
+	if !shouldSampleResponseBodyForRequest(provider, &Account{Type: AccountTypeGrok}, "/v1/responses", resp, TranslateNone, "conv", true) {
+		t.Fatal("body logging should keep response sampling enabled")
+	}
+}
+
+func TestCodexSSEStillSamplesWhenCyberPolicyMayInspect(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	provider := NewCodexProvider(base, base, nil)
+	resp := &http.Response{Header: http.Header{"Content-Type": []string{"text/event-stream"}}}
+
+	if !shouldSampleResponseBodyForRequest(provider, &Account{Type: AccountTypeCodex}, "/v1/responses", resp, TranslateNone, "conv", false) {
+		t.Fatal("codex non-cyber SSE should keep sampling for cyber policy inspection")
+	}
+	if shouldSampleResponseBodyForRequest(provider, &Account{Type: AccountTypeCodex, CyberAccess: true}, "/v1/responses", resp, TranslateNone, "conv", false) {
+		t.Fatal("codex cyber-access SSE with conversation ID can skip response sampling")
+	}
+}
+
 func TestModelRouteOverrideDoesNotRouteCodexClientPathsToClaude(t *testing.T) {
 	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")
 	handler := &proxyHandler{
@@ -89,10 +141,50 @@ func TestModelRouteOverrideDoesNotRouteCodexClientPathsToClaude(t *testing.T) {
 	}
 
 	for _, path := range []string{"/v1/responses", "/responses", "/v1/chat/completions", "/v1/completions"} {
-		provider, overrideBase, rewritten := handler.modelRouteOverride(path, "opus", []byte(`{"model":"opus"}`))
-		if provider != nil || overrideBase != nil || rewritten != nil {
-			t.Fatalf("modelRouteOverride(%q, opus) = provider=%v base=%v rewritten=%s, want no Claude override", path, provider, overrideBase, rewritten)
+		for _, model := range []string{"opus", "fable"} {
+			provider, overrideBase, rewritten := handler.modelRouteOverride(path, model, []byte(`{"model":"`+model+`"}`))
+			if provider != nil || overrideBase != nil || rewritten != nil {
+				t.Fatalf("modelRouteOverride(%q, %s) = provider=%v base=%v rewritten=%s, want no Claude override", path, model, provider, overrideBase, rewritten)
+			}
 		}
+	}
+}
+
+func TestModelRouteOverrideRewritesClaudeFableAlias(t *testing.T) {
+	base, _ := url.Parse("https://api.anthropic.com")
+	handler := &proxyHandler{
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+	}
+
+	provider, overrideBase, rewritten := handler.modelRouteOverride("/v1/messages", "fable", []byte(`{"model":"fable"}`))
+	if provider == nil || provider.Type() != AccountTypeClaude || overrideBase == nil {
+		t.Fatalf("modelRouteOverride(/v1/messages, fable) = provider=%v base=%v, want Claude override", provider, overrideBase)
+	}
+	if !bytes.Contains(rewritten, []byte(`"model":"claude-fable-5"`)) {
+		t.Fatalf("rewritten body = %s, want claude-fable-5", rewritten)
+	}
+}
+
+func TestModelRouteOverrideRewritesClaudeSonnetAlias(t *testing.T) {
+	base, _ := url.Parse("https://api.anthropic.com")
+	handler := &proxyHandler{
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+		),
+	}
+
+	provider, overrideBase, rewritten := handler.modelRouteOverride("/v1/messages", "sonnet", []byte(`{"model":"sonnet"}`))
+	if provider == nil || provider.Type() != AccountTypeClaude || overrideBase == nil {
+		t.Fatalf("modelRouteOverride(/v1/messages, sonnet) = provider=%v base=%v, want Claude override", provider, overrideBase)
+	}
+	if !bytes.Contains(rewritten, []byte(`"model":"claude-sonnet-5"`)) {
+		t.Fatalf("rewritten body = %s, want claude-sonnet-5", rewritten)
 	}
 }
 
@@ -506,22 +598,34 @@ func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
 		t.Fatalf("models missing from catalog: %#v", catalog)
 	}
 
-	var found map[string]any
+	var foundCodex map[string]any
+	var foundSonnet map[string]any
 	for _, model := range models {
 		m, ok := model.(map[string]any)
-		if ok && m["slug"] == "gpt-5.5" {
-			found = m
-			break
+		if !ok {
+			continue
+		}
+		switch m["slug"] {
+		case "gpt-5.5":
+			foundCodex = m
+		case "claude-sonnet-5":
+			foundSonnet = m
 		}
 	}
-	if found == nil {
+	if foundCodex == nil {
 		t.Fatalf("missing gpt-5.5 in injected catalog: %#v", models)
 	}
-	if got := int(found["context_window"].(float64)); got != 272000 {
+	if got := int(foundCodex["context_window"].(float64)); got != 272000 {
 		t.Fatalf("gpt-5.5 context_window = %d", got)
 	}
-	if got := found["display_name"]; got != "gpt-5.5" {
+	if got := foundCodex["display_name"]; got != "gpt-5.5" {
 		t.Fatalf("gpt-5.5 display_name = %#v", got)
+	}
+	if foundSonnet == nil {
+		t.Fatalf("missing claude-sonnet-5 in injected catalog: %#v", models)
+	}
+	if got := foundSonnet["display_name"]; got != "Claude Sonnet 5" {
+		t.Fatalf("claude-sonnet-5 display_name = %#v", got)
 	}
 }
 
@@ -621,6 +725,9 @@ func TestClaudeRequestRequiresPremium(t *testing.T) {
 	if !claudeRequestRequiresPremium(nil, "opus") {
 		t.Fatal("expected opus alias to require a premium Claude account")
 	}
+	if !claudeRequestRequiresPremium(nil, "claude-sonnet-5 [1m]") {
+		t.Fatal("expected [1m] model suffix to require a premium Claude account")
+	}
 	if !claudeRequestRequiresPremium(nil, "claude-sonnet-4-6 [1m]") {
 		t.Fatal("expected [1m] model suffix to require a premium Claude account")
 	}
@@ -628,6 +735,9 @@ func TestClaudeRequestRequiresPremium(t *testing.T) {
 	req.Header.Set("anthropic-beta", "context-1m-2025-08-07")
 	if !claudeRequestRequiresPremium(req, "claude-sonnet-4-6") {
 		t.Fatal("expected 1m beta header to require a premium Claude account")
+	}
+	if claudeRequestRequiresPremium(nil, "claude-sonnet-5") {
+		t.Fatal("did not expect regular sonnet model to require a premium Claude account")
 	}
 	if claudeRequestRequiresPremium(nil, "claude-sonnet-4-6") {
 		t.Fatal("did not expect regular sonnet model to require a premium Claude account")

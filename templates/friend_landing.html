@@ -588,6 +588,7 @@
         .model-pill.claude { background: rgba(139,92,246,0.1); color: #a78bfa; }
         .model-pill.openai { background: rgba(16,185,129,0.1); color: #34d399; }
         .model-pill.other { background: rgba(59,130,246,0.1); color: #60a5fa; }
+        .model-pill.grok { background: rgba(34,211,238,0.1); color: #22d3ee; }
         .model-pill.warn { background: rgba(245,158,11,0.1); color: #fbbf24; }
         .model-pill.red { background: rgba(239,68,68,0.1); color: #f87171; }
 
@@ -1267,7 +1268,7 @@ brew install claude-code</pre>
 
                     <div class="step-label">Model Names</div>
                     <div class="model-pills">
-                        <span class="model-pill claude">claude-sonnet-4-6</span>
+                        <span class="model-pill claude">claude-sonnet-5</span>
                         <span class="model-pill claude">claude-opus-4-7</span>
                         <span class="model-pill openai">gpt-5.5</span>
                         <span class="model-pill openai">gpt-5.4</span>
@@ -1275,6 +1276,7 @@ brew install claude-code</pre>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
                         <span class="model-pill red">glm-5.1</span>
+                        <span class="model-pill red">glm-5.2</span>
                     </div>
                 </div>
 
@@ -1407,12 +1409,15 @@ brew install claude-code</pre>
                         <span class="model-pill openai">gpt-5.5</span>
                         <span class="model-pill openai">gpt-5.4</span>
                         <span class="model-pill openai">gpt-5.3-codex</span>
-                        <span class="model-pill claude">claude-sonnet-4-6</span>
+                        <span class="model-pill claude">claude-sonnet-5</span>
                         <span class="model-pill claude">claude-opus-4-7</span>
                         <span class="model-pill other">k2p5</span>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
                         <span class="model-pill red">glm-5.1</span>
+                        <span class="model-pill red">glm-5.2</span>
+                        <span class="model-pill grok">grok-build</span>
+                        <span class="model-pill grok">grok-composer-2.5-fast</span>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">Claude models sent to <code>/v1/chat/completions</code> are translated to Anthropic Messages and back. OpenAI models sent to <code>/v1/messages</code> are translated to Codex Responses and back.</p>
                 </div>
@@ -1459,10 +1464,11 @@ brew install claude-code</pre>
                         <span style="background: rgba(16,185,129,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">codex</span>
                         <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">zai</span>
                         <span style="background: rgba(249,115,22,0.1); color: #fb923c; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">xiaomi</span>
+                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok</span>
                     </div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px;">
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-haiku-4-5</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-4-6</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-5</span>
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-7</span>
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-6</span>
                         <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
@@ -1471,6 +1477,9 @@ brew install claude-code</pre>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
                         <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.1</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
+                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-build</span>
+                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-composer-2.5-fast</span>
                     </div>
 
                     <div class="step-label">03 // Raw models.json</div>
@@ -1493,7 +1502,7 @@ brew install claude-code</pre>
                             Cute Code Setup
                         </div>
                         <p style="color: #999; font-size: 0.8rem; margin-bottom: 15px;">
-                            Installs cute-code, writes pool settings to <code>~/.claude/settings.json</code>, and registers Codex/OpenAI, Claude, Kimi, MiniMax, and GLM models.
+                            Installs cute-code, writes pool settings to <code>~/.claude/settings.json</code>, and registers Codex/OpenAI, Claude, Kimi, MiniMax, GLM, and Grok models.
                         </p>
                     </div>
 
@@ -1841,6 +1850,28 @@ brew install claude-code</pre>
                             </div>
                         </div>
 
+                        <!-- GROK SECTION -->
+                        <div class="step-label" style="margin-top: 40px;">Grok</div>
+                        <div id="grok-section">
+                            <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;">
+                                <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">grok-build</span>
+                                <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">grok-composer-2.5-fast</span>
+                            </div>
+                            <div id="grok-empty" style="color: var(--text-muted); font-style: italic; padding: 20px; text-align: center;">No Grok accounts configured</div>
+                            <div id="grok-content" style="display: none;">
+                                <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a;">
+                                    <div id="grok-accounts-list"></div>
+                                </div>
+                            </div>
+                            <!-- Import Grok OAuth JSON -->
+                            <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-top: 12px;">
+                                <p class="api-note" style="margin-top: 0;">Paste the Grok CLI auth JSON from <code>~/.grok</code> or a pi-grok auth export.</p>
+                                <textarea id="grok-auth-json" placeholder='{"access":"...","refresh":"..."}' style="width: 100%; min-height: 90px; font-size: 0.75rem; font-family: monospace; margin-bottom: 8px;"></textarea>
+                                <button class="btn" onclick="addGrokAuth()" style="white-space: nowrap; padding: 8px 16px;">Import Grok Auth</button>
+                                <div id="grok-add-status" style="margin-top: 8px;"></div>
+                            </div>
+                        </div>
+
                         <!-- Pool Users Section -->
                         <div class="step-label" style="margin-top: 40px;">Pool Users</div>
                         <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-bottom: 20px;">
@@ -2034,7 +2065,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="claude-sonnet-4-6",  # or gpt-5.5, k2p5, MiniMax-M3, glm-5.1, mimo-v2.5-pro[1m]
+    model="claude-sonnet-5",  # or gpt-5.5, k2p5, MiniMax-M3, glm-5.2, mimo-v2.5-pro[1m]
     max_tokens=128,
     messages=[{"role": "user", "content": "Hello from the pool"}],
 )
@@ -2044,7 +2075,7 @@ print(message.content[0].text)`);
   -H "anthropic-version: 2023-06-01" \\
   -H "x-api-key: ${key}" \\
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "max_tokens": 128,
     "messages": [{"role": "user", "content": "Hello from the pool"}]
   }'`);
@@ -2053,7 +2084,7 @@ print(message.content[0].text)`);
 const q = query({
   prompt: "Reply with exactly: pool ok",
   options: {
-    model: "claude-sonnet-4-6", // or gpt-5.5
+    model: "claude-sonnet-5", // or gpt-5.5
     maxTurns: 1,
     tools: [],
     env: {
@@ -2081,7 +2112,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.4-mini",  # or gpt-5.5, claude-sonnet-4-6, k2p5, MiniMax-M3
+    model="gpt-5.4-mini",  # or gpt-5.5, claude-sonnet-5, k2p5, MiniMax-M3
     messages=[{"role": "user", "content": "Hello from the pool"}],
     tools=[{
         "type": "function",
@@ -2258,7 +2289,7 @@ Implementation requirements:
 1. Find every OpenAI client initialization, raw OpenAI HTTP call, Agents SDK setup, LiteLLM/OpenAI-compatible provider config, and environment example in this repo.
 2. Configure them to use base URL ${publicUrl}/v1 and bearer/API key ${key}. For raw HTTP, send Authorization: Bearer ${key} and Content-Type: application/json.
 3. Keep normal OpenAI SDK method calls intact where possible. The proxy supports Responses, Chat Completions, legacy Completions, Images generate/edit, tool/function calls, structured outputs, and OpenAI Agents SDK usage.
-4. Use gpt-5.4-mini as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-4-6, claude-opus-4-7, k2p5, MiniMax-M3, and glm-5.1.
+4. Use gpt-5.4-mini as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-7, k2p5, MiniMax-M3, and glm-5.2.
 5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
 6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.4-mini") or new OpenAIChatCompletionsModel(client, "gpt-5.4-mini") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
 7. Update README, .env.example, deployment config, tests, and CI secrets documentation so future runs use the proxy settings instead of api.openai.com.
@@ -2653,11 +2684,12 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                     kimi:    { bg: 'rgba(59, 130, 246, 0.15)', fg: '#60a5fa' },
                     minimax: { bg: 'rgba(245, 158, 11, 0.15)', fg: '#fbbf24' },
                     zai:     { bg: 'rgba(239, 68, 68, 0.15)', fg: '#f87171' },
-                    xiaomi:  { bg: 'rgba(249, 115, 22, 0.15)', fg: '#fb923c' }
+                    xiaomi:  { bg: 'rgba(249, 115, 22, 0.15)', fg: '#fb923c' },
+                    grok:    { bg: 'rgba(34, 211, 238, 0.15)', fg: '#22d3ee' }
                 };
                 const breakdownEl = document.getElementById('provider-breakdown');
                 breakdownEl.innerHTML = '';
-                const providerOrder = ['codex', 'claude', 'gemini', 'kimi', 'minimax', 'zai', 'xiaomi'];
+                const providerOrder = ['codex', 'claude', 'gemini', 'kimi', 'minimax', 'zai', 'xiaomi', 'grok'];
                 const costByProvider = (agg.cost_by_provider) || {};
                 providerOrder.forEach(type => {
                     const count = providerCounts[type];
@@ -2964,6 +2996,37 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 } else {
                     document.getElementById('xiaomi-empty').style.display = 'block';
                     document.getElementById('xiaomi-content').style.display = 'none';
+                }
+
+                // Populate Grok accounts
+                const grokAccounts = allAccounts.filter(a => a.type === 'grok');
+                if (grokAccounts.length > 0) {
+                    document.getElementById('grok-empty').style.display = 'none';
+                    document.getElementById('grok-content').style.display = 'block';
+                    const grokList = document.getElementById('grok-accounts-list');
+                    grokList.innerHTML = '';
+                    for (const acc of grokAccounts) {
+                        const rowStatusColor = statusColor(acc.status);
+                        const tokens = acc.total_billable_tokens > 0 ? formatNumber(acc.total_billable_tokens) : '0';
+                        const primaryPct = acc.primary_window_used_pct || 0;
+                        const usageBar = primaryPct > 0 ? `
+                            <div style="flex: 1; max-width: 120px; margin: 0 8px;">
+                                <div style="background: #1a1a1a; border-radius: 3px; height: 6px; overflow: hidden;">
+                                    <div style="background: ${primaryPct > 80 ? '#c0392b' : '#22d3ee'}; width: ${Math.min(primaryPct, 100)}%; height: 100%;"></div>
+                                </div>
+                                <div style="font-size: 0.6rem; color: #666; text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
+                            </div>` : '';
+                        grokList.innerHTML += `
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; ${grokAccounts.indexOf(acc) < grokAccounts.length - 1 ? 'border-bottom: 1px solid #1a1a1a;' : ''}">
+                                <span style="font-family: monospace; color: #888; font-size: 0.85rem;">${acc.id}</span>
+                                <span style="color: ${rowStatusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</span>
+                                ${usageBar}
+                                <span style="font-family: monospace; color: #22d3ee; font-size: 0.85rem;">${tokens} tokens</span>
+                            </div>`;
+                    }
+                } else {
+                    document.getElementById('grok-empty').style.display = 'block';
+                    document.getElementById('grok-content').style.display = 'none';
                 }
 
                 // Load users data and chart (now part of stats tab)
@@ -3576,6 +3639,39 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 }
 
                 statusEl.innerHTML = `<span style="color: var(--success-green);">Added: ${data.account_id}</span>`;
+                input.value = '';
+                setTimeout(() => { statusEl.innerHTML = ''; loadStats(); }, 2000);
+            } catch (err) {
+                statusEl.innerHTML = `<span style="color: var(--error-red);">${err.message}</span>`;
+            }
+        }
+
+        async function addGrokAuth() {
+            const input = document.getElementById('grok-auth-json');
+            const statusEl = document.getElementById('grok-add-status');
+            const authJSON = input.value.trim();
+
+            if (!authJSON) {
+                statusEl.innerHTML = '<span style="color: var(--error-red);">Please paste Grok auth JSON</span>';
+                return;
+            }
+
+            statusEl.innerHTML = '<span style="color: var(--text-muted);">Importing auth...</span>';
+
+            try {
+                JSON.parse(authJSON);
+                const response = await poolFetch('/admin/grok/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auth_json: authJSON })
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to import Grok auth');
+                }
+
+                statusEl.innerHTML = `<span style="color: var(--success-green);">Imported: ${data.account_id}</span>`;
                 input.value = '';
                 setTimeout(() => { statusEl.innerHTML = ''; loadStats(); }, 2000);
             } catch (err) {

@@ -28,6 +28,7 @@ type codexCyberSwapOptions struct {
 	IdleTimeout                 time.Duration
 	DownstreamHeartbeatInterval time.Duration
 	ReadLimit                   int64
+	CompressionEnabled          bool
 	LogLabel                    string
 
 	// SetActiveAccount lets the caller follow the swap with bookkeeping
@@ -80,7 +81,7 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 ) codexCyberSwapResult {
 	ctx := clientReq.Context()
 
-	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(ctx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit)
+	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(ctx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return codexCyberSwapResult{err: err, finalAccount: opts.InitialAccount}
@@ -92,7 +93,9 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 
 	acceptOpts := &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
-		CompressionMode:    websocket.CompressionNoContextTakeover,
+	}
+	if opts.CompressionEnabled {
+		acceptOpts.CompressionMode = websocket.CompressionNoContextTakeover
 	}
 	if subprotocol := upstreamConn.Subprotocol(); subprotocol != "" {
 		acceptOpts.Subprotocols = []string{subprotocol}
@@ -434,7 +437,7 @@ func (h *proxyHandler) dialSwappedUpstream(
 	tmpReq := &http.Request{Header: headers}
 	opts.Provider.SetAuthHeaders(tmpReq, acc)
 
-	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit)
+	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -450,9 +453,10 @@ func dialUpstreamWebSocket(
 	upstreamHeaders http.Header,
 	clientHeaders http.Header,
 	readLimit int64,
+	compressionEnabled bool,
 ) (*websocket.Conn, *http.Response, []string, error) {
 	subprotocols := extractWebSocketSubprotocols(clientHeaders)
-	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upstreamURL, upstreamHeaders, subprotocols, readLimit)
+	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upstreamURL, upstreamHeaders, subprotocols, readLimit, compressionEnabled)
 	return conn, resp, subprotocols, err
 }
 
@@ -462,6 +466,7 @@ func dialUpstreamWebSocketWithSubprotocols(
 	upstreamHeaders http.Header,
 	subprotocols []string,
 	readLimit int64,
+	compressionEnabled bool,
 ) (*websocket.Conn, *http.Response, []string, error) {
 	wsURL := *upstreamURL
 	switch wsURL.Scheme {
@@ -483,11 +488,14 @@ func dialUpstreamWebSocketWithSubprotocols(
 		dialHeaders.Del(key)
 	}
 
-	conn, resp, err := websocket.Dial(ctx, wsURL.String(), &websocket.DialOptions{
-		HTTPHeader:      dialHeaders,
-		Subprotocols:    subprotocols,
-		CompressionMode: websocket.CompressionNoContextTakeover,
-	})
+	dialOpts := &websocket.DialOptions{
+		HTTPHeader:   dialHeaders,
+		Subprotocols: subprotocols,
+	}
+	if compressionEnabled {
+		dialOpts.CompressionMode = websocket.CompressionNoContextTakeover
+	}
+	conn, resp, err := websocket.Dial(ctx, wsURL.String(), dialOpts)
 	if err != nil {
 		return nil, nil, subprotocols, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
 	}

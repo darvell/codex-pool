@@ -236,10 +236,12 @@ func TestServeCuteCodeSettingsConfig(t *testing.T) {
 		`"anthropicBaseUrl": "http://example.com"`,
 		`"openaiApiKey": "sk-ant-oat01-pool-`,
 		`"id": "gpt-5.5"`,
+		`"id": "claude-fable-5"`,
 		`"id": "claude-opus-4-7"`,
 		`"id": "MiniMax-M3"`,
 		`"id": "MiniMax-M2.7"`,
 		`"id": "glm-5.1"`,
+		`"id": "glm-5.2"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected cute-code config to contain %q, got:\n%s", want, body)

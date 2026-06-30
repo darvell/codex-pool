@@ -17,6 +17,7 @@ type ConfigFile struct {
 	RefreshProxyURL string  `toml:"refresh_proxy_url"` // HTTP proxy for refresh operations
 	Debug           bool    `toml:"debug"`
 	PublicURL       string  `toml:"public_url"`
+	GrokBase        string  `toml:"grok_base"`
 	FriendCode      string  `toml:"friend_code"`
 	FriendName      string  `toml:"friend_name"`
 	FriendTagline   string  `toml:"friend_tagline"`

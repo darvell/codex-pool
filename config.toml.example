@@ -17,6 +17,11 @@ debug = false
 # Example: "https://proxy.example.com" or "http://192.168.1.100:8989"
 public_url = ""
 
+# Grok Code upstream and accounts
+# Accounts are loaded from pool/grok/*.json. You can paste/import ~/.grok auth JSON
+# from the friend admin page, or place pi-grok/simple auth JSON in that directory.
+grok_base = "https://cli-chat-proxy.grok.com/v1"
+
 # Friend Code Access
 # Enable a self-service landing page at / where users with this code
 # can generate their own credentials.
