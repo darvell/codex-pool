@@ -206,7 +206,8 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
 	settings := cuteCodeSettings{
-		Model:            "gpt-5.5",
+		// gpt-5.6 is a pool alias for gpt-5.6-sol (default 5.6 series variant).
+		Model:            "gpt-5.6",
 		OpenAIBaseURL:    baseURL,
 		OpenAIAPIKey:     apiKey,
 		AnthropicBaseURL: baseURL,
@@ -217,11 +218,11 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 		CustomModels: []cuteCodeModelConfig{
 			// apiKey is required alongside baseUrl: cute refuses custom endpoints that would
 			// otherwise inherit first-party Anthropic/OpenAI credentials by accident.
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6", "GPT-5.6", 372000, "GPT-5.6 (pool alias for gpt-5.6-sol)"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6", "GPT-5.6", 372000, "Default GPT/Codex pool model (alias for gpt-5.6-sol)"),
 			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-sol", "GPT-5.6 Sol", 372000, "Default GPT-5.6 coding variant"),
 			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-terra", "GPT-5.6 Terra", 372000, "GPT-5.6 Terra variant"),
 			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-luna", "GPT-5.6 Luna", 372000, "GPT-5.6 Luna variant"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.5", "GPT-5.5", 272000, "Default GPT/Codex pool model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.5", "GPT-5.5", 272000, "GPT-5.5 coding model"),
 			cuteOpenAIModel(baseURL, apiKey, "gpt-5.4", "GPT-5.4", 1000000, "Long-context GPT model for remote compaction and large tasks"),
 			cuteOpenAIModel(baseURL, apiKey, "gpt-5.3-codex", "GPT-5.3 Codex", 272000, "Codex reasoning model"),
 			cuteOpenAIModel(baseURL, apiKey, "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, "Fast Codex model"),

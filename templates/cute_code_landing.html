@@ -82,8 +82,8 @@
         const result = await response.json();
         const url = result.public_url || publicUrl;
         const token = result.download_token;
-        maclinux.textContent = `curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash\ncurl -fsSL "${url}/setup/cute-code/${token}" | bash\ncute-code --model gpt-5.5`;
-        windows.textContent = `irm https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.ps1 | iex\nirm "${url}/setup/cute-code/${token}?shell=powershell" | iex\ncute-code --model gpt-5.5`;
+        maclinux.textContent = `curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash\ncurl -fsSL "${url}/setup/cute-code/${token}" | bash\ncute-code --model gpt-5.6`;
+        windows.textContent = `irm https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.ps1 | iex\nirm "${url}/setup/cute-code/${token}?shell=powershell" | iex\ncute-code --model gpt-5.6`;
         settings.textContent = result.cute_code_settings_json || '';
         statusEl.textContent = 'Ready.';
         results.style.display = 'block';

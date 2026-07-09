@@ -352,7 +352,7 @@ foreach ($prop in $incoming.PSObject.Properties) {
 
 Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 20)
 Write-Host "cute-code pool settings saved to $settingsFile"
-Write-Host 'Run: cute-code --model gpt-5.5'
+Write-Host 'Run: cute-code --model gpt-5.6'
 `, publicURL, token)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
@@ -409,7 +409,7 @@ fi
 
 rm -f "$TMP_FILE"
 printf 'cute-code pool settings saved to %%s\n' "$SETTINGS_FILE"
-printf 'Run: cute-code --model gpt-5.5\n'
+printf 'Run: cute-code --model gpt-5.6\n'
 `, publicURL, token)
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
