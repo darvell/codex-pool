@@ -52,6 +52,7 @@ type cuteCodeModelConfig struct {
 	Name          string `json:"name,omitempty"`
 	Protocol      string `json:"protocol"`
 	BaseURL       string `json:"baseUrl,omitempty"`
+	APIKey        string `json:"apiKey,omitempty"`
 	ContextWindow int    `json:"contextWindow,omitempty"`
 	Description   string `json:"description,omitempty"`
 }
@@ -65,6 +66,10 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				APIKey:  codexAPIKey,
 				API:     "openai-codex-responses",
 				Models: []piModelConfig{
+					piTextModel("gpt-5.6", "GPT-5.6", true, 372000, 128000),
+					piTextModel("gpt-5.6-sol", "GPT-5.6 Sol", true, 372000, 128000),
+					piTextModel("gpt-5.6-terra", "GPT-5.6 Terra", true, 372000, 128000),
+					piTextModel("gpt-5.6-luna", "GPT-5.6 Luna", true, 372000, 128000),
 					piTextModel("gpt-5.5", "GPT-5.5", true, 272000, 128000),
 					piTextModel("gpt-5.4", "GPT-5.4", true, 1000000, 128000),
 					piTextModel("gpt-5.3-codex", "GPT-5.3 Codex", true, 272000, 128000),
@@ -210,34 +215,40 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 			URL: baseURL,
 		},
 		CustomModels: []cuteCodeModelConfig{
-			cuteOpenAIModel(baseURL, "gpt-5.5", "GPT-5.5", 272000, "Default GPT/Codex pool model"),
-			cuteOpenAIModel(baseURL, "gpt-5.4", "GPT-5.4", 1000000, "Long-context GPT model for remote compaction and large tasks"),
-			cuteOpenAIModel(baseURL, "gpt-5.3-codex", "GPT-5.3 Codex", 272000, "Codex reasoning model"),
-			cuteOpenAIModel(baseURL, "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, "Fast Codex model"),
-			cuteOpenAIModel(baseURL, "gpt-5.2-codex", "GPT-5.2 Codex", 272000, "Codex reasoning model"),
-			cuteOpenAIModel(baseURL, "gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, "High-capability Codex model"),
-			cuteOpenAIModel(baseURL, "gpt-5.2", "GPT-5.2", 272000, "GPT reasoning model"),
-			cuteOpenAIModel(baseURL, "gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, "Small Codex model"),
-			cuteAnthropicModel(baseURL, "claude-haiku-4-5", "Claude Haiku 4.5", 200000, "Fast Claude model through the pool"),
-			cuteAnthropicModel(baseURL, "claude-sonnet-5", "Claude Sonnet 5", 1000000, "Claude Sonnet through the pool"),
-			cuteAnthropicModel(baseURL, "claude-sonnet-5 [1m]", "Claude Sonnet 5 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
-			cuteAnthropicModel(baseURL, "claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, "Claude Sonnet through the pool"),
-			cuteAnthropicModel(baseURL, "claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
-			cuteAnthropicModel(baseURL, "claude-fable-5", "Claude Fable 5", 1000000, "Claude Fable through the pool"),
-			cuteAnthropicModel(baseURL, "claude-opus-4-7", "Claude Opus 4.7", 1000000, "Claude Opus through the pool"),
-			cuteAnthropicModel(baseURL, "claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, "Claude Opus with 1m context routing"),
-			cuteAnthropicModel(baseURL, "claude-opus-4-6", "Claude Opus 4.6", 1000000, "Claude Opus through the pool"),
-			cuteAnthropicModel(baseURL, "claude-opus-4-6 [1m]", "Claude Opus 4.6 [1m]", 1000000, "Claude Opus with 1m context routing"),
-			cuteAnthropicModel(baseURL, "k2p5", "Kimi K2.5", 262144, "Kimi model routed through Anthropic-compatible pool API"),
-			cuteAnthropicModel(baseURL, "kimi-k2-thinking", "Kimi K2 Thinking", 262144, "Kimi thinking model routed through the pool"),
-			cuteAnthropicModel(baseURL, "MiniMax-M3", "MiniMax M3", 1000000, "1M-context MiniMax model routed through the pool"),
-			cuteAnthropicModel(baseURL, "MiniMax-M2.7", "MiniMax M2.7", 204800, "MiniMax model routed through the pool"),
-			cuteAnthropicModel(baseURL, "MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, "High-speed MiniMax route through the pool"),
-			cuteAnthropicModel(baseURL, "glm-5.1", "GLM 5.1", 128000, "GLM model routed through the pool"),
-			cuteAnthropicModel(baseURL, "glm-5.2", "GLM 5.2", 1000000, "1M-context GLM model routed through the pool"),
+			// apiKey is required alongside baseUrl: cute refuses custom endpoints that would
+			// otherwise inherit first-party Anthropic/OpenAI credentials by accident.
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6", "GPT-5.6", 372000, "GPT-5.6 (pool alias for gpt-5.6-sol)"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-sol", "GPT-5.6 Sol", 372000, "Default GPT-5.6 coding variant"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-terra", "GPT-5.6 Terra", 372000, "GPT-5.6 Terra variant"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-luna", "GPT-5.6 Luna", 372000, "GPT-5.6 Luna variant"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.5", "GPT-5.5", 272000, "Default GPT/Codex pool model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.4", "GPT-5.4", 1000000, "Long-context GPT model for remote compaction and large tasks"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.3-codex", "GPT-5.3 Codex", 272000, "Codex reasoning model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, "Fast Codex model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.2-codex", "GPT-5.2 Codex", 272000, "Codex reasoning model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, "High-capability Codex model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.2", "GPT-5.2", 272000, "GPT reasoning model"),
+			cuteOpenAIModel(baseURL, apiKey, "gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, "Small Codex model"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-haiku-4-5", "Claude Haiku 4.5", 200000, "Fast Claude model through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-5", "Claude Sonnet 5", 1000000, "Claude Sonnet through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-5 [1m]", "Claude Sonnet 5 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, "Claude Sonnet through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-fable-5", "Claude Fable 5", 1000000, "Claude Fable through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-7", "Claude Opus 4.7", 1000000, "Claude Opus through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, "Claude Opus with 1m context routing"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-6", "Claude Opus 4.6", 1000000, "Claude Opus through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-6 [1m]", "Claude Opus 4.6 [1m]", 1000000, "Claude Opus with 1m context routing"),
+			cuteAnthropicModel(baseURL, apiKey, "k2p5", "Kimi K2.5", 262144, "Kimi model routed through Anthropic-compatible pool API"),
+			cuteAnthropicModel(baseURL, apiKey, "kimi-k2-thinking", "Kimi K2 Thinking", 262144, "Kimi thinking model routed through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "MiniMax-M3", "MiniMax M3", 1000000, "1M-context MiniMax model routed through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "MiniMax-M2.7", "MiniMax M2.7", 204800, "MiniMax model routed through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, "High-speed MiniMax route through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "glm-5.1", "GLM 5.1", 128000, "GLM model routed through the pool"),
+			cuteAnthropicModel(baseURL, apiKey, "glm-5.2", "GLM 5.2", 1000000, "1M-context GLM model routed through the pool"),
 		},
 	}
-	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL)...)
+	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
 	return json.MarshalIndent(settings, "", "  ")
 }
 
@@ -249,31 +260,33 @@ func grokPiModels() []piModelConfig {
 	return models
 }
 
-func grokCuteModels(baseURL string) []cuteCodeModelConfig {
+func grokCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 	models := make([]cuteCodeModelConfig, 0, len(grokModelCatalog))
 	for _, model := range grokModelCatalog {
-		models = append(models, cuteOpenAIModel(baseURL, model.ID, model.Name, model.ContextWindow, "Grok model routed through the pool"))
+		models = append(models, cuteOpenAIModel(baseURL, apiKey, model.ID, model.Name, model.ContextWindow, "Grok model routed through the pool"))
 	}
 	return models
 }
 
-func cuteOpenAIModel(baseURL, id, name string, contextWindow int, description string) cuteCodeModelConfig {
+func cuteOpenAIModel(baseURL, apiKey, id, name string, contextWindow int, description string) cuteCodeModelConfig {
 	return cuteCodeModelConfig{
 		ID:            id,
 		Name:          name,
 		Protocol:      "openai",
 		BaseURL:       baseURL,
+		APIKey:        apiKey,
 		ContextWindow: contextWindow,
 		Description:   description,
 	}
 }
 
-func cuteAnthropicModel(baseURL, id, name string, contextWindow int, description string) cuteCodeModelConfig {
+func cuteAnthropicModel(baseURL, apiKey, id, name string, contextWindow int, description string) cuteCodeModelConfig {
 	return cuteCodeModelConfig{
 		ID:            id,
 		Name:          name,
 		Protocol:      "anthropic",
 		BaseURL:       baseURL,
+		APIKey:        apiKey,
 		ContextWindow: contextWindow,
 		Description:   description,
 	}

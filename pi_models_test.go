@@ -59,6 +59,10 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		contextWindow int
 		maxTokens     int
 	}{
+		"gpt-5.6":             {contextWindow: 372000, maxTokens: 128000},
+		"gpt-5.6-sol":         {contextWindow: 372000, maxTokens: 128000},
+		"gpt-5.6-terra":       {contextWindow: 372000, maxTokens: 128000},
+		"gpt-5.6-luna":        {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.5":             {contextWindow: 272000, maxTokens: 128000},
 		"gpt-5.4":             {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.3-codex":       {contextWindow: 272000, maxTokens: 128000},
@@ -205,10 +209,11 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if grok.BaseURL != "https://pool.example.com" {
 		t.Fatalf("grok baseUrl = %q", grok.BaseURL)
 	}
-	if len(grok.Models) != 6 {
+	if len(grok.Models) != 7 {
 		t.Fatalf("grok model count = %d", len(grok.Models))
 	}
 	wantGrokContexts := map[string]int{
+		"grok-4.5":                     500000,
 		"grok-composer-2.5-fast":       200000,
 		"grok-build":                   512000,
 		"grok-4.3":                     1000000,
@@ -261,6 +266,8 @@ func TestGrokCanonicalModelHandlesCodeAliases(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
+		"grok-4.5":                     "grok-4.5",
+		"grok-4.5-build":               "grok-4.5",
 		"grok-build":                   "grok-build",
 		"grok-composer-2.5-fast":       "grok-composer-2.5-fast",
 		"grok-composer":                "grok-composer-2.5-fast",

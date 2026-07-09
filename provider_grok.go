@@ -20,7 +20,8 @@ const (
 	grokOAuthClientID        = "b1a00492-073a-47ea-816f-4c329264a828"
 	grokDefaultTokenURL      = "https://auth.x.ai/oauth2/token"
 	grokClientIdentifier     = "grok-cli"
-	grokDefaultClientVersion = "0.2.22"
+	// Matches current Grok Build CLI (0.2.93 as of 2026-07-09).
+	grokDefaultClientVersion = "0.2.93"
 )
 
 // GrokProvider handles xAI Grok Code OAuth accounts through Grok's OpenAI-compatible Responses API.
@@ -300,8 +301,11 @@ type grokModelInfo struct {
 	Aliases       []string
 }
 
+// Catalog sourced from cli-chat-proxy GET /v1/models (Grok Build 0.2.93) plus
+// still-routable legacy IDs verified against the same Responses API.
 var grokModelCatalog = []grokModelInfo{
-	{ID: "grok-composer-2.5-fast", Name: "Composer 2.5 Fast (Grok CLI)", Reasoning: false, ContextWindow: 200000, MaxTokens: 30000, Aliases: []string{"grok-composer", "grok-code-fast"}},
+	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
+	{ID: "grok-composer-2.5-fast", Name: "Composer 2.5", Reasoning: false, ContextWindow: 200000, MaxTokens: 30000, Aliases: []string{"grok-composer", "grok-code-fast"}},
 	{ID: "grok-build", Name: "Grok Build", Reasoning: true, ContextWindow: 512000, MaxTokens: 30000},
 	{ID: "grok-4.3", Name: "Grok 4.3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 30000},
 	{ID: "grok-4.20-0309-reasoning", Name: "Grok 4.20 Reasoning", Reasoning: true, ContextWindow: 2000000, MaxTokens: 30000},
@@ -359,7 +363,11 @@ func grokModelMaxCompletionTokens(model string) int {
 
 func grokModelSupportsReasoningEffort(model string) bool {
 	m := strings.ToLower(grokCanonicalModel(model))
-	return strings.HasPrefix(m, "grok-4.3") || strings.HasPrefix(m, "grok-4.20-multi-agent")
+	// Live /v1/models (2026-07-09): grok-4.5 advertises supports_reasoning_effort
+	// with high/medium/low. Legacy multi-agent + 4.3 keep the prior allowlist.
+	return strings.HasPrefix(m, "grok-4.5") ||
+		strings.HasPrefix(m, "grok-4.3") ||
+		strings.HasPrefix(m, "grok-4.20-multi-agent")
 }
 
 func rewriteAndSanitizeGrokRequestBody(body []byte, model string) []byte {
@@ -426,13 +434,22 @@ func sanitizeGrokRequestObject(obj map[string]any, model string) bool {
 	if sanitizeGrokNestedUnsupportedFields(obj) {
 		changed = true
 	}
+	// Chat Completions uses top-level reasoningEffort; Responses uses reasoning.effort.
+	// Always drop the chat-style field; optionally promote it when the model allows effort.
+	if effortRaw, ok := obj["reasoningEffort"]; ok {
+		if grokModelSupportsReasoningEffort(model) {
+			if _, hasReasoning := obj["reasoning"]; !hasReasoning {
+				if effort, ok := effortRaw.(string); ok && strings.TrimSpace(effort) != "" {
+					obj["reasoning"] = map[string]any{"effort": strings.TrimSpace(effort)}
+				}
+			}
+		}
+		delete(obj, "reasoningEffort")
+		changed = true
+	}
 	if !grokModelSupportsReasoningEffort(model) {
 		if _, ok := obj["reasoning"]; ok {
 			delete(obj, "reasoning")
-			changed = true
-		}
-		if _, ok := obj["reasoningEffort"]; ok {
-			delete(obj, "reasoningEffort")
 			changed = true
 		}
 	}

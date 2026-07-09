@@ -6,20 +6,39 @@ import (
 	"sync"
 )
 
+// defaultModelAliases are always registered unless overridden by config.toml
+// [model_aliases]. Keys are matched case-insensitively at resolve time.
+var defaultModelAliases = map[string]string{
+	// GPT-5.6 series short name → Sol (default variant).
+	"gpt-5.6": "gpt-5.6-sol",
+}
+
 // modelAliases manages model name aliases. Thread-safe for hot-reload.
 type modelAliases struct {
 	mu      sync.RWMutex
 	aliases map[string]string // short name -> full upstream model name
 }
 
-func newModelAliases(cfg map[string]string) *modelAliases {
-	m := &modelAliases{aliases: make(map[string]string)}
-	if cfg != nil {
-		for k, v := range cfg {
-			m.aliases[strings.ToLower(k)] = v
+func mergeModelAliases(cfg map[string]string) map[string]string {
+	out := make(map[string]string, len(defaultModelAliases)+len(cfg))
+	for k, v := range defaultModelAliases {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
 		}
+		out[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
 	}
-	return m
+	for k, v := range cfg {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			continue
+		}
+		// Config overrides built-ins.
+		out[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+	}
+	return out
+}
+
+func newModelAliases(cfg map[string]string) *modelAliases {
+	return &modelAliases{aliases: mergeModelAliases(cfg)}
 }
 
 // resolve returns the upstream model name for a given alias, or the
@@ -37,14 +56,12 @@ func (m *modelAliases) resolve(model string) (string, bool) {
 	return model, false
 }
 
-// reload replaces the alias map (used by hot-reload).
+// reload replaces the alias map (used by hot-reload). Always re-applies
+// built-in defaults, then overlays cfg (which may be nil).
 func (m *modelAliases) reload(cfg map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.aliases = make(map[string]string, len(cfg))
-	for k, v := range cfg {
-		m.aliases[strings.ToLower(k)] = v
-	}
+	m.aliases = mergeModelAliases(cfg)
 }
 
 // applyModelAlias resolves the model alias and rewrites the body if needed.

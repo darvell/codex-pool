@@ -8,17 +8,47 @@ import (
 	"strings"
 )
 
-func shouldNoopCodexPath(path string) bool {
+func normalizeNoopPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	// Reverse proxies and clients sometimes leave a trailing slash.
+	if path != "/" {
+		path = strings.TrimRight(path, "/")
+	}
+	return path
+}
+
+// isCodexAppsMCPPath matches the streamable-HTTP endpoint Codex uses for the
+// built-in codex_apps MCP server. Path can arrive with or without the
+// /backend-api prefix depending on how the public reverse proxy rewrites.
+func isCodexAppsMCPPath(path string) bool {
+	path = normalizeNoopPath(path)
 	switch path {
-	case "/.well-known/oauth-authorization-server/mcp",
-		"/connectors/directory/list",
+	case "/api/codex/apps", "/backend-api/wham/apps", "/wham/apps", "/apps":
+		return true
+	}
+	return strings.HasSuffix(path, "/wham/apps") ||
+		strings.HasSuffix(path, "/codex/apps")
+}
+
+func shouldNoopCodexPath(path string) bool {
+	path = normalizeNoopPath(path)
+	if isCodexAppsMCPPath(path) {
+		return true
+	}
+	// OAuth discovery for streamable HTTP is rooted at the MCP URL path.
+	if strings.HasPrefix(path, "/.well-known/oauth-authorization-server") {
+		return true
+	}
+	switch path {
+	case "/connectors/directory/list",
 		"/connectors/directory/list_workspace",
 		"/codex/analytics-events/events",
 		"/v1/traces/ingest",
 		"/plugins/featured",
 		"/plugins/list",
-		"/api/codex/apps",
-		"/backend-api/wham/apps",
 		"/backend-api/plugins/featured",
 		"/backend-api/codex/analytics-events/events":
 		return true
@@ -28,35 +58,58 @@ func shouldNoopCodexPath(path string) bool {
 }
 
 func serveNoopCodexPath(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case "/.well-known/oauth-authorization-server/mcp":
+	path := normalizeNoopPath(r.URL.Path)
+	if isCodexAppsMCPPath(path) {
+		serveNoopCodexAppsMCP(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "/.well-known/oauth-authorization-server") {
+		// Empty discovery doc: codex_apps does not need OAuth through the pool.
 		respondJSON(w, map[string]any{
 			"authorization_endpoint": "",
 			"token_endpoint":         "",
-			"scopes_supported":       []string{""},
+			"scopes_supported":       []string{},
 		})
+		return
+	}
+	switch path {
 	case "/connectors/directory/list", "/connectors/directory/list_workspace":
 		respondJSON(w, map[string]any{
 			"apps":      []any{},
 			"nextToken": nil,
 		})
-	case "/api/codex/apps", "/backend-api/wham/apps":
-		serveNoopCodexAppsMCP(w, r)
 	case "/v1/traces/ingest":
 		respondJSON(w, map[string]any{"ok": true})
 	default:
+		// Empty success for noisy telemetry / plugin list probes.
 		w.WriteHeader(http.StatusOK)
 	}
 }
 
 func serveNoopCodexAppsMCP(w http.ResponseWriter, r *http.Request) {
+	// Streamable HTTP may open with GET (SSE) or OPTIONS; neither needs tools.
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Allow", "GET, HEAD, POST, OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	var req struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
 		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
 	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	_ = json.Unmarshal(body, &req)
+
+	// Notifications (no id) — accept and stop. Includes notifications/initialized.
 	if len(req.ID) == 0 || string(req.ID) == "null" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
@@ -66,37 +119,44 @@ func serveNoopCodexAppsMCP(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{}
 	switch req.Method {
 	case "initialize":
+		// Echo the client's protocolVersion when present; clients reject
+		// unsupported versions. Empty tools is intentional — pool has no apps.
+		protocolVersion := "2025-06-18"
+		if len(req.Params) > 0 {
+			var params struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if err := json.Unmarshal(req.Params, &params); err == nil && strings.TrimSpace(params.ProtocolVersion) != "" {
+				protocolVersion = strings.TrimSpace(params.ProtocolVersion)
+			}
+		}
 		result = map[string]any{
-			"protocolVersion": "2025-11-25",
+			"protocolVersion": protocolVersion,
 			"capabilities": map[string]any{
-				"tools":     map[string]any{"listChanged": false},
-				"resources": map[string]any{"listChanged": false},
+				"tools": map[string]any{"listChanged": false},
 			},
 			"serverInfo": map[string]any{"name": "codex_apps", "version": "0.0.0"},
 		}
 	case "tools/list":
-		result = map[string]any{"tools": []any{}, "nextCursor": nil}
+		// Empty tool list: quiet success instead of 401/handshake failure.
+		result = map[string]any{"tools": []any{}}
 	case "resources/list":
-		result = map[string]any{"resources": []any{}, "nextCursor": nil}
+		result = map[string]any{"resources": []any{}}
 	case "resources/templates/list":
-		result = map[string]any{"resourceTemplates": []any{}, "nextCursor": nil}
+		result = map[string]any{"resourceTemplates": []any{}}
+	case "prompts/list":
+		result = map[string]any{"prompts": []any{}}
 	case "ping":
 		result = map[string]any{}
 	default:
-		respondJSON(w, map[string]any{
-			"jsonrpc": "2.0",
-			"id":      req.ID,
-			"error": map[string]any{
-				"code":    -32601,
-				"message": "Method not found",
-			},
-		})
-		return
+		// Unknown methods: empty result rather than hard error so startup
+		// probes do not surface as MCP client failures.
+		result = map[string]any{}
 	}
 
 	respondJSON(w, map[string]any{
 		"jsonrpc": "2.0",
-		"id":      req.ID,
+		"id":      json.RawMessage(req.ID),
 		"result":  result,
 	})
 }

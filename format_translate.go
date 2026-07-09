@@ -1388,10 +1388,11 @@ func claudeModelEntry(slug, displayName string, contextWindow int) map[string]an
 }
 
 type codexCatalogModel struct {
-	slug          string
-	displayName   string
-	description   string
-	contextWindow int
+	slug                  string
+	displayName           string
+	description           string
+	contextWindow         int
+	defaultReasoningLevel string // optional; empty leaves template/default alone
 }
 
 var codexCatalogFallbackModels = []codexCatalogModel{
@@ -1400,6 +1401,35 @@ var codexCatalogFallbackModels = []codexCatalogModel{
 		displayName:   "gpt-5.5",
 		description:   "Strong model for complex coding tasks.",
 		contextWindow: 272000,
+	},
+	// GPT-5.6 series (sol / terra / luna). Upstream serves these for
+	// client_version >= ~0.144.0; inject when the catalog is older or sparse.
+	{
+		slug:                  "gpt-5.6-sol",
+		displayName:           "gpt-5.6-sol",
+		description:           "GPT-5.6 Sol — default 5.6 coding variant.",
+		contextWindow:         372000,
+		defaultReasoningLevel: "low",
+	},
+	{
+		slug:          "gpt-5.6-terra",
+		displayName:   "gpt-5.6-terra",
+		description:   "GPT-5.6 Terra.",
+		contextWindow: 372000,
+	},
+	{
+		slug:          "gpt-5.6-luna",
+		displayName:   "gpt-5.6-luna",
+		description:   "GPT-5.6 Luna.",
+		contextWindow: 372000,
+	},
+	// Request-time alias gpt-5.6 → gpt-5.6-sol; keep a catalog entry so clients can pick it.
+	{
+		slug:                  "gpt-5.6",
+		displayName:           "gpt-5.6",
+		description:           "GPT-5.6 (routes to gpt-5.6-sol).",
+		contextWindow:         372000,
+		defaultReasoningLevel: "low",
 	},
 }
 
@@ -1492,6 +1522,9 @@ func codexCatalogFallbackEntry(model codexCatalogModel, template map[string]any)
 	entry["max_context_window"] = model.contextWindow
 	entry["visibility"] = "list"
 	entry["supported_in_api"] = true
+	if model.defaultReasoningLevel != "" {
+		entry["default_reasoning_level"] = model.defaultReasoningLevel
+	}
 	return entry
 }
 

@@ -165,7 +165,7 @@ func TestGrokProviderSetsBearerHeaders(t *testing.T) {
 	if got := req.Header.Get("x-grok-client-identifier"); got != "grok-cli" {
 		t.Fatalf("x-grok-client-identifier = %q", got)
 	}
-	if got := req.Header.Get("x-grok-client-version"); got != "0.2.22" {
+	if got := req.Header.Get("x-grok-client-version"); got != "0.2.93" {
 		t.Fatalf("x-grok-client-version = %q", got)
 	}
 	if got := req.Header.Get("X-Api-Key"); got != "" {
@@ -192,6 +192,30 @@ func TestSanitizeGrokRequestBodyRemovesUnsupportedFields(t *testing.T) {
 	}
 	if !strings.Contains(text, `"text":{"format":{"type":"json_object"}}`) {
 		t.Fatalf("rewritten body missing text.format: %s", text)
+	}
+}
+
+func TestSanitizeGrokRequestBodyPreservesReasoningForGrok45(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":"hello","reasoning":{"effort":"medium"},"reasoningEffort":"medium","metadata":{"conversation_id":"c"}}`)
+	rewritten := rewriteAndSanitizeGrokRequestBody(body, "grok-4.5-build")
+	text := string(rewritten)
+	if !strings.Contains(text, `"model":"grok-4.5"`) {
+		t.Fatalf("expected canonical grok-4.5 model: %s", text)
+	}
+	if !strings.Contains(text, `"reasoning":{"effort":"medium"}`) {
+		t.Fatalf("expected reasoning effort preserved for grok-4.5: %s", text)
+	}
+	if strings.Contains(text, "reasoningEffort") {
+		t.Fatalf("chat-style reasoningEffort should be stripped: %s", text)
+	}
+	if strings.Contains(text, "metadata") {
+		t.Fatalf("metadata should be stripped: %s", text)
+	}
+	if !grokModelSupportsReasoningEffort("grok-4.5") || !grokModelSupportsReasoningEffort("grok-4.5-build") {
+		t.Fatal("expected grok-4.5 aliases to support reasoning effort")
+	}
+	if got := grokModelContextWindow("grok-4.5"); got != 500000 {
+		t.Fatalf("context window = %d, want 500000", got)
 	}
 }
 

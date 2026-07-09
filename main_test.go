@@ -598,33 +598,40 @@ func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
 		t.Fatalf("models missing from catalog: %#v", catalog)
 	}
 
-	var foundCodex map[string]any
-	var foundSonnet map[string]any
+	found := map[string]map[string]any{}
 	for _, model := range models {
 		m, ok := model.(map[string]any)
 		if !ok {
 			continue
 		}
-		switch m["slug"] {
-		case "gpt-5.5":
-			foundCodex = m
-		case "claude-sonnet-5":
-			foundSonnet = m
+		if slug, _ := m["slug"].(string); slug != "" {
+			found[slug] = m
 		}
 	}
-	if foundCodex == nil {
+	if found["gpt-5.5"] == nil {
 		t.Fatalf("missing gpt-5.5 in injected catalog: %#v", models)
 	}
-	if got := int(foundCodex["context_window"].(float64)); got != 272000 {
+	if got := int(found["gpt-5.5"]["context_window"].(float64)); got != 272000 {
 		t.Fatalf("gpt-5.5 context_window = %d", got)
 	}
-	if got := foundCodex["display_name"]; got != "gpt-5.5" {
+	if got := found["gpt-5.5"]["display_name"]; got != "gpt-5.5" {
 		t.Fatalf("gpt-5.5 display_name = %#v", got)
 	}
-	if foundSonnet == nil {
+	for _, slug := range []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		if found[slug] == nil {
+			t.Fatalf("missing %s in injected catalog: %#v", slug, models)
+		}
+		if got := int(found[slug]["context_window"].(float64)); got != 372000 {
+			t.Fatalf("%s context_window = %d, want 372000", slug, got)
+		}
+	}
+	if got := found["gpt-5.6-sol"]["default_reasoning_level"]; got != "low" {
+		t.Fatalf("gpt-5.6-sol default_reasoning_level = %#v, want low", got)
+	}
+	if found["claude-sonnet-5"] == nil {
 		t.Fatalf("missing claude-sonnet-5 in injected catalog: %#v", models)
 	}
-	if got := foundSonnet["display_name"]; got != "Claude Sonnet 5" {
+	if got := found["claude-sonnet-5"]["display_name"]; got != "Claude Sonnet 5" {
 		t.Fatalf("claude-sonnet-5 display_name = %#v", got)
 	}
 }
@@ -931,27 +938,79 @@ func TestServeHTTPCodexAppsMCPInitializeReturnsJSON(t *testing.T) {
 	t.Parallel()
 
 	h := &proxyHandler{cfg: &config{}}
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
-	req := httptest.NewRequest(http.MethodPost, "/backend-api/wham/apps", bytes.NewReader(body))
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"codex","version":"0"}}}`)
+
+	// Cover reverse-proxy rewrite variants (with/without /backend-api prefix).
+	for _, path := range []string{
+		"/backend-api/wham/apps",
+		"/wham/apps",
+		"/api/codex/apps",
+		"/backend-api/wham/apps/", // trailing slash
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		// Codex sends a ChatGPT access token here — not a pool JWT. The stub
+		// must succeed without pool auth.
+		req.Header.Set("Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.chatgpt-access.not-a-pool-token")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status=%d want %d body=%s", path, rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if got := rr.Header().Get("Content-Type"); got != "application/json" {
+			t.Fatalf("%s content-type=%q want application/json", path, got)
+		}
+		var response map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("%s unmarshal response: %v body=%s", path, err, rr.Body.String())
+		}
+		result, ok := response["result"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s missing result: %#v", path, response)
+		}
+		if got := result["protocolVersion"]; got != "2025-06-18" {
+			t.Fatalf("%s protocolVersion=%#v", path, got)
+		}
+	}
+}
+
+func TestServeHTTPCodexAppsMCPToolsListEmpty(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{}}
+	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/wham/apps", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status=%d want %d", rr.Code, http.StatusOK)
-	}
-	if got := rr.Header().Get("Content-Type"); got != "application/json" {
-		t.Fatalf("content-type=%q want application/json", got)
+		t.Fatalf("status=%d want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	var response map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
+		t.Fatalf("unmarshal: %v", err)
 	}
-	result, ok := response["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("missing result: %#v", response)
+	result, _ := response["result"].(map[string]any)
+	tools, ok := result["tools"].([]any)
+	if !ok || len(tools) != 0 {
+		t.Fatalf("tools=%#v want empty array", result["tools"])
 	}
-	if got := result["protocolVersion"]; got != "2025-11-25" {
-		t.Fatalf("protocolVersion=%#v", got)
+}
+
+func TestServeHTTPCodexAppsMCPDoesNotRequirePoolToken(t *testing.T) {
+	t.Parallel()
+
+	// Reach the endpoint via proxyRequest path guard as well.
+	h := &proxyHandler{cfg: &config{}}
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/wham/apps", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.proxyRequest(rr, req, "test")
+	if rr.Code == http.StatusUnauthorized {
+		t.Fatalf("proxyRequest returned 401 for codex_apps MCP: %s", rr.Body.String())
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

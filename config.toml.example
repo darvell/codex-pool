@@ -39,3 +39,9 @@ jwt_secret = ""
 
 # Where to store pool user data
 storage_path = "./data/pool_users.json"
+
+# Optional model name aliases (short name -> upstream model).
+# Built-in defaults always include: gpt-5.6 -> gpt-5.6-sol
+# Entries here override built-ins.
+# [model_aliases]
+# "gpt-5.6" = "gpt-5.6-sol"

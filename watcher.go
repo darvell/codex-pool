@@ -134,10 +134,10 @@ func (pw *poolWatcher) reloadConfig() {
 	pw.handler.pool.debug = newDebug
 	pw.handler.pool.mu.Unlock()
 
-	// Reload model aliases.
-	if pw.handler.aliases != nil && cfg.ModelAliases != nil {
+	// Reload model aliases (built-in defaults + optional config overrides).
+	if pw.handler.aliases != nil {
 		pw.handler.aliases.reload(cfg.ModelAliases)
-		log.Printf("reloaded %d model aliases", len(cfg.ModelAliases))
+		log.Printf("reloaded model aliases (config overrides=%d)", len(cfg.ModelAliases))
 	}
 
 	log.Printf("config hot-reload complete (debug=%v, tier_threshold=%.2f)",

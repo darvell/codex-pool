@@ -1488,6 +1488,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	start := time.Now()
 	authHeader := r.Header.Get("Authorization")
 
+	// codex_apps MCP and other noop paths must never require a pool token.
+	// ServeHTTP already routes these, but keep a guard here in case a future
+	// caller reaches proxyRequest with a rewritten / stripped path.
+	if shouldNoopCodexPath(r.URL.Path) {
+		serveNoopCodexPath(w, r)
+		return
+	}
+
 	// Determine user ID - either from pool JWT, Claude pool token, or hashed IP
 	var userID string
 	secret := getPoolJWTSecret()
@@ -1606,13 +1614,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 	accountType := provider.Type()
-
-	// Block paths that are not API endpoints — these hit Cloudflare challenges
-	// and cascade auth penalties across every account in the pool.
-	if strings.Contains(r.URL.Path, "/api/codex/apps") {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
 
 	if isWebSocketUpgradeRequest(r) {
 		h.proxyRequestWebSocket(w, r, reqID, userID, originID, provider, targetBase)

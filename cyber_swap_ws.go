@@ -231,15 +231,16 @@ func (s *codexRelayState) relayOnce() error {
 }
 
 // pumpFrames forwards frames from src to dst, calling inspect on each
-// frame before writing. inspect can return a sentinel error (e.g.
-// *swapPendingErr) to abort the relay without writing the frame.
+// frame before writing. inspect may rewrite the frame (returned []byte)
+// and/or return a sentinel error (e.g. *swapPendingErr) to abort the
+// relay without writing the frame.
 func pumpFrames(
 	ctx context.Context,
 	src <-chan wsFrame,
 	dst *webSocketWriter,
 	logLabel, label string,
 	debug bool,
-	inspect func([]byte) error,
+	inspect func([]byte) ([]byte, error),
 ) error {
 	for {
 		select {
@@ -252,24 +253,29 @@ func pumpFrames(
 			if frame.err != nil {
 				return fmt.Errorf("%s read: %w", label, frame.err)
 			}
+			data := frame.data
 			if debug {
-				logRelayFrame(logLabel, label, frame.msgType, frame.data)
+				logRelayFrame(logLabel, label, frame.msgType, data)
 			}
 			if inspect != nil {
-				if err := inspect(frame.data); err != nil {
+				rewritten, err := inspect(data)
+				if err != nil {
 					return err
 				}
+				if rewritten != nil {
+					data = rewritten
+				}
 			}
-			if err := dst.Write(ctx, frame.msgType, frame.data); err != nil {
+			if err := dst.Write(ctx, frame.msgType, data); err != nil {
 				return fmt.Errorf("%s write: %w", label, err)
 			}
 		}
 	}
 }
 
-func (s *codexRelayState) inspectUpstream(data []byte) error {
+func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 	if !isCyberPolicyError(data) {
-		return nil
+		return data, nil
 	}
 	log.Printf("[%s] cyber_policy frame from account %s", s.opts.ReqID, s.activeAccount.ID)
 	if s.h != nil && s.h.metrics != nil {
@@ -278,21 +284,45 @@ func (s *codexRelayState) inspectUpstream(data []byte) error {
 	if !s.swapDone && s.lastResponseCreate != nil {
 		if cand := s.pickCyberAccessCandidate(); cand != nil {
 			s.swapDone = true
-			return &swapPendingErr{next: cand, frame: data}
+			return data, &swapPendingErr{next: cand, frame: data}
 		}
 	}
 	s.swapDone = true
 	if s.h != nil && s.h.metrics != nil {
 		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "swap_no_candidate")
 	}
-	return &swapPendingErr{frame: data}
+	return data, &swapPendingErr{frame: data}
 }
 
-func (s *codexRelayState) inspectClient(data []byte) error {
+func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if isCodexResponseCreate(data) {
+		data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
 		s.lastResponseCreate = append(s.lastResponseCreate[:0], data...)
 	}
-	return nil
+	return data, nil
+}
+
+// applyModelAliasToJSONFrame rewrites a top-level JSON "model" field when a
+// configured/built-in alias matches (e.g. gpt-5.6 -> gpt-5.6-sol).
+func applyModelAliasToJSONFrame(h *proxyHandler, reqID string, data []byte) []byte {
+	if h == nil || h.aliases == nil || len(data) == 0 {
+		return data
+	}
+	model := extractRequestedModelFromJSON(data)
+	if model == "" {
+		return data
+	}
+	resolved, ok := h.aliases.resolve(model)
+	if !ok || resolved == model {
+		return data
+	}
+	if rewritten := rewriteModelInBody(data, resolved); rewritten != nil {
+		if h.cfg != nil && h.cfg.debug.Load() {
+			log.Printf("[%s] ws model alias: %s -> %s", reqID, model, resolved)
+		}
+		return rewritten
+	}
+	return data
 }
 
 func (s *codexRelayState) doSwap(cand *Account) error {
