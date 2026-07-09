@@ -1,9 +1,18 @@
 package main
 
 import (
+	"encoding/base64"
 	"net/url"
 	"testing"
 )
+
+func TestParseCodexClaimsNormalizesProLitePlan(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_plan_type":"PROLITE"}}`))
+	claims := parseCodexClaims("header." + payload + ".signature")
+	if claims.PlanType != "prolite" {
+		t.Fatalf("PlanType = %q, want prolite", claims.PlanType)
+	}
+}
 
 func TestCodexProviderNormalizeResponsesPaths(t *testing.T) {
 	base, _ := url.Parse("https://chatgpt.com/backend-api/codex")

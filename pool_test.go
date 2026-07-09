@@ -100,6 +100,43 @@ func TestCandidateRequiredPlanFiltersAccounts(t *testing.T) {
 	}
 }
 
+func TestCodexProLiteHasProAccessAndTier(t *testing.T) {
+	for _, plan := range []string{"prolite", "PROLITE", " ProLite "} {
+		if !isCodexProAccessPlan(plan) {
+			t.Fatalf("expected %q to have Codex Pro access", plan)
+		}
+		if !planMatchesRequired(plan, "pro") {
+			t.Fatalf("expected %q to satisfy a Pro plan requirement", plan)
+		}
+		if got := accountTier(AccountTypeCodex, plan); got != 1 {
+			t.Fatalf("accountTier(codex, %q) = %d, want 1", plan, got)
+		}
+	}
+}
+
+func TestCandidateUsesCodexProLiteAlongsidePro(t *testing.T) {
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.7, SecondaryUsedPercent: 0.7}}
+	proLite := &Account{ID: "prolite", Type: AccountTypeCodex, PlanType: "prolite", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1, SecondaryUsedPercent: 0.1}}
+	p := newPoolState([]*Account{pro, proLite}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "pro", "")
+	if got == nil || got.ID != "prolite" {
+		t.Fatalf("expected lower-usage Pro Lite account to compete with Pro, got %+v", got)
+	}
+}
+
+func TestCandidateKeepsPinnedCodexProLite(t *testing.T) {
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1, SecondaryUsedPercent: 0.1}}
+	proLite := &Account{ID: "prolite", Type: AccountTypeCodex, PlanType: "prolite", Usage: UsageSnapshot{PrimaryUsedPercent: 0.5, SecondaryUsedPercent: 0.5}}
+	p := newPoolState([]*Account{pro, proLite}, false)
+	p.pin("conversation", proLite.ID)
+
+	got := p.candidate("conversation", nil, AccountTypeCodex, "pro", "")
+	if got == nil || got.ID != "prolite" {
+		t.Fatalf("expected pinned Pro Lite account to remain eligible, got %+v", got)
+	}
+}
+
 func TestCandidatePrefersClaudeMaxOverPro(t *testing.T) {
 	// Claude pro should be tier 3 (last resort), max should be tier 1
 	maxAcc := &Account{ID: "max1", Type: AccountTypeClaude, PlanType: "max", Usage: UsageSnapshot{

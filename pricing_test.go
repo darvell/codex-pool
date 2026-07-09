@@ -2,6 +2,27 @@ package main
 
 import "testing"
 
+func TestCodexProLiteSubscriptionCost(t *testing.T) {
+	t.Parallel()
+
+	for _, plan := range []string{"prolite", "PROLITE", " ProLite "} {
+		monthly, label := getSubscriptionCost(AccountTypeCodex, plan)
+		if monthly != 100 || label != "Codex Pro Lite" {
+			t.Fatalf("getSubscriptionCost(codex, %q) = (%v, %q), want (100, %q)", plan, monthly, label, "Codex Pro Lite")
+		}
+	}
+}
+
+func TestAccountPlanForSubscriptionPreservesProLite(t *testing.T) {
+	t.Parallel()
+
+	for _, plan := range []string{"prolite", "PROLITE", "Codex ProLite"} {
+		if got := accountPlanForSubscription(plan); got != "prolite" {
+			t.Fatalf("accountPlanForSubscription(%q) = %q, want prolite", plan, got)
+		}
+	}
+}
+
 func TestLookupPricingUsesClaudeSonnet5Alias(t *testing.T) {
 	t.Parallel()
 

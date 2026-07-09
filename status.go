@@ -290,7 +290,7 @@ func (h *proxyHandler) loadTokenAnalytics() *TokenAnalytics {
 
 	// Sort by plan type
 	sort.Slice(analytics.PlanCapacities, func(i, j int) bool {
-		order := map[string]int{"team": 0, "pro": 1, "plus": 2, "gemini": 3}
+		order := map[string]int{"team": 0, "pro": 1, "prolite": 2, "plus": 3, "gemini": 4}
 		return order[analytics.PlanCapacities[i].PlanType] < order[analytics.PlanCapacities[j].PlanType]
 	})
 
@@ -380,6 +380,7 @@ const statusHTML = `<!DOCTYPE html>
             font-weight: 500;
         }
         .tag-pro { background: #238636; color: #fff; }
+        .tag-prolite { background: #2f7d46; color: #fff; }
         .tag-plus { background: #1f6feb; color: #fff; }
         .tag-team { background: #8957e5; color: #fff; }
         .tag-gemini { background: #ea4335; color: #fff; }
@@ -494,6 +495,7 @@ const statusHTML = `<!DOCTYPE html>
             </td>
             <td>
                 {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
+                {{if eq .PlanType "prolite"}}<span class="tag tag-prolite">prolite</span>{{end}}
                 {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
                 {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
                 {{if eq .PlanType "max"}}<span class="tag tag-claude">max</span>{{end}}
@@ -547,6 +549,7 @@ const statusHTML = `<!DOCTYPE html>
         <tr>
             <td>
                 {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
+                {{if eq .PlanType "prolite"}}<span class="tag tag-prolite">prolite</span>{{end}}
                 {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
                 {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
                 {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}

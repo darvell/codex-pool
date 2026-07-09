@@ -47,6 +47,7 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeClaude, "default_claude_max_20x"}: {200, "Claude Max 20x"},
 	{AccountTypeClaude, "team"}:                   {25, "Claude Team"},
 	{AccountTypeCodex, "plus"}:                    {20, "Codex Plus"},
+	{AccountTypeCodex, "prolite"}:                 {100, "Codex Pro Lite"},
 	{AccountTypeCodex, "pro"}:                     {200, "Codex Pro"},
 	{AccountTypeCodex, "team"}:                    {25, "Codex Team"},
 	{AccountTypeGemini, "api"}:                    {0, "Gemini API"},
@@ -62,6 +63,7 @@ var subscriptionCosts = map[subscriptionKey]struct {
 
 // getSubscriptionCost returns monthly cost and label for an account.
 func getSubscriptionCost(accType AccountType, planType string) (monthly float64, label string) {
+	planType = strings.ToLower(strings.TrimSpace(planType))
 	// Try exact match first
 	if info, ok := subscriptionCosts[subscriptionKey{accType, planType}]; ok {
 		return info.monthly, info.label

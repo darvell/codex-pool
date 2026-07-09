@@ -2047,6 +2047,8 @@ func accountPlanForSubscription(planType string) string {
 		return "max_5x"
 	case strings.Contains(pt, "team"):
 		return "team"
+	case strings.Contains(pt, "prolite"):
+		return "prolite"
 	case strings.Contains(pt, "pro"):
 		return "pro"
 	case strings.Contains(pt, "plus"):

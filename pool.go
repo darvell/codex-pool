@@ -397,7 +397,7 @@ func (p *poolState) count() int {
 
 // accountTier returns the preference tier for an account (1 = best, 2 = mid, 3 = last resort).
 // Claude: tier 1 = max/team/max_team, tier 2 = unknown/other, tier 3 = pro
-// Codex: tier 1 = pro, tier 2 = everything else
+// Codex: tier 1 = pro/prolite, tier 2 = everything else
 // Gemini: tier 1 = ultra, tier 2 = everything else
 func accountTier(accType AccountType, planType string) int {
 	switch accType {
@@ -412,12 +412,12 @@ func accountTier(accType AccountType, planType string) int {
 			return 2
 		}
 	case AccountTypeCodex:
-		if planType == "pro" {
+		if isCodexProAccessPlan(planType) {
 			return 1
 		}
 		return 2
 	case AccountTypeGemini:
-		if planType == "ultra" {
+		if strings.EqualFold(strings.TrimSpace(planType), "ultra") {
 			return 1
 		}
 		return 2
@@ -425,8 +425,13 @@ func accountTier(accType AccountType, planType string) int {
 	return 2
 }
 
-func isCodexProPlan(planType string) bool {
-	return strings.EqualFold(strings.TrimSpace(planType), "pro")
+func isCodexProAccessPlan(planType string) bool {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "pro", "prolite":
+		return true
+	default:
+		return false
+	}
 }
 
 func accountAllowsClientIPLocked(a *Account, clientIP string) bool {
@@ -570,7 +575,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
 				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan) && accountAllowsClientIPLocked(a, clientIP)
-				if ok && a.Type == AccountTypeCodex && !isCodexProPlan(a.PlanType) {
+				if ok && a.Type == AccountTypeCodex && !isCodexProAccessPlan(a.PlanType) {
 					ok = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from non-pro codex account %s", conversationID, id)
@@ -811,6 +816,9 @@ func planMatchesRequired(planType, requiredPlan string) bool {
 	required := strings.ToLower(strings.TrimSpace(requiredPlan))
 	if required == requiredPlanClaudePremium {
 		return strings.HasPrefix(plan, "max") || strings.HasPrefix(plan, "team")
+	}
+	if required == "pro" {
+		return isCodexProAccessPlan(plan)
 	}
 	return plan == required
 }
