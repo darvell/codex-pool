@@ -1025,10 +1025,16 @@ func stripCodexModelSuffixes(model string) (base string, reasoningEffort string,
 			break
 		}
 	}
-	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh"} {
+	// Order matters: longer suffixes first so -xhigh wins over -high, etc.
+	// GPT-5.6 adds max (above xhigh). ultra is multi-agent product mode;
+	// map suffix to max for single-request routing through the pool.
+	for _, effort := range []string{"xhigh", "minimal", "medium", "ultra", "none", "high", "max", "low"} {
 		suffix := "-" + effort
 		if strings.HasSuffix(lower, suffix) {
 			reasoningEffort = effort
+			if effort == "ultra" {
+				reasoningEffort = "max"
+			}
 			base = strings.TrimSpace(base[:len(base)-len(suffix)])
 			break
 		}

@@ -1040,6 +1040,21 @@ func TestStripCodexModelSuffixes(t *testing.T) {
 	if base != "gpt-5.4-mini" || effort != "high" || tier != "priority" {
 		t.Fatalf("suffix parse = %q %q %q", base, effort, tier)
 	}
+
+	base, effort, tier = stripCodexModelSuffixes("gpt-5.6-sol-max")
+	if base != "gpt-5.6-sol" || effort != "max" || tier != "" {
+		t.Fatalf("max suffix parse = %q %q %q", base, effort, tier)
+	}
+
+	base, effort, tier = stripCodexModelSuffixes("gpt-5.6-ultra")
+	if base != "gpt-5.6" || effort != "max" || tier != "" {
+		t.Fatalf("ultra suffix parse = %q %q %q want gpt-5.6/max", base, effort, tier)
+	}
+
+	base, effort, tier = stripCodexModelSuffixes("gpt-5.6-sol-xhigh")
+	if base != "gpt-5.6-sol" || effort != "xhigh" || tier != "" {
+		t.Fatalf("xhigh suffix parse = %q %q %q", base, effort, tier)
+	}
 }
 
 func TestEnsureCodexResponsesCompactBodyDoesNotForceStream(t *testing.T) {
