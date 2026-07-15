@@ -1608,6 +1608,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, "unauthorized: valid pool token required", http.StatusUnauthorized)
 		return
 	}
+	if r.Method == http.MethodGet && normalizeNoopPath(r.URL.Path) == "/api/pool/models" {
+		servePoolModels(w)
+		return
+	}
 	originID := hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode))
 	originIP := getClientIP(r)
 	if h.store != nil && originID != "" && originIP != "" {
