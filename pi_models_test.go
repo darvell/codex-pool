@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,13 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 				)
 			}
 		}
+		if model.ID == "gpt-5.6" || model.ID == "gpt-5.6-sol" || model.ID == "gpt-5.6-terra" || model.ID == "gpt-5.6-luna" {
+			if model.ThinkingLevelMap["xhigh"] != "xhigh" || model.ThinkingLevelMap["max"] != "max" {
+				t.Fatalf("codex model %q thinking levels = %#v, want xhigh+max", model.ID, model.ThinkingLevelMap)
+			}
+		} else if len(model.ThinkingLevelMap) != 0 {
+			t.Fatalf("codex model %q unexpectedly advertises extended thinking levels: %#v", model.ID, model.ThinkingLevelMap)
+		}
 	}
 
 	claude := cfg.Providers["claude"]
@@ -112,6 +120,20 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	for _, model := range claude.Models {
 		if _, ok := needClaudeIDs[model.ID]; ok {
 			needClaudeIDs[model.ID] = true
+		}
+		if model.ID == "claude-haiku-4-5" {
+			if model.Compat != nil || len(model.ThinkingLevelMap) != 0 {
+				t.Fatalf("haiku unexpectedly advertises adaptive thinking: %#v %#v", model.Compat, model.ThinkingLevelMap)
+			}
+			continue
+		}
+		if model.Compat == nil || !model.Compat.ForceAdaptiveThinking || model.ThinkingLevelMap["max"] != "max" {
+			t.Fatalf("claude model %q missing adaptive max metadata: %#v %#v", model.ID, model.Compat, model.ThinkingLevelMap)
+		}
+		canonical := ccCanonicalClaudeModel(model.ID)
+		wantXHigh := strings.Contains(canonical, "sonnet-5") || strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5")
+		if gotXHigh := model.ThinkingLevelMap["xhigh"] == "xhigh"; gotXHigh != wantXHigh {
+			t.Fatalf("claude model %q xhigh support = %v, want %v", model.ID, gotXHigh, wantXHigh)
 		}
 	}
 	for id, found := range needClaudeIDs {
