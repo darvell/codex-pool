@@ -170,6 +170,9 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 	case strings.HasPrefix(path, "/config/pi/"):
 		configType = "pi"
 		token = strings.TrimPrefix(path, "/config/pi/")
+	case strings.HasPrefix(path, "/config/grok/"):
+		configType = "grok"
+		token = strings.TrimPrefix(path, "/config/grok/")
 	default:
 		http.NotFound(w, r)
 		return
@@ -243,5 +246,18 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		w.Write(modelsJSON)
+	case "grok":
+		auth, err := generateClaudeAuth(secret, user)
+		if err != nil {
+			respondJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		respondJSON(w, map[string]any{
+			"api_key":        auth.AccessToken,
+			"base_url":       strings.TrimRight(h.getEffectivePublicURL(r), "/") + "/v1",
+			"model":          "grok-build",
+			"api_backend":    "responses",
+			"context_window": 512000,
+		})
 	}
 }

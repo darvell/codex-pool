@@ -71,131 +71,43 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				BaseURL: baseURL + "/backend-api",
 				APIKey:  codexAPIKey,
 				API:     "openai-codex-responses",
-				Models: []piModelConfig{
-					piCodexModel("gpt-5.6", "GPT-5.6", 372000, 128000),
-					piCodexModel("gpt-5.6-sol", "GPT-5.6 Sol", 372000, 128000),
-					piCodexModel("gpt-5.6-terra", "GPT-5.6 Terra", 372000, 128000),
-					piCodexModel("gpt-5.6-luna", "GPT-5.6 Luna", 372000, 128000),
-					piCodexModel("gpt-5.5", "GPT-5.5", 272000, 128000),
-					piCodexModel("gpt-5.4", "GPT-5.4", 1000000, 128000),
-					piCodexModel("gpt-5.3-codex", "GPT-5.3 Codex", 272000, 128000),
-					piCodexModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, 128000),
-					piCodexModel("gpt-5.2-codex", "GPT-5.2 Codex", 272000, 128000),
-					piCodexModel("gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, 128000),
-					piCodexModel("gpt-5.2", "GPT-5.2", 272000, 128000),
-					piCodexModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, 128000),
-				},
+				Models:  piModelsForProvider(AccountTypeCodex),
 			},
 			"claude": {
 				BaseURL: baseURL,
 				APIKey:  anthropicAPIKey,
 				API:     "anthropic-messages",
-				Models: []piModelConfig{
-					piClaudeAlias("claude-haiku-4-5", "Claude Haiku 4.5", 200000, 64000, 1, 5, 0.1, 1.25),
-					piClaudeAlias("claude-sonnet-5", "Claude Sonnet 5", 1000000, 64000, 3, 15, 0.3, 3.75),
-					piClaudeAlias("claude-sonnet-5 [1m]", "Claude Sonnet 5 [1m]", 1000000, 64000, 3, 15, 0.3, 3.75),
-					piClaudeAlias("claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, 64000, 3, 15, 0.3, 3.75),
-					piClaudeAlias("claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, 64000, 3, 15, 0.3, 3.75),
-					piClaudeAlias("claude-fable-5", "Claude Fable 5", 1000000, 128000, 5, 25, 0.5, 6.25),
-					piClaudeAlias("claude-opus-4-7", "Claude Opus 4.7", 1000000, 128000, 5, 25, 0.5, 6.25),
-					piClaudeAlias("claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, 128000, 5, 25, 0.5, 6.25),
-					piClaudeAlias("claude-opus-4-6", "Claude Opus 4.6", 1000000, 128000, 5, 25, 0.5, 6.25),
-					piClaudeAlias("claude-opus-4-6 [1m]", "Claude Opus 4.6 [1m]", 1000000, 128000, 5, 25, 0.5, 6.25),
-				},
+				Models:  piModelsForProvider(AccountTypeClaude),
+			},
+			"antigravity": {
+				BaseURL: baseURL,
+				APIKey:  codexAPIKey,
+				API:     "openai-completions",
+				Models:  antigravityPiModels(),
 			},
 			"kimi": {
 				BaseURL: baseURL,
 				APIKey:  anthropicAPIKey,
 				API:     "anthropic-messages",
-				Models: []piModelConfig{
-					{
-						ID:            "k2p5",
-						Name:          "Kimi K2.5",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 262144,
-						MaxTokens:     32768,
-						Cost:          &piModelCost{},
-					},
-					{
-						ID:            "kimi-k2-thinking",
-						Name:          "Kimi K2 Thinking",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 262144,
-						MaxTokens:     32768,
-						Cost:          &piModelCost{},
-					},
-				},
+				Models:  piModelsForProvider(AccountTypeKimi),
 			},
 			"minimax": {
 				BaseURL: baseURL,
 				APIKey:  anthropicAPIKey,
 				API:     "anthropic-messages",
-				Models: []piModelConfig{
-					{
-						ID:            "MiniMax-M3",
-						Name:          "MiniMax M3",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 1000000,
-						MaxTokens:     131072,
-						Cost:          &piModelCost{},
-					},
-					{
-						ID:            "MiniMax-M2.7",
-						Name:          "MiniMax M2.7",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 204800,
-						MaxTokens:     131072,
-						Cost: &piModelCost{
-							Input:      0.3,
-							Output:     1.2,
-							CacheRead:  0.06,
-							CacheWrite: 0.375,
-						},
-					},
-					{
-						ID:            "MiniMax-M2.7-highspeed",
-						Name:          "MiniMax M2.7 Highspeed",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 204800,
-						MaxTokens:     131072,
-						Cost: &piModelCost{
-							Input:      0.6,
-							Output:     2.4,
-							CacheRead:  0.06,
-							CacheWrite: 0.375,
-						},
-					},
-				},
+				Models:  piModelsForProvider(AccountTypeMinimax),
 			},
 			"zai": {
 				BaseURL: baseURL,
 				APIKey:  anthropicAPIKey,
 				API:     "anthropic-messages",
-				Models: []piModelConfig{
-					{
-						ID:            "glm-5.1",
-						Name:          "GLM 5.1",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 128000,
-						MaxTokens:     65536,
-						Cost:          &piModelCost{},
-					},
-					{
-						ID:            "glm-5.2",
-						Name:          "GLM 5.2",
-						Reasoning:     boolPtr(true),
-						Input:         []string{"text", "image"},
-						ContextWindow: 1000000,
-						MaxTokens:     65536,
-						Cost:          &piModelCost{},
-					},
-				},
+				Models:  piModelsForProvider(AccountTypeZAI),
+			},
+			"xiaomi": {
+				BaseURL: baseURL,
+				APIKey:  anthropicAPIKey,
+				API:     "anthropic-messages",
+				Models:  piModelsForProvider(AccountTypeXiaomi),
 			},
 			"grok": {
 				BaseURL: baseURL,
@@ -212,8 +124,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
 	settings := cuteCodeSettings{
-		// gpt-5.6 is a pool alias for gpt-5.6-sol (default 5.6 series variant).
-		Model:            "gpt-5.6",
+		Model:            "gpt-5.6-sol",
 		OpenAIBaseURL:    baseURL,
 		OpenAIAPIKey:     apiKey,
 		AnthropicBaseURL: baseURL,
@@ -221,42 +132,35 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 		CodexPool: cuteCodePoolConfig{
 			URL: baseURL,
 		},
-		CustomModels: []cuteCodeModelConfig{
-			// apiKey is required alongside baseUrl: cute refuses custom endpoints that would
-			// otherwise inherit first-party Anthropic/OpenAI credentials by accident.
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6", "GPT-5.6", 372000, "Default GPT/Codex pool model (alias for gpt-5.6-sol)"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-sol", "GPT-5.6 Sol", 372000, "Default GPT-5.6 coding variant"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-terra", "GPT-5.6 Terra", 372000, "GPT-5.6 Terra variant"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.6-luna", "GPT-5.6 Luna", 372000, "GPT-5.6 Luna variant"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.5", "GPT-5.5", 272000, "GPT-5.5 coding model"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.4", "GPT-5.4", 1000000, "Long-context GPT model for remote compaction and large tasks"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.3-codex", "GPT-5.3 Codex", 272000, "Codex reasoning model"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, "Fast Codex model"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.2-codex", "GPT-5.2 Codex", 272000, "Codex reasoning model"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, "High-capability Codex model"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.2", "GPT-5.2", 272000, "GPT reasoning model"),
-			cuteOpenAIModel(baseURL, apiKey, "gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, "Small Codex model"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-haiku-4-5", "Claude Haiku 4.5", 200000, "Fast Claude model through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-5", "Claude Sonnet 5", 1000000, "Claude Sonnet through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-5 [1m]", "Claude Sonnet 5 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-4-6", "Claude Sonnet 4.6", 1000000, "Claude Sonnet through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-sonnet-4-6 [1m]", "Claude Sonnet 4.6 [1m]", 1000000, "Claude Sonnet with 1m context routing"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-fable-5", "Claude Fable 5", 1000000, "Claude Fable through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-7", "Claude Opus 4.7", 1000000, "Claude Opus through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-7 [1m]", "Claude Opus 4.7 [1m]", 1000000, "Claude Opus with 1m context routing"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-6", "Claude Opus 4.6", 1000000, "Claude Opus through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "claude-opus-4-6 [1m]", "Claude Opus 4.6 [1m]", 1000000, "Claude Opus with 1m context routing"),
-			cuteAnthropicModel(baseURL, apiKey, "k2p5", "Kimi K2.5", 262144, "Kimi model routed through Anthropic-compatible pool API"),
-			cuteAnthropicModel(baseURL, apiKey, "kimi-k2-thinking", "Kimi K2 Thinking", 262144, "Kimi thinking model routed through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "MiniMax-M3", "MiniMax M3", 1000000, "1M-context MiniMax model routed through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "MiniMax-M2.7", "MiniMax M2.7", 204800, "MiniMax model routed through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, "High-speed MiniMax route through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "glm-5.1", "GLM 5.1", 128000, "GLM model routed through the pool"),
-			cuteAnthropicModel(baseURL, apiKey, "glm-5.2", "GLM 5.2", 1000000, "1M-context GLM model routed through the pool"),
-		},
+	}
+	for _, accountType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi} {
+		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType)...)
 	}
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
+	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey)...)
 	return json.MarshalIndent(settings, "", "  ")
+}
+
+func antigravityPiModels() []piModelConfig {
+	models := antigravityModels.Models(nil)
+	result := make([]piModelConfig, 0, len(models))
+	for _, model := range models {
+		input := []string{"text"}
+		if model.SupportsImages {
+			input = append(input, "image")
+		}
+		result = append(result, piModelConfig{ID: "antigravity/" + model.ID, Name: model.DisplayName, Reasoning: boolPtr(model.SupportsThinking), Input: input, ContextWindow: model.MaxTokens, MaxTokens: model.MaxOutputTokens, Cost: &piModelCost{}})
+	}
+	return result
+}
+
+func antigravityCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
+	models := antigravityModels.Models(nil)
+	result := make([]cuteCodeModelConfig, 0, len(models))
+	for _, model := range models {
+		result = append(result, cuteOpenAIModel(baseURL, apiKey, "antigravity/"+model.ID, model.DisplayName, model.MaxTokens, "Google Antigravity"))
+	}
+	return result
 }
 
 func grokPiModels() []piModelConfig {
@@ -270,9 +174,30 @@ func grokPiModels() []piModelConfig {
 func grokCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 	models := make([]cuteCodeModelConfig, 0, len(grokModelCatalog))
 	for _, model := range grokModelCatalog {
-		models = append(models, cuteOpenAIModel(baseURL, apiKey, model.ID, model.Name, model.ContextWindow, "Grok model routed through the pool"))
+		models = append(models, cuteOpenAIModel(baseURL, apiKey, model.ID, model.Name, model.ContextWindow, ""))
 	}
 	return models
+}
+
+func cuteModelsForProvider(baseURL, apiKey string, accountType AccountType) []cuteCodeModelConfig {
+	models := modelsForProvider(accountType)
+	result := make([]cuteCodeModelConfig, 0, len(models))
+	for _, model := range models {
+		protocol := "anthropic"
+		if accountType == AccountTypeCodex {
+			protocol = "openai"
+		}
+		result = append(result, cuteCodeModelConfig{
+			ID:            model.ID,
+			Name:          model.DisplayName,
+			Protocol:      protocol,
+			BaseURL:       baseURL,
+			APIKey:        apiKey,
+			ContextWindow: model.ContextWindow,
+			Description:   model.Description,
+		})
+	}
+	return result
 }
 
 func cuteOpenAIModel(baseURL, apiKey, id, name string, contextWindow int, description string) cuteCodeModelConfig {
@@ -347,4 +272,41 @@ func piClaudeAlias(id, name string, contextWindow, maxTokens int, inputCost, out
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+func piModelsForProvider(accountType AccountType) []piModelConfig {
+	models := modelsForProvider(accountType)
+	result := make([]piModelConfig, 0, len(models))
+	for _, model := range models {
+		config := piModelConfig{
+			ID:            model.ID,
+			Name:          model.DisplayName,
+			Reasoning:     boolPtr(model.Reasoning),
+			Input:         append([]string(nil), model.Input...),
+			ContextWindow: model.ContextWindow,
+			MaxTokens:     model.MaxTokens,
+			Cost:          cloneModelCost(model.Cost),
+		}
+		if accountType == AccountTypeCodex && strings.HasPrefix(model.ID, "gpt-5.6-") {
+			config.ThinkingLevelMap = map[string]string{"xhigh": "xhigh", "max": "max"}
+		}
+		if accountType == AccountTypeClaude && ccModelSupportsEffort(model.ID) {
+			config.ThinkingLevelMap = map[string]string{"max": "max"}
+			config.Compat = &piModelCompat{ForceAdaptiveThinking: true}
+			canonical := ccCanonicalClaudeModel(model.ID)
+			if strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
+				config.ThinkingLevelMap["xhigh"] = "xhigh"
+			}
+		}
+		result = append(result, config)
+	}
+	return result
+}
+
+func cloneModelCost(cost *piModelCost) *piModelCost {
+	if cost == nil {
+		return &piModelCost{}
+	}
+	cloned := *cost
+	return &cloned
 }

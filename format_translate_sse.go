@@ -22,20 +22,20 @@ type sseTranslateWriter struct {
 }
 
 type streamTranslationState struct {
-	messageStarted     bool
-	contentBlockIndex  int
-	toolCallIndex      int
-	currentToolID      string
-	currentToolName    string
-	sentRole           bool
-	sentThinking       bool // whether we've emitted a thinking content_block_start
-	sentText           bool // whether we've emitted a text content_block_start
-	finishReason       string
-	model              string
-	id                 string
-	inputTokens        int64
-	outputTokens       int64
-	cachedInputTokens  int64
+	messageStarted    bool
+	contentBlockIndex int
+	toolCallIndex     int
+	currentToolID     string
+	currentToolName   string
+	sentRole          bool
+	sentThinking      bool // whether we've emitted a thinking content_block_start
+	sentText          bool // whether we've emitted a text content_block_start
+	finishReason      string
+	model             string
+	id                string
+	inputTokens       int64
+	outputTokens      int64
+	cachedInputTokens int64
 }
 
 func (sw *sseTranslateWriter) Write(p []byte) (int, error) {
@@ -68,22 +68,7 @@ func (sw *sseTranslateWriter) scanAndTranslate() {
 }
 
 func (sw *sseTranslateWriter) processEvent(event []byte) {
-	// Parse SSE event: look for "event:" and "data:" lines
-	var eventType string
-	var data []byte
-
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("event: ")) {
-			eventType = string(bytes.TrimSpace(line[7:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 
 	// Forward original data to usage callback
 	if len(data) > 0 && sw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {

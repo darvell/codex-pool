@@ -24,12 +24,16 @@ func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 	type row struct {
 		ID                      string      `json:"id"`
+		PublicID                string      `json:"public_id"`
 		Type                    AccountType `json:"type"`
 		PlanType                string      `json:"plan_type,omitempty"`
 		AccountID               string      `json:"account_id,omitempty"`
 		IDTokenChatGPTAccountID string      `json:"id_token_chatgpt_account_id,omitempty"`
 		Disabled                bool        `json:"disabled"`
 		Dead                    bool        `json:"dead"`
+		NeedsVerification       bool        `json:"needs_verification,omitempty"`
+		VerificationURL         string      `json:"verification_url,omitempty"`
+		HealthError             string      `json:"health_error,omitempty"`
 		CyberAccess             bool        `json:"cyber_access,omitempty"`
 		Inflight                int64       `json:"inflight"`
 		ExpiresAt               time.Time   `json:"expires_at,omitempty"`
@@ -51,6 +55,9 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		idTokID := a.IDTokenChatGPTAccountID
 		disabled := a.Disabled
 		dead := a.Dead
+		needsVerification := a.NeedsVerification
+		verificationURL := a.VerificationURL
+		healthError := a.HealthError
 		cyberAccess := a.CyberAccess
 		expiresAt := a.ExpiresAt
 		lastRefresh := a.LastRefresh
@@ -64,12 +71,16 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 
 		out = append(out, row{
 			ID:                      a.ID,
+			PublicID:                hashAccountID(a.ID),
 			Type:                    a.Type,
 			PlanType:                planType,
 			AccountID:               accountID,
 			IDTokenChatGPTAccountID: idTokID,
 			Disabled:                disabled,
 			Dead:                    dead,
+			NeedsVerification:       needsVerification,
+			VerificationURL:         verificationURL,
+			HealthError:             healthError,
 			CyberAccess:             cyberAccess,
 			Inflight:                atomic.LoadInt64(&a.Inflight),
 			ExpiresAt:               expiresAt,
@@ -101,12 +112,19 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 }
 
 func (h *proxyHandler) reloadAccounts() {
+	// A usage poll works on account pointers copied from the pool. Serialize reloads
+	// with the poller so a completed fetch cannot update an account after it has
+	// been replaced, then carry the latest snapshot onto the reloaded account.
+	h.usagePollMu.Lock()
+	defer h.usagePollMu.Unlock()
+
 	log.Printf("reloading pool from %s", h.cfg.poolDir)
 	accs, err := loadPool(h.cfg.poolDir, h.registry)
 	if err != nil {
 		log.Printf("load pool: %v", err)
 		return
 	}
+	preserveUsageSnapshots(h.pool.allAccounts(), accs)
 	h.pool.replace(accs)
 	if h.pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", h.cfg.poolDir)
@@ -126,6 +144,67 @@ func (h *proxyHandler) reloadAccounts() {
 			h.pool.mu.RUnlock()
 		}
 	}
+}
+
+func preserveUsageSnapshots(current, loaded []*Account) {
+	byID := make(map[string]*Account, len(current))
+	for _, account := range current {
+		if account != nil {
+			byID[string(account.Type)+"\x00"+account.ID] = account
+		}
+	}
+	for _, account := range loaded {
+		if account == nil {
+			continue
+		}
+		previous := byID[string(account.Type)+"\x00"+account.ID]
+		if previous == nil {
+			continue
+		}
+		previous.mu.Lock()
+		usage := previous.Usage
+		previous.mu.Unlock()
+		account.mu.Lock()
+		account.Usage = mergeUsage(account.Usage, usage)
+		account.mu.Unlock()
+	}
+}
+
+// setAccountDisabled changes whether an account may receive traffic and
+// persists the state in its provider file.
+func (h *proxyHandler) setAccountDisabled(w http.ResponseWriter, accountID string, disabled bool) {
+	h.pool.mu.RLock()
+	var target *Account
+	for _, account := range h.pool.accounts {
+		if account.ID == accountID {
+			target = account
+			break
+		}
+	}
+	h.pool.mu.RUnlock()
+	if target == nil {
+		respondJSONError(w, http.StatusNotFound, "account not found")
+		return
+	}
+
+	target.mu.Lock()
+	previous := target.Disabled
+	target.Disabled = disabled
+	target.mu.Unlock()
+	if err := saveAccount(target); err != nil {
+		target.mu.Lock()
+		target.Disabled = previous
+		target.mu.Unlock()
+		respondJSONError(w, http.StatusInternalServerError, "failed to persist account state")
+		return
+	}
+
+	action := "enabled"
+	if disabled {
+		action = "disabled"
+	}
+	log.Printf("%s account %s", action, accountID)
+	respondJSON(w, map[string]any{"status": "ok", "account": accountID, "disabled": disabled})
 }
 
 // resurrectAccount marks a dead account as alive and resets its penalty.
@@ -392,9 +471,10 @@ func isUsageRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
-	// Handle both paths - Codex CLI uses /api/codex/usage, legacy uses /backend-api/wham/usage
-	return strings.HasPrefix(r.URL.Path, "/backend-api/wham/usage") ||
-		strings.HasPrefix(r.URL.Path, "/api/codex/usage")
+	// Codex CLI uses /api/codex/usage; legacy clients use /backend-api/wham/usage.
+	// Child resources under the legacy path must continue to the upstream API.
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	return path == "/backend-api/wham/usage" || path == "/api/codex/usage"
 }
 
 // isClaudeProfileRequest checks if this is a Claude CLI profile request
@@ -484,27 +564,49 @@ func (h *proxyHandler) handleClaudeUsage(w http.ResponseWriter, r *http.Request)
 	respondJSON(w, resp)
 }
 
+func codexUsageWindowResponse(window *codexUsageWindow, now time.Time) any {
+	if window == nil {
+		return nil
+	}
+	resetAfter := int64(0)
+	resetAt := int64(0)
+	if !window.ResetAt.IsZero() {
+		resetAt = window.ResetAt.Unix()
+		resetAfter = int64(window.ResetAt.Sub(now).Seconds())
+		if resetAfter < 0 {
+			resetAfter = 0
+		}
+	}
+	return map[string]any{
+		"used_percent":         window.UsedPercent * 100,
+		"limit_window_seconds": window.WindowMinutes * 60,
+		"reset_after_seconds":  resetAfter,
+		"reset_at":             resetAt,
+	}
+}
+
 func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string) {
-	snap := h.pool.timeWeightedUsage()
+	now := time.Now()
+	codexSnap := h.pool.timeWeightedUsageByType(AccountTypeCodex)
+	codexSlots := codexUsageSlotsFromSnapshot(codexSnap)
 	poolStats := h.pool.getPoolStats()
+	codexHealthy := 0
+	codexWeeklyUsed := 0.0
+	if poolStats.Providers != nil && poolStats.Providers.Codex != nil {
+		codexHealthy = poolStats.Providers.Codex.HealthyCount
+		codexWeeklyUsed = poolStats.Providers.Codex.Weekly.AvgUsedPct / 100.0
+	}
 
 	resp := map[string]any{
 		"plan_type": "pool", // Indicate this is a pool, not a single account
+		"rate_limit_reset_credits": map[string]any{
+			"available_count": 0,
+		},
 		"rate_limit": map[string]any{
-			"allowed":       poolStats.HealthyCount > 0,
-			"limit_reached": poolStats.AvgSecondaryUsed > 0.9,
-			"primary_window": map[string]any{
-				"used_percent":         int(snap.PrimaryUsed * 100),
-				"limit_window_seconds": 18000,
-				"reset_after_seconds":  3600,
-				"reset_at":             time.Now().Add(3600 * time.Second).Unix(),
-			},
-			"secondary_window": map[string]any{
-				"used_percent":         int(snap.SecondaryUsed * 100),
-				"limit_window_seconds": 604800,
-				"reset_after_seconds":  86400,
-				"reset_at":             time.Now().Add(24 * time.Hour).Unix(),
-			},
+			"allowed":          codexHealthy > 0,
+			"limit_reached":    codexWeeklyUsed > 0.9,
+			"primary_window":   codexUsageWindowResponse(codexSlots.Primary, now),
+			"secondary_window": codexUsageWindowResponse(codexSlots.Secondary, now),
 		},
 		// Pool-specific stats
 		"pool": map[string]any{

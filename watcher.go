@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -43,6 +45,18 @@ func newPoolWatcher(poolDir, configPath string, handler *proxyHandler) (*poolWat
 			return nil, err
 		}
 		log.Printf("watching pool directory: %s", poolDir)
+		entries, readErr := os.ReadDir(poolDir)
+		if readErr == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				subdir := filepath.Join(poolDir, entry.Name())
+				if addErr := w.Add(subdir); addErr != nil {
+					log.Printf("warning: cannot watch provider directory %s: %v", subdir, addErr)
+				}
+			}
+		}
 	}
 
 	// Watch config file for setting changes.
@@ -110,8 +124,9 @@ func (pw *poolWatcher) reloadPool() {
 		counts[a.Type]++
 	}
 	pw.handler.pool.mu.RUnlock()
-	log.Printf("hot-reload complete: codex=%d claude=%d gemini=%d kimi=%d minimax=%d zai=%d xiaomi=%d grok=%d",
+	log.Printf("hot-reload complete: codex=%d claude=%d gemini=%d antigravity=%d kimi=%d minimax=%d zai=%d xiaomi=%d grok=%d",
 		counts[AccountTypeCodex], counts[AccountTypeClaude], counts[AccountTypeGemini],
+		counts[AccountTypeAntigravity],
 		counts[AccountTypeKimi], counts[AccountTypeMinimax], counts[AccountTypeZAI], counts[AccountTypeXiaomi], counts[AccountTypeGrok])
 }
 

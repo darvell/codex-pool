@@ -89,6 +89,37 @@ func TestCandidateSkipsDeadOrDisabled(t *testing.T) {
 	}
 }
 
+func TestCandidateSkipsRateLimitedCodexAccount(t *testing.T) {
+	rateLimited := &Account{
+		ID:             "limited",
+		Type:           AccountTypeCodex,
+		PlanType:       "pro",
+		RateLimitUntil: time.Now().Add(time.Hour),
+	}
+	healthy := &Account{ID: "healthy", Type: AccountTypeCodex, PlanType: "pro"}
+	pool := newPoolState([]*Account{rateLimited, healthy}, false)
+
+	if got := pool.candidate("", nil, AccountTypeCodex, "", ""); got != healthy {
+		t.Fatalf("candidate = %v, want healthy account", got)
+	}
+}
+
+func TestCandidateUnpinsRateLimitedCodexAccount(t *testing.T) {
+	rateLimited := &Account{
+		ID:             "limited",
+		Type:           AccountTypeCodex,
+		PlanType:       "pro",
+		RateLimitUntil: time.Now().Add(time.Hour),
+	}
+	healthy := &Account{ID: "healthy", Type: AccountTypeCodex, PlanType: "pro"}
+	pool := newPoolState([]*Account{rateLimited, healthy}, false)
+	pool.pin("conversation", rateLimited.ID)
+
+	if got := pool.candidate("conversation", nil, AccountTypeCodex, "", ""); got != healthy {
+		t.Fatalf("candidate = %v, want healthy account", got)
+	}
+}
+
 func TestCandidateRequiredPlanFiltersAccounts(t *testing.T) {
 	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
 	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
@@ -234,6 +265,39 @@ func TestCandidateWithCyberAccessReturnsExpiredAccount(t *testing.T) {
 	got := p.candidateWithCyberAccess(nil, AccountTypeCodex, "", "")
 	if got == nil || got.ID != "cyber-expired" {
 		t.Fatalf("expected expired cyber account to still be picked, got %+v", got)
+	}
+}
+
+func TestCandidateDoesNotPileTrafficOntoHighWeeklyProLiteAccount(t *testing.T) {
+	now := time.Now()
+	proLite := &Account{
+		ID:       "prolite",
+		Type:     AccountTypeCodex,
+		PlanType: "prolite",
+		Usage: UsageSnapshot{
+			SecondaryUsedPercent:   0.82,
+			SecondaryWindowMinutes: codexWeeklyWindowMinutes,
+			SecondaryResetAt:       now.Add(6 * 24 * time.Hour),
+		},
+	}
+	pro := &Account{
+		ID:       "pro",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			SecondaryUsedPercent:   0.02,
+			SecondaryWindowMinutes: codexWeeklyWindowMinutes,
+			SecondaryResetAt:       now.Add(6 * 24 * time.Hour),
+		},
+	}
+	pool := newPoolState([]*Account{proLite, pro}, false)
+
+	got := pool.candidate("", nil, AccountTypeCodex, "", "")
+	if got == nil {
+		t.Fatal("expected a Codex candidate")
+	}
+	if got.ID != "pro" {
+		t.Fatalf("candidate = %q, want lower-weekly-usage pro account", got.ID)
 	}
 }
 

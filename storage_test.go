@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -126,11 +127,13 @@ func TestUsageStorePrune(t *testing.T) {
 	defer s.Close()
 
 	old := time.Now().Add(-48 * time.Hour)
-	s.record(RequestUsage{AccountID: "acct", BillableTokens: 1, Timestamp: old})
-	s.record(RequestUsage{AccountID: "acct", BillableTokens: 1, Timestamp: time.Now()})
+	// The recent "aaa" range sorts before the stale "zzz" range. Pruning must
+	// not stop when it encounters the first recent account.
+	s.record(RequestUsage{AccountID: "aaa", BillableTokens: 1, Timestamp: time.Now()})
+	s.record(RequestUsage{AccountID: "zzz", BillableTokens: 1, Timestamp: old})
 	// Force prune
 	s.nextPrune = time.Now().Add(-time.Hour)
-	_ = s.record(RequestUsage{AccountID: "acct", BillableTokens: 1, Timestamp: time.Now()})
+	_ = s.record(RequestUsage{AccountID: "aaa", BillableTokens: 1, Timestamp: time.Now()})
 
 	err = s.db.View(func(tx *bbolt.Tx) error {
 		c := tx.Bucket([]byte(bucketUsageRequests)).Cursor()
@@ -143,5 +146,60 @@ func TestUsageStorePrune(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("view: %v", err)
+	}
+}
+
+func TestUsageStoreBackfillsLegacyOriginWeeklyIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := bbolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := RequestUsage{
+		Timestamp:         time.Now().UTC().Add(-24 * time.Hour),
+		AccountID:         "legacy-account",
+		AccountType:       AccountTypeCodex,
+		OriginID:          "legacy-origin",
+		InputTokens:       120,
+		CachedInputTokens: 80,
+		OutputTokens:      15,
+		BillableTokens:    55,
+	}
+	encoded, err := json.Marshal(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(bucketUsageRequests))
+		if err != nil {
+			return err
+		}
+		key := fmt.Sprintf("%s|%020d|legacy", usage.AccountID, usage.Timestamp.UnixNano())
+		return bucket.Put([]byte(key), encoded)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := newUsageStore(path, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// Serialize behind the startup backfill and return only once its marker is
+	// durable. This keeps the test deterministic without sleeps.
+	store.backfillOriginWeeklyUsage(time.Now().UTC())
+
+	rows, err := store.getOriginWeeklyUsage(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("weekly rows = %d, want 1", len(rows))
+	}
+	if rows[0].OriginID != usage.OriginID || rows[0].AccountID != hashAccountID(usage.AccountID) || rows[0].BillableTokens != usage.BillableTokens {
+		t.Fatalf("weekly row = %+v", rows[0])
 	}
 }

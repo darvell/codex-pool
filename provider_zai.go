@@ -121,19 +121,14 @@ func (p *ZAIProvider) DetectsSSE(path string, contentType string) bool {
 	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }
 
-var zaiModels = map[string]string{
-	"glm-5.1": "glm-5.1",
-	"glm-5.2": "glm-5.2",
-}
-
 func isZAIModel(model string) bool {
-	_, ok := zaiModels[strings.ToLower(strings.TrimSpace(model))]
+	_, ok := modelForProvider(AccountTypeZAI, model)
 	return ok
 }
 
 func zaiCanonicalModel(model string) string {
-	if canonical, ok := zaiModels[strings.ToLower(strings.TrimSpace(model))]; ok {
-		return canonical
+	if found, ok := modelForProvider(AccountTypeZAI, model); ok {
+		return found.ID
 	}
 	return model
 }

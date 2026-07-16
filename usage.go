@@ -15,6 +15,197 @@ func clampNonNegative(n int64) int64 {
 	return n
 }
 
+const (
+	codexFiveHourWindowMinutes = 5 * 60
+	codexWeeklyWindowMinutes   = 7 * 24 * 60
+)
+
+type codexUsageWindow struct {
+	UsedPercent   float64
+	WindowMinutes int
+	ResetAt       time.Time
+}
+
+type codexUsageSlots struct {
+	Primary   *codexUsageWindow
+	Secondary *codexUsageWindow
+}
+
+type codexWindowKind int
+
+const (
+	codexWindowUnknown codexWindowKind = iota
+	codexWindowFiveHour
+	codexWindowWeekly
+)
+
+func parseCodexRateLimitMap(rateLimit map[string]any, now time.Time, source string) (UsageSnapshot, bool) {
+	if rateLimit == nil {
+		return UsageSnapshot{}, false
+	}
+	primary := codexUsageWindowFromMap(firstMap(rateLimit, "primary_window", "primary"))
+	secondary := codexUsageWindowFromMap(firstMap(rateLimit, "secondary_window", "secondary"))
+	return normalizeCodexUsageWindows(primary, secondary, now, source)
+}
+
+func firstMap(m map[string]any, keys ...string) map[string]any {
+	for _, key := range keys {
+		if value, ok := m[key].(map[string]any); ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func codexUsageWindowFromMap(m map[string]any) *codexUsageWindow {
+	if m == nil {
+		return nil
+	}
+	windowMinutes := int(readFloat64(m, "window_minutes"))
+	if windowMinutes == 0 {
+		windowMinutes = int(readFloat64(m, "limit_window_minutes"))
+	}
+	if windowMinutes == 0 {
+		windowSeconds := readFloat64(m, "limit_window_seconds")
+		if windowSeconds == 0 {
+			windowSeconds = readFloat64(m, "window_seconds")
+		}
+		if windowSeconds > 0 {
+			windowMinutes = int(windowSeconds / 60)
+		}
+	}
+
+	window := &codexUsageWindow{
+		UsedPercent:   readFloat64(m, "used_percent") / 100.0,
+		WindowMinutes: windowMinutes,
+	}
+	if resetAt := int64(readFloat64(m, "reset_at")); resetAt > 0 {
+		window.ResetAt = time.Unix(resetAt, 0)
+	}
+	return window
+}
+
+func normalizeCodexUsageWindows(primary, secondary *codexUsageWindow, now time.Time, source string) (UsageSnapshot, bool) {
+	if primary == nil && secondary == nil {
+		return UsageSnapshot{}, false
+	}
+
+	snap := UsageSnapshot{
+		RetrievedAt:  now,
+		Source:       source,
+		primarySet:   true,
+		secondarySet: true,
+	}
+	primaryFallback := codexWindowUnknown
+	secondaryFallback := codexWindowUnknown
+	if primary != nil && secondary != nil {
+		// When both legacy slots are present their ordering is unambiguous even if
+		// an older event omitted durations.
+		primaryFallback = codexWindowFiveHour
+		secondaryFallback = codexWindowWeekly
+	}
+	assigned := assignCodexUsageWindow(&snap, primary, primaryFallback)
+	assigned = assignCodexUsageWindow(&snap, secondary, secondaryFallback) || assigned
+	if !assigned {
+		return UsageSnapshot{}, false
+	}
+	return snap, true
+}
+
+func assignCodexUsageWindow(snap *UsageSnapshot, window *codexUsageWindow, fallback codexWindowKind) bool {
+	if snap == nil || window == nil {
+		return false
+	}
+	kind := classifyCodexUsageWindow(window.WindowMinutes)
+	if kind == codexWindowUnknown {
+		kind = fallback
+	}
+	switch kind {
+	case codexWindowFiveHour:
+		snap.PrimaryUsed = window.UsedPercent
+		snap.PrimaryUsedPercent = window.UsedPercent
+		snap.PrimaryWindowMinutes = window.WindowMinutes
+		snap.PrimaryResetAt = window.ResetAt
+		return true
+	case codexWindowWeekly:
+		snap.SecondaryUsed = window.UsedPercent
+		snap.SecondaryUsedPercent = window.UsedPercent
+		snap.SecondaryWindowMinutes = window.WindowMinutes
+		snap.SecondaryResetAt = window.ResetAt
+		return true
+	default:
+		return false
+	}
+}
+
+func classifyCodexUsageWindow(windowMinutes int) codexWindowKind {
+	switch {
+	case windowMinutes >= 4*60 && windowMinutes <= 6*60:
+		return codexWindowFiveHour
+	case windowMinutes >= 6*24*60 && windowMinutes <= 8*24*60:
+		return codexWindowWeekly
+	default:
+		return codexWindowUnknown
+	}
+}
+
+func codexUsageSlotsFromSnapshot(snap UsageSnapshot) codexUsageSlots {
+	var windows []codexUsageWindow
+	if usagePrimaryWindowAvailable(snap) {
+		minutes := snap.PrimaryWindowMinutes
+		if minutes == 0 {
+			minutes = codexFiveHourWindowMinutes
+		}
+		windows = append(windows, codexUsageWindow{
+			UsedPercent:   usagePrimaryUsed(snap),
+			WindowMinutes: minutes,
+			ResetAt:       snap.PrimaryResetAt,
+		})
+	}
+	if usageSecondaryWindowAvailable(snap) {
+		minutes := snap.SecondaryWindowMinutes
+		if minutes == 0 {
+			minutes = codexWeeklyWindowMinutes
+		}
+		windows = append(windows, codexUsageWindow{
+			UsedPercent:   usageSecondaryUsed(snap),
+			WindowMinutes: minutes,
+			ResetAt:       snap.SecondaryResetAt,
+		})
+	}
+
+	var slots codexUsageSlots
+	if len(windows) > 0 {
+		slots.Primary = &windows[0]
+	}
+	if len(windows) > 1 {
+		slots.Secondary = &windows[1]
+	}
+	return slots
+}
+
+func usagePrimaryUsed(snap UsageSnapshot) float64 {
+	if snap.PrimaryUsedPercent != 0 {
+		return snap.PrimaryUsedPercent
+	}
+	return snap.PrimaryUsed
+}
+
+func usageSecondaryUsed(snap UsageSnapshot) float64 {
+	if snap.SecondaryUsedPercent != 0 {
+		return snap.SecondaryUsedPercent
+	}
+	return snap.SecondaryUsed
+}
+
+func usagePrimaryWindowAvailable(snap UsageSnapshot) bool {
+	return snap.PrimaryWindowMinutes > 0 || !snap.PrimaryResetAt.IsZero() || usagePrimaryUsed(snap) > 0
+}
+
+func usageSecondaryWindowAvailable(snap UsageSnapshot) bool {
+	return snap.SecondaryWindowMinutes > 0 || !snap.SecondaryResetAt.IsZero() || usageSecondaryUsed(snap) > 0
+}
+
 // parseTokenCountEvent extracts usage from Codex token_count SSE events.
 // Format: {type: "token_count", info: {last_token_usage: {...}, total_token_usage: {...}}, rate_limits: {...}}
 func parseTokenCountEvent(obj map[string]any) *RequestUsage {
@@ -48,13 +239,12 @@ func parseTokenCountEvent(obj map[string]any) *RequestUsage {
 		return nil
 	}
 
-	// Extract rate limits for capacity tracking
+	// Normalize rate limit windows by duration. OpenAI can place the weekly
+	// window in the upstream primary slot when the five-hour limit is absent.
 	if rl, ok := obj["rate_limits"].(map[string]any); ok {
-		if primary, ok := rl["primary"].(map[string]any); ok {
-			ru.PrimaryUsedPct = readFloat64(primary, "used_percent") / 100.0
-		}
-		if secondary, ok := rl["secondary"].(map[string]any); ok {
-			ru.SecondaryUsedPct = readFloat64(secondary, "used_percent") / 100.0
+		if snap, ok := parseCodexRateLimitMap(rl, ru.Timestamp, "token_count"); ok {
+			ru.PrimaryUsedPct = usagePrimaryUsed(snap)
+			ru.SecondaryUsedPct = usageSecondaryUsed(snap)
 		}
 	}
 

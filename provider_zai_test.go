@@ -9,12 +9,7 @@ import (
 func TestIsZAIModelHandlesCodingPlanModels(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{
-		"glm-5.1",
-		"GLM-5.1",
-		"glm-5.2",
-		"GLM-5.2",
-	} {
+	for _, model := range []string{"glm-5.2", "GLM-5.2"} {
 		if !isZAIModel(model) {
 			t.Fatalf("expected %q to route to zai", model)
 		}
@@ -23,7 +18,7 @@ func TestIsZAIModelHandlesCodingPlanModels(t *testing.T) {
 		}
 	}
 
-	for _, model := range []string{"glm-4.7", "glm-5", "glm-5-turbo"} {
+	for _, model := range []string{"glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1"} {
 		if isZAIModel(model) {
 			t.Fatalf("did not expect %q to route to zai", model)
 		}

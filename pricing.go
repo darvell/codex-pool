@@ -51,6 +51,7 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeCodex, "pro"}:                     {200, "Codex Pro"},
 	{AccountTypeCodex, "team"}:                    {25, "Codex Team"},
 	{AccountTypeGemini, "api"}:                    {0, "Gemini API"},
+	{AccountTypeAntigravity, "antigravity"}:       {0, "Google Antigravity"},
 	{AccountTypeKimi, "api"}:                      {49, "Kimi Coding"},
 	{AccountTypeKimi, ""}:                         {49, "Kimi Coding"},
 	{AccountTypeMinimax, "api"}:                   {5, "MiniMax API"},
@@ -73,6 +74,19 @@ func getSubscriptionCost(accType AccountType, planType string) (monthly float64,
 		return info.monthly, info.label
 	}
 	return 0, string(accType)
+}
+
+// estimateSubscriptionSpend counts the initial paid month plus one billing
+// cycle for each completed 30-day period covered by the API-cost analytics.
+func estimateSubscriptionSpend(monthly float64, firstSeen, now time.Time) (spend float64, billingCycles int) {
+	if monthly <= 0 || firstSeen.IsZero() {
+		return 0, 0
+	}
+	if now.Before(firstSeen) {
+		now = firstSeen
+	}
+	billingCycles = int(now.Sub(firstSeen)/(30*24*time.Hour)) + 1
+	return monthly * float64(billingCycles), billingCycles
 }
 
 // newPricingData loads pricing from the embedded fallback.

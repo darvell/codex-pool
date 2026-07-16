@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestApplyProxyAuthFailure(t *testing.T) {
 	t.Run("codex proxy auth failure stays lightweight", func(t *testing.T) {
@@ -16,6 +21,19 @@ func TestApplyProxyAuthFailure(t *testing.T) {
 		}
 		if penaltyNow != 0.2 || acc.Penalty != 0.2 {
 			t.Fatalf("codex penalty = %v, want 0.2", acc.Penalty)
+		}
+	})
+
+	t.Run("static API key proxy auth failure never retires account", func(t *testing.T) {
+		for _, accountType := range []AccountType{AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi} {
+			acc := &Account{Type: accountType}
+			markedDead, penaltyNow := applyProxyAuthFailure(acc, true)
+			if markedDead || acc.Dead {
+				t.Fatalf("%s account should require provider validation before being marked dead", accountType)
+			}
+			if penaltyNow != 0.2 || acc.Penalty != 0.2 {
+				t.Fatalf("%s penalty = %v, want 0.2", accountType, acc.Penalty)
+			}
 		}
 	})
 
@@ -50,4 +68,25 @@ func TestApplyProxyAuthFailure(t *testing.T) {
 			t.Fatalf("penalty = %v, want 1.0", acc.Penalty)
 		}
 	})
+}
+
+func TestRestoreValidatedStaticAccountPersistsHealthyState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "minimax.json")
+	if err := os.WriteFile(path, []byte(`{"api_key":"secret","dead":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account := &Account{ID: "minimax", Type: AccountTypeMinimax, File: path, AccessToken: "secret", Dead: true, Penalty: 100}
+
+	restoreValidatedAccount(account, "test")
+
+	if account.Dead || account.Penalty != 0 {
+		t.Fatalf("account state = dead %v penalty %v", account.Dead, account.Penalty)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"dead"`) {
+		t.Fatalf("persisted account still dead: %s", data)
+	}
 }

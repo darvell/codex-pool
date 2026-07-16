@@ -124,26 +124,16 @@ func (p *MinimaxProvider) DetectsSSE(path string, contentType string) bool {
 }
 
 // minimaxModels maps request model names to the canonical model name sent upstream.
-var minimaxModels = map[string]string{
-	"minimax":                "MiniMax-M2.5",
-	"minimax-m3":             "MiniMax-M3",
-	"minimax-m2":             "MiniMax-M2",
-	"minimax-m2.1":           "MiniMax-M2.1",
-	"minimax-m2.5":           "MiniMax-M2.5",
-	"minimax-m2.7":           "MiniMax-M2.7",
-	"minimax-m2.7-highspeed": "MiniMax-M2.7-highspeed",
-}
-
 // isMinimaxModel returns true if the given model name should be routed to MiniMax.
 func isMinimaxModel(model string) bool {
-	_, ok := minimaxModels[strings.ToLower(strings.TrimSpace(model))]
+	_, ok := modelForProvider(AccountTypeMinimax, model)
 	return ok
 }
 
 // minimaxCanonicalModel returns the canonical upstream model name for a MiniMax alias.
 func minimaxCanonicalModel(model string) string {
-	if canonical, ok := minimaxModels[strings.ToLower(strings.TrimSpace(model))]; ok {
-		return canonical
+	if found, ok := modelForProvider(AccountTypeMinimax, model); ok {
+		return found.ID
 	}
 	return model
 }

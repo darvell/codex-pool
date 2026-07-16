@@ -4,15 +4,78 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestServeGrokModelsReturnsGrokClientCatalog(t *testing.T) {
+	rr := httptest.NewRecorder()
+	serveGrokModels(rr)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	var body struct {
+		Object string            `json:"object"`
+		Data   []grokClientModel `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	if body.Object != "list" || len(body.Data) != len(grokCLIModelCatalog)+len(poolModels) {
+		t.Fatalf("catalog object=%q models=%d", body.Object, len(body.Data))
+	}
+	for _, model := range body.Data {
+		if model.ID == "grok-4.5" {
+			if model.Model != "grok-4.5" || model.APIBackend != "responses" || model.ContextWindow != 500000 || len(model.ReasoningEfforts) != 3 {
+				t.Fatalf("grok-4.5 catalog entry = %#v", model)
+			}
+			return
+		}
+	}
+	t.Fatal("grok-4.5 missing from catalog")
+}
+
+func TestGrokClientCatalogIncludesPoolModels(t *testing.T) {
+	models := grokModelsForClient()
+	want := map[string]struct {
+		owner   string
+		backend string
+	}{
+		"gpt-5.6-luna":    {owner: "codex-pool", backend: "chat_completions"},
+		"claude-sonnet-5": {owner: "codex-pool", backend: "messages"},
+		"MiniMax-M3":      {owner: "codex-pool", backend: "messages"},
+		"grok-4.5":        {owner: "xAI", backend: "responses"},
+	}
+	for _, model := range models {
+		expected, ok := want[model.ID]
+		if !ok {
+			continue
+		}
+		if model.OwnedBy != expected.owner || model.APIBackend != expected.backend || model.ContextWindow == 0 {
+			t.Fatalf("catalog entry %q = %#v", model.ID, model)
+		}
+		delete(want, model.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing Grok client models: %#v", want)
+	}
+
+	ids := grokSetupModelIDs()
+	for _, id := range []string{"grok-build", "gpt-5.6-luna", "claude-sonnet-5"} {
+		if !slices.Contains(ids, id) {
+			t.Fatalf("setup model IDs missing %q", id)
+		}
+	}
+}
 
 func TestGrokProviderLoadsCLIAuthJSON(t *testing.T) {
 	expires := time.Date(2026, 6, 6, 17, 51, 28, 0, time.UTC)
@@ -45,6 +108,27 @@ func TestGrokProviderLoadsCLIAuthJSON(t *testing.T) {
 	}
 	if !acc.ExpiresAt.Equal(expires) {
 		t.Fatalf("expires = %v, want %v", acc.ExpiresAt, expires)
+	}
+}
+
+func TestGrokProviderLoadsCLIAuthJSONWithCommonMetadata(t *testing.T) {
+	body := `{
+		"added_at": "2026-07-15T00:46:57Z",
+		"https://auth.x.ai::client": {
+			"key": "access-token",
+			"refresh_token": "refresh-token",
+			"expires_at": "2026-07-16T00:00:00Z",
+			"oidc_issuer": "https://auth.x.ai"
+		}
+	}`
+
+	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
+	account, err := provider.LoadAccount("auth.json", "/tmp/auth.json", []byte(body))
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if account == nil || account.AccessToken != "access-token" || account.RefreshToken != "refresh-token" {
+		t.Fatalf("unexpected account: %#v", account)
 	}
 }
 
@@ -264,6 +348,86 @@ func TestGrokUsagePollerDoesNotDeadMarkAccount(t *testing.T) {
 	}
 	if _, ok := saved["dead"]; ok {
 		t.Fatalf("usage poller persisted dead flag for Grok account: %s", data)
+	}
+}
+
+func TestGrokProviderParsesQuotaHeaders(t *testing.T) {
+	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
+	account := &Account{Type: AccountTypeGrok}
+	requestsReset := time.Now().UTC().Add(15 * time.Minute).Truncate(time.Second)
+	tokensReset := time.Now().UTC().Add(45 * time.Minute).Truncate(time.Second)
+
+	provider.ParseUsageHeaders(account, http.Header{
+		"X-Ratelimit-Limit-Requests":     []string{"100"},
+		"X-Ratelimit-Remaining-Requests": []string{"25"},
+		"X-Ratelimit-Reset-Requests":     []string{strconv.FormatInt(requestsReset.Unix(), 10)},
+		"X-Ratelimit-Limit-Tokens":       []string{"1000000"},
+		"X-Ratelimit-Remaining-Tokens":   []string{"750000"},
+		"X-Ratelimit-Reset-Tokens":       []string{tokensReset.Format(time.RFC3339)},
+	})
+
+	if got := account.Usage.PrimaryUsedPercent; got != 0.75 {
+		t.Fatalf("request utilization = %v, want 0.75", got)
+	}
+	if got := account.Usage.SecondaryUsedPercent; got != 0.25 {
+		t.Fatalf("token utilization = %v, want 0.25", got)
+	}
+	if !account.Usage.PrimaryResetAt.Equal(requestsReset) {
+		t.Fatalf("request reset = %v, want %v", account.Usage.PrimaryResetAt, requestsReset)
+	}
+	if !account.Usage.SecondaryResetAt.Equal(tokensReset) {
+		t.Fatalf("token reset = %v, want %v", account.Usage.SecondaryResetAt, tokensReset)
+	}
+}
+
+func TestParseGrokBillingUsage(t *testing.T) {
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	monthly := []byte(`{"config":{"monthlyLimit":{"val":16500},"used":{"val":5092},"billingPeriodStart":"2026-07-01T00:00:00Z","billingPeriodEnd":"2026-08-01T00:00:00Z"}}`)
+	weekly := []byte(`{"config":{"currentPeriod":{"start":"2026-07-09T09:46:16Z","end":"2026-07-16T09:46:16Z"},"creditUsagePercent":42.5}}`)
+
+	snap, ok := parseGrokBillingUsage(monthly, weekly, now)
+	if !ok {
+		t.Fatal("expected billing usage")
+	}
+	if math.Abs(snap.PrimaryUsedPercent-(5092.0/16500.0)) > 0.000001 {
+		t.Fatalf("monthly utilization = %v", snap.PrimaryUsedPercent)
+	}
+	if snap.SecondaryUsedPercent != 0.425 {
+		t.Fatalf("weekly utilization = %v, want 0.425", snap.SecondaryUsedPercent)
+	}
+	if snap.PrimaryWindowMinutes != 31*24*60 {
+		t.Fatalf("monthly window = %d minutes", snap.PrimaryWindowMinutes)
+	}
+	if snap.SecondaryWindowMinutes != 7*24*60 {
+		t.Fatalf("weekly window = %d minutes", snap.SecondaryWindowMinutes)
+	}
+}
+
+func TestFetchGrokUsageFromBillingEndpoints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("X-Xai-Token-Auth") != "xai-grok-cli" {
+			t.Errorf("missing Grok CLI auth headers: %v", r.Header)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("format") == "credits" {
+			_, _ = io.WriteString(w, `{"config":{"currentPeriod":{"start":"2026-07-09T00:00:00Z","end":"2026-07-16T00:00:00Z"},"creditUsagePercent":25}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"config":{"monthlyLimit":{"val":10000},"used":{"val":4000},"billingPeriodStart":"2026-07-01T00:00:00Z","billingPeriodEnd":"2026-08-01T00:00:00Z"}}`)
+	}))
+	defer server.Close()
+
+	base := mustParse(server.URL + "/v1")
+	handler := &proxyHandler{
+		cfg:       &config{grokBase: base},
+		transport: http.DefaultTransport,
+	}
+	account := &Account{Type: AccountTypeGrok, AccessToken: "access-token"}
+	if err := handler.fetchGrokUsage(time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC), account); err != nil {
+		t.Fatalf("fetchGrokUsage: %v", err)
+	}
+	if account.Usage.PrimaryUsedPercent != 0.4 || account.Usage.SecondaryUsedPercent != 0.25 {
+		t.Fatalf("usage = %+v", account.Usage)
 	}
 }
 

@@ -155,16 +155,10 @@ func (p *KimiProvider) DetectsSSE(path string, contentType string) bool {
 
 // kimiModels lists model names that should be routed to the Kimi provider.
 // Pi's built-in kimi-coding provider exposes both short aliases and provider-native IDs.
-var kimiModels = map[string]bool{
-	"kimi-for-coding":  true,
-	"kimi":             true,
-	"k2p5":             true,
-	"kimi-k2-thinking": true,
-}
-
 // isKimiModel returns true if the given model name should be routed to Kimi.
 func isKimiModel(model string) bool {
-	return kimiModels[strings.ToLower(strings.TrimSpace(model))]
+	_, ok := modelForProvider(AccountTypeKimi, model)
+	return ok
 }
 
 func parseKimiResponseRateLimits(headers http.Header) (UsageSnapshot, bool) {

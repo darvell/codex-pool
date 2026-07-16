@@ -476,7 +476,7 @@ func TestXiaomiAdminRejectsUnauthorizedKeyWithoutSaving(t *testing.T) {
 	}
 }
 
-func TestFriendLandingIncludesXiaomiKeyManagement(t *testing.T) {
+func TestFriendLandingShowsXiaomiStatusWithoutAdminCredentialForm(t *testing.T) {
 	t.Parallel()
 
 	page, err := os.ReadFile(filepath.Join("templates", "friend_landing.html"))
@@ -485,15 +485,15 @@ func TestFriendLandingIncludesXiaomiKeyManagement(t *testing.T) {
 	}
 	html := string(page)
 	for _, needle := range []string{
-		`id="xiaomi-api-key"`,
-		`addXiaomiKey()`,
-		`/admin/xiaomi/add`,
 		`id="xiaomi-accounts-list"`,
 		`mimo-v2.5-pro[1m]`,
 	} {
 		if !strings.Contains(html, needle) {
 			t.Fatalf("friend landing page missing %q", needle)
 		}
+	}
+	if strings.Contains(html, `id="xiaomi-api-key"`) {
+		t.Fatal("friend landing must not render the admin Xiaomi credential form")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,14 +17,15 @@ import (
 type AccountType string
 
 const (
-	AccountTypeCodex   AccountType = "codex"
-	AccountTypeGemini  AccountType = "gemini"
-	AccountTypeClaude  AccountType = "claude"
-	AccountTypeKimi    AccountType = "kimi"
-	AccountTypeMinimax AccountType = "minimax"
-	AccountTypeZAI     AccountType = "zai"
-	AccountTypeXiaomi  AccountType = "xiaomi"
-	AccountTypeGrok    AccountType = "grok"
+	AccountTypeCodex       AccountType = "codex"
+	AccountTypeGemini      AccountType = "gemini"
+	AccountTypeAntigravity AccountType = "antigravity"
+	AccountTypeClaude      AccountType = "claude"
+	AccountTypeKimi        AccountType = "kimi"
+	AccountTypeMinimax     AccountType = "minimax"
+	AccountTypeZAI         AccountType = "zai"
+	AccountTypeXiaomi      AccountType = "xiaomi"
+	AccountTypeGrok        AccountType = "grok"
 )
 
 type Account struct {
@@ -46,8 +48,12 @@ type Account struct {
 	RateLimitTier           string
 	Disabled                bool
 	Inflight                int64
+	ImageGenerationSupport  int32
+	ImageGenerationFailures int32
+	ImageGenerationRetryAt  int64
 	ExpiresAt               time.Time
 	LastRefresh             time.Time
+	AddedAt                 time.Time
 	Usage                   UsageSnapshot
 	Penalty                 float64
 	LastPenalty             time.Time
@@ -59,87 +65,67 @@ type Account struct {
 	AccountUUID             string // Anthropic internal account UUID, learned from /api/claude_cli/bootstrap
 	CyberAccess             bool
 	CodexCookies            map[string]string
+	RateLimitResetCredits   []RateLimitResetCredit
+	ResetCreditsAvailable   int
+	ResetCreditsRetrievedAt time.Time
+	ResetCreditRedeeming    bool
+	Email                   string
+	ProjectID               string
+	ModelRateLimits         map[string]time.Time
+	NeedsVerification       bool
+	VerificationURL         string
+	HealthError             string
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
 }
 
+type RateLimitResetCredit struct {
+	ID        string
+	ExpiresAt time.Time
+}
+
+type accountUsageSnapshot struct {
+	Type           AccountType
+	Dead           bool
+	Disabled       bool
+	RateLimitUntil time.Time
+	Usage          UsageSnapshot
+}
+
+func snapshotAccountUsage(a *Account) accountUsageSnapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return accountUsageSnapshot{
+		Type:           a.Type,
+		Dead:           a.Dead,
+		Disabled:       a.Disabled,
+		RateLimitUntil: a.RateLimitUntil,
+		Usage:          a.Usage,
+	}
+}
+
 func (a *Account) applyRateLimitObject(rl map[string]any) {
-	primaryUsed := readUsedPercent(rl, "primary_window")
-	secondaryUsed := readUsedPercent(rl, "secondary_window")
-	if primaryUsed == 0 && secondaryUsed == 0 {
+	if a == nil {
 		return
 	}
-	newSnap := UsageSnapshot{
-		PrimaryUsed:          primaryUsed,
-		SecondaryUsed:        secondaryUsed,
-		PrimaryUsedPercent:   primaryUsed,
-		SecondaryUsedPercent: secondaryUsed,
-		RetrievedAt:          time.Now(),
-		Source:               "body",
+	newSnap, ok := parseCodexRateLimitMap(rl, time.Now(), "body")
+	if !ok {
+		return
 	}
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, newSnap)
 	a.mu.Unlock()
 }
 
-func readUsedPercent(rl map[string]any, key string) float64 {
-	v, ok := rl[key]
-	if !ok {
-		return 0
-	}
-	obj, ok := v.(map[string]any)
-	if !ok {
-		return 0
-	}
-	if up, ok := obj["used_percent"]; ok {
-		switch t := up.(type) {
-		case float64:
-			return t / 100.0
-		case int:
-			return float64(t) / 100.0
-		}
-	}
-	return 0
-}
-
 // applyRateLimitsFromTokenCount updates account usage from Codex token_count rate_limits.
-// Format: {primary: {used_percent: 26.5, ...}, secondary: {used_percent: 14.5, ...}}
 func (a *Account) applyRateLimitsFromTokenCount(rl map[string]any) {
-	if a == nil || rl == nil {
+	if a == nil {
 		return
 	}
-	var primaryPct, secondaryPct float64
-	if primary, ok := rl["primary"].(map[string]any); ok {
-		if up, ok := primary["used_percent"]; ok {
-			switch t := up.(type) {
-			case float64:
-				primaryPct = t / 100.0
-			case int:
-				primaryPct = float64(t) / 100.0
-			}
-		}
-	}
-	if secondary, ok := rl["secondary"].(map[string]any); ok {
-		if up, ok := secondary["used_percent"]; ok {
-			switch t := up.(type) {
-			case float64:
-				secondaryPct = t / 100.0
-			case int:
-				secondaryPct = float64(t) / 100.0
-			}
-		}
-	}
-	if primaryPct == 0 && secondaryPct == 0 {
+	newSnap, ok := parseCodexRateLimitMap(rl, time.Now(), "token_count")
+	if !ok {
 		return
-	}
-	newSnap := UsageSnapshot{
-		PrimaryUsed:          primaryPct,
-		SecondaryUsed:        secondaryPct,
-		PrimaryUsedPercent:   primaryPct,
-		SecondaryUsedPercent: secondaryPct,
-		RetrievedAt:          time.Now(),
-		Source:               "token_count",
 	}
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, newSnap)
@@ -162,6 +148,9 @@ type UsageSnapshot struct {
 	CreditsUnlimited       bool
 	RetrievedAt            time.Time
 	Source                 string
+	primarySet             bool
+	secondarySet           bool
+	creditsSet             bool
 }
 
 // RequestUsage captures per-request token consumption parsed from SSE events.
@@ -280,6 +269,30 @@ type GeminiAuthJSON struct {
 	LastRefresh  string `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
 }
 
+// AntigravityAuthJSON is the durable Google Antigravity OAuth credential.
+// The optional model snapshot keeps the public catalog stable when Google's
+// discovery endpoint is temporarily unavailable.
+type AntigravityAuthJSON struct {
+	Type              string                      `json:"type"`
+	AccessToken       string                      `json:"access_token"`
+	RefreshToken      string                      `json:"refresh_token"`
+	TokenType         string                      `json:"token_type,omitempty"`
+	Scope             string                      `json:"scope,omitempty"`
+	ExpiresAt         string                      `json:"expired,omitempty"`
+	ExpiryDate        int64                       `json:"expiry_date,omitempty"`
+	Email             string                      `json:"email,omitempty"`
+	ProjectID         string                      `json:"project_id"`
+	PlanType          string                      `json:"plan_type,omitempty"`
+	LastRefresh       string                      `json:"last_refresh,omitempty"`
+	Disabled          bool                        `json:"disabled,omitempty"`
+	Dead              bool                        `json:"dead,omitempty"`
+	ModelSnapshot     *AntigravityAccountSnapshot `json:"model_snapshot,omitempty"`
+	ModelCooldowns    map[string]string           `json:"model_rate_limits,omitempty"`
+	NeedsVerification bool                        `json:"needs_verification,omitempty"`
+	VerificationURL   string                      `json:"verification_url,omitempty"`
+	HealthError       string                      `json:"health_error,omitempty"`
+}
+
 // ClaudeAuthJSON is the format for Claude auth files.
 // Files should be named claude_*.json in the pool folder.
 // Supports both API key format and OAuth format (from Claude Code).
@@ -296,6 +309,7 @@ type ClaudeAuthJSON struct {
 
 	// Learned from Anthropic's bootstrap endpoint
 	AccountUUID string `json:"account_uuid,omitempty"`
+	AddedAt     string `json:"added_at,omitempty"`
 }
 
 // ClaudeOAuthData is the OAuth token structure from Claude Code.
@@ -310,17 +324,19 @@ type ClaudeOAuthData struct {
 
 func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	var accs []*Account
+	antigravityModels.Reset()
 
 	// Load accounts from provider subdirectories: pool/codex/, pool/claude/, pool/gemini/
 	providerDirs := map[string]AccountType{
-		"codex":   AccountTypeCodex,
-		"claude":  AccountTypeClaude,
-		"gemini":  AccountTypeGemini,
-		"kimi":    AccountTypeKimi,
-		"minimax": AccountTypeMinimax,
-		"zai":     AccountTypeZAI,
-		"xiaomi":  AccountTypeXiaomi,
-		"grok":    AccountTypeGrok,
+		"codex":       AccountTypeCodex,
+		"claude":      AccountTypeClaude,
+		"gemini":      AccountTypeGemini,
+		"antigravity": AccountTypeAntigravity,
+		"kimi":        AccountTypeKimi,
+		"minimax":     AccountTypeMinimax,
+		"zai":         AccountTypeZAI,
+		"xiaomi":      AccountTypeXiaomi,
+		"grok":        AccountTypeGrok,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -353,12 +369,39 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 				return nil, err
 			}
 			if acc != nil {
+				applyCommonAccountFileState(acc, data)
 				accs = append(accs, acc)
 			}
 		}
 	}
 
 	return accs, nil
+}
+
+func applyCommonAccountFileState(account *Account, data []byte) {
+	var root map[string]any
+	if json.Unmarshal(data, &root) != nil {
+		return
+	}
+	if disabled, ok := root["disabled"].(bool); ok {
+		account.Disabled = disabled
+	}
+	if dead, ok := root["dead"].(bool); ok {
+		account.Dead = dead
+	}
+	if raw, ok := root["added_at"].(string); ok {
+		if addedAt, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			account.AddedAt = addedAt.UTC()
+		}
+	}
+	if account.AddedAt.IsZero() {
+		if info, err := os.Stat(account.File); err == nil {
+			// Legacy account files predate durable admission timestamps. Their
+			// original file timestamp is the best locally available boundary and
+			// gets persisted as added_at on the next account save.
+			account.AddedAt = info.ModTime().UTC()
+		}
+	}
 }
 
 // Note: Individual account loading functions are now in the provider files:
@@ -416,8 +459,9 @@ func accountTier(accType AccountType, planType string) int {
 			return 1
 		}
 		return 2
-	case AccountTypeGemini:
-		if strings.EqualFold(strings.TrimSpace(planType), "ultra") {
+	case AccountTypeGemini, AccountTypeAntigravity:
+		plan := strings.ToLower(strings.TrimSpace(planType))
+		if strings.Contains(plan, "ultra") || strings.Contains(plan, "pro") || strings.Contains(plan, "paid") {
 			return 1
 		}
 		return 2
@@ -581,16 +625,11 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 						log.Printf("unpinning conversation %s from non-pro codex account %s", conversationID, id)
 					}
 				}
-				if ok && a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+				if ok && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 					ok = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from rate-limited account %s (until %s)",
 							conversationID, id, a.RateLimitUntil.Format(time.RFC3339))
-					}
-				} else if ok && a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
-					if p.debug {
-						log.Printf("ignoring rate limit for codex account %s (until %s)",
-							id, a.RateLimitUntil.Format(time.RFC3339))
 					}
 				}
 				// Unpin at 95% secondary (raised from 90% for better stickiness)
@@ -653,7 +692,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			a.mu.Unlock()
 			continue
 		}
-		if a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+		if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 			secondaryUsed := accountSecondaryUsageLocked(a)
 			tier := accountTier(a.Type, a.PlanType)
 			score := scoreAccountLocked(a, now)
@@ -665,11 +704,6 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 				log.Printf("skipping account %s: rate limited until %s", a.ID, a.RateLimitUntil.Format(time.RFC3339))
 			}
 			continue
-		}
-		if a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
-			if p.debug {
-				log.Printf("ignoring rate limit for codex account %s (until %s)", a.ID, a.RateLimitUntil.Format(time.RFC3339))
-			}
 		}
 		// Hard exclusion: >=95% primary usage
 		primaryUsed := accountPrimaryUsageLocked(a)
@@ -808,6 +842,95 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 	return selectCandidate(eligible)
 }
 
+func (p *poolState) excludeInflightWhenIdleAvailable(accountType AccountType, exclude map[string]bool) {
+	if p == nil || exclude == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	hasIdle := false
+	for _, account := range p.accounts {
+		if account != nil && account.Type == accountType && atomic.LoadInt64(&account.Inflight) == 0 {
+			hasIdle = true
+			break
+		}
+	}
+	if !hasIdle {
+		return
+	}
+	for _, account := range p.accounts {
+		if account != nil && account.Type == accountType && atomic.LoadInt64(&account.Inflight) > 0 {
+			exclude[account.ID] = true
+		}
+	}
+}
+
+func (p *poolState) excludeImageIncapable(exclude map[string]bool) {
+	if p == nil || exclude == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, account := range p.accounts {
+		if account == nil || account.Type != AccountTypeCodex || atomic.LoadInt32(&account.ImageGenerationSupport) >= 0 {
+			continue
+		}
+		retryAt := atomic.LoadInt64(&account.ImageGenerationRetryAt)
+		if retryAt > 0 && time.Now().Unix() >= retryAt {
+			atomic.StoreInt32(&account.ImageGenerationSupport, 0)
+			atomic.StoreInt32(&account.ImageGenerationFailures, 0)
+			atomic.StoreInt64(&account.ImageGenerationRetryAt, 0)
+			continue
+		}
+		exclude[account.ID] = true
+	}
+}
+
+func recordImageGenerationResult(account *Account, success bool) {
+	if account == nil {
+		return
+	}
+	if success {
+		atomic.StoreInt32(&account.ImageGenerationFailures, 0)
+		atomic.StoreInt32(&account.ImageGenerationSupport, 1)
+		atomic.StoreInt64(&account.ImageGenerationRetryAt, 0)
+		return
+	}
+	atomic.AddInt32(&account.ImageGenerationFailures, 1)
+	atomic.StoreInt32(&account.ImageGenerationSupport, -1)
+	atomic.StoreInt64(&account.ImageGenerationRetryAt, time.Now().Add(10*time.Minute).Unix())
+}
+
+func (p *poolState) imageFanoutCandidate(index int, exclude map[string]bool, requiredPlan string, clientIP string) *Account {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	ids := make([]string, 0, len(p.accounts))
+	for _, account := range p.accounts {
+		if account != nil && account.Type == AccountTypeCodex && !exclude[account.ID] {
+			ids = append(ids, account.ID)
+		}
+	}
+	p.mu.RUnlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	start := index % len(ids)
+	if start < 0 {
+		start += len(ids)
+	}
+	for offset := 0; offset < len(ids); offset++ {
+		id := ids[(start+offset)%len(ids)]
+		if account := p.candidateByID(id, AccountTypeCodex, requiredPlan, clientIP); account != nil {
+			return account
+		}
+	}
+	return nil
+}
+
 func planMatchesRequired(planType, requiredPlan string) bool {
 	if requiredPlan == "" {
 		return true
@@ -849,21 +972,24 @@ func scoreAccount(a *Account, now time.Time) float64 {
 }
 
 type scoreBreakdown struct {
-	Score             float64
-	PrimaryUsed       float64
-	SecondaryUsed     float64
-	BaseHeadroom      float64
-	DrainMultiplier   float64
-	PrimaryPaceBonus  float64
-	PrimaryPenalty    float64
-	ExpiryPenalty     float64
-	PenaltyRaw        float64
-	PenaltyFactor     float64
-	PenaltyApplied    float64
-	ClampedToFloor    bool
-	RecentUseBonus    float64
-	CreditBonus       float64
-	HeadroomPreCredit float64
+	Score              float64
+	PrimaryUsed        float64
+	SecondaryUsed      float64
+	PrimaryAvailable   bool
+	SecondaryAvailable bool
+	BaseWindow         string
+	BaseHeadroom       float64
+	DrainMultiplier    float64
+	PrimaryPaceBonus   float64
+	PrimaryPenalty     float64
+	ExpiryPenalty      float64
+	PenaltyRaw         float64
+	PenaltyFactor      float64
+	PenaltyApplied     float64
+	ClampedToFloor     bool
+	RecentUseBonus     float64
+	CreditBonus        float64
+	HeadroomPreCredit  float64
 }
 
 func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
@@ -880,14 +1006,28 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 	}
 	out.PrimaryUsed = primaryUsed
 	out.SecondaryUsed = secondaryUsed
+	out.PrimaryAvailable = usagePrimaryWindowAvailable(a.Usage)
+	out.SecondaryAvailable = usageSecondaryWindowAvailable(a.Usage)
 
-	// Start from weekly headroom.
-	headroom := 1.0 - secondaryUsed
+	// Prefer the weekly window as the long-term balancing signal. If OpenAI
+	// temporarily exposes only a five-hour window, use that instead of treating
+	// the missing weekly window as unlimited headroom.
+	headroom := 1.0
+	switch {
+	case out.SecondaryAvailable:
+		headroom = 1.0 - secondaryUsed
+		out.BaseWindow = "7d"
+	case out.PrimaryAvailable:
+		headroom = 1.0 - primaryUsed
+		out.BaseWindow = "5h"
+	default:
+		out.BaseWindow = "none"
+	}
 	out.BaseHeadroom = headroom
 	out.DrainMultiplier = 1.0
 
-	// Accounts closer to reset can absorb more traffic right now.
-	if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
+	// Accounts closer to a weekly reset can absorb more traffic right now.
+	if out.SecondaryAvailable && !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
 		hoursRemaining := a.Usage.SecondaryResetAt.Sub(now).Hours()
 		totalHours := 168.0
 		if hoursRemaining > 1 && hoursRemaining < totalHours {
@@ -913,44 +1053,36 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 
 	// Cap drain multiplier for accounts with no primary window data.
 	// Pro/Team plans lack a 5hr window; don't let phantom headroom inflate their score.
-	if a.Usage.PrimaryResetAt.IsZero() && primaryUsed == 0 {
+	if !out.PrimaryAvailable {
 		if out.DrainMultiplier > 1.0 {
 			out.DrainMultiplier = 1.0
 			headroom = out.BaseHeadroom
 		}
 	}
 
-	// Bonus for short-term headroom in the 5h window.
-	// The 5h window controls burst capacity: an account at 0% primary can absorb
-	// heavy traffic right now regardless of 7d usage. Scale the bonus by how much
-	// primary headroom exists, up to matching the base headroom itself.
-	if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
-		hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
-		primaryHeadroom := 1.0 - primaryUsed
-		if hoursRemaining > 0.1 && hoursRemaining <= 5.0 && primaryHeadroom > 0.05 {
-			// Scale bonus: more primary headroom = bigger boost.
-			// At 100% primary headroom (0% used), bonus ≈ 0.5 * timeWeight.
-			// At 50% primary headroom, bonus ≈ 0.25 * timeWeight.
-			// timeWeight: full bonus when >2h remain, tapers as window shrinks.
-			timeWeight := hoursRemaining / 3.0
-			if timeWeight > 1.0 {
-				timeWeight = 1.0
+	// When both windows exist, use five-hour headroom as the burst signal on
+	// top of the weekly base. If five-hour is the only window, it is already the
+	// base and must not be counted twice.
+	if out.PrimaryAvailable && out.SecondaryAvailable {
+		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
+			hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
+			primaryHeadroom := 1.0 - primaryUsed
+			if hoursRemaining > 0.1 && hoursRemaining <= 5.0 && primaryHeadroom > 0.05 {
+				timeWeight := hoursRemaining / 3.0
+				if timeWeight > 1.0 {
+					timeWeight = 1.0
+				}
+				out.PrimaryPaceBonus = primaryHeadroom * 0.5 * timeWeight
 			}
-			out.PrimaryPaceBonus = primaryHeadroom * 0.5 * timeWeight
+		} else if primaryUsed < 0.5 {
+			out.PrimaryPaceBonus = (1.0 - primaryUsed) * 0.15
 		}
-	} else if a.Usage.PrimaryResetAt.IsZero() && primaryUsed == 0 && a.Usage.RetrievedAt.IsZero() {
-		// No primary data at all (never polled) -- no bonus.
-	} else if a.Usage.PrimaryResetAt.IsZero() && primaryUsed < 0.5 {
-		// Have primary usage data but no reset time (some plan types).
-		// Give a modest bonus based on raw headroom.
-		out.PrimaryPaceBonus = (1.0 - primaryUsed) * 0.15
-	}
-	headroom += out.PrimaryPaceBonus
+		headroom += out.PrimaryPaceBonus
 
-	// Penalize only when 5h usage gets critically high.
-	if primaryUsed > 0.8 {
-		out.PrimaryPenalty = (primaryUsed - 0.8) * 2.0
-		headroom -= out.PrimaryPenalty
+		if primaryUsed > 0.8 {
+			out.PrimaryPenalty = (primaryUsed - 0.8) * 2.0
+			headroom -= out.PrimaryPenalty
+		}
 	}
 
 	// Mild expiry penalty.
@@ -1012,7 +1144,17 @@ func scoreTooltipFromBreakdownLocked(a *Account, now time.Time, breakdown scoreB
 
 	lines := make([]string, 0, 12)
 	lines = append(lines, fmt.Sprintf("Final score: %.2f", breakdown.Score))
-	lines = append(lines, fmt.Sprintf("7d headroom: %.2f from %.0f%% weekly usage", breakdown.BaseHeadroom, breakdown.SecondaryUsed*100))
+	switch breakdown.BaseWindow {
+	case "7d":
+		lines = append(lines, fmt.Sprintf("7d headroom: %.2f from %.0f%% weekly usage", breakdown.BaseHeadroom, breakdown.SecondaryUsed*100))
+	case "5h":
+		lines = append(lines, fmt.Sprintf("5h headroom: %.2f from %.0f%% five-hour usage", breakdown.BaseHeadroom, breakdown.PrimaryUsed*100))
+	default:
+		lines = append(lines, "No current Codex usage window data; neutral headroom used")
+	}
+	if !breakdown.PrimaryAvailable && breakdown.SecondaryAvailable {
+		lines = append(lines, "5h window is not currently exposed")
+	}
 
 	if breakdown.DrainMultiplier != 1.0 {
 		lines = append(lines, fmt.Sprintf("Drain multiplier: x%.2f", breakdown.DrainMultiplier))
@@ -1080,6 +1222,8 @@ func saveAccount(a *Account) error {
 	switch a.Type {
 	case AccountTypeGemini:
 		return saveGeminiAccount(a)
+	case AccountTypeAntigravity:
+		return saveAntigravityAccount(a)
 	case AccountTypeClaude:
 		return saveClaudeAccount(a)
 	case AccountTypeKimi:
@@ -1097,6 +1241,13 @@ func saveAccount(a *Account) error {
 	}
 }
 
+func persistAccountAddedAt(root map[string]any, a *Account) {
+	if a.AddedAt.IsZero() {
+		a.AddedAt = time.Now().UTC()
+	}
+	root["added_at"] = a.AddedAt.UTC().Format(time.RFC3339Nano)
+}
+
 func saveCodexAccount(a *Account) error {
 	// Preserve ALL fields in the original auth.json by modifying only token fields that
 	// refresh updates. If we can't parse the existing file, fail closed to avoid
@@ -1109,6 +1260,7 @@ func saveCodexAccount(a *Account) error {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return fmt.Errorf("parse %s: %w", a.File, err)
 	}
+	persistAccountAddedAt(root, a)
 
 	tokensAny := root["tokens"]
 	tokens, ok := tokensAny.(map[string]any)
@@ -1165,6 +1317,11 @@ func saveCodexAccount(a *Account) error {
 	} else {
 		delete(root, "dead")
 	}
+	if a.Disabled {
+		root["disabled"] = true
+	} else {
+		delete(root, "disabled")
+	}
 
 	return atomicWriteJSON(a.File, root)
 }
@@ -1179,6 +1336,7 @@ func saveGeminiAccount(a *Account) error {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return fmt.Errorf("parse %s: %w", a.File, err)
 	}
+	persistAccountAddedAt(root, a)
 
 	// Update token fields
 	if a.AccessToken != "" {
@@ -1192,6 +1350,16 @@ func saveGeminiAccount(a *Account) error {
 	}
 	if !a.LastRefresh.IsZero() {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
+	}
+	if a.Dead {
+		root["dead"] = true
+	} else {
+		delete(root, "dead")
+	}
+	if a.Disabled {
+		root["disabled"] = true
+	} else {
+		delete(root, "disabled")
 	}
 
 	return atomicWriteJSON(a.File, root)
@@ -1207,6 +1375,7 @@ func saveAPIKeyAccount(a *Account) error {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return fmt.Errorf("parse %s: %w", a.File, err)
 	}
+	persistAccountAddedAt(root, a)
 
 	if a.AccessToken != "" {
 		root["api_key"] = a.AccessToken
@@ -1215,6 +1384,11 @@ func saveAPIKeyAccount(a *Account) error {
 		root["dead"] = true
 	} else {
 		delete(root, "dead")
+	}
+	if a.Disabled {
+		root["disabled"] = true
+	} else {
+		delete(root, "disabled")
 	}
 	return atomicWriteJSON(a.File, root)
 }
@@ -1228,6 +1402,7 @@ func saveGrokAccount(a *Account) error {
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return fmt.Errorf("parse %s: %w", a.File, err)
 	}
+	persistAccountAddedAt(root, a)
 
 	if _, ok := root["access"]; ok {
 		applyGrokTokenFields(root, a, "access", "refresh", "expires", "tokenEndpoint", true)
@@ -1281,6 +1456,11 @@ func applyGrokTokenFields(target map[string]any, a *Account, accessKey, refreshK
 	} else {
 		delete(target, "dead")
 	}
+	if a.Disabled {
+		target["disabled"] = true
+	} else {
+		delete(target, "disabled")
+	}
 }
 
 func atomicWriteJSON(filePath string, data any) error {
@@ -1320,36 +1500,45 @@ func mergeUsage(prev, next UsageSnapshot) UsageSnapshot {
 	authoritativeZero := res.Source == "claude-api" || res.Source == "wham"
 	hardReset := res.PrimaryUsedPercent == 0 && res.SecondaryUsedPercent == 0
 
-	if res.PrimaryUsedPercent == 0 && prev.PrimaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
-		res.PrimaryUsedPercent = prev.PrimaryUsedPercent
+	if !res.primarySet {
+		if res.PrimaryUsedPercent == 0 && prev.PrimaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
+			res.PrimaryUsedPercent = prev.PrimaryUsedPercent
+		}
+		if res.PrimaryUsed == 0 && prev.PrimaryUsed > 0 && !authoritativeZero && !(hardSource && hardReset) {
+			res.PrimaryUsed = prev.PrimaryUsed
+		}
+		if res.PrimaryWindowMinutes == 0 && prev.PrimaryWindowMinutes > 0 {
+			res.PrimaryWindowMinutes = prev.PrimaryWindowMinutes
+		}
+		if res.PrimaryResetAt.IsZero() && !prev.PrimaryResetAt.IsZero() {
+			res.PrimaryResetAt = prev.PrimaryResetAt
+		}
 	}
-	if res.SecondaryUsedPercent == 0 && prev.SecondaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
-		res.SecondaryUsedPercent = prev.SecondaryUsedPercent
+	if !res.secondarySet {
+		if res.SecondaryUsedPercent == 0 && prev.SecondaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
+			res.SecondaryUsedPercent = prev.SecondaryUsedPercent
+		}
+		if res.SecondaryUsed == 0 && prev.SecondaryUsed > 0 && !authoritativeZero && !(hardSource && hardReset) {
+			res.SecondaryUsed = prev.SecondaryUsed
+		}
+		if res.SecondaryWindowMinutes == 0 && prev.SecondaryWindowMinutes > 0 {
+			res.SecondaryWindowMinutes = prev.SecondaryWindowMinutes
+		}
+		if res.SecondaryResetAt.IsZero() && !prev.SecondaryResetAt.IsZero() {
+			res.SecondaryResetAt = prev.SecondaryResetAt
+		}
 	}
-	if res.PrimaryUsed == 0 && prev.PrimaryUsed > 0 && !authoritativeZero && !(hardSource && hardReset) {
-		res.PrimaryUsed = prev.PrimaryUsed
+	if !res.creditsSet {
+		if res.CreditsBalance == 0 && prev.CreditsBalance > 0 {
+			res.CreditsBalance = prev.CreditsBalance
+		}
+		res.HasCredits = res.HasCredits || prev.HasCredits
+		res.CreditsUnlimited = res.CreditsUnlimited || prev.CreditsUnlimited
 	}
-	if res.SecondaryUsed == 0 && prev.SecondaryUsed > 0 && !authoritativeZero && !(hardSource && hardReset) {
-		res.SecondaryUsed = prev.SecondaryUsed
-	}
-	if res.PrimaryWindowMinutes == 0 && prev.PrimaryWindowMinutes > 0 {
-		res.PrimaryWindowMinutes = prev.PrimaryWindowMinutes
-	}
-	if res.SecondaryWindowMinutes == 0 && prev.SecondaryWindowMinutes > 0 {
-		res.SecondaryWindowMinutes = prev.SecondaryWindowMinutes
-	}
-	if res.PrimaryResetAt.IsZero() && !prev.PrimaryResetAt.IsZero() {
-		res.PrimaryResetAt = prev.PrimaryResetAt
-	}
-	if res.SecondaryResetAt.IsZero() && !prev.SecondaryResetAt.IsZero() {
-		res.SecondaryResetAt = prev.SecondaryResetAt
-	}
-	if res.CreditsBalance == 0 && prev.CreditsBalance > 0 {
-		res.CreditsBalance = prev.CreditsBalance
-	}
-	res.HasCredits = res.HasCredits || prev.HasCredits
-	res.CreditsUnlimited = res.CreditsUnlimited || prev.CreditsUnlimited
 
+	res.primarySet = res.primarySet || prev.primarySet
+	res.secondarySet = res.secondarySet || prev.secondarySet
+	res.creditsSet = res.creditsSet || prev.creditsSet
 	if res.RetrievedAt.IsZero() || (!prev.RetrievedAt.IsZero() && prev.RetrievedAt.After(res.RetrievedAt)) {
 		res.RetrievedAt = prev.RetrievedAt
 	}
@@ -1381,50 +1570,58 @@ func (p *poolState) averageUsageByType(accountType AccountType) UsageSnapshot {
 	var totalP, totalS float64
 	var totalPW, totalSW float64
 	var nP, nS float64
+	var primaryCount, secondaryCount float64
 	var n float64
 	var latestPrimaryReset, latestSecondaryReset time.Time
 	for _, a := range p.accounts {
-		if a.Dead {
+		account := snapshotAccountUsage(a)
+		if account.Dead {
 			continue
 		}
-		if accountType != "" && a.Type != accountType {
+		if accountType != "" && account.Type != accountType {
 			continue
 		}
-		usedP := a.Usage.PrimaryUsedPercent
+		usedP := account.Usage.PrimaryUsedPercent
 		if usedP == 0 {
-			usedP = a.Usage.PrimaryUsed
+			usedP = account.Usage.PrimaryUsed
 		}
-		usedS := a.Usage.SecondaryUsedPercent
+		usedS := account.Usage.SecondaryUsedPercent
 		if usedS == 0 {
-			usedS = a.Usage.SecondaryUsed
+			usedS = account.Usage.SecondaryUsed
 		}
-		totalP += usedP
-		totalS += usedS
-		n += 1
-		if a.Usage.PrimaryWindowMinutes > 0 {
-			totalPW += float64(a.Usage.PrimaryWindowMinutes)
+		if usagePrimaryWindowAvailable(account.Usage) {
+			totalP += usedP
+			primaryCount++
+		}
+		if usageSecondaryWindowAvailable(account.Usage) {
+			totalS += usedS
+			secondaryCount++
+		}
+		n++
+		if account.Usage.PrimaryWindowMinutes > 0 {
+			totalPW += float64(account.Usage.PrimaryWindowMinutes)
 			nP += 1
 		}
-		if a.Usage.SecondaryWindowMinutes > 0 {
-			totalSW += float64(a.Usage.SecondaryWindowMinutes)
+		if account.Usage.SecondaryWindowMinutes > 0 {
+			totalSW += float64(account.Usage.SecondaryWindowMinutes)
 			nS += 1
 		}
 		// Track latest reset times
-		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(latestPrimaryReset) {
-			latestPrimaryReset = a.Usage.PrimaryResetAt
+		if !account.Usage.PrimaryResetAt.IsZero() && account.Usage.PrimaryResetAt.After(latestPrimaryReset) {
+			latestPrimaryReset = account.Usage.PrimaryResetAt
 		}
-		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(latestSecondaryReset) {
-			latestSecondaryReset = a.Usage.SecondaryResetAt
+		if !account.Usage.SecondaryResetAt.IsZero() && account.Usage.SecondaryResetAt.After(latestSecondaryReset) {
+			latestSecondaryReset = account.Usage.SecondaryResetAt
 		}
 	}
 	if n == 0 {
 		return UsageSnapshot{}
 	}
 	return UsageSnapshot{
-		PrimaryUsed:            totalP / n,
-		SecondaryUsed:          totalS / n,
-		PrimaryUsedPercent:     totalP / n,
-		SecondaryUsedPercent:   totalS / n,
+		PrimaryUsed:            totalP / max(1, primaryCount),
+		SecondaryUsed:          totalS / max(1, secondaryCount),
+		PrimaryUsedPercent:     totalP / max(1, primaryCount),
+		SecondaryUsedPercent:   totalS / max(1, secondaryCount),
 		PrimaryWindowMinutes:   int(totalPW / max(1, nP)),
 		SecondaryWindowMinutes: int(totalSW / max(1, nS)),
 		PrimaryResetAt:         latestPrimaryReset,
@@ -1475,30 +1672,32 @@ func (p *poolState) timeWeightedUsageByType(accountType AccountType) UsageSnapsh
 	var totalEffP, totalEffS float64
 	var totalPW, totalSW float64
 	var nP, nS float64
+	var primaryCount, secondaryCount float64
 	var n float64
 	var earliestPrimaryReset, earliestSecondaryReset time.Time
 
 	for _, a := range p.accounts {
-		if a.Dead {
+		account := snapshotAccountUsage(a)
+		if account.Dead {
 			continue
 		}
-		if accountType != "" && a.Type != accountType {
+		if accountType != "" && account.Type != accountType {
 			continue
 		}
 
-		usedP := a.Usage.PrimaryUsedPercent
+		usedP := account.Usage.PrimaryUsedPercent
 		if usedP == 0 {
-			usedP = a.Usage.PrimaryUsed
+			usedP = account.Usage.PrimaryUsed
 		}
-		usedS := a.Usage.SecondaryUsedPercent
+		usedS := account.Usage.SecondaryUsedPercent
 		if usedS == 0 {
-			usedS = a.Usage.SecondaryUsed
+			usedS = account.Usage.SecondaryUsed
 		}
 
 		// Compute time weight for primary window
 		primaryWeight := 1.0 // default: no reset info, use full weight (conservative)
-		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
-			timeToReset := a.Usage.PrimaryResetAt.Sub(now)
+		if !account.Usage.PrimaryResetAt.IsZero() && account.Usage.PrimaryResetAt.After(now) {
+			timeToReset := account.Usage.PrimaryResetAt.Sub(now)
 			if timeToReset > primaryWindowDuration {
 				timeToReset = primaryWindowDuration
 			}
@@ -1507,36 +1706,42 @@ func (p *poolState) timeWeightedUsageByType(accountType AccountType) UsageSnapsh
 
 		// Compute time weight for secondary window
 		secondaryWeight := 1.0 // default: no reset info, use full weight (conservative)
-		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
-			timeToReset := a.Usage.SecondaryResetAt.Sub(now)
+		if !account.Usage.SecondaryResetAt.IsZero() && account.Usage.SecondaryResetAt.After(now) {
+			timeToReset := account.Usage.SecondaryResetAt.Sub(now)
 			if timeToReset > secondaryWindowDuration {
 				timeToReset = secondaryWindowDuration
 			}
 			secondaryWeight = float64(timeToReset) / float64(secondaryWindowDuration)
 		}
 
-		totalEffP += usedP * primaryWeight
-		totalEffS += usedS * secondaryWeight
-		n += 1
+		if usagePrimaryWindowAvailable(account.Usage) {
+			totalEffP += usedP * primaryWeight
+			primaryCount++
+		}
+		if usageSecondaryWindowAvailable(account.Usage) {
+			totalEffS += usedS * secondaryWeight
+			secondaryCount++
+		}
+		n++
 
-		if a.Usage.PrimaryWindowMinutes > 0 {
-			totalPW += float64(a.Usage.PrimaryWindowMinutes)
+		if account.Usage.PrimaryWindowMinutes > 0 {
+			totalPW += float64(account.Usage.PrimaryWindowMinutes)
 			nP += 1
 		}
-		if a.Usage.SecondaryWindowMinutes > 0 {
-			totalSW += float64(a.Usage.SecondaryWindowMinutes)
+		if account.Usage.SecondaryWindowMinutes > 0 {
+			totalSW += float64(account.Usage.SecondaryWindowMinutes)
 			nS += 1
 		}
 
 		// Track earliest reset times (soonest capacity refill)
-		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
-			if earliestPrimaryReset.IsZero() || a.Usage.PrimaryResetAt.Before(earliestPrimaryReset) {
-				earliestPrimaryReset = a.Usage.PrimaryResetAt
+		if !account.Usage.PrimaryResetAt.IsZero() && account.Usage.PrimaryResetAt.After(now) {
+			if earliestPrimaryReset.IsZero() || account.Usage.PrimaryResetAt.Before(earliestPrimaryReset) {
+				earliestPrimaryReset = account.Usage.PrimaryResetAt
 			}
 		}
-		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
-			if earliestSecondaryReset.IsZero() || a.Usage.SecondaryResetAt.Before(earliestSecondaryReset) {
-				earliestSecondaryReset = a.Usage.SecondaryResetAt
+		if !account.Usage.SecondaryResetAt.IsZero() && account.Usage.SecondaryResetAt.After(now) {
+			if earliestSecondaryReset.IsZero() || account.Usage.SecondaryResetAt.Before(earliestSecondaryReset) {
+				earliestSecondaryReset = account.Usage.SecondaryResetAt
 			}
 		}
 	}
@@ -1545,10 +1750,10 @@ func (p *poolState) timeWeightedUsageByType(accountType AccountType) UsageSnapsh
 		return UsageSnapshot{}
 	}
 	return UsageSnapshot{
-		PrimaryUsed:            totalEffP / n,
-		SecondaryUsed:          totalEffS / n,
-		PrimaryUsedPercent:     totalEffP / n,
-		SecondaryUsedPercent:   totalEffS / n,
+		PrimaryUsed:            totalEffP / max(1, primaryCount),
+		SecondaryUsed:          totalEffS / max(1, secondaryCount),
+		PrimaryUsedPercent:     totalEffP / max(1, primaryCount),
+		SecondaryUsedPercent:   totalEffS / max(1, secondaryCount),
 		PrimaryWindowMinutes:   int(totalPW / max(1, nP)),
 		SecondaryWindowMinutes: int(totalSW / max(1, nS)),
 		PrimaryResetAt:         earliestPrimaryReset,
@@ -1567,40 +1772,49 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 
 	type provAccum struct {
 		totalEffP, totalEffS   float64
-		n                      float64
+		nPrimary, nSecondary   float64
 		available, total       int
 		earliestSecondaryReset time.Time
 		resetsIn24h            int
 	}
 
 	accums := map[AccountType]*provAccum{
-		AccountTypeCodex:  {},
-		AccountTypeClaude: {},
-		AccountTypeGemini: {},
+		AccountTypeCodex:       {},
+		AccountTypeClaude:      {},
+		AccountTypeGemini:      {},
+		AccountTypeAntigravity: {},
 	}
 
 	for _, a := range p.accounts {
-		if a.Dead || a.Disabled {
+		account := snapshotAccountUsage(a)
+		if account.Dead || account.Disabled {
 			continue
 		}
 
-		pa := accums[a.Type]
+		pa := accums[account.Type]
 		if pa == nil {
 			continue
 		}
 		pa.total++
 
-		usedP := accountPrimaryUsageLocked(a)
-		usedS := accountSecondaryUsageLocked(a)
+		usedP := account.Usage.PrimaryUsedPercent
+		if usedP == 0 {
+			usedP = account.Usage.PrimaryUsed
+		}
+		usedS := account.Usage.SecondaryUsedPercent
+		if usedS == 0 {
+			usedS = account.Usage.SecondaryUsed
+		}
 
-		if accountAvailableForRoutingLocked(a, now) {
+		if (account.RateLimitUntil.IsZero() || !account.RateLimitUntil.After(now)) &&
+			usedP < primaryHardExcludeThreshold && usedS < secondaryHardExcludeThreshold {
 			pa.available++
 		}
 
 		// Primary time weight
 		primaryWeight := 1.0
-		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
-			ttr := a.Usage.PrimaryResetAt.Sub(now)
+		if !account.Usage.PrimaryResetAt.IsZero() && account.Usage.PrimaryResetAt.After(now) {
+			ttr := account.Usage.PrimaryResetAt.Sub(now)
 			if ttr > primaryWindowDuration {
 				ttr = primaryWindowDuration
 			}
@@ -1609,28 +1823,33 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 
 		// Secondary time weight
 		secondaryWeight := 1.0
-		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
-			ttr := a.Usage.SecondaryResetAt.Sub(now)
+		if !account.Usage.SecondaryResetAt.IsZero() && account.Usage.SecondaryResetAt.After(now) {
+			ttr := account.Usage.SecondaryResetAt.Sub(now)
 			if ttr > secondaryWindowDuration {
 				ttr = secondaryWindowDuration
 			}
 			secondaryWeight = float64(ttr) / float64(secondaryWindowDuration)
 
-			if pa.earliestSecondaryReset.IsZero() || a.Usage.SecondaryResetAt.Before(pa.earliestSecondaryReset) {
-				pa.earliestSecondaryReset = a.Usage.SecondaryResetAt
+			if pa.earliestSecondaryReset.IsZero() || account.Usage.SecondaryResetAt.Before(pa.earliestSecondaryReset) {
+				pa.earliestSecondaryReset = account.Usage.SecondaryResetAt
 			}
-			if a.Usage.SecondaryResetAt.Before(in24h) {
+			if account.Usage.SecondaryResetAt.Before(in24h) {
 				pa.resetsIn24h++
 			}
 		}
 
-		pa.totalEffP += usedP * primaryWeight
-		pa.totalEffS += usedS * secondaryWeight
-		pa.n++
+		if usagePrimaryWindowAvailable(account.Usage) {
+			pa.totalEffP += usedP * primaryWeight
+			pa.nPrimary++
+		}
+		if usageSecondaryWindowAvailable(account.Usage) {
+			pa.totalEffS += usedS * secondaryWeight
+			pa.nSecondary++
+		}
 	}
 
 	var results []PoolUtilization
-	for _, accType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeGemini} {
+	for _, accType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeGemini, AccountTypeAntigravity} {
 		pa := accums[accType]
 		if pa.total == 0 {
 			continue
@@ -1642,9 +1861,11 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 			TotalAccounts:     pa.total,
 			ResetsIn24h:       pa.resetsIn24h,
 		}
-		if pa.n > 0 {
-			pu.TimeWeightedPrimaryPct = (pa.totalEffP / pa.n) * 100
-			pu.TimeWeightedSecondaryPct = (pa.totalEffS / pa.n) * 100
+		if pa.nPrimary > 0 {
+			pu.TimeWeightedPrimaryPct = (pa.totalEffP / pa.nPrimary) * 100
+		}
+		if pa.nSecondary > 0 {
+			pu.TimeWeightedSecondaryPct = (pa.totalEffS / pa.nSecondary) * 100
 		}
 		if !pa.earliestSecondaryReset.IsZero() && pa.earliestSecondaryReset.After(now) {
 			pu.NextSecondaryResetIn = formatDuration(pa.earliestSecondaryReset.Sub(now))
@@ -1718,22 +1939,25 @@ type GeminiUsageSummary struct {
 
 // UsageWindowStats contains stats for a usage window.
 type UsageWindowStats struct {
-	AvgUsedPct  float64   `json:"avg_used_pct"`
-	MinUsedPct  float64   `json:"min_used_pct"`
-	MaxUsedPct  float64   `json:"max_used_pct"`
-	NextResetAt time.Time `json:"next_reset_at,omitempty"`
-	WindowName  string    `json:"window_name,omitempty"` // e.g., "5 hours", "7 days", "24 hours"
+	AvgUsedPct     float64   `json:"avg_used_pct"`
+	MinUsedPct     float64   `json:"min_used_pct"`
+	MaxUsedPct     float64   `json:"max_used_pct"`
+	AvailableCount int       `json:"available_count"`
+	NextResetAt    time.Time `json:"next_reset_at,omitempty"`
+	WindowName     string    `json:"window_name,omitempty"` // e.g., "5 hours", "7 days", "24 hours"
 }
 
 // AccountBrief is a summary of an account for the usage endpoint.
 type AccountBrief struct {
-	ID           string  `json:"id"`
-	Type         string  `json:"type"`
-	Plan         string  `json:"plan"`
-	Status       string  `json:"status"` // "healthy", "dead", "disabled"
-	PrimaryPct   int     `json:"primary_pct"`
-	SecondaryPct int     `json:"secondary_pct"`
-	Score        float64 `json:"score"`
+	ID                 string  `json:"id"`
+	Type               string  `json:"type"`
+	Plan               string  `json:"plan"`
+	Status             string  `json:"status"` // "healthy", "dead", "disabled"
+	PrimaryPct         int     `json:"primary_pct"`
+	SecondaryPct       int     `json:"secondary_pct"`
+	PrimaryAvailable   bool    `json:"primary_available"`
+	SecondaryAvailable bool    `json:"secondary_available"`
+	Score              float64 `json:"score"`
 	// Provider-specific labels for the percentages
 	PrimaryLabel   string `json:"primary_label,omitempty"`   // e.g., "5hr tokens", "daily"
 	SecondaryLabel string `json:"secondary_label,omitempty"` // e.g., "weekly", "requests"
@@ -1751,11 +1975,12 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 	}
 
 	var totalP, totalS float64
-	var healthyCount int
+	var primaryHealthyCount, secondaryHealthyCount int
 
 	// Provider-specific tracking
 	type providerStats struct {
 		total, healthy                       int
+		primaryCount, secondaryCount         int
 		primarySum, secondarySum             float64
 		primaryMin, primaryMax               float64
 		secondaryMin, secondaryMax           float64
@@ -1800,19 +2025,27 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 		if secondaryUsed == 0 {
 			secondaryUsed = a.Usage.SecondaryUsed
 		}
+		primaryAvailable := usagePrimaryWindowAvailable(a.Usage)
+		secondaryAvailable := usageSecondaryWindowAvailable(a.Usage)
 
 		isHealthy := !a.Dead && !a.Disabled
 
-		// Track min/max for healthy accounts
+		// Track min/max for healthy accounts with an actual window. An absent
+		// five-hour limit is not the same thing as a five-hour limit at 0%.
 		if isHealthy {
-			healthyCount++
-			totalP += primaryUsed
-			totalS += secondaryUsed
-			if secondaryUsed < stats.MinSecondaryUsed {
-				stats.MinSecondaryUsed = secondaryUsed
+			if primaryAvailable {
+				totalP += primaryUsed
+				primaryHealthyCount++
 			}
-			if secondaryUsed > stats.MaxSecondaryUsed {
-				stats.MaxSecondaryUsed = secondaryUsed
+			if secondaryAvailable {
+				totalS += secondaryUsed
+				secondaryHealthyCount++
+				if secondaryUsed < stats.MinSecondaryUsed {
+					stats.MinSecondaryUsed = secondaryUsed
+				}
+				if secondaryUsed > stats.MaxSecondaryUsed {
+					stats.MaxSecondaryUsed = secondaryUsed
+				}
 			}
 		}
 
@@ -1830,26 +2063,31 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			ps.total++
 			if isHealthy {
 				ps.healthy++
-				ps.primarySum += primaryUsed
-				ps.secondarySum += secondaryUsed
-				if primaryUsed < ps.primaryMin {
-					ps.primaryMin = primaryUsed
+				if primaryAvailable {
+					ps.primaryCount++
+					ps.primarySum += primaryUsed
+					if primaryUsed < ps.primaryMin {
+						ps.primaryMin = primaryUsed
+					}
+					if primaryUsed > ps.primaryMax {
+						ps.primaryMax = primaryUsed
+					}
+					if !a.Usage.PrimaryResetAt.IsZero() && (ps.nextPrimaryReset.IsZero() || a.Usage.PrimaryResetAt.Before(ps.nextPrimaryReset)) {
+						ps.nextPrimaryReset = a.Usage.PrimaryResetAt
+					}
 				}
-				if primaryUsed > ps.primaryMax {
-					ps.primaryMax = primaryUsed
-				}
-				if secondaryUsed < ps.secondaryMin {
-					ps.secondaryMin = secondaryUsed
-				}
-				if secondaryUsed > ps.secondaryMax {
-					ps.secondaryMax = secondaryUsed
-				}
-				// Track earliest reset times
-				if !a.Usage.PrimaryResetAt.IsZero() && (ps.nextPrimaryReset.IsZero() || a.Usage.PrimaryResetAt.Before(ps.nextPrimaryReset)) {
-					ps.nextPrimaryReset = a.Usage.PrimaryResetAt
-				}
-				if !a.Usage.SecondaryResetAt.IsZero() && (ps.nextSecondaryReset.IsZero() || a.Usage.SecondaryResetAt.Before(ps.nextSecondaryReset)) {
-					ps.nextSecondaryReset = a.Usage.SecondaryResetAt
+				if secondaryAvailable {
+					ps.secondaryCount++
+					ps.secondarySum += secondaryUsed
+					if secondaryUsed < ps.secondaryMin {
+						ps.secondaryMin = secondaryUsed
+					}
+					if secondaryUsed > ps.secondaryMax {
+						ps.secondaryMax = secondaryUsed
+					}
+					if !a.Usage.SecondaryResetAt.IsZero() && (ps.nextSecondaryReset.IsZero() || a.Usage.SecondaryResetAt.Before(ps.nextSecondaryReset)) {
+						ps.nextSecondaryReset = a.Usage.SecondaryResetAt
+					}
 				}
 			}
 		}
@@ -1868,29 +2106,33 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 		case AccountTypeClaude:
 			primaryLabel = "tokens"
 			secondaryLabel = "requests"
-		case AccountTypeGemini:
+		case AccountTypeGemini, AccountTypeAntigravity:
 			primaryLabel = "daily"
 			secondaryLabel = ""
 		}
 
 		stats.Accounts = append(stats.Accounts, AccountBrief{
-			ID:             a.ID,
-			Type:           string(a.Type),
-			Plan:           a.PlanType,
-			Status:         status,
-			PrimaryPct:     int(primaryUsed * 100),
-			SecondaryPct:   int(secondaryUsed * 100),
-			Score:          score,
-			PrimaryLabel:   primaryLabel,
-			SecondaryLabel: secondaryLabel,
+			ID:                 a.ID,
+			Type:               string(a.Type),
+			Plan:               a.PlanType,
+			Status:             status,
+			PrimaryPct:         int(primaryUsed * 100),
+			SecondaryPct:       int(secondaryUsed * 100),
+			PrimaryAvailable:   primaryAvailable,
+			SecondaryAvailable: secondaryAvailable,
+			Score:              score,
+			PrimaryLabel:       primaryLabel,
+			SecondaryLabel:     secondaryLabel,
 		})
 
 		a.mu.Unlock()
 	}
 
-	if healthyCount > 0 {
-		stats.AvgPrimaryUsed = totalP / float64(healthyCount)
-		stats.AvgSecondaryUsed = totalS / float64(healthyCount)
+	if primaryHealthyCount > 0 {
+		stats.AvgPrimaryUsed = totalP / float64(primaryHealthyCount)
+	}
+	if secondaryHealthyCount > 0 {
+		stats.AvgSecondaryUsed = totalS / float64(secondaryHealthyCount)
 	}
 	if stats.MinSecondaryUsed > stats.MaxSecondaryUsed {
 		stats.MinSecondaryUsed = 0
@@ -1904,21 +2146,25 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			TotalCount:   codexStats.total,
 			HealthyCount: codexStats.healthy,
 			FiveHour: UsageWindowStats{
-				WindowName:  "5 hours",
-				MinUsedPct:  codexStats.primaryMin * 100,
-				MaxUsedPct:  codexStats.primaryMax * 100,
-				NextResetAt: codexStats.nextPrimaryReset,
+				WindowName:     "5 hours",
+				AvailableCount: codexStats.primaryCount,
 			},
 			Weekly: UsageWindowStats{
-				WindowName:  "7 days",
-				MinUsedPct:  codexStats.secondaryMin * 100,
-				MaxUsedPct:  codexStats.secondaryMax * 100,
-				NextResetAt: codexStats.nextSecondaryReset,
+				WindowName:     "7 days",
+				AvailableCount: codexStats.secondaryCount,
 			},
 		}
-		if codexStats.healthy > 0 {
-			stats.Providers.Codex.FiveHour.AvgUsedPct = (codexStats.primarySum / float64(codexStats.healthy)) * 100
-			stats.Providers.Codex.Weekly.AvgUsedPct = (codexStats.secondarySum / float64(codexStats.healthy)) * 100
+		if codexStats.primaryCount > 0 {
+			stats.Providers.Codex.FiveHour.AvgUsedPct = (codexStats.primarySum / float64(codexStats.primaryCount)) * 100
+			stats.Providers.Codex.FiveHour.MinUsedPct = codexStats.primaryMin * 100
+			stats.Providers.Codex.FiveHour.MaxUsedPct = codexStats.primaryMax * 100
+			stats.Providers.Codex.FiveHour.NextResetAt = codexStats.nextPrimaryReset
+		}
+		if codexStats.secondaryCount > 0 {
+			stats.Providers.Codex.Weekly.AvgUsedPct = (codexStats.secondarySum / float64(codexStats.secondaryCount)) * 100
+			stats.Providers.Codex.Weekly.MinUsedPct = codexStats.secondaryMin * 100
+			stats.Providers.Codex.Weekly.MaxUsedPct = codexStats.secondaryMax * 100
+			stats.Providers.Codex.Weekly.NextResetAt = codexStats.nextSecondaryReset
 		}
 	}
 
@@ -1927,21 +2173,25 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			TotalCount:   claudeStats.total,
 			HealthyCount: claudeStats.healthy,
 			Tokens: UsageWindowStats{
-				WindowName:  "tokens",
-				MinUsedPct:  claudeStats.primaryMin * 100,
-				MaxUsedPct:  claudeStats.primaryMax * 100,
-				NextResetAt: claudeStats.nextPrimaryReset,
+				WindowName:     "tokens",
+				AvailableCount: claudeStats.primaryCount,
 			},
 			Requests: UsageWindowStats{
-				WindowName:  "requests",
-				MinUsedPct:  claudeStats.secondaryMin * 100,
-				MaxUsedPct:  claudeStats.secondaryMax * 100,
-				NextResetAt: claudeStats.nextSecondaryReset,
+				WindowName:     "requests",
+				AvailableCount: claudeStats.secondaryCount,
 			},
 		}
-		if claudeStats.healthy > 0 {
-			stats.Providers.Claude.Tokens.AvgUsedPct = (claudeStats.primarySum / float64(claudeStats.healthy)) * 100
-			stats.Providers.Claude.Requests.AvgUsedPct = (claudeStats.secondarySum / float64(claudeStats.healthy)) * 100
+		if claudeStats.primaryCount > 0 {
+			stats.Providers.Claude.Tokens.AvgUsedPct = (claudeStats.primarySum / float64(claudeStats.primaryCount)) * 100
+			stats.Providers.Claude.Tokens.MinUsedPct = claudeStats.primaryMin * 100
+			stats.Providers.Claude.Tokens.MaxUsedPct = claudeStats.primaryMax * 100
+			stats.Providers.Claude.Tokens.NextResetAt = claudeStats.nextPrimaryReset
+		}
+		if claudeStats.secondaryCount > 0 {
+			stats.Providers.Claude.Requests.AvgUsedPct = (claudeStats.secondarySum / float64(claudeStats.secondaryCount)) * 100
+			stats.Providers.Claude.Requests.MinUsedPct = claudeStats.secondaryMin * 100
+			stats.Providers.Claude.Requests.MaxUsedPct = claudeStats.secondaryMax * 100
+			stats.Providers.Claude.Requests.NextResetAt = claudeStats.nextSecondaryReset
 		}
 	}
 
@@ -1950,14 +2200,15 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 			TotalCount:   geminiStats.total,
 			HealthyCount: geminiStats.healthy,
 			Daily: UsageWindowStats{
-				WindowName:  "24 hours",
-				MinUsedPct:  geminiStats.primaryMin * 100,
-				MaxUsedPct:  geminiStats.primaryMax * 100,
-				NextResetAt: geminiStats.nextPrimaryReset,
+				WindowName:     "24 hours",
+				AvailableCount: geminiStats.primaryCount,
 			},
 		}
-		if geminiStats.healthy > 0 {
-			stats.Providers.Gemini.Daily.AvgUsedPct = (geminiStats.primarySum / float64(geminiStats.healthy)) * 100
+		if geminiStats.primaryCount > 0 {
+			stats.Providers.Gemini.Daily.AvgUsedPct = (geminiStats.primarySum / float64(geminiStats.primaryCount)) * 100
+			stats.Providers.Gemini.Daily.MinUsedPct = geminiStats.primaryMin * 100
+			stats.Providers.Gemini.Daily.MaxUsedPct = geminiStats.primaryMax * 100
+			stats.Providers.Gemini.Daily.NextResetAt = geminiStats.nextPrimaryReset
 		}
 	}
 

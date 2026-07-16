@@ -25,6 +25,8 @@ type codexCyberSwapOptions struct {
 	ConversationID              string
 	RequiredPlan                string
 	ClientIP                    string
+	UserID                      string
+	OriginID                    string
 	IdleTimeout                 time.Duration
 	DownstreamHeartbeatInterval time.Duration
 	ReadLimit                   int64
@@ -157,6 +159,8 @@ type codexRelayState struct {
 	// response.create frame so the swap path can replay it on the new
 	// upstream.
 	lastResponseCreate []byte
+	requestedModel     string
+	recordedResponses  map[string]struct{}
 }
 
 func (s *codexRelayState) run() (int, error) {
@@ -209,24 +213,49 @@ func (s *codexRelayState) relayOnce() error {
 
 	upstreamErrCh := make(chan error, 1)
 	clientErrCh := make(chan error, 1)
+	activityCh := make(chan struct{}, 1)
 
 	debug := s.h != nil && s.h.cfg != nil && s.h.cfg.debug.Load()
 	go func() {
-		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream)
+		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream, activityCh)
 	}()
 	go func() {
-		clientErrCh <- pumpFrames(roundCtx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient)
+		clientErrCh <- pumpFrames(roundCtx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient, activityCh)
 	}()
 
-	select {
-	case err := <-upstreamErrCh:
-		roundCancel()
-		<-clientErrCh
-		return err
-	case err := <-clientErrCh:
-		roundCancel()
-		<-upstreamErrCh
-		return err
+	var idleTimer *time.Timer
+	var idleCh <-chan time.Time
+	if s.opts.IdleTimeout > 0 {
+		idleTimer = time.NewTimer(s.opts.IdleTimeout)
+		idleCh = idleTimer.C
+		defer idleTimer.Stop()
+	}
+	for {
+		select {
+		case err := <-upstreamErrCh:
+			roundCancel()
+			<-clientErrCh
+			return err
+		case err := <-clientErrCh:
+			roundCancel()
+			<-upstreamErrCh
+			return err
+		case <-activityCh:
+			if idleTimer != nil {
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(s.opts.IdleTimeout)
+			}
+		case <-idleCh:
+			roundCancel()
+			<-upstreamErrCh
+			<-clientErrCh
+			return fmt.Errorf("websocket idle timeout after %s", s.opts.IdleTimeout)
+		}
 	}
 }
 
@@ -241,6 +270,7 @@ func pumpFrames(
 	logLabel, label string,
 	debug bool,
 	inspect func([]byte) ([]byte, error),
+	activity chan<- struct{},
 ) error {
 	for {
 		select {
@@ -252,6 +282,10 @@ func pumpFrames(
 			}
 			if frame.err != nil {
 				return fmt.Errorf("%s read: %w", label, frame.err)
+			}
+			select {
+			case activity <- struct{}{}:
+			default:
 			}
 			data := frame.data
 			if debug {
@@ -274,6 +308,7 @@ func pumpFrames(
 }
 
 func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
+	s.recordCompletedUsage(data)
 	if !isCyberPolicyError(data) {
 		return data, nil
 	}
@@ -298,8 +333,62 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if isCodexResponseCreate(data) {
 		data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
 		s.lastResponseCreate = append(s.lastResponseCreate[:0], data...)
+		s.requestedModel = extractRequestedModelFromJSON(data)
 	}
 	return data, nil
+}
+
+// recordCompletedUsage sends terminal Codex websocket usage through the same
+// accounting path as HTTP/SSE. A websocket can carry multiple turns, and a
+// cyber swap changes which account owns the active turn, so attribution is
+// resolved from state at the moment the completion arrives.
+func (s *codexRelayState) recordCompletedUsage(data []byte) {
+	if s.h == nil || s.opts.Provider == nil || s.activeAccount == nil || len(data) == 0 {
+		return
+	}
+
+	var event map[string]any
+	if err := json.Unmarshal(data, &event); err != nil || event["type"] != "response.completed" {
+		return
+	}
+
+	responseID := ""
+	if response, ok := event["response"].(map[string]any); ok {
+		responseID, _ = response["id"].(string)
+	}
+	if responseID == "" {
+		responseID, _ = event["id"].(string)
+	}
+	if responseID != "" {
+		if s.recordedResponses == nil {
+			s.recordedResponses = make(map[string]struct{})
+		}
+		if _, recorded := s.recordedResponses[responseID]; recorded {
+			return
+		}
+	}
+
+	ru := s.opts.Provider.ParseUsage(event)
+	if ru == nil {
+		return
+	}
+	if responseID != "" {
+		s.recordedResponses[responseID] = struct{}{}
+		ru.RequestID = responseID
+	}
+
+	account := s.activeAccount
+	ru.AccountID = account.ID
+	ru.AccountType = account.Type
+	ru.UserID = s.opts.UserID
+	ru.OriginID = s.opts.OriginID
+	account.mu.Lock()
+	ru.PlanType = account.PlanType
+	account.mu.Unlock()
+	if ru.Model == "" {
+		ru.Model = s.requestedModel
+	}
+	s.h.recordUsage(account, *ru)
 }
 
 // applyModelAliasToJSONFrame rewrites a top-level JSON "model" field when a

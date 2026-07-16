@@ -1,0 +1,53 @@
+{
+  "workflow": "autoresearch:predict",
+  "created_at": "2026-05-06T17:49:00Z",
+  "scope": "entire Go codebase",
+  "goal": "Responses and Completions proxy gaps with normal OpenAI SDK behavior and hidden unsupported Codex quirks",
+  "depth": "standard",
+  "personas": 5,
+  "rounds": 2,
+  "chain": ["debug"],
+  "head": "ca4d79d",
+  "top_hypotheses": [
+    {
+      "id": "H1",
+      "title": "Responses subresource paths collapse to /responses",
+      "severity": "high",
+      "confidence": 0.98,
+      "status": "confirmed_by_probe",
+      "evidence": ["main.go:463", "provider_codex.go:324"]
+    },
+    {
+      "id": "H2",
+      "title": "Unsupported semantic fields are silently stripped without a policy matrix",
+      "severity": "high",
+      "confidence": 0.95,
+      "status": "probable",
+      "evidence": ["main.go:509", "format_translate_responses.go:332"]
+    },
+    {
+      "id": "H3",
+      "title": "Generated prompt_cache_key is cross-user and full-request granular",
+      "severity": "high",
+      "confidence": 0.92,
+      "status": "confirmed_by_probe",
+      "evidence": ["format_translate_responses.go:166", "main.go:688"]
+    },
+    {
+      "id": "H4",
+      "title": "Codex SSE detection over-classifies successful JSON /v1/* responses",
+      "severity": "high",
+      "confidence": 0.90,
+      "status": "confirmed_by_probe",
+      "evidence": ["provider_codex.go:344", "main.go:1479"]
+    },
+    {
+      "id": "H5",
+      "title": "OpenAI-compatible usage omits cached token details",
+      "severity": "medium",
+      "confidence": 0.88,
+      "status": "confirmed_by_probe",
+      "evidence": ["format_translate_responses.go:457", "format_translate_responses_sse.go:101"]
+    }
+  ]
+}

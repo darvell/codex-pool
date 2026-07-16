@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -10,6 +11,8 @@ import (
 
 	"go.etcd.io/bbolt"
 )
+
+const originWeeklyBackfillMarker = "\x00backfill-v1"
 
 const (
 	bucketUsageRequests     = "usage_requests"
@@ -19,6 +22,7 @@ const (
 	bucketUserUsage         = "user_usage"
 	bucketOriginUsage       = "origin_usage"
 	bucketOriginMetadata    = "origin_metadata"
+	bucketOriginWeeklyUsage = "origin_weekly_usage"
 	bucketUserDailyUsage    = "user_daily_usage"
 	bucketUserHourlyUsage   = "user_hourly_usage"
 	bucketGlobalHourlyUsage = "global_hourly_usage"
@@ -48,6 +52,22 @@ type OriginUsage struct {
 	RequestCount         int64     `json:"request_count"`
 	FirstSeen            time.Time `json:"first_seen"`
 	LastSeen             time.Time `json:"last_seen"`
+}
+
+// OriginWeeklyUsage attributes weekly demand from a hashed request origin to
+// the provider account that served it. AccountID is hashed before it leaves
+// the server so friend-visible analytics cannot reveal pool filenames.
+type OriginWeeklyUsage struct {
+	WeekStart       string `json:"week_start"`
+	OriginID        string `json:"origin_id"`
+	AccountID       string `json:"account_id"`
+	AccountType     string `json:"account_type"`
+	InputTokens     int64  `json:"input_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	BillableTokens  int64  `json:"billable_tokens"`
+	RequestCount    int64  `json:"request_count"`
 }
 
 // OriginMetadata tracks admin-only attribution details for a hashed origin.
@@ -98,6 +118,7 @@ type usageStore struct {
 	// In-memory cache of last known rate limits per account for delta calculation
 	lastRateLimits   map[string]rateLimitSnapshot
 	lastRateLimitsMu sync.RWMutex
+	originBackfillMu sync.Mutex
 }
 
 type rateLimitSnapshot struct {
@@ -128,23 +149,43 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	startedAt := time.Now().UTC()
+	needsOriginBackfill := false
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketOriginUsage, bucketOriginMetadata, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketOriginUsage, bucketOriginMetadata, bucketOriginWeeklyUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
+		}
+
+		weekly := tx.Bucket([]byte(bucketOriginWeeklyUsage))
+		if weekly.Get([]byte(originWeeklyBackfillMarker)) == nil {
+			if tx.Bucket([]byte(bucketUsageRequests)).Stats().KeyN == 0 {
+				return weekly.Put([]byte(originWeeklyBackfillMarker), []byte(startedAt.Format(time.RFC3339Nano)))
+			}
+			if err := tx.DeleteBucket([]byte(bucketOriginWeeklyUsage)); err != nil {
+				return err
+			}
+			if _, err := tx.CreateBucket([]byte(bucketOriginWeeklyUsage)); err != nil {
+				return err
+			}
+			needsOriginBackfill = true
 		}
 		return nil
 	}); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &usageStore{
+	store := &usageStore{
 		db:             db,
 		retention:      time.Duration(retentionDays) * 24 * time.Hour,
 		nextPrune:      time.Now().Add(1 * time.Hour),
 		lastRateLimits: make(map[string]rateLimitSnapshot),
-	}, nil
+	}
+	if needsOriginBackfill {
+		go store.backfillOriginWeeklyUsage(startedAt)
+	}
+	return store, nil
 }
 
 func (s *usageStore) Close() error {
@@ -199,7 +240,9 @@ func (s *usageStore) record(u RequestUsage) error {
 		b := tx.Bucket([]byte(bucketAccountUsage))
 		var agg AccountUsage
 		if raw := b.Get([]byte(u.AccountID)); raw != nil {
-			_ = json.Unmarshal(raw, &agg)
+			if err := json.Unmarshal(raw, &agg); err != nil {
+				return fmt.Errorf("decode account usage %q: %w", u.AccountID, err)
+			}
 		}
 		agg.TotalInputTokens += u.InputTokens
 		agg.TotalCachedTokens += u.CachedInputTokens
@@ -210,8 +253,12 @@ func (s *usageStore) record(u RequestUsage) error {
 		agg.LastPrimaryPct = u.PrimaryUsedPct
 		agg.LastSecondaryPct = u.SecondaryUsedPct
 		agg.LastUpdated = u.Timestamp
-		if enc, err := json.Marshal(&agg); err == nil {
-			_ = b.Put([]byte(u.AccountID), enc)
+		enc, err := json.Marshal(&agg)
+		if err != nil {
+			return fmt.Errorf("encode account usage %q: %w", u.AccountID, err)
+		}
+		if err := b.Put([]byte(u.AccountID), enc); err != nil {
+			return fmt.Errorf("store account usage %q: %w", u.AccountID, err)
 		}
 
 		// Update user usage aggregates (if UserID is set)
@@ -219,7 +266,9 @@ func (s *usageStore) record(u RequestUsage) error {
 			userBucket := tx.Bucket([]byte(bucketUserUsage))
 			var userAgg UserUsage
 			if raw := userBucket.Get([]byte(u.UserID)); raw != nil {
-				_ = json.Unmarshal(raw, &userAgg)
+				if err := json.Unmarshal(raw, &userAgg); err != nil {
+					return fmt.Errorf("decode user usage %q: %w", u.UserID, err)
+				}
 			}
 			if userAgg.FirstSeen.IsZero() {
 				userAgg.FirstSeen = u.Timestamp
@@ -232,17 +281,23 @@ func (s *usageStore) record(u RequestUsage) error {
 			userAgg.TotalBillableTokens += u.BillableTokens
 			userAgg.RequestCount++
 			userAgg.LastSeen = u.Timestamp
-			if enc, err := json.Marshal(&userAgg); err == nil {
-				_ = userBucket.Put([]byte(u.UserID), enc)
+			enc, err := json.Marshal(&userAgg)
+			if err != nil {
+				return fmt.Errorf("encode user usage %q: %w", u.UserID, err)
+			}
+			if err := userBucket.Put([]byte(u.UserID), enc); err != nil {
+				return fmt.Errorf("store user usage %q: %w", u.UserID, err)
 			}
 
 			// Update daily usage
-			dateKey := u.Timestamp.Format("2006-01-02")
+			dateKey := u.Timestamp.UTC().Format("2006-01-02")
 			dailyBucket := tx.Bucket([]byte(bucketUserDailyUsage))
 			dailyKey := fmt.Sprintf("%s|%s", u.UserID, dateKey)
 			var daily UserDailyUsage
 			if raw := dailyBucket.Get([]byte(dailyKey)); raw != nil {
-				_ = json.Unmarshal(raw, &daily)
+				if err := json.Unmarshal(raw, &daily); err != nil {
+					return fmt.Errorf("decode daily usage %q: %w", dailyKey, err)
+				}
 			}
 			daily.Date = dateKey
 			daily.BillableTokens += u.BillableTokens
@@ -257,19 +312,23 @@ func (s *usageStore) record(u RequestUsage) error {
 				daily.ClaudeTokens += u.BillableTokens
 			case AccountTypeCodex:
 				daily.CodexTokens += u.BillableTokens
-			case AccountTypeGemini:
+			case AccountTypeGemini, AccountTypeAntigravity:
 				daily.GeminiTokens += u.BillableTokens
 			case AccountTypeKimi:
 				daily.KimiTokens += u.BillableTokens
 			case AccountTypeMinimax:
 				daily.MinimaxTokens += u.BillableTokens
 			}
-			if enc, err := json.Marshal(&daily); err == nil {
-				_ = dailyBucket.Put([]byte(dailyKey), enc)
+			enc, err = json.Marshal(&daily)
+			if err != nil {
+				return fmt.Errorf("encode daily usage %q: %w", dailyKey, err)
+			}
+			if err := dailyBucket.Put([]byte(dailyKey), enc); err != nil {
+				return fmt.Errorf("store daily usage %q: %w", dailyKey, err)
 			}
 
 			// Update hourly usage (per-user)
-			hourKey := u.Timestamp.Format("2006-01-02T15")
+			hourKey := u.Timestamp.UTC().Format("2006-01-02T15")
 			acctType := string(u.AccountType)
 			if acctType == "" {
 				acctType = "unknown"
@@ -278,7 +337,9 @@ func (s *usageStore) record(u RequestUsage) error {
 			hourlyBucketKey := fmt.Sprintf("%s|%s|%s", u.UserID, hourKey, acctType)
 			var hourly UserHourlyUsage
 			if raw := hourlyBucket.Get([]byte(hourlyBucketKey)); raw != nil {
-				_ = json.Unmarshal(raw, &hourly)
+				if err := json.Unmarshal(raw, &hourly); err != nil {
+					return fmt.Errorf("decode hourly usage %q: %w", hourlyBucketKey, err)
+				}
 			}
 			hourly.Hour = hourKey
 			hourly.AccountType = acctType
@@ -288,8 +349,12 @@ func (s *usageStore) record(u RequestUsage) error {
 			hourly.ReasoningTokens += u.ReasoningTokens
 			hourly.BillableTokens += u.BillableTokens
 			hourly.RequestCount++
-			if enc, err := json.Marshal(&hourly); err == nil {
-				_ = hourlyBucket.Put([]byte(hourlyBucketKey), enc)
+			enc, err = json.Marshal(&hourly)
+			if err != nil {
+				return fmt.Errorf("encode hourly usage %q: %w", hourlyBucketKey, err)
+			}
+			if err := hourlyBucket.Put([]byte(hourlyBucketKey), enc); err != nil {
+				return fmt.Errorf("store hourly usage %q: %w", hourlyBucketKey, err)
 			}
 
 			// Update global hourly usage (all users combined)
@@ -297,7 +362,9 @@ func (s *usageStore) record(u RequestUsage) error {
 			globalHourlyKey := fmt.Sprintf("%s|%s", hourKey, acctType)
 			var globalHourly UserHourlyUsage
 			if raw := globalHourlyBucket.Get([]byte(globalHourlyKey)); raw != nil {
-				_ = json.Unmarshal(raw, &globalHourly)
+				if err := json.Unmarshal(raw, &globalHourly); err != nil {
+					return fmt.Errorf("decode global hourly usage %q: %w", globalHourlyKey, err)
+				}
 			}
 			globalHourly.Hour = hourKey
 			globalHourly.AccountType = acctType
@@ -307,8 +374,12 @@ func (s *usageStore) record(u RequestUsage) error {
 			globalHourly.ReasoningTokens += u.ReasoningTokens
 			globalHourly.BillableTokens += u.BillableTokens
 			globalHourly.RequestCount++
-			if enc, err := json.Marshal(&globalHourly); err == nil {
-				_ = globalHourlyBucket.Put([]byte(globalHourlyKey), enc)
+			enc, err = json.Marshal(&globalHourly)
+			if err != nil {
+				return fmt.Errorf("encode global hourly usage %q: %w", globalHourlyKey, err)
+			}
+			if err := globalHourlyBucket.Put([]byte(globalHourlyKey), enc); err != nil {
+				return fmt.Errorf("store global hourly usage %q: %w", globalHourlyKey, err)
 			}
 		}
 
@@ -317,7 +388,9 @@ func (s *usageStore) record(u RequestUsage) error {
 			originBucket := tx.Bucket([]byte(bucketOriginUsage))
 			var originAgg OriginUsage
 			if raw := originBucket.Get([]byte(u.OriginID)); raw != nil {
-				_ = json.Unmarshal(raw, &originAgg)
+				if err := json.Unmarshal(raw, &originAgg); err != nil {
+					return fmt.Errorf("decode origin usage %q: %w", u.OriginID, err)
+				}
 			}
 			if originAgg.FirstSeen.IsZero() {
 				originAgg.FirstSeen = u.Timestamp
@@ -330,8 +403,15 @@ func (s *usageStore) record(u RequestUsage) error {
 			originAgg.TotalBillableTokens += u.BillableTokens
 			originAgg.RequestCount++
 			originAgg.LastSeen = u.Timestamp
-			if enc, err := json.Marshal(&originAgg); err == nil {
-				_ = originBucket.Put([]byte(u.OriginID), enc)
+			enc, err := json.Marshal(&originAgg)
+			if err != nil {
+				return fmt.Errorf("encode origin usage %q: %w", u.OriginID, err)
+			}
+			if err := originBucket.Put([]byte(u.OriginID), enc); err != nil {
+				return fmt.Errorf("store origin usage %q: %w", u.OriginID, err)
+			}
+			if err := addOriginWeeklyUsage(tx.Bucket([]byte(bucketOriginWeeklyUsage)), u); err != nil {
+				return err
 			}
 		}
 
@@ -350,8 +430,12 @@ func (s *usageStore) record(u RequestUsage) error {
 				SecondaryDelta:  secondaryDelta,
 			}
 			sampleKey := fmt.Sprintf("%s|%020d", safeID(u.PlanType), u.Timestamp.UnixNano())
-			if sampleVal, err := json.Marshal(sample); err == nil {
-				_ = tx.Bucket([]byte(bucketCapacitySamples)).Put([]byte(sampleKey), sampleVal)
+			sampleVal, err := json.Marshal(sample)
+			if err != nil {
+				return fmt.Errorf("encode capacity sample %q: %w", sampleKey, err)
+			}
+			if err := tx.Bucket([]byte(bucketCapacitySamples)).Put([]byte(sampleKey), sampleVal); err != nil {
+				return fmt.Errorf("store capacity sample %q: %w", sampleKey, err)
 			}
 
 			// Update plan capacity aggregates with full sample for weighted analysis
@@ -398,6 +482,204 @@ func (s *usageStore) getAllOriginUsage() ([]OriginUsage, error) {
 		return origins[i].TotalBillableTokens > origins[j].TotalBillableTokens
 	})
 	return origins, nil
+}
+
+func originWeeklyKey(usage RequestUsage) string {
+	accountType := string(usage.AccountType)
+	if accountType == "" {
+		accountType = "unknown"
+	}
+	return fmt.Sprintf("%s|%s|%s|%s", startOfUTCWeek(usage.Timestamp).Format("2006-01-02"), usage.OriginID, hashAccountID(usage.AccountID), accountType)
+}
+
+func addOriginWeeklyUsage(bucket *bbolt.Bucket, usage RequestUsage) error {
+	if bucket == nil || usage.OriginID == "" {
+		return nil
+	}
+	key := originWeeklyKey(usage)
+	aggregate := OriginWeeklyUsage{
+		WeekStart:   startOfUTCWeek(usage.Timestamp).Format("2006-01-02"),
+		OriginID:    usage.OriginID,
+		AccountID:   hashAccountID(usage.AccountID),
+		AccountType: string(usage.AccountType),
+	}
+	if aggregate.AccountType == "" {
+		aggregate.AccountType = "unknown"
+	}
+	if raw := bucket.Get([]byte(key)); raw != nil {
+		if err := json.Unmarshal(raw, &aggregate); err != nil {
+			return fmt.Errorf("decode weekly origin usage %q: %w", key, err)
+		}
+	}
+	aggregate.InputTokens += usage.InputTokens
+	aggregate.CachedTokens += usage.CachedInputTokens
+	aggregate.OutputTokens += usage.OutputTokens
+	aggregate.ReasoningTokens += usage.ReasoningTokens
+	aggregate.BillableTokens += usage.BillableTokens
+	aggregate.RequestCount++
+	encoded, err := json.Marshal(&aggregate)
+	if err != nil {
+		return fmt.Errorf("encode weekly origin usage %q: %w", key, err)
+	}
+	if err := bucket.Put([]byte(key), encoded); err != nil {
+		return fmt.Errorf("store weekly origin usage %q: %w", key, err)
+	}
+	return nil
+}
+
+func mergeOriginWeeklyUsage(bucket *bbolt.Bucket, key string, aggregate OriginWeeklyUsage) error {
+	if raw := bucket.Get([]byte(key)); raw != nil {
+		var current OriginWeeklyUsage
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return err
+		}
+		aggregate.InputTokens += current.InputTokens
+		aggregate.CachedTokens += current.CachedTokens
+		aggregate.OutputTokens += current.OutputTokens
+		aggregate.ReasoningTokens += current.ReasoningTokens
+		aggregate.BillableTokens += current.BillableTokens
+		aggregate.RequestCount += current.RequestCount
+	}
+	encoded, err := json.Marshal(&aggregate)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(key), encoded)
+}
+
+func (s *usageStore) backfillOriginWeeklyUsage(startedAt time.Time) {
+	s.originBackfillMu.Lock()
+	defer s.originBackfillMu.Unlock()
+
+	complete := false
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		complete = tx.Bucket([]byte(bucketOriginWeeklyUsage)).Get([]byte(originWeeklyBackfillMarker)) != nil
+		return nil
+	}); err != nil || complete {
+		return
+	}
+
+	started := time.Now()
+	historyCutoff := startedAt.Add(-s.retention)
+	aggregates := make(map[string]OriginWeeklyUsage)
+	var requestCount int64
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketUsageRequests))
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(rawKey, value []byte) error {
+			parts := strings.SplitN(string(rawKey), "|", 3)
+			if len(parts) < 2 {
+				return nil
+			}
+			timestamp, err := timeFromKey(parts[1])
+			if err != nil || timestamp.Before(historyCutoff) || !timestamp.Before(startedAt) {
+				return nil
+			}
+			var usage RequestUsage
+			if err := json.Unmarshal(value, &usage); err != nil || usage.OriginID == "" {
+				return nil
+			}
+			key := originWeeklyKey(usage)
+			aggregate := aggregates[key]
+			if aggregate.OriginID == "" {
+				aggregate = OriginWeeklyUsage{
+					WeekStart:   startOfUTCWeek(usage.Timestamp).Format("2006-01-02"),
+					OriginID:    usage.OriginID,
+					AccountID:   hashAccountID(usage.AccountID),
+					AccountType: string(usage.AccountType),
+				}
+				if aggregate.AccountType == "" {
+					aggregate.AccountType = "unknown"
+				}
+			}
+			aggregate.InputTokens += usage.InputTokens
+			aggregate.CachedTokens += usage.CachedInputTokens
+			aggregate.OutputTokens += usage.OutputTokens
+			aggregate.ReasoningTokens += usage.ReasoningTokens
+			aggregate.BillableTokens += usage.BillableTokens
+			aggregate.RequestCount++
+			aggregates[key] = aggregate
+			requestCount++
+			return nil
+		})
+	}); err != nil {
+		log.Printf("origin weekly index: scan failed: %v", err)
+		return
+	}
+
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketOriginWeeklyUsage))
+		if bucket.Get([]byte(originWeeklyBackfillMarker)) != nil {
+			return nil
+		}
+		for key, aggregate := range aggregates {
+			if err := mergeOriginWeeklyUsage(bucket, key, aggregate); err != nil {
+				return err
+			}
+		}
+		return bucket.Put([]byte(originWeeklyBackfillMarker), []byte(startedAt.Format(time.RFC3339Nano)))
+	}); err != nil {
+		log.Printf("origin weekly index: write failed: %v", err)
+		return
+	}
+	log.Printf("origin weekly index: backfilled %d requests into %d rows in %s", requestCount, len(aggregates), time.Since(started).Round(time.Millisecond))
+}
+
+// getOriginWeeklyUsage reads the materialized origin-to-account drain matrix.
+// Request recording owns this aggregation so dashboard reads stay bounded by
+// the number of chart rows instead of the number of historical requests.
+func (s *usageStore) getOriginWeeklyUsage(weeks int) ([]OriginWeeklyUsage, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	if weeks <= 0 {
+		weeks = 6
+	}
+
+	cutoff := startOfUTCWeek(time.Now().UTC()).AddDate(0, 0, -(weeks-1)*7).Format("2006-01-02")
+	result := make([]OriginWeeklyUsage, 0)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketOriginWeeklyUsage))
+		if bucket == nil {
+			return nil
+		}
+		cursor := bucket.Cursor()
+		for key, value := cursor.Seek([]byte(cutoff)); key != nil; key, value = cursor.Next() {
+			if string(key) == originWeeklyBackfillMarker {
+				continue
+			}
+			var aggregate OriginWeeklyUsage
+			if err := json.Unmarshal(value, &aggregate); err == nil {
+				result = append(result, aggregate)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].WeekStart != result[j].WeekStart {
+			return result[i].WeekStart < result[j].WeekStart
+		}
+		if result[i].BillableTokens != result[j].BillableTokens {
+			return result[i].BillableTokens > result[j].BillableTokens
+		}
+		if result[i].OriginID != result[j].OriginID {
+			return result[i].OriginID < result[j].OriginID
+		}
+		return result[i].AccountID < result[j].AccountID
+	})
+	return result, nil
+}
+
+func startOfUTCWeek(value time.Time) time.Time {
+	value = value.UTC()
+	daysSinceMonday := (int(value.Weekday()) + 6) % 7
+	return time.Date(value.Year(), value.Month(), value.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC)
 }
 
 func (s *usageStore) recordOriginMetadata(originID, rawIP, userID, userAgent, path string, seenAt time.Time) error {
@@ -551,27 +833,48 @@ func (s *usageStore) updatePlanCapacity(tx *bbolt.Tx, sample CapacitySample) {
 
 func (s *usageStore) prune() {
 	cutoff := time.Now().Add(-s.retention)
+	const maxRequestDeletes = 5000
+	deleted := 0
 	_ = s.db.Update(func(tx *bbolt.Tx) error {
-		c := tx.Bucket([]byte(bucketUsageRequests)).Cursor()
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			parts := strings.Split(string(k), "|")
+		// Request keys are account-first, not time-first. Every account range must
+		// be inspected; stopping at the first recent row leaves old rows from all
+		// later accounts behind indefinitely.
+		requests := tx.Bucket([]byte(bucketUsageRequests)).Cursor()
+		for key, _ := requests.First(); key != nil; key, _ = requests.Next() {
+			parts := strings.SplitN(string(key), "|", 3)
 			if len(parts) < 2 {
 				continue
 			}
-			ts, err := timeFromKey(parts[1])
-			if err != nil {
+			timestamp, err := timeFromKey(parts[1])
+			if err == nil && timestamp.Before(cutoff) {
+				if err := requests.Delete(); err == nil {
+					deleted++
+				}
+				if deleted >= maxRequestDeletes {
+					break
+				}
+			}
+		}
+
+		weeklyCutoff := startOfUTCWeek(cutoff).Format("2006-01-02")
+		weekly := tx.Bucket([]byte(bucketOriginWeeklyUsage)).Cursor()
+		for key, _ := weekly.First(); key != nil; key, _ = weekly.Next() {
+			if string(key) == originWeeklyBackfillMarker {
 				continue
 			}
-			if ts.Before(cutoff) {
-				_ = c.Delete()
-			} else {
-				// keys are ordered; can break once beyond cutoff
-				break
+			if len(key) >= len(weeklyCutoff) && string(key[:len(weeklyCutoff)]) < weeklyCutoff {
+				_ = weekly.Delete()
+				continue
 			}
+			break
 		}
 		return nil
 	})
-	s.nextPrune = time.Now().Add(1 * time.Hour)
+	if deleted >= maxRequestDeletes {
+		s.nextPrune = time.Now().Add(1 * time.Minute)
+	} else {
+		s.nextPrune = time.Now().Add(1 * time.Hour)
+	}
 }
 
 func timeFromKey(tsPart string) (time.Time, error) {
@@ -875,7 +1178,7 @@ func (s *usageStore) getUserDailyUsage(userID string, days int) ([]UserDailyUsag
 	}
 
 	// Generate date keys for the last N days
-	today := time.Now()
+	today := time.Now().UTC()
 	dateKeys := make(map[string]bool)
 	for i := 0; i < days; i++ {
 		d := today.AddDate(0, 0, -i)
@@ -923,7 +1226,7 @@ func (s *usageStore) getUserHourlyUsage(userID string, hours int) ([]UserHourlyU
 	}
 
 	// Generate hour keys for the last N hours
-	now := time.Now()
+	now := time.Now().UTC()
 	hourKeys := make(map[string]bool)
 	for i := 0; i < hours; i++ {
 		h := now.Add(-time.Duration(i) * time.Hour)
@@ -977,7 +1280,7 @@ func (s *usageStore) getGlobalHourlyUsage(hours int) ([]UserHourlyUsage, error) 
 	}
 
 	// Generate hour keys for the last N hours
-	now := time.Now()
+	now := time.Now().UTC()
 	hourKeys := make(map[string]bool)
 	for i := 0; i < hours; i++ {
 		h := now.Add(-time.Duration(i) * time.Hour)

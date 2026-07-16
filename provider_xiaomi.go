@@ -140,19 +140,14 @@ func (p *XiaomiProvider) DetectsSSE(path string, contentType string) bool {
 	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }
 
-var xiaomiModels = map[string]string{
-	"mimo-v2.5-pro":     "mimo-v2.5-pro",
-	"mimo-v2.5-pro[1m]": "mimo-v2.5-pro",
-}
-
 func isXiaomiModel(model string) bool {
-	_, ok := xiaomiModels[strings.ToLower(strings.TrimSpace(model))]
+	_, ok := modelForProvider(AccountTypeXiaomi, model)
 	return ok
 }
 
 func xiaomiCanonicalModel(model string) string {
-	if canonical, ok := xiaomiModels[strings.ToLower(strings.TrimSpace(model))]; ok {
-		return canonical
+	if found, ok := modelForProvider(AccountTypeXiaomi, model); ok {
+		return found.ID
 	}
 	return model
 }

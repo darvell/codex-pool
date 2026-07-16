@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,183 @@ func TestBuildWhamUsageURLKeepsBackendAPI(t *testing.T) {
 	expected := "https://chatgpt.com/backend-api/wham/usage"
 	if got != expected {
 		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestIsUsageRequestMatchesOnlyUsageResource(t *testing.T) {
+	for _, path := range []string{"/api/codex/usage", "/api/codex/usage/", "/backend-api/wham/usage"} {
+		if !isUsageRequest(httptest.NewRequest(http.MethodGet, path, nil)) {
+			t.Fatalf("expected %s to match", path)
+		}
+	}
+	for _, path := range []string{
+		"/backend-api/wham/usage/daily-token-usage-breakdown",
+		"/api/codex/usage/details",
+	} {
+		if isUsageRequest(httptest.NewRequest(http.MethodGet, path, nil)) {
+			t.Fatalf("did not expect %s to match", path)
+		}
+	}
+}
+
+func TestBuildWhamResetCreditsURLKeepsBackendAPI(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	got := buildWhamResetCreditsURL(base)
+	expected := "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	if got != expected {
+		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestBuildWhamConsumeResetCreditURLKeepsBackendAPI(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	got := buildWhamConsumeResetCreditURL(base)
+	expected := "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+	if got != expected {
+		t.Fatalf("expected %s, got %s", expected, got)
+	}
+}
+
+func TestFetchCodexResetCreditsStoresAvailableExpirations(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	h := &proxyHandler{
+		cfg: &config{whamBase: base},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
+				t.Fatalf("authorization = %q", got)
+			}
+			if got := req.Header.Get("ChatGPT-Account-ID"); got != "account-id" {
+				t.Fatalf("account id = %q", got)
+			}
+			body := `{
+				"available_count": 3,
+				"credits": [
+					{"id":"credit-later","status":"available","expires_at":"2026-07-31T20:08:45.858813Z"},
+					{"id":"credit-redeemed","status":"redeemed","expires_at":"2026-07-12T01:47:43.975382Z"},
+					{"id":"credit-sooner","status":"available","expires_at":"2026-07-18T00:35:13.709488Z"}
+				]
+			}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	account := &Account{
+		AccessToken: "access-token",
+		AccountID:   "account-id",
+	}
+
+	if err := h.fetchCodexResetCredits(account); err != nil {
+		t.Fatal(err)
+	}
+	if account.ResetCreditsAvailable != 3 {
+		t.Fatalf("available count = %d", account.ResetCreditsAvailable)
+	}
+	if len(account.RateLimitResetCredits) != 2 {
+		t.Fatalf("expiration count = %d", len(account.RateLimitResetCredits))
+	}
+	if got := account.RateLimitResetCredits[0].ExpiresAt.Format(time.RFC3339Nano); got != "2026-07-18T00:35:13.709488Z" {
+		t.Fatalf("first expiration = %s", got)
+	}
+	if got := account.RateLimitResetCredits[0].ID; got != "credit-sooner" {
+		t.Fatalf("first credit id = %s", got)
+	}
+	if account.ResetCreditsRetrievedAt.IsZero() {
+		t.Fatal("reset credits were not marked as retrieved")
+	}
+}
+
+func TestAutoRedeemExpiringCodexResetCredit(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	var requests int
+	h := &proxyHandler{
+		cfg: &config{whamBase: base},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			switch requests {
+			case 1:
+				if req.Method != http.MethodPost {
+					t.Fatalf("method = %s", req.Method)
+				}
+				var body map[string]string
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if got := body["credit_id"]; got != "credit-due" {
+					t.Fatalf("credit id = %q", got)
+				}
+				if got := body["redeem_request_id"]; got != "codex-pool:credit-due" {
+					t.Fatalf("redeem request id = %q", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Body:       io.NopCloser(strings.NewReader(`{"code":"reset","windows_reset":2}`)),
+					Header:     make(http.Header),
+				}, nil
+			case 2:
+				if req.Method != http.MethodGet {
+					t.Fatalf("method = %s", req.Method)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Body:       io.NopCloser(strings.NewReader(`{"available_count":0,"credits":[]}`)),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				t.Fatalf("unexpected request %d", requests)
+				return nil, nil
+			}
+		}),
+	}
+	account := &Account{
+		ID:          "account",
+		AccessToken: "access-token",
+		AccountID:   "account-id",
+		RateLimitResetCredits: []RateLimitResetCredit{
+			{ID: "credit-due", ExpiresAt: now.Add(10 * time.Minute)},
+		},
+		ResetCreditsAvailable: 1,
+	}
+
+	if err := h.autoRedeemExpiringCodexResetCredit(now, account); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+	if account.ResetCreditsAvailable != 0 || len(account.RateLimitResetCredits) != 0 {
+		t.Fatalf("credits were not refreshed after redemption: %+v", account.RateLimitResetCredits)
+	}
+}
+
+func TestAutoRedeemCodexResetCreditWaitsUntilThreshold(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	now := time.Date(2026, time.July, 11, 20, 0, 0, 0, time.UTC)
+	requests := 0
+	h := &proxyHandler{
+		cfg: &config{whamBase: base},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			return nil, fmt.Errorf("unexpected request to %s", req.URL)
+		}),
+	}
+	account := &Account{
+		RateLimitResetCredits: []RateLimitResetCredit{
+			{ID: "credit-later", ExpiresAt: now.Add(16 * time.Minute)},
+		},
+	}
+
+	if err := h.autoRedeemExpiringCodexResetCredit(now, account); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d", requests)
 	}
 }
 
@@ -241,12 +420,14 @@ func TestCodexClientClaudeModelStaysOnCodexAccount(t *testing.T) {
 	}
 }
 
-func TestClaudePoolRejectsCodexClientFormatTranslation(t *testing.T) {
+func TestClaudePoolTranslatesResponsesClientFormat(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	base, _ := url.Parse("https://api.anthropic.com")
 	claude := &Account{Type: AccountTypeClaude, ID: "claude", AccessToken: "sk-ant-api-upstream", PlanType: "max"}
 	transportCalled := false
+	var upstreamPath string
+	var upstreamModel string
 
 	h := &proxyHandler{
 		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
@@ -260,7 +441,20 @@ func TestClaudePoolRejectsCodexClientFormatTranslation(t *testing.T) {
 		),
 		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			transportCalled = true
-			return nil, nil
+			upstreamPath = req.URL.Path
+			var body map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			upstreamModel, _ = body["model"].(string)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+				)),
+			}, nil
 		}),
 	}
 
@@ -270,11 +464,17 @@ func TestClaudePoolRejectsCodexClientFormatTranslation(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.proxyRequest(rr, req, "req-claude-responses")
 
-	if rr.Code != http.StatusBadRequest {
+	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
-	if transportCalled {
-		t.Fatal("transport should not be called for Codex-to-Claude translation")
+	if !transportCalled {
+		t.Fatal("transport was not called")
+	}
+	if upstreamPath != "/v1/messages" {
+		t.Fatalf("upstream path = %q", upstreamPath)
+	}
+	if upstreamModel != "claude-opus-4-8" {
+		t.Fatalf("upstream model = %q", upstreamModel)
 	}
 }
 
@@ -377,17 +577,21 @@ func TestClaudePoolTokenAcceptedViaXAPIKeyPreservesNativeClaudeRequest(t *testin
 	if upstreamAPIKey != "" {
 		t.Fatalf("upstream X-Api-Key leaked pool token: %q", upstreamAPIKey)
 	}
-	if upstreamBeta != betaOAuth {
-		t.Fatalf("upstream anthropic-beta = %q", upstreamBeta)
+	for _, beta := range []string{betaClaudeCode, betaOAuth, betaInterleavedThink, betaCacheScope} {
+		if !strings.Contains(upstreamBeta, beta) {
+			t.Fatalf("upstream anthropic-beta = %q, missing %q", upstreamBeta, beta)
+		}
 	}
 	if obfuscatedToolName != "Bash" {
 		t.Fatalf("tool name should be preserved, got %q", obfuscatedToolName)
 	}
 	system, _ := upstreamBody["system"].([]any)
 	systemBlock, _ := system[0].(map[string]any)
-	systemCache, _ := systemBlock["cache_control"].(map[string]any)
-	if systemBlock["text"] != "be helpful" || systemCache["ttl"] != "5m" {
-		t.Fatalf("system cache block was rewritten: %#v", systemBlock)
+	if text, _ := systemBlock["text"].(string); !strings.Contains(text, "x-anthropic-billing-header") {
+		t.Fatalf("billing system block missing: %#v", systemBlock)
+	}
+	if len(system) != 3 || system[1].(map[string]any)["text"] != ccSystemPrefix {
+		t.Fatalf("Claude Code system shape missing: %#v", system)
 	}
 	tools, _ := upstreamBody["tools"].([]any)
 	tool, _ := tools[0].(map[string]any)
@@ -396,8 +600,15 @@ func TestClaudePoolTokenAcceptedViaXAPIKeyPreservesNativeClaudeRequest(t *testin
 		t.Fatalf("tool cache block was rewritten: %#v", tool)
 	}
 	messages, _ := upstreamBody["messages"].([]any)
-	first, _ := messages[0].(map[string]any)
-	content, _ := first["content"].([]any)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %#v, want instruction pair plus original", messages)
+	}
+	instruction := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if instruction["text"] != "[System Instructions]\nbe helpful" {
+		t.Fatalf("system instructions were not preserved: %#v", instruction)
+	}
+	original, _ := messages[2].(map[string]any)
+	content, _ := original["content"].([]any)
 	textBlock, _ := content[0].(map[string]any)
 	messageCache, _ := textBlock["cache_control"].(map[string]any)
 	if textBlock["text"] != "hello" || messageCache["ttl"] != "1h" {
@@ -614,19 +825,16 @@ func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
 	if got := int(found["gpt-5.5"]["context_window"].(float64)); got != 272000 {
 		t.Fatalf("gpt-5.5 context_window = %d", got)
 	}
-	if got := found["gpt-5.5"]["display_name"]; got != "gpt-5.5" {
+	if got := found["gpt-5.5"]["display_name"]; got != "GPT-5.5" {
 		t.Fatalf("gpt-5.5 display_name = %#v", got)
 	}
-	for _, slug := range []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+	for _, slug := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
 		if found[slug] == nil {
 			t.Fatalf("missing %s in injected catalog: %#v", slug, models)
 		}
 		if got := int(found[slug]["context_window"].(float64)); got != 372000 {
 			t.Fatalf("%s context_window = %d, want 372000", slug, got)
 		}
-	}
-	if got := found["gpt-5.6-sol"]["default_reasoning_level"]; got != "low" {
-		t.Fatalf("gpt-5.6-sol default_reasoning_level = %#v, want low", got)
 	}
 	if found["claude-sonnet-5"] == nil {
 		t.Fatalf("missing claude-sonnet-5 in injected catalog: %#v", models)
@@ -663,9 +871,10 @@ func TestCodexProviderParseUsageHeaders(t *testing.T) {
 	acc := &Account{Type: AccountTypeCodex}
 	provider := &CodexProvider{}
 	provider.ParseUsageHeaders(acc, mapToHeader(map[string]string{
-		"X-Codex-Primary-Used-Percent":   "25",
-		"X-Codex-Secondary-Used-Percent": "50",
-		"X-Codex-Primary-Window-Minutes": "300",
+		"X-Codex-Primary-Used-Percent":     "25",
+		"X-Codex-Secondary-Used-Percent":   "50",
+		"X-Codex-Primary-Window-Minutes":   "300",
+		"X-Codex-Secondary-Window-Minutes": "10080",
 	}))
 
 	if acc.Usage.PrimaryUsedPercent != 0.25 {
@@ -676,6 +885,176 @@ func TestCodexProviderParseUsageHeaders(t *testing.T) {
 	}
 	if acc.Usage.PrimaryWindowMinutes != 300 {
 		t.Fatalf("primary window = %d", acc.Usage.PrimaryWindowMinutes)
+	}
+	if acc.Usage.SecondaryWindowMinutes != 10080 {
+		t.Fatalf("secondary window = %d", acc.Usage.SecondaryWindowMinutes)
+	}
+}
+
+func TestCodexProviderMapsWeeklyOnlyPrimarySlotAndClearsRemovedFiveHourWindow(t *testing.T) {
+	oldReset := time.Now().Add(time.Hour).Truncate(time.Second)
+	weeklyReset := time.Now().Add(6 * 24 * time.Hour).Truncate(time.Second)
+	acc := &Account{
+		Type: AccountTypeCodex,
+		Usage: UsageSnapshot{
+			PrimaryUsed:            0.75,
+			PrimaryUsedPercent:     0.75,
+			PrimaryWindowMinutes:   300,
+			PrimaryResetAt:         oldReset,
+			SecondaryUsed:          0.40,
+			SecondaryUsedPercent:   0.40,
+			SecondaryWindowMinutes: 10080,
+			SecondaryResetAt:       oldReset,
+			CreditsBalance:         10,
+			HasCredits:             true,
+		},
+	}
+
+	provider := &CodexProvider{}
+	provider.ParseUsageHeaders(acc, mapToHeader(map[string]string{
+		"X-Codex-Primary-Used-Percent":     "82",
+		"X-Codex-Primary-Window-Minutes":   "10080",
+		"X-Codex-Primary-Reset-At":         strconv.FormatInt(weeklyReset.Unix(), 10),
+		"X-Codex-Secondary-Used-Percent":   "0",
+		"X-Codex-Secondary-Window-Minutes": "0",
+		"X-Codex-Credits-Has-Credits":      "false",
+		"X-Codex-Credits-Unlimited":        "false",
+		"X-Codex-Credits-Balance":          "0",
+	}))
+
+	if usagePrimaryWindowAvailable(acc.Usage) {
+		t.Fatalf("removed five-hour window survived: %+v", acc.Usage)
+	}
+	if got := usageSecondaryUsed(acc.Usage); got != 0.82 {
+		t.Fatalf("weekly usage = %v, want 0.82", got)
+	}
+	if acc.Usage.SecondaryWindowMinutes != 10080 {
+		t.Fatalf("weekly window = %d", acc.Usage.SecondaryWindowMinutes)
+	}
+	if !acc.Usage.SecondaryResetAt.Equal(weeklyReset) {
+		t.Fatalf("weekly reset = %v, want %v", acc.Usage.SecondaryResetAt, weeklyReset)
+	}
+	if acc.Usage.HasCredits || acc.Usage.CreditsBalance != 0 {
+		t.Fatalf("stale credits survived: %+v", acc.Usage)
+	}
+}
+
+func TestCodexProviderMapsFiveHourOnlyPrimarySlotAndClearsRemovedWeeklyWindow(t *testing.T) {
+	fiveHourReset := time.Now().Add(4 * time.Hour).Truncate(time.Second)
+	acc := &Account{
+		Type: AccountTypeCodex,
+		Usage: UsageSnapshot{
+			SecondaryUsed:          0.82,
+			SecondaryUsedPercent:   0.82,
+			SecondaryWindowMinutes: 10080,
+			SecondaryResetAt:       time.Now().Add(6 * 24 * time.Hour),
+		},
+	}
+
+	provider := &CodexProvider{}
+	provider.ParseUsageHeaders(acc, mapToHeader(map[string]string{
+		"X-Codex-Primary-Used-Percent":     "25",
+		"X-Codex-Primary-Window-Minutes":   "300",
+		"X-Codex-Primary-Reset-At":         strconv.FormatInt(fiveHourReset.Unix(), 10),
+		"X-Codex-Secondary-Used-Percent":   "0",
+		"X-Codex-Secondary-Window-Minutes": "0",
+	}))
+
+	if got := usagePrimaryUsed(acc.Usage); got != 0.25 {
+		t.Fatalf("five-hour usage = %v, want 0.25", got)
+	}
+	if acc.Usage.PrimaryWindowMinutes != 300 || !acc.Usage.PrimaryResetAt.Equal(fiveHourReset) {
+		t.Fatalf("five-hour window = %+v", acc.Usage)
+	}
+	if usageSecondaryWindowAvailable(acc.Usage) {
+		t.Fatalf("removed weekly window survived: %+v", acc.Usage)
+	}
+}
+
+func TestCodexUsageSlotsEncodeWeeklyOnlyAsUpstreamPrimary(t *testing.T) {
+	resetAt := time.Now().Add(6 * 24 * time.Hour).Truncate(time.Second)
+	slots := codexUsageSlotsFromSnapshot(UsageSnapshot{
+		SecondaryUsed:          0.82,
+		SecondaryUsedPercent:   0.82,
+		SecondaryWindowMinutes: 10080,
+		SecondaryResetAt:       resetAt,
+	})
+	if slots.Primary == nil {
+		t.Fatal("missing upstream primary slot")
+	}
+	if slots.Primary.WindowMinutes != 10080 || slots.Primary.UsedPercent != 0.82 {
+		t.Fatalf("primary slot = %+v", slots.Primary)
+	}
+	if slots.Secondary != nil {
+		t.Fatalf("unexpected secondary slot: %+v", slots.Secondary)
+	}
+}
+
+func TestReplaceUsageHeadersEmitsWeeklyOnlyPoolInPrimarySlot(t *testing.T) {
+	account := &Account{
+		ID:       "weekly-only",
+		Type:     AccountTypeCodex,
+		PlanType: "prolite",
+		Usage: UsageSnapshot{
+			SecondaryUsed:          0.82,
+			SecondaryUsedPercent:   0.82,
+			SecondaryWindowMinutes: 10080,
+		},
+	}
+	h := &proxyHandler{pool: newPoolState([]*Account{account}, false)}
+	headers := mapToHeader(map[string]string{
+		"X-Codex-Primary-Used-Percent":     "82",
+		"X-Codex-Primary-Window-Minutes":   "10080",
+		"X-Codex-Secondary-Used-Percent":   "0",
+		"X-Codex-Secondary-Window-Minutes": "0",
+	})
+
+	h.replaceUsageHeaders(headers)
+
+	if got := headers.Get("X-Codex-Primary-Used-Percent"); got != "82.0" {
+		t.Fatalf("primary used header = %q", got)
+	}
+	if got := headers.Get("X-Codex-Primary-Window-Minutes"); got != "10080" {
+		t.Fatalf("primary window header = %q", got)
+	}
+	if got := headers.Get("X-Codex-Secondary-Used-Percent"); got != "" {
+		t.Fatalf("stale secondary header = %q", got)
+	}
+}
+
+func TestHandleAggregatedUsageMatchesWeeklyOnlyUpstreamShape(t *testing.T) {
+	account := &Account{
+		ID:       "weekly-only",
+		Type:     AccountTypeCodex,
+		PlanType: "prolite",
+		Usage: UsageSnapshot{
+			SecondaryUsed:          0.82,
+			SecondaryUsedPercent:   0.82,
+			SecondaryWindowMinutes: 10080,
+		},
+	}
+	h := &proxyHandler{
+		cfg:  &config{},
+		pool: newPoolState([]*Account{account}, false),
+	}
+	recorder := httptest.NewRecorder()
+
+	h.handleAggregatedUsage(recorder, "test")
+
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	rateLimit := payload["rate_limit"].(map[string]any)
+	primary := rateLimit["primary_window"].(map[string]any)
+	if got := int(primary["limit_window_seconds"].(float64)); got != 604800 {
+		t.Fatalf("primary window seconds = %d", got)
+	}
+	if got := primary["used_percent"].(float64); got != 82 {
+		t.Fatalf("primary used percent = %v", got)
+	}
+	if rateLimit["secondary_window"] != nil {
+		t.Fatalf("secondary window = %#v, want null", rateLimit["secondary_window"])
 	}
 }
 
@@ -945,6 +1324,8 @@ func TestServeHTTPCodexAppsMCPInitializeReturnsJSON(t *testing.T) {
 		"/backend-api/wham/apps",
 		"/wham/apps",
 		"/api/codex/apps",
+		"/backend-api/ps/mcp",
+		"/api/codex/ps/mcp",
 		"/backend-api/wham/apps/", // trailing slash
 	} {
 		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
@@ -971,6 +1352,57 @@ func TestServeHTTPCodexAppsMCPInitializeReturnsJSON(t *testing.T) {
 		if got := result["protocolVersion"]; got != "2025-06-18" {
 			t.Fatalf("%s protocolVersion=%#v", path, got)
 		}
+	}
+}
+
+func TestServeHTTPCodexResetCreditsAlwaysReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{}}
+	for _, path := range []string{
+		"/backend-api/wham/rate-limit-reset-credits",
+		"/api/codex/rate-limit-reset-credits",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer invalid-pool-token")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, rr.Code, rr.Body.String())
+		}
+		var response struct {
+			AvailableCount int   `json:"available_count"`
+			Credits        []any `json:"credits"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("%s unmarshal: %v", path, err)
+		}
+		if response.AvailableCount != 0 || len(response.Credits) != 0 {
+			t.Fatalf("%s response=%s", path, rr.Body.String())
+		}
+	}
+}
+
+func TestServeHTTPCodexResetCreditConsumeCannotReachUpstream(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{}}
+	body := bytes.NewReader([]byte(`{"redeem_request_id":"request","credit_id":"credit"}`))
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/wham/rate-limit-reset-credits/consume", body)
+	req.Header.Set("Authorization", "Bearer invalid-pool-token")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["code"] != "no_credit" || response["windows_reset"] != float64(0) {
+		t.Fatalf("response=%#v", response)
 	}
 }
 
@@ -1123,10 +1555,10 @@ func TestTranslateImagesGenerationToResponses(t *testing.T) {
 	}
 	tools := got["tools"].([]any)
 	tool := tools[0].(map[string]any)
-	if got["model"] != "gpt-5.4-mini" {
+	if got["model"] != "gpt-5.6-luna" {
 		t.Fatalf("image model should map to host responses model: %#v", got["model"])
 	}
-	if tool["type"] != "image_generation" || tool["size"] != "1024x1024" || tool["output_format"] != "webp" {
+	if tool["type"] != "image_generation" || tool["size"] != "1024x1024" || tool["output_format"] != "webp" || tool["partial_images"] != float64(0) {
 		t.Fatalf("bad image tool: %#v", tool)
 	}
 	if got["stream"] != true || got["store"] != false {
@@ -1205,6 +1637,36 @@ func TestRequestHasImageGenerationTool(t *testing.T) {
 	}
 }
 
+func TestResponsesBufferingWriterUsesLatestPartialImageAtStreamEnd(t *testing.T) {
+	t.Parallel()
+
+	writer := &responsesBufferingWriter{model: "gpt-5.6-luna"}
+	events := []string{
+		"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_img\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-luna\"}}\n\n",
+		"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"ig_1\",\"type\":\"image_generation_call\",\"status\":\"in_progress\"}}\n\n",
+		"event: response.image_generation_call.partial_image\ndata: {\"type\":\"response.image_generation_call.partial_image\",\"item_id\":\"ig_1\",\"partial_image_b64\":\"FIRST\"}\n\n",
+		"event: response.image_generation_call.partial_image\ndata: {\"type\":\"response.image_generation_call.partial_image\",\"item_id\":\"ig_1\",\"partial_image_b64\":\"LATEST\"}\n\n",
+	}
+	for _, event := range events {
+		if _, err := writer.Write([]byte(event)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	translated, err := translateResponsesToImagesGeneration(writer.Result(), "b64_json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(translated, &response); err != nil {
+		t.Fatal(err)
+	}
+	data := response["data"].([]any)
+	if got := data[0].(map[string]any)["b64_json"]; got != "LATEST" {
+		t.Fatalf("b64_json = %#v, want latest partial image", got)
+	}
+}
+
 func TestClientOrDefaultTimeoutDoesNotClampStreams(t *testing.T) {
 	t.Parallel()
 
@@ -1229,6 +1691,16 @@ func TestClientOrDefaultTimeoutDoesNotClampStreams(t *testing.T) {
 	plainReq.Header.Set("X-Stainless-Timeout", "60")
 	if got := clientOrDefaultTimeout(plainReq, 10*time.Second, 0, []byte(`{"stream":false}`)); got != time.Minute {
 		t.Fatalf("plain timeout = %v, want 1m", got)
+	}
+}
+
+func TestImageFanoutUsesLoopbackEndpoint(t *testing.T) {
+	t.Parallel()
+
+	h := &proxyHandler{cfg: &config{listenAddr: "0.0.0.0:14430"}}
+	req := httptest.NewRequest(http.MethodPost, "https://codex.ppflix.net/v1/images/generations", nil)
+	if got := h.imageFanoutEndpoint(req); got != "http://127.0.0.1:14430/v1/images/generations" {
+		t.Fatalf("fanout endpoint = %q", got)
 	}
 }
 

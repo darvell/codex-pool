@@ -59,7 +59,7 @@ func buildImagesResponsesRequest(req map[string]any, content []any) ([]byte, str
 	model, _ := req["model"].(string)
 	model = strings.TrimSpace(model)
 	if model == "" || strings.HasPrefix(strings.ToLower(model), "gpt-image") || strings.HasPrefix(strings.ToLower(model), "dall-e") {
-		model = "gpt-5.4-mini"
+		model = "gpt-5.6-luna"
 	}
 	outputFormat, _ := req["output_format"].(string)
 	if outputFormat == "" {
@@ -81,6 +81,9 @@ func buildImagesResponsesRequest(req map[string]any, content []any) ([]byte, str
 		if v, ok := req[key]; ok {
 			tool[key] = v
 		}
+	}
+	if _, ok := tool["partial_images"]; !ok {
+		tool["partial_images"] = 0
 	}
 
 	instructions := "Generate the requested image with the image_generation tool. Do not answer with text unless the image tool fails."

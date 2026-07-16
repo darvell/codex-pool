@@ -629,7 +629,7 @@ func translateOpenAIReqToClaude(body []byte) ([]byte, error) {
 
 	// model
 	if m, ok := oai["model"].(string); ok {
-		claude["model"] = m
+		claude["model"] = claudeCanonicalModel(m)
 	}
 
 	// Build messages, extracting system messages
@@ -1253,7 +1253,7 @@ func claudeCanonicalModel(model string) string {
 	} else {
 		switch baseLower {
 		case "opus":
-			canonical = "claude-opus-4-7"
+			canonical = "claude-opus-4-8"
 		case "fable":
 			canonical = "claude-fable-5"
 		case "sonnet":
@@ -1356,7 +1356,7 @@ func claudeModelEntry(slug, displayName string, contextWindow int) map[string]an
 	return map[string]any{
 		"slug":                           slug,
 		"display_name":                   displayName,
-		"description":                    displayName + " via Codex Pool",
+		"description":                    displayName,
 		"prefer_websockets":              false,
 		"support_verbosity":              false,
 		"default_verbosity":              nil,
@@ -1395,42 +1395,19 @@ type codexCatalogModel struct {
 	defaultReasoningLevel string // optional; empty leaves template/default alone
 }
 
-var codexCatalogFallbackModels = []codexCatalogModel{
-	{
-		slug:          "gpt-5.5",
-		displayName:   "gpt-5.5",
-		description:   "Strong model for complex coding tasks.",
-		contextWindow: 272000,
-	},
-	// GPT-5.6 series (sol / terra / luna). Upstream serves these for
-	// client_version >= ~0.144.0; inject when the catalog is older or sparse.
-	{
-		slug:                  "gpt-5.6-sol",
-		displayName:           "gpt-5.6-sol",
-		description:           "GPT-5.6 Sol — default 5.6 coding variant.",
-		contextWindow:         372000,
-		defaultReasoningLevel: "low",
-	},
-	{
-		slug:          "gpt-5.6-terra",
-		displayName:   "gpt-5.6-terra",
-		description:   "GPT-5.6 Terra.",
-		contextWindow: 372000,
-	},
-	{
-		slug:          "gpt-5.6-luna",
-		displayName:   "gpt-5.6-luna",
-		description:   "GPT-5.6 Luna.",
-		contextWindow: 372000,
-	},
-	// Request-time alias gpt-5.6 → gpt-5.6-sol; keep a catalog entry so clients can pick it.
-	{
-		slug:                  "gpt-5.6",
-		displayName:           "gpt-5.6",
-		description:           "GPT-5.6 (routes to gpt-5.6-sol).",
-		contextWindow:         372000,
-		defaultReasoningLevel: "low",
-	},
+var codexCatalogFallbackModels = codexFallbackModels()
+
+func codexFallbackModels() []codexCatalogModel {
+	var result []codexCatalogModel
+	for _, model := range modelsForProvider(AccountTypeCodex) {
+		result = append(result, codexCatalogModel{
+			slug:          model.ID,
+			displayName:   model.DisplayName,
+			description:   model.Description,
+			contextWindow: model.ContextWindow,
+		})
+	}
+	return result
 }
 
 // injectClaudeModels adds local pool model entries to the Codex model catalog response
@@ -1461,18 +1438,24 @@ func injectClaudeModels(body []byte) []byte {
 
 	models = injectMissingCodexCatalogModels(models)
 
-	claudeModels := []map[string]any{
-		claudeModelEntry("opus", "Claude Opus 4.7", 200000),
-		claudeModelEntry("opus[1m]", "Claude Opus 4.7 [1m]", 1000000),
-		claudeModelEntry("sonnet", "Claude Sonnet 5", 200000),
-		claudeModelEntry("sonnet[1m]", "Claude Sonnet 5 [1m]", 1000000),
-		claudeModelEntry("claude-sonnet-5", "Claude Sonnet 5", 200000),
-		claudeModelEntry("claude-sonnet-5[1m]", "Claude Sonnet 5 [1m]", 1000000),
-		claudeModelEntry("haiku", "Claude Haiku 4.5", 200000),
+	existing := make(map[string]bool, len(models))
+	for _, raw := range models {
+		if model, ok := raw.(map[string]any); ok {
+			if slug, _ := model["slug"].(string); slug != "" {
+				existing[slug] = true
+			}
+		}
 	}
-
-	for _, cm := range claudeModels {
-		models = append(models, cm)
+	for _, model := range modelsForProvider(AccountTypeClaude) {
+		if !existing[model.ID] {
+			models = append(models, claudeModelEntry(model.ID, model.DisplayName, model.ContextWindow))
+		}
+	}
+	for _, model := range antigravityModels.Models(nil) {
+		slug := "antigravity/" + model.ID
+		if !existing[slug] {
+			models = append(models, claudeModelEntry(slug, model.DisplayName, model.MaxTokens))
+		}
 	}
 	catalog["models"] = models
 

@@ -246,20 +246,8 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 }
 
 func extractSSEEventData(event []byte) []byte {
-	dataIdx := bytes.Index(event, []byte("data: "))
-	if dataIdx < 0 {
-		dataIdx = bytes.Index(event, []byte("data:"))
-	}
-
-	var data []byte
-	if dataIdx >= 0 {
-		data = event[dataIdx:]
-		if bytes.HasPrefix(data, []byte("data: ")) {
-			data = data[6:]
-		} else if bytes.HasPrefix(data, []byte("data:")) {
-			data = data[5:]
-		}
-	} else {
+	_, data := parseSSEEvent(event)
+	if len(data) == 0 {
 		trimmed := bytes.TrimSpace(event)
 		if len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
 			data = trimmed
@@ -268,4 +256,23 @@ func extractSSEEventData(event []byte) []byte {
 		}
 	}
 	return bytes.TrimSpace(data)
+}
+
+func parseSSEEvent(event []byte) (string, []byte) {
+	var eventType string
+	var dataLines [][]byte
+	for _, rawLine := range bytes.Split(event, []byte("\n")) {
+		line := bytes.TrimSuffix(rawLine, []byte("\r"))
+		switch {
+		case bytes.HasPrefix(line, []byte("event:")):
+			eventType = string(bytes.TrimSpace(line[len("event:"):]))
+		case bytes.HasPrefix(line, []byte("data:")):
+			value := line[len("data:"):]
+			if len(value) > 0 && value[0] == ' ' {
+				value = value[1:]
+			}
+			dataLines = append(dataLines, value)
+		}
+	}
+	return eventType, bytes.Join(dataLines, []byte("\n"))
 }

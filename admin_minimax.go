@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -56,7 +57,7 @@ func (h *proxyHandler) handleMinimaxAdd(w http.ResponseWriter, r *http.Request) 
 	// Validate key by sending a minimal completion request
 	validationURL := h.cfg.minimaxBase.String() + "/v1/messages"
 	body := map[string]any{
-		"model":      "MiniMax-M2.5",
+		"model":      "MiniMax-M3",
 		"max_tokens": 1,
 		"messages": []map[string]string{
 			{"role": "user", "content": "hi"},
@@ -79,6 +80,10 @@ func (h *proxyHandler) handleMinimaxAdd(w http.ResponseWriter, r *http.Request) 
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		respondJSONError(w, http.StatusBadRequest, "invalid API key (authentication failed)")
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respondJSONError(w, http.StatusBadGateway, fmt.Sprintf("key validation returned status %d", resp.StatusCode))
 		return
 	}
 

@@ -10,10 +10,14 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const resetCreditAutoRedeemWindow = 15 * time.Minute
+const resetCreditPollInterval = 5 * time.Minute
 
 func (h *proxyHandler) startUsagePoller() {
 	if h == nil || h.cfg.usageRefresh <= 0 {
@@ -22,7 +26,11 @@ func (h *proxyHandler) startUsagePoller() {
 	// Fetch usage immediately on startup
 	go h.pollUpstreamUsage()
 
-	ticker := time.NewTicker(h.cfg.usageRefresh)
+	pollInterval := h.cfg.usageRefresh
+	if pollInterval > resetCreditPollInterval {
+		pollInterval = resetCreditPollInterval
+	}
+	ticker := time.NewTicker(pollInterval)
 	go func() {
 		for range ticker.C {
 			h.pollUpstreamUsage()
@@ -31,6 +39,11 @@ func (h *proxyHandler) startUsagePoller() {
 }
 
 func (h *proxyHandler) pollUpstreamUsage() {
+	if !h.usagePollMu.TryLock() {
+		return
+	}
+	defer h.usagePollMu.Unlock()
+
 	now := time.Now()
 	h.pool.mu.RLock()
 	accs := append([]*Account{}, h.pool.accounts...)
@@ -51,17 +64,36 @@ func (h *proxyHandler) pollUpstreamUsage() {
 		retrievedAt := a.Usage.RetrievedAt
 		accType := a.Type
 		rateLimitUntil := a.RateLimitUntil
+		resetCreditsRetrievedAt := a.ResetCreditsRetrievedAt
 		a.mu.Unlock()
 
-		if dead || !hasToken {
+		if !hasToken || (dead && !accountUsesStaticAPIKey(accType)) {
 			continue
+		}
+		if accType == AccountTypeCodex {
+			resetCreditsFresh := !resetCreditsRetrievedAt.IsZero() && now.Sub(resetCreditsRetrievedAt) < resetCreditPollInterval
+			resetCreditsReady := resetCreditsFresh
+			if !resetCreditsFresh {
+				if err := h.fetchCodexResetCredits(a); err != nil {
+					if h.cfg.debug.Load() {
+						log.Printf("reset credit fetch %s failed: %v", a.ID, err)
+					}
+				} else {
+					resetCreditsReady = true
+				}
+			}
+			if resetCreditsReady {
+				if err := h.autoRedeemExpiringCodexResetCredit(now, a); err != nil {
+					log.Printf("reset credit auto-redeem %s failed: %v", a.ID, err)
+				}
+			}
 		}
 		if !rateLimitUntil.IsZero() && rateLimitUntil.After(now) {
 			continue
 		}
 
 		// Gemini accounts don't have WHAM usage endpoint, but still need refresh
-		if accType == AccountTypeGemini {
+		if accType == AccountTypeGemini || accType == AccountTypeAntigravity {
 			if !h.cfg.disableRefresh && h.needsRefresh(a) {
 				if err := h.refreshAccount(context.Background(), a); err != nil {
 					if isRateLimitError(err) {
@@ -77,7 +109,7 @@ func (h *proxyHandler) pollUpstreamUsage() {
 						a.Penalty = 0
 					}
 					a.mu.Unlock()
-					log.Printf("gemini refresh %s: success", a.ID)
+					log.Printf("google refresh %s: success", a.ID)
 				}
 			}
 			continue
@@ -85,8 +117,9 @@ func (h *proxyHandler) pollUpstreamUsage() {
 
 		// MiniMax doesn't have a dedicated usage endpoint; usage is captured from response headers
 		if accType == AccountTypeMinimax {
-			// Seed initial usage via a lightweight request if no usage data yet
-			if retrievedAt.IsZero() {
+			// A dead static key must be revalidated; successful provider traffic is
+			// authoritative and clears stale retirement state.
+			if dead || retrievedAt.IsZero() {
 				if err := h.seedMinimaxUsage(now, a); err != nil && h.cfg.debug.Load() {
 					log.Printf("minimax usage seed %s failed: %v", a.ID, err)
 				}
@@ -95,7 +128,7 @@ func (h *proxyHandler) pollUpstreamUsage() {
 		}
 
 		if accType == AccountTypeZAI {
-			if retrievedAt.IsZero() {
+			if dead || retrievedAt.IsZero() {
 				if err := h.seedZAIUsage(now, a); err != nil && h.cfg.debug.Load() {
 					log.Printf("zai usage seed %s failed: %v", a.ID, err)
 				}
@@ -105,7 +138,7 @@ func (h *proxyHandler) pollUpstreamUsage() {
 
 		// Kimi has a dedicated usage endpoint
 		if accType == AccountTypeKimi {
-			if retrievedAt.IsZero() || now.Sub(retrievedAt) >= h.cfg.usageRefresh {
+			if dead || retrievedAt.IsZero() || now.Sub(retrievedAt) >= h.cfg.usageRefresh {
 				if err := h.fetchKimiUsage(now, a); err != nil && h.cfg.debug.Load() {
 					log.Printf("kimi usage fetch %s failed: %v", a.ID, err)
 				}
@@ -113,8 +146,28 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
-		// Xiaomi and Grok don't document proactive usage endpoints; request usage is parsed from responses.
-		if accType == AccountTypeXiaomi || accType == AccountTypeGrok {
+		// Xiaomi doesn't document a proactive usage endpoint; request usage is parsed from responses.
+		if accType == AccountTypeXiaomi {
+			continue
+		}
+
+		if accType == AccountTypeGrok {
+			if !h.cfg.disableRefresh && h.needsRefresh(a) {
+				if err := h.refreshAccount(context.Background(), a); err != nil {
+					if isRateLimitError(err) {
+						h.applyRateLimit(a, nil)
+					}
+					if h.cfg.debug.Load() {
+						log.Printf("grok refresh %s failed: %v", a.ID, err)
+					}
+					continue
+				}
+			}
+			if retrievedAt.IsZero() || now.Sub(retrievedAt) >= h.cfg.usageRefresh {
+				if err := h.fetchGrokUsage(now, a); err != nil && h.cfg.debug.Load() {
+					log.Printf("grok usage fetch %s failed: %v", a.ID, err)
+				}
+			}
 			continue
 		}
 
@@ -157,6 +210,60 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			log.Printf("usage fetch %s failed: %v", a.ID, err)
 		}
 	}
+}
+
+func (h *proxyHandler) fetchGrokUsage(now time.Time, a *Account) error {
+	if h == nil || a == nil || h.cfg.grokBase == nil {
+		return fmt.Errorf("grok billing is not configured")
+	}
+
+	monthly, monthlyErr := h.fetchGrokBillingPart(a, false)
+	weekly, weeklyErr := h.fetchGrokBillingPart(a, true)
+	if monthlyErr != nil && weeklyErr != nil {
+		return fmt.Errorf("grok billing failed: monthly: %v; weekly: %v", monthlyErr, weeklyErr)
+	}
+
+	snap, ok := parseGrokBillingUsage(monthly, weekly, now)
+	if !ok {
+		return fmt.Errorf("grok billing response did not include quota utilization")
+	}
+	a.mu.Lock()
+	a.Usage = mergeUsage(a.Usage, snap)
+	a.mu.Unlock()
+	restoreValidatedAccount(a, "Grok billing API")
+	return nil
+}
+
+func (h *proxyHandler) fetchGrokBillingPart(a *Account, weekly bool) ([]byte, error) {
+	base := *h.cfg.grokBase
+	base.Path = singleJoin(base.Path, "/billing")
+	if weekly {
+		query := base.Query()
+		query.Set("format", "credits")
+		base.RawQuery = query.Encode()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	NewGrokProvider(h.cfg.grokBase).SetAuthHeaders(req, a)
+	resp, err := h.transport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		h.applyRateLimit(a, resp.Header)
+		return nil, fmt.Errorf("billing rate limited: %s", resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("billing bad status: %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
@@ -299,36 +406,27 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 		return fmt.Errorf("usage bad status: %s", resp.Status)
 	}
 
-	var payload struct {
-		RateLimit struct {
-			PrimaryWindow struct {
-				UsedPercent float64 `json:"used_percent"`
-				ResetAt     int64   `json:"reset_at"`
-			} `json:"primary_window"`
-			SecondaryWindow struct {
-				UsedPercent float64 `json:"used_percent"`
-				ResetAt     int64   `json:"reset_at"`
-			} `json:"secondary_window"`
-		} `json:"rate_limit"`
-	}
+	var payload map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return err
 	}
-	whamSnap := UsageSnapshot{
-		PrimaryUsed:          payload.RateLimit.PrimaryWindow.UsedPercent / 100.0,
-		SecondaryUsed:        payload.RateLimit.SecondaryWindow.UsedPercent / 100.0,
-		PrimaryUsedPercent:   payload.RateLimit.PrimaryWindow.UsedPercent / 100.0,
-		SecondaryUsedPercent: payload.RateLimit.SecondaryWindow.UsedPercent / 100.0,
-		RetrievedAt:          now,
-		Source:               "wham",
+	rateLimit, _ := payload["rate_limit"].(map[string]any)
+	whamSnap, ok := parseCodexRateLimitMap(rateLimit, now, "wham")
+	if !ok {
+		return fmt.Errorf("usage response missing rate limit windows")
 	}
-	if payload.RateLimit.PrimaryWindow.ResetAt > 0 {
-		whamSnap.PrimaryResetAt = time.Unix(payload.RateLimit.PrimaryWindow.ResetAt, 0)
+	if credits, ok := payload["credits"].(map[string]any); ok {
+		whamSnap.creditsSet = true
+		whamSnap.HasCredits, _ = readBoolFromMap(credits, "has_credits")
+		whamSnap.CreditsUnlimited, _ = readBoolFromMap(credits, "unlimited")
+		whamSnap.CreditsBalance, _ = readFloatFromMap(credits, "balance")
 	}
-	if payload.RateLimit.SecondaryWindow.ResetAt > 0 {
-		whamSnap.SecondaryResetAt = time.Unix(payload.RateLimit.SecondaryWindow.ResetAt, 0)
+	if planType, ok := payload["plan_type"].(string); ok && planType != "" {
+		a.mu.Lock()
+		a.PlanType = planType
+		a.mu.Unlock()
 	}
-	log.Printf("usage fetch %s: primary=%.1f%% secondary=%.1f%%", a.ID, payload.RateLimit.PrimaryWindow.UsedPercent, payload.RateLimit.SecondaryWindow.UsedPercent)
+	log.Printf("usage fetch %s: 5hr=%.1f%% weekly=%.1f%%", a.ID, usagePrimaryUsed(whamSnap)*100, usageSecondaryUsed(whamSnap)*100)
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, whamSnap)
 	a.mu.Unlock()
@@ -341,6 +439,180 @@ func buildWhamUsageURL(base *url.URL) string {
 	copy.Path = joined
 	copy.RawQuery = ""
 	return copy.String()
+}
+
+func buildWhamResetCreditsURL(base *url.URL) string {
+	joined := singleJoin(base.Path, "/wham/rate-limit-reset-credits")
+	copy := *base
+	copy.Path = joined
+	copy.RawQuery = ""
+	return copy.String()
+}
+
+func buildWhamConsumeResetCreditURL(base *url.URL) string {
+	joined := singleJoin(base.Path, "/wham/rate-limit-reset-credits/consume")
+	copy := *base
+	copy.Path = joined
+	copy.RawQuery = ""
+	return copy.String()
+}
+
+func (h *proxyHandler) fetchCodexResetCredits(a *Account) error {
+	req, err := http.NewRequest(http.MethodGet, buildWhamResetCreditsURL(h.cfg.whamBase), nil)
+	if err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	access := a.AccessToken
+	accountID := a.AccountID
+	if accountID == "" {
+		accountID = a.IDTokenChatGPTAccountID
+	}
+	a.mu.Unlock()
+
+	req.Header.Set("Authorization", "Bearer "+access)
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
+
+	resp, err := h.transport.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("reset credits bad status: %s", resp.Status)
+	}
+
+	var payload struct {
+		AvailableCount int `json:"available_count"`
+		Credits        []struct {
+			ID        string  `json:"id"`
+			Status    string  `json:"status"`
+			ExpiresAt *string `json:"expires_at"`
+		} `json:"credits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+
+	credits := make([]RateLimitResetCredit, 0, len(payload.Credits))
+	for _, credit := range payload.Credits {
+		if credit.Status != "available" || credit.ExpiresAt == nil {
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, *credit.ExpiresAt)
+		if err != nil {
+			continue
+		}
+		credits = append(credits, RateLimitResetCredit{
+			ID:        credit.ID,
+			ExpiresAt: expiresAt,
+		})
+	}
+	sort.Slice(credits, func(i, j int) bool {
+		return credits[i].ExpiresAt.Before(credits[j].ExpiresAt)
+	})
+
+	a.mu.Lock()
+	a.ResetCreditsAvailable = payload.AvailableCount
+	a.RateLimitResetCredits = credits
+	a.ResetCreditsRetrievedAt = time.Now()
+	a.mu.Unlock()
+	return nil
+}
+
+func (h *proxyHandler) autoRedeemExpiringCodexResetCredit(now time.Time, a *Account) error {
+	a.mu.Lock()
+	if a.ResetCreditRedeeming {
+		a.mu.Unlock()
+		return nil
+	}
+	var due *RateLimitResetCredit
+	for _, credit := range a.RateLimitResetCredits {
+		untilExpiry := credit.ExpiresAt.Sub(now)
+		if credit.ID != "" && untilExpiry > 0 && untilExpiry <= resetCreditAutoRedeemWindow {
+			copy := credit
+			due = &copy
+			break
+		}
+	}
+	if due != nil {
+		a.ResetCreditRedeeming = true
+	}
+	a.mu.Unlock()
+	if due == nil {
+		return nil
+	}
+	defer func() {
+		a.mu.Lock()
+		a.ResetCreditRedeeming = false
+		a.mu.Unlock()
+	}()
+
+	code, windowsReset, err := h.consumeCodexResetCredit(a, *due)
+	if err != nil {
+		return err
+	}
+	log.Printf(
+		"reset credit auto-redeem %s: credit=%s expires_in=%s code=%s windows_reset=%d",
+		a.ID,
+		due.ID,
+		formatDuration(due.ExpiresAt.Sub(now)),
+		code,
+		windowsReset,
+	)
+	return h.fetchCodexResetCredits(a)
+}
+
+func (h *proxyHandler) consumeCodexResetCredit(a *Account, credit RateLimitResetCredit) (string, int, error) {
+	body, err := json.Marshal(map[string]string{
+		"redeem_request_id": "codex-pool:" + credit.ID,
+		"credit_id":         credit.ID,
+	})
+	if err != nil {
+		return "", 0, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, buildWhamConsumeResetCreditURL(h.cfg.whamBase), bytes.NewReader(body))
+	if err != nil {
+		return "", 0, err
+	}
+
+	a.mu.Lock()
+	access := a.AccessToken
+	accountID := a.AccountID
+	if accountID == "" {
+		accountID = a.IDTokenChatGPTAccountID
+	}
+	a.mu.Unlock()
+
+	req.Header.Set("Authorization", "Bearer "+access)
+	req.Header.Set("Content-Type", "application/json")
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
+
+	resp, err := h.transport.RoundTrip(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", 0, fmt.Errorf("consume reset credit bad status: %s", resp.Status)
+	}
+
+	var payload struct {
+		Code         string `json:"code"`
+		WindowsReset int    `json:"windows_reset"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", 0, err
+	}
+	return payload.Code, payload.WindowsReset, nil
 }
 
 func parseClaudeResetAt(value any) (time.Time, bool) {
@@ -648,6 +920,45 @@ func (h *proxyHandler) fetchDailyBreakdownData(a *Account) ([]DailyBreakdownDay,
 	return result, nil
 }
 
+func hasCodexUsageHeaders(hdr http.Header) bool {
+	for _, key := range []string{
+		"X-Codex-Primary-Used-Percent",
+		"X-Codex-Secondary-Used-Percent",
+		"X-Codex-Primary-Window-Minutes",
+		"X-Codex-Secondary-Window-Minutes",
+	} {
+		if hdr.Get(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func clearCodexUsageHeaders(hdr http.Header) {
+	for _, slot := range []string{"Primary", "Secondary"} {
+		for _, suffix := range []string{"Used-Percent", "Window-Minutes", "Reset-At", "Reset-After-Seconds"} {
+			hdr.Del("X-Codex-" + slot + "-" + suffix)
+		}
+	}
+}
+
+func setCodexUsageSlotHeaders(hdr http.Header, slot string, window *codexUsageWindow) {
+	if window == nil {
+		return
+	}
+	prefix := "X-Codex-" + slot + "-"
+	hdr.Set(prefix+"Used-Percent", fmt.Sprintf("%.1f", window.UsedPercent*100))
+	hdr.Set(prefix+"Window-Minutes", strconv.Itoa(window.WindowMinutes))
+	if !window.ResetAt.IsZero() {
+		hdr.Set(prefix+"Reset-At", strconv.FormatInt(window.ResetAt.Unix(), 10))
+		resetAfter := int64(time.Until(window.ResetAt).Seconds())
+		if resetAfter < 0 {
+			resetAfter = 0
+		}
+		hdr.Set(prefix+"Reset-After-Seconds", strconv.FormatInt(resetAfter, 10))
+	}
+}
+
 // replaceUsageHeaders replaces individual account usage headers with pool aggregate values.
 // This shows the client the overall pool capacity rather than a single account's usage.
 // Supports Codex (X-Codex-*), Claude (anthropic-ratelimit-unified-*), and
@@ -660,24 +971,19 @@ func (h *proxyHandler) replaceUsageHeaders(hdr http.Header) {
 		return // No usage data available
 	}
 
-	// Codex headers: Replace usage percentages with time-weighted pool values (0-100 scale)
-	codexSnap := h.pool.timeWeightedUsageByType(AccountTypeCodex)
-	if codexSnap.RetrievedAt.IsZero() {
-		codexSnap = snap
-	}
-	if codexSnap.PrimaryUsedPercent > 0 {
-		hdr.Set("X-Codex-Primary-Used-Percent", fmt.Sprintf("%.1f", codexSnap.PrimaryUsedPercent*100))
-	}
-	if codexSnap.SecondaryUsedPercent > 0 {
-		hdr.Set("X-Codex-Secondary-Used-Percent", fmt.Sprintf("%.1f", codexSnap.SecondaryUsedPercent*100))
-	}
-
-	// Replace window minutes if we have them
-	if codexSnap.PrimaryWindowMinutes > 0 {
-		hdr.Set("X-Codex-Primary-Window-Minutes", strconv.Itoa(codexSnap.PrimaryWindowMinutes))
-	}
-	if codexSnap.SecondaryWindowMinutes > 0 {
-		hdr.Set("X-Codex-Secondary-Window-Minutes", strconv.Itoa(codexSnap.SecondaryWindowMinutes))
+	// Codex clients consume positional primary/secondary slots, while the pool stores
+	// semantic five-hour/weekly windows. Re-encode the available windows in duration
+	// order so a weekly-only limit is emitted as upstream primary, matching OpenAI.
+	if hasCodexUsageHeaders(hdr) {
+		codexSnap := h.pool.timeWeightedUsageByType(AccountTypeCodex)
+		if !codexSnap.RetrievedAt.IsZero() {
+			slots := codexUsageSlotsFromSnapshot(codexSnap)
+			if slots.Primary != nil {
+				clearCodexUsageHeaders(hdr)
+				setCodexUsageSlotHeaders(hdr, "Primary", slots.Primary)
+				setCodexUsageSlotHeaders(hdr, "Secondary", slots.Secondary)
+			}
+		}
 	}
 
 	// Claude unified rate limit headers: Replace with time-weighted pool values.
@@ -896,6 +1202,7 @@ func (h *proxyHandler) fetchKimiUsage(now time.Time, a *Account) error {
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, snap)
 	a.mu.Unlock()
+	restoreValidatedAccount(a, "Kimi usage API")
 	return nil
 }
 
@@ -906,7 +1213,7 @@ func (h *proxyHandler) seedMinimaxUsage(now time.Time, a *Account) error {
 	a.mu.Unlock()
 
 	seedURL := h.cfg.minimaxBase.String() + "/v1/messages"
-	body := []byte(`{"model":"MiniMax-M2.5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"MiniMax-M3","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 
 	req, _ := http.NewRequest(http.MethodPost, seedURL, bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+access)
@@ -931,8 +1238,10 @@ func (h *proxyHandler) seedMinimaxUsage(now time.Time, a *Account) error {
 		return fmt.Errorf("minimax seed unauthorized: %s", resp.Status)
 	}
 
-	// Parse rate limit headers from the response
+	// A successful model request proves the static credential is live, even when
+	// an older request-scoped 401 left a persisted dead flag behind.
 	applyMinimaxRateLimits(a, resp.Header, now)
+	restoreValidatedAccount(a, "MiniMax model")
 
 	return nil
 }
@@ -943,7 +1252,7 @@ func (h *proxyHandler) seedZAIUsage(now time.Time, a *Account) error {
 	a.mu.Unlock()
 
 	seedURL := h.cfg.zaiBase.String() + "/v1/messages"
-	body := []byte(`{"model":"glm-5.1","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"glm-5.2","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 
 	req, _ := http.NewRequest(http.MethodPost, seedURL, bytes.NewReader(body))
 	req.Header.Set("X-Api-Key", access)
@@ -974,6 +1283,7 @@ func (h *proxyHandler) seedZAIUsage(now time.Time, a *Account) error {
 		Source:      "seed",
 	})
 	a.mu.Unlock()
+	restoreValidatedAccount(a, "Z.ai model")
 	return nil
 }
 
@@ -1043,6 +1353,22 @@ func readFloatFromMap(m map[string]any, key string) (float64, bool) {
 		return 0, false
 	}
 	return readFloat(v)
+}
+
+func readBoolFromMap(m map[string]any, key string) (bool, bool) {
+	v, ok := m[key]
+	if !ok {
+		return false, false
+	}
+	switch value := v.(type) {
+	case bool:
+		return value, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		return parsed, err == nil
+	default:
+		return false, false
+	}
 }
 
 func readFloat(v any) (float64, bool) {

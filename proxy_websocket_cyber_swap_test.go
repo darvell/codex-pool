@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,9 +21,9 @@ import (
 // the ChatGPT-Account-ID header so we can simulate both the flagged and
 // the cyber-access account behind one upstream URL.
 type fakeCodexUpstream struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	hits   map[string]int
+	server  *httptest.Server
+	mu      sync.Mutex
+	hits    map[string]int
 	scripts map[string]func(ctx context.Context, conn *websocket.Conn)
 	wg      sync.WaitGroup
 }
@@ -142,6 +143,86 @@ func mustReadUntil(t *testing.T, conn *websocket.Conn, marker string, timeout ti
 		}
 	}
 	return seen
+}
+
+func TestCodexWebSocketCompletionRecordsUsageOnce(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	upstream := newFakeCodexUpstream(t)
+	upstream.on("acct_usage", func(ctx context.Context, conn *websocket.Conn) {
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp_usage","model":"gpt-5.5","status":"completed","usage":{"input_tokens":3000000,"input_tokens_details":{"cached_tokens":1000000},"output_tokens":250000,"output_tokens_details":{"reasoning_tokens":125000}}}}`)
+		_ = conn.Write(ctx, websocket.MessageText, completed)
+		_ = conn.Write(ctx, websocket.MessageText, completed)
+	})
+
+	upURL, _ := url.Parse(upstream.server.URL)
+	account := &Account{Type: AccountTypeCodex, ID: "usage", AccessToken: "usage-token", AccountID: "acct_usage", PlanType: "pro"}
+	fx := newCodexProxyFixture(t, upURL, []*Account{account})
+	analytics, err := newAnalyticsStore(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := newUsageStore(filepath.Join(t.TempDir(), "usage.db"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.handler.analyticsStore = analytics
+	fx.handler.store = usage
+	t.Cleanup(func() {
+		_ = analytics.Close()
+		_ = usage.Close()
+	})
+
+	conn := dialClientWS(t, fx, http.Header{
+		"Authorization": []string{"Bearer " + generateClaudePoolToken("test-secret", "ws-user")},
+	})
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.5","input":"burn"}`)); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	frames := mustReadUntil(t, conn, `"response.completed"`, 4*time.Second)
+	if len(frames) == 0 {
+		t.Fatal("client did not receive response.completed")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for account.Totals.RequestCount == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	account.mu.Lock()
+	totals := account.Totals
+	account.mu.Unlock()
+	if totals.RequestCount != 1 {
+		t.Fatalf("request count = %d, want 1 after duplicate completion", totals.RequestCount)
+	}
+	if totals.TotalInputTokens != 3000000 || totals.TotalCachedTokens != 1000000 || totals.TotalOutputTokens != 250000 || totals.TotalBillableTokens != 2250000 {
+		t.Fatalf("unexpected websocket totals: %+v", totals)
+	}
+
+	var count int
+	var accountID, accountType, userID, model string
+	var input, cached, output, reasoning int64
+	if err := analytics.db.QueryRow(`
+		SELECT COUNT(*), account_id, account_type, user_id, model,
+			input_tokens, cached_tokens, output_tokens, reasoning_tokens
+		FROM request_costs`).Scan(&count, &accountID, &accountType, &userID, &model, &input, &cached, &output, &reasoning); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || accountID != "usage" || accountType != string(AccountTypeCodex) || userID != "ws-user" || model != "gpt-5.5" {
+		t.Fatalf("websocket attribution count=%d account=%q type=%q user=%q model=%q", count, accountID, accountType, userID, model)
+	}
+	if input != 3000000 || cached != 1000000 || output != 250000 || reasoning != 125000 {
+		t.Fatalf("persisted websocket tokens input=%d cached=%d output=%d reasoning=%d", input, cached, output, reasoning)
+	}
+	origins, err := usage.getOriginWeeklyUsage(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(origins) != 1 || origins[0].OriginID == "" || origins[0].AccountID == "" || origins[0].BillableTokens != 2250000 {
+		t.Fatalf("unexpected websocket origin usage: %+v", origins)
+	}
 }
 
 // 1) Cyber policy mid-stream triggers a silent swap. Client never sees

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func (h *proxyHandler) serveGrokAdmin(w http.ResponseWriter, r *http.Request) {
@@ -80,9 +81,15 @@ func (h *proxyHandler) handleGrokImport(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	var root any
+	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
 		respondJSONError(w, http.StatusBadRequest, "invalid Grok auth JSON: "+err.Error())
+		return
+	}
+	root["added_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "failed to marshal account json: "+err.Error())
 		return
 	}
 

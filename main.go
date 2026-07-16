@@ -27,19 +27,22 @@ import (
 )
 
 type config struct {
-	listenAddr    string
-	responsesBase *url.URL
-	whamBase      *url.URL
-	refreshBase   *url.URL
-	geminiBase    *url.URL // Gemini CloudCode endpoint (for OAuth/Code Assist mode)
-	geminiAPIBase *url.URL // Gemini API endpoint (for API key mode)
-	claudeBase    *url.URL // Claude API endpoint
-	kimiBase      *url.URL // Kimi API endpoint
-	minimaxBase   *url.URL // MiniMax API endpoint
-	zaiBase       *url.URL // Z.ai Anthropic-compatible endpoint
-	xiaomiBase    *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
-	grokBase      *url.URL // Grok Code OpenAI-compatible endpoint
-	poolDir       string
+	listenAddr             string
+	responsesBase          *url.URL
+	whamBase               *url.URL
+	refreshBase            *url.URL
+	geminiBase             *url.URL // Gemini CloudCode endpoint (for OAuth/Code Assist mode)
+	geminiAPIBase          *url.URL // Gemini API endpoint (for API key mode)
+	antigravityDailyBase   *url.URL
+	antigravityProdBase    *url.URL
+	antigravityOnboardBase *url.URL
+	claudeBase             *url.URL // Claude API endpoint
+	kimiBase               *url.URL // Kimi API endpoint
+	minimaxBase            *url.URL // MiniMax API endpoint
+	zaiBase                *url.URL // Z.ai Anthropic-compatible endpoint
+	xiaomiBase             *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
+	grokBase               *url.URL // Grok Code OpenAI-compatible endpoint
+	poolDir                string
 
 	disableRefresh  bool
 	refreshProxyURL string // HTTP proxy URL for refresh operations
@@ -127,6 +130,9 @@ func buildConfig() *config {
 	cfg.refreshBase = mustParse(getenv("UPSTREAM_REFRESH_BASE", "https://auth.openai.com"))
 	cfg.geminiBase = mustParse(getenv("UPSTREAM_GEMINI_BASE", "https://cloudcode-pa.googleapis.com"))
 	cfg.geminiAPIBase = mustParse(getenv("UPSTREAM_GEMINI_API_BASE", "https://generativelanguage.googleapis.com"))
+	cfg.antigravityDailyBase = mustParse(getenv("UPSTREAM_ANTIGRAVITY_DAILY_BASE", "https://daily-cloudcode-pa.googleapis.com"))
+	cfg.antigravityProdBase = mustParse(getenv("UPSTREAM_ANTIGRAVITY_BASE", "https://cloudcode-pa.googleapis.com"))
+	cfg.antigravityOnboardBase = mustParse(getenv("UPSTREAM_ANTIGRAVITY_ONBOARD_BASE", "https://daily-cloudcode-pa.googleapis.com"))
 	cfg.claudeBase = mustParse(getenv("UPSTREAM_CLAUDE_BASE", "https://api.anthropic.com"))
 	cfg.kimiBase = mustParse(getenv("UPSTREAM_KIMI_BASE", "https://api.kimi.com/coding"))
 	cfg.minimaxBase = mustParse(getenv("UPSTREAM_MINIMAX_BASE", "https://api.minimax.io/anthropic"))
@@ -240,12 +246,13 @@ func main() {
 	codexProvider := NewCodexProvider(cfg.responsesBase, cfg.whamBase, cfg.refreshBase)
 	claudeProvider := NewClaudeProvider(cfg.claudeBase)
 	geminiProvider := NewGeminiProvider(cfg.geminiBase, cfg.geminiAPIBase)
+	antigravityProvider := NewAntigravityProvider(cfg.antigravityDailyBase, cfg.antigravityProdBase)
 	kimiProvider := NewKimiProvider(cfg.kimiBase)
 	minimaxProvider := NewMinimaxProvider(cfg.minimaxBase)
 	zaiProvider := NewZAIProvider(cfg.zaiBase)
 	xiaomiProvider := NewXiaomiProvider(cfg.xiaomiBase)
 	grokProvider := NewGrokProvider(cfg.grokBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -257,6 +264,7 @@ func main() {
 	codexCount := pool.countByType(AccountTypeCodex)
 	claudeCount := pool.countByType(AccountTypeClaude)
 	geminiCount := pool.countByType(AccountTypeGemini)
+	antigravityCount := pool.countByType(AccountTypeAntigravity)
 	kimiCount := pool.countByType(AccountTypeKimi)
 	minimaxCount := pool.countByType(AccountTypeMinimax)
 	zaiCount := pool.countByType(AccountTypeZAI)
@@ -302,21 +310,26 @@ func main() {
 		MaxIdleConnsPerHost:   50,
 	}
 	_ = http2.ConfigureTransport(standardTransport)
+	antigravityTransport := cloneAntigravityHTTP11Transport(standardTransport)
 
-	// Default to the standard Go transport. Set CODEX_TLS_FINGERPRINT=rustls to opt
-	// into the experimental uTLS/rustls hybrid transport for ChatGPT/Auth hosts.
-	// Set CODEX_TLS_FINGERPRINT=bun for Bun 1.3.12 fingerprint (Anthropic traffic only).
-	var transport http.RoundTripper = standardTransport
+	// Anthropic traffic defaults to the Node.js 24.x uTLS profile used by Claude
+	// Code. Other providers retain their existing transports.
+	var transport http.RoundTripper = newBunHybridTransport(standardTransport)
 	switch strings.ToLower(os.Getenv("CODEX_TLS_FINGERPRINT")) {
 	case "rustls":
 		transport = newRustlsHybridTransport(standardTransport)
 		log.Printf("codex rustls/uTLS hybrid transport enabled")
+	case "off", "go", "standard":
+		transport = standardTransport
+		log.Printf("standard Go TLS transport enabled")
 	case "bun":
 		transport = newBunHybridTransport(standardTransport)
-		log.Printf("bun/uTLS hybrid transport enabled (Anthropic traffic only)")
+		log.Printf("Node.js/uTLS hybrid transport enabled (Anthropic traffic only)")
 	case "bun-all":
 		transport = createBunTransport()
-		log.Printf("bun/uTLS transport enabled (all traffic)")
+		log.Printf("Node.js/uTLS transport enabled (all traffic)")
+	default:
+		log.Printf("Node.js/uTLS hybrid transport enabled by default (Anthropic traffic only)")
 	}
 
 	// CODEX_ANTHROPIC_PROXY_URL routes Anthropic API traffic through a proxy
@@ -326,8 +339,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("invalid CODEX_ANTHROPIC_PROXY_URL: %v", err)
 		}
-		proxyTransport := standardTransport.Clone()
-		proxyTransport.Proxy = http.ProxyURL(proxyURL)
+		proxyTransport := createBunTransportWithProxy(proxyURL)
 		transport = &anthropicHostProxyTransport{
 			anthropic: proxyTransport,
 			direct:    transport,
@@ -408,23 +420,26 @@ func main() {
 	}
 
 	h := &proxyHandler{
-		cfg:              cfg,
-		transport:        transport,
-		refreshTransport: refreshTransport,
-		pool:             pool,
-		poolUsers:        poolUsers,
-		registry:         registry,
-		store:            store,
-		analyticsStore:   analyticsStore,
-		pricing:          pricing,
-		aliases:          newModelAliases(aliasesCfg),
-		bruteForce:       newBruteForceTracker(),
-		metrics:          newMetrics(),
-		recent:           newRecentErrors(50),
-		startTime:        time.Now(),
-		pacer:            pacer,
+		cfg:                  cfg,
+		transport:            transport,
+		antigravityTransport: antigravityTransport,
+		refreshTransport:     refreshTransport,
+		pool:                 pool,
+		poolUsers:            poolUsers,
+		registry:             registry,
+		store:                store,
+		analyticsStore:       analyticsStore,
+		pricing:              pricing,
+		aliases:              newModelAliases(aliasesCfg),
+		bruteForce:           newBruteForceTracker(),
+		metrics:              newMetrics(),
+		recent:               newRecentErrors(50),
+		startTime:            time.Now(),
+		pacer:                pacer,
 	}
 	h.startUsagePoller()
+	startAntigravityVersionUpdater(context.Background())
+	h.startAntigravityModelPoller()
 
 	// Probe account UUIDs for Claude OAuth accounts that don't have one yet.
 	go h.probeClaudeAccountUUIDs()
@@ -475,8 +490,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -486,28 +501,30 @@ func main() {
 }
 
 type proxyHandler struct {
-	cfg              *config
-	transport        http.RoundTripper
-	refreshTransport http.RoundTripper // Separate transport for refresh ops (may use proxy)
-	pool             *poolState
-	poolUsers        *PoolUserStore
-	registry         *ProviderRegistry
-	store            *usageStore
-	analyticsStore   *AnalyticsStore
-	pricing          *PricingData
-	aliases          *modelAliases
-	bruteForce       *bruteForceTracker
-	metrics          *metrics
-	recent           *recentErrors
-	inflight         int64
-	startTime        time.Time
-	pacer            *requestPacer // Per-session request pacing
+	cfg                  *config
+	transport            http.RoundTripper
+	antigravityTransport http.RoundTripper
+	refreshTransport     http.RoundTripper // Separate transport for refresh ops (may use proxy)
+	pool                 *poolState
+	poolUsers            *PoolUserStore
+	registry             *ProviderRegistry
+	store                *usageStore
+	analyticsStore       *AnalyticsStore
+	pricing              *PricingData
+	aliases              *modelAliases
+	bruteForce           *bruteForceTracker
+	metrics              *metrics
+	recent               *recentErrors
+	inflight             int64
+	startTime            time.Time
+	pacer                *requestPacer // Per-session request pacing
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
 	lastRefreshTime time.Time
 	refreshCallsMu  sync.Mutex
 	refreshCalls    map[string]*refreshCall
+	usagePollMu     sync.Mutex
 }
 
 type refreshCall struct {
@@ -547,8 +564,7 @@ func (h *proxyHandler) handleImagesGenerationFanout(w http.ResponseWriter, r *ht
 		http.Error(w, "n must be between 1 and 10", http.StatusBadRequest)
 		return true
 	}
-	baseURL := h.getEffectivePublicURL(r)
-	endpoint := strings.TrimRight(baseURL, "/") + "/v1/images/generations"
+	endpoint := h.imageFanoutEndpoint(r)
 	oneBody := setImagesGenerationCount(body, 1)
 	ctx := r.Context()
 	client := &http.Client{Timeout: clientOrDefaultTimeout(r, h.cfg.requestTimeout, h.cfg.streamTimeout, oneBody)}
@@ -562,7 +578,14 @@ func (h *proxyHandler) handleImagesGenerationFanout(w http.ResponseWriter, r *ht
 		data    []any
 	}
 	results := make([]imageFanoutResult, n)
-	sem := make(chan struct{}, 3)
+	parallelism := h.pool.countByType(AccountTypeCodex)
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	if parallelism > n {
+		parallelism = n
+	}
+	sem := make(chan struct{}, parallelism)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		i := i
@@ -571,44 +594,59 @@ func (h *proxyHandler) handleImagesGenerationFanout(w http.ResponseWriter, r *ht
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(oneBody))
-			if err != nil {
-				results[i].err = err
-				return
+			const maxSlotAttempts = 3
+			for slotAttempt := 1; slotAttempt <= maxSlotAttempts; slotAttempt++ {
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(oneBody))
+				if err != nil {
+					results[i].err = err
+					return
+				}
+				req.Header = cloneHeader(r.Header)
+				removeHopByHopHeaders(req.Header)
+				removeConflictingProxyHeaders(req.Header)
+				req.Header.Del("Accept-Encoding")
+				req.Header.Del("Content-Length")
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-Codex-Pool-Image-Fanout", "1")
+				req.Header.Set("X-Codex-Pool-Image-Fanout-Index", strconv.Itoa(i))
+				req.Header.Set("X-Codex-Pool-Image-Fanout-Attempt", strconv.Itoa(slotAttempt))
+				resp, err := client.Do(req)
+				if err != nil {
+					results[i].err = err
+				} else {
+					respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 80*1024*1024))
+					_ = resp.Body.Close()
+					results[i].index = i
+					results[i].status = resp.StatusCode
+					results[i].header = resp.Header.Clone()
+					results[i].body = respBody
+					switch {
+					case readErr != nil:
+						results[i].err = readErr
+					case resp.StatusCode < 200 || resp.StatusCode >= 300:
+						results[i].err = fmt.Errorf("image fanout request %d failed: %s: %s", i+1, resp.Status, safeText(respBody))
+					default:
+						var data []any
+						data, results[i].created, err = appendImagesGenerationData(nil, respBody, "b64_json")
+						results[i].err = err
+						results[i].data = data
+					}
+				}
+				if results[i].err == nil {
+					return
+				}
+				if results[i].status >= 400 && results[i].status < 500 {
+					return
+				}
+				if slotAttempt < maxSlotAttempts {
+					select {
+					case <-ctx.Done():
+						results[i].err = ctx.Err()
+						return
+					case <-time.After(time.Duration(slotAttempt) * 250 * time.Millisecond):
+					}
+				}
 			}
-			req.Header = cloneHeader(r.Header)
-			removeHopByHopHeaders(req.Header)
-			removeConflictingProxyHeaders(req.Header)
-			req.Header.Del("Accept-Encoding")
-			req.Header.Del("Content-Length")
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Codex-Pool-Image-Fanout", "1")
-			resp, err := client.Do(req)
-			if err != nil {
-				results[i].err = err
-				return
-			}
-			defer resp.Body.Close()
-			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 80*1024*1024))
-			results[i].index = i
-			results[i].status = resp.StatusCode
-			results[i].header = resp.Header.Clone()
-			results[i].body = respBody
-			if readErr != nil {
-				results[i].err = readErr
-				return
-			}
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				results[i].err = fmt.Errorf("image fanout request %d failed: %s: %s", i+1, resp.Status, safeText(respBody))
-				return
-			}
-			var data []any
-			data, results[i].created, err = appendImagesGenerationData(nil, respBody, "b64_json")
-			if err != nil {
-				results[i].err = err
-				return
-			}
-			results[i].data = data
 		}()
 	}
 	wg.Wait()
@@ -636,6 +674,16 @@ func (h *proxyHandler) handleImagesGenerationFanout(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusOK)
 	w.Write(out)
 	return true
+}
+
+func (h *proxyHandler) imageFanoutEndpoint(r *http.Request) string {
+	if h != nil && h.cfg != nil {
+		if _, port, err := net.SplitHostPort(h.cfg.listenAddr); err == nil && port != "" {
+			return "http://127.0.0.1:" + port + "/v1/images/generations"
+		}
+	}
+	baseURL := h.getEffectivePublicURL(r)
+	return strings.TrimRight(baseURL, "/") + "/v1/images/generations"
 }
 
 func mapResponsesPath(in string) string {
@@ -1225,19 +1273,16 @@ func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provide
 		}
 		requestedModel = resolved
 	}
-	if !isXiaomiModel(requestedModel) {
+	routeProvider, routeBase, canonicalModel := h.resolveStreamedModelRoute(r.URL.Path, requestedModel)
+	if routeProvider == nil {
 		restoreBody(prefix)
 		return provider, targetBase, nil
 	}
-
-	xiaomiProvider := h.registry.ForType(AccountTypeXiaomi)
-	if xiaomiProvider == nil {
-		restoreBody(prefix)
-		return provider, targetBase, nil
+	rewrittenPrefix := prefix
+	delta := 0
+	if canonicalModel != requestedModel {
+		rewrittenPrefix, delta, err = replaceJSONStringToken(prefix, valueStart, valueEnd, canonicalModel)
 	}
-
-	canonical := xiaomiCanonicalModel(requestedModel)
-	rewrittenPrefix, delta, err := replaceJSONStringToken(prefix, valueStart, valueEnd, canonical)
 	if err != nil {
 		restoreBody(prefix)
 		return provider, targetBase, err
@@ -1247,7 +1292,33 @@ func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provide
 		r.Header.Del("Content-Length")
 	}
 	restoreBody(rewrittenPrefix)
-	return xiaomiProvider, xiaomiProvider.UpstreamURL(r.URL.Path), nil
+	return routeProvider, routeBase, nil
+}
+
+func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, *url.URL, string) {
+	type route struct {
+		accountType AccountType
+		matches     func(string) bool
+		canonical   func(string) string
+	}
+	routes := []route{
+		{AccountTypeKimi, isKimiModel, func(model string) string { return model }},
+		{AccountTypeMinimax, isMinimaxModel, minimaxCanonicalModel},
+		{AccountTypeZAI, isZAIModel, zaiCanonicalModel},
+		{AccountTypeXiaomi, isXiaomiModel, xiaomiCanonicalModel},
+		{AccountTypeGrok, isGrokModel, grokCanonicalModel},
+	}
+	for _, candidate := range routes {
+		if !candidate.matches(model) {
+			continue
+		}
+		provider := h.registry.ForType(candidate.accountType)
+		if provider == nil {
+			return nil, nil, model
+		}
+		return provider, provider.UpstreamURL(path), candidate.canonical(model)
+	}
+	return nil, nil, model
 }
 
 func readBodyPrefix(body io.Reader, limit int64) ([]byte, error) {
@@ -1501,6 +1572,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		serveNoopCodexPath(w, r)
 		return
 	}
+	if isCodexResetCreditsPath(r.URL.Path) {
+		servePoolCodexResetCredits(w, r)
+		return
+	}
 
 	// Determine user ID - either from pool JWT, Claude pool token, or hashed IP
 	var userID string
@@ -1609,7 +1684,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 	if r.Method == http.MethodGet && normalizeNoopPath(r.URL.Path) == "/api/pool/models" {
-		servePoolModels(w)
+		servePoolModels(w, h.pool)
+		return
+	}
+	if r.Method == http.MethodGet && normalizeNoopPath(r.URL.Path) == "/v1/models" {
+		serveUnifiedOpenAIModels(w, h.pool)
+		return
+	}
+	if r.Method == http.MethodGet && normalizeNoopPath(r.URL.Path) == "/v1beta/models" {
+		serveUnifiedGeminiModels(w, h.pool)
 		return
 	}
 	originID := hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode))
@@ -1683,10 +1766,20 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 	}
 	requestedModel := extractRequestedModelFromJSON(inspect)
+	if requestedModel == "" {
+		requestedModel = antigravityModelFromGeminiPath(r.URL.Path)
+	}
 
 	// Resolve model aliases before routing.
 	if requestedModel != "" {
 		requestedModel, bodyBytes = applyModelAlias(h.aliases, requestedModel, bodyBytes, h.cfg.debug.Load(), reqID)
+	}
+
+	// Antigravity owns its complete upstream envelope and protocol conversion.
+	// Handle it before the generic provider translator so every public protocol
+	// consumes the same model registry and quota scheduler.
+	if requestedModel != "" && h.handleAntigravityProxy(w, r, bodyBytes, requestedModel, conversationID, userID, originID, originIP, reqID) {
+		return
 	}
 
 	if requestedModel != "" && isOpenAIModel(requestedModel) {
@@ -1737,10 +1830,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// --- Format translation: detect mismatch between client format and provider format ---
 	sourceFormat := detectRequestFormat(r.URL.Path)
 	targetFormat := providerTargetFormat(accountType)
-	if accountType == AccountTypeClaude && (sourceFormat == FormatOpenAI || strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
-		http.Error(w, "OpenAI/Codex request formats cannot be translated to Claude", http.StatusBadRequest)
-		return
-	}
 	translateDir := TranslateNone
 	if sourceFormat != FormatUnknown && targetFormat != FormatUnknown && sourceFormat != targetFormat {
 		if sourceFormat == FormatClaude && targetFormat == FormatOpenAI {
@@ -1933,17 +2022,33 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
 	const preferredImageCodexAccountID = "neon"
 	imageGenerationRequest := accountType == AccountTypeCodex && requestHasImageGenerationTool(bodyBytes)
+	imageFanoutChild := r.Header.Get("X-Codex-Pool-Image-Fanout") != ""
+	imageFanoutIndex, _ := strconv.Atoi(r.Header.Get("X-Codex-Pool-Image-Fanout-Index"))
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		var acc *Account
-		if imageGenerationRequest && attempt == 1 {
+		candidateExclude := exclude
+		if imageGenerationRequest {
+			candidateExclude = make(map[string]bool, len(exclude)+h.pool.countByType(accountType))
+			for id, excluded := range exclude {
+				candidateExclude[id] = excluded
+			}
+			h.pool.excludeImageIncapable(candidateExclude)
+			if imageFanoutChild && attempt == 1 {
+				h.pool.excludeInflightWhenIdleAvailable(accountType, candidateExclude)
+			}
+		}
+		if imageGenerationRequest && attempt == 1 && !imageFanoutChild {
 			acc = h.pool.candidateByID(preferredImageCodexAccountID, accountType, requiredPlan, originIP)
 			if acc != nil && h.cfg.debug.Load() {
 				log.Printf("[%s] routing image generation request to codex account %s", reqID, acc.ID)
 			}
 		}
+		if imageGenerationRequest && imageFanoutChild && attempt == 1 {
+			acc = h.pool.imageFanoutCandidate(imageFanoutIndex, candidateExclude, requiredPlan, originIP)
+		}
 		if acc == nil && cyberAccessRetry {
-			acc = h.pool.candidateWithCyberAccess(exclude, accountType, requiredPlan, originIP)
+			acc = h.pool.candidateWithCyberAccess(candidateExclude, accountType, requiredPlan, originIP)
 			if acc != nil && h.cfg.debug.Load() {
 				log.Printf("[%s] routing cyber_policy retry to %s account %s", reqID, accountType, acc.ID)
 			}
@@ -1953,7 +2058,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if imageGenerationRequest {
 				candidateConversationID = ""
 			}
-			acc = h.pool.candidate(candidateConversationID, exclude, accountType, requiredPlan, originIP)
+			acc = h.pool.candidate(candidateConversationID, candidateExclude, accountType, requiredPlan, originIP)
 		}
 		if acc == nil {
 			// All accounts excluded or rate-limited. If there are rate-limited
@@ -2074,7 +2179,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 			switch errClass {
 			case ErrorClassRateLimit:
-				h.applyRateLimit(acc, resp.Header)
+				h.applyRateLimitResponse(acc, resp.Header, errBody)
 				acc.mu.Lock()
 				acc.Penalty += 0.2
 				acc.mu.Unlock()
@@ -2271,7 +2376,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 			bufWriter := &responsesBufferingWriter{model: requestedModel}
 			inspectWriter := h.wrapBufferedSSEWithCyberDetector(bufWriter, accountType, acc, conversationID, requiredPlan, originIP, reqID, &cyberPinned)
-			if _, err := io.Copy(inspectWriter, resp.Body); err != nil {
+			var rawImageStream bytes.Buffer
+			if _, err := io.Copy(inspectWriter, io.TeeReader(resp.Body, &rawImageStream)); err != nil {
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] buffering Images SSE error: %v", reqID, err)
 				}
@@ -2284,9 +2390,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			result := bufWriter.Result()
 			translated, err := translateResponsesToImagesGeneration(result, imagesResponseFormat)
 			if err != nil {
+				recordImageGenerationResult(acc, false)
+				h.writeImageGenerationTrace(reqID, acc, rawImageStream.Bytes(), result, err)
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
+			recordImageGenerationResult(acc, true)
 			w.WriteHeader(resp.StatusCode)
 			w.Write(translated)
 		} else if clientWantsNonStreaming && isSSE && translateDir == TranslateCompletionsToResponses {
@@ -2453,10 +2562,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				var trErr error
 				translated, trErr = translateResponsesToImagesGeneration(respBody, imagesResponseFormat)
 				if trErr != nil {
+					recordImageGenerationResult(acc, false)
 					if h.cfg.debug.Load() {
 						log.Printf("[%s] responses->images translation error: %v", reqID, trErr)
 					}
 					translated = respBody
+				} else {
+					recordImageGenerationResult(acc, true)
 				}
 			} else {
 				var trErr error
@@ -2859,6 +2971,8 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			ConversationID:              conversationID,
 			RequiredPlan:                requiredPlan,
 			ClientIP:                    clientIP,
+			UserID:                      userID,
+			OriginID:                    originID,
 			IdleTimeout:                 h.cfg.websocketIdleTimeout,
 			DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 			ReadLimit:                   readLimit,
@@ -3809,26 +3923,34 @@ func (h *proxyHandler) applyRateLimit(a *Account, hdr http.Header) time.Duration
 	}
 
 	// Try multiple sources for the cooldown duration, in priority order:
-	// 1. anthropic-ratelimit-unified-reset (precise reset timestamp from Claude)
+	// 1. Provider reset timestamp headers
 	// 2. Retry-After header (standard HTTP)
 	// 3. Exponential backoff (fallback)
 	wait := time.Duration(0)
 	gotPreciseReset := false
 
 	if hdr != nil {
-		// Check Claude's unified reset headers for a precise reset time.
+		// Prefer the latest explicit reset. A 429 can exhaust more than one
+		// request or token window, and retrying at the earlier boundary just
+		// produces another 429.
+		var preciseReset time.Time
 		for _, key := range []string{
 			"anthropic-ratelimit-unified-reset",
 			"anthropic-ratelimit-unified-primary-reset",
 			"anthropic-ratelimit-unified-5h-reset",
+			"x-ratelimit-reset-requests",
+			"x-ratelimit-reset-tokens",
+			"x-ratelimit-reset",
 		} {
 			if resetStr := hdr.Get(key); resetStr != "" {
-				if resetAt, ok := parseRateLimitReset(resetStr); ok && resetAt.After(time.Now()) {
-					wait = time.Until(resetAt)
-					gotPreciseReset = true
-					break
+				if resetAt, ok := parseRateLimitReset(resetStr); ok && resetAt.After(time.Now()) && resetAt.After(preciseReset) {
+					preciseReset = resetAt
 				}
 			}
+		}
+		if !preciseReset.IsZero() {
+			wait = time.Until(preciseReset)
+			gotPreciseReset = true
 		}
 	}
 
@@ -4161,7 +4283,11 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		defer idleReader.Close()
 	}
 
-	if _, copyErr := io.Copy(writer, resp.Body); copyErr != nil {
+	source := io.Reader(resp.Body)
+	if idleReader != nil {
+		source = idleReader
+	}
+	if _, copyErr := io.Copy(writer, source); copyErr != nil {
 		if r.Context().Err() == nil {
 			h.recent.add(copyErr.Error())
 			h.metrics.inc("error", "passthrough")
@@ -4292,7 +4418,11 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 		defer idleReader.Close()
 	}
 
-	if _, copyErr := io.Copy(writer, resp.Body); copyErr != nil {
+	source := io.Reader(resp.Body)
+	if idleReader != nil {
+		source = idleReader
+	}
+	if _, copyErr := io.Copy(writer, source); copyErr != nil {
 		h.recent.add(copyErr.Error())
 		h.metrics.inc("error", "passthrough")
 		if idleReader != nil {
@@ -4467,31 +4597,16 @@ func (h *proxyHandler) tryOnce(
 				sessionID := ccSessionHeader(in, userID)
 				h.pacer.wait(sessionID)
 
-				// Wire fingerprint functions: metadata, system blocks, ordered keys, CCH hash
-				// Guarded behind CODEX_INJECT_CLAUDE_FP=1 — disabled by default after
-				// suspected account bans from mismatched billing fingerprints.
-				if os.Getenv("CODEX_INJECT_CLAUDE_FP") == "1" {
-					acc.mu.Lock()
-					accUUID := acc.AccountUUID
-					acc.mu.Unlock()
-
-					// 1. Inject metadata.user_id with account UUID, device ID, session ID
-					ccInjectMetadata(bodyObj, accUUID, userID, sessionID)
-
-					// 2. Inject system blocks only if client didn't already send them
-					if !bodyHasClaudeSystemBlocks(bodyObj) {
-						bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
-						// Re-parse after system block injection modified bodyBytes
-						json.Unmarshal(bodyBytes, &bodyObj)
-					}
-
-					// 3. Re-serialize with ordered keys matching Claude Code
-					if reordered, err := orderedMarshal(bodyObj, claudeBodyKeyOrder); err == nil {
-						bodyBytes = reordered
-					}
-
-					// 4. Replace CCH placeholder with computed xxhash
-					bodyBytes = ccReplaceCCHPlaceholder(bodyBytes)
+				acc.mu.Lock()
+				accUUID := acc.AccountUUID
+				acc.mu.Unlock()
+				ccInjectMetadata(bodyObj, accUUID, userID, sessionID)
+				if !bodyHasClaudeSystemBlocks(bodyObj) {
+					bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
+					_ = json.Unmarshal(bodyBytes, &bodyObj)
+				}
+				if reordered, err := orderedMarshal(bodyObj, claudeBodyKeyOrder); err == nil {
+					bodyBytes = reordered
 				}
 			}
 			// Extract the model from the translated body (canonical name)
@@ -4521,6 +4636,64 @@ func (h *proxyHandler) tryOnce(
 			// Remove any OpenAI-specific headers that might leak
 			outReq.Header.Del("openai-beta")
 			outReq.Header.Del("openai-organization")
+		}
+
+		if provider.Type() == AccountTypeClaude &&
+			translateDir == TranslateNone &&
+			strings.HasPrefix(access, "sk-ant-oat") {
+			var bodyObj map[string]any
+			if json.Unmarshal(bodyBytes, &bodyObj) == nil && !ccIsGenuineClaudeCodeRequest(in, bodyObj) {
+				sessionID := ccSessionHeader(in, userID)
+				acc.mu.Lock()
+				accUUID := acc.AccountUUID
+				acc.mu.Unlock()
+				ccInjectMetadata(bodyObj, accUUID, userID, sessionID)
+				if _, ok := bodyObj["tools"]; !ok {
+					bodyObj["tools"] = []any{}
+				}
+				if _, ok := bodyObj["temperature"]; !ok {
+					bodyObj["temperature"] = 1
+				}
+				if !bodyHasClaudeSystemBlocks(bodyObj) {
+					bodyBytes = ccInjectSystemBlocks(bodyObj, bodyBytes)
+					_ = json.Unmarshal(bodyBytes, &bodyObj)
+				}
+				if reordered, err := orderedMarshal(bodyObj, claudeBodyKeyOrder); err == nil {
+					bodyBytes = reordered
+				}
+
+				model, _ := bodyObj["model"].(string)
+				outReq.Header.Set("anthropic-version", ccAnthropicVersion)
+				outReq.Header.Set("anthropic-beta", ccBetaHeader(model, true, false, false, ccRequestHasStructuredOutputs(bodyObj), ccRequestHasTaskBudget(bodyObj)))
+				outReq.Header.Set("anthropic-dangerous-direct-browser-access", "true")
+				outReq.Header.Set("User-Agent", ccUserAgent())
+				outReq.Header.Set("X-Claude-Code-Session-Id", sessionID)
+				outReq.Header.Set("X-App", "cli")
+				outReq.Header.Set("x-client-request-id", uuid.NewString())
+				outReq.Header.Set("Accept-Language", "*")
+				outReq.Header.Set("Sec-Fetch-Mode", "cors")
+				ccStainlessHeaders(outReq.Header.Set)
+			}
+		}
+
+		if provider.Type() == AccountTypeClaude && strings.HasPrefix(access, "sk-ant-oat") {
+			if normalized, hits, changed := normalizeAnthropicDateline(bodyBytes); changed {
+				bodyBytes = normalized
+				if h.cfg.debug.Load() {
+					log.Printf("[%s] normalized %d Anthropic dateline fingerprint(s)", reqID, len(hits))
+				}
+			}
+		}
+
+		// Body fingerprinting and dateline normalization happen after the request
+		// is constructed, so replace the reader with the final bytes.
+		if len(bodyBytes) > 0 {
+			outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			outReq.ContentLength = int64(len(bodyBytes))
+			outReq.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+			}
+			outReq.Header.Del("Content-Length")
 		}
 
 		// Debug: log ALL outgoing headers
@@ -4584,7 +4757,7 @@ func (h *proxyHandler) tryOnce(
 		acc.mu.Unlock()
 		if hasRefresh {
 			_ = resp.Body.Close()
-			if err := h.refreshAccount(ctx, acc); err == nil {
+			if err := h.refreshAccountAfterAuthFailure(ctx, acc); err == nil {
 				outReq, err = buildReq()
 				if err != nil {
 					if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
@@ -4723,8 +4896,14 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 		return false
 	}
 
-	// Only refresh if token is ACTUALLY expired (not "about to expire")
-	// This is more conservative - we only refresh when we know the token won't work
+	// Antigravity refreshes with the same 3000-second headroom as the native
+	// client so a long generation does not cross the token expiry boundary.
+	if a.Type == AccountTypeAntigravity && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now.Add(50*time.Minute)) {
+		return true
+	}
+
+	// Other providers refresh after expiry and recover early invalidation with
+	// their existing same-account 401 retry.
 	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
 		return true
 	}
@@ -4774,6 +4953,13 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	return err
 }
 
+func (h *proxyHandler) refreshAccountAfterAuthFailure(ctx context.Context, a *Account) error {
+	a.mu.Lock()
+	a.LastRefresh = time.Time{}
+	a.mu.Unlock()
+	return h.refreshAccount(ctx, a)
+}
+
 func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error {
 	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
@@ -4785,15 +4971,9 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	accType := a.Type
 	a.mu.Unlock()
 
-	// Global rate limit - max 1 refresh globally every 5 seconds
-	h.refreshMu.Lock()
-	elapsed := time.Since(h.lastRefreshTime)
-	if elapsed < refreshMinInterval {
-		h.refreshMu.Unlock()
-		return fmt.Errorf("refresh rate limited, wait %v", refreshMinInterval-elapsed)
+	if err := h.waitForRefreshSlot(ctx); err != nil {
+		return err
 	}
-	h.lastRefreshTime = time.Now()
-	h.refreshMu.Unlock()
 
 	// Use the provider's RefreshToken method
 	provider := h.registry.ForType(accType)
@@ -4802,18 +4982,37 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	}
 	err := provider.RefreshToken(ctx, a, h.refreshTransport)
 
-	a.mu.Lock()
-	a.LastRefresh = time.Now().UTC()
-	a.mu.Unlock()
-
-	// Always save to disk after refresh (success or failure)
-	// - On success: persist the new access token
-	// - On failure: persist LastRefresh to prevent retrying for 1 hour
-	if saveErr := saveAccount(a); saveErr != nil {
-		log.Printf("warning: failed to save account %s after refresh: %v", a.ID, saveErr)
+	if err == nil {
+		a.mu.Lock()
+		a.LastRefresh = time.Now().UTC()
+		a.mu.Unlock()
+		if saveErr := saveAccount(a); saveErr != nil {
+			log.Printf("warning: failed to save account %s after refresh: %v", a.ID, saveErr)
+		}
 	}
 
 	return err
+}
+
+func (h *proxyHandler) waitForRefreshSlot(ctx context.Context) error {
+	for {
+		h.refreshMu.Lock()
+		wait := refreshMinInterval - time.Since(h.lastRefreshTime)
+		if h.lastRefreshTime.IsZero() || wait <= 0 {
+			h.lastRefreshTime = time.Now()
+			h.refreshMu.Unlock()
+			return nil
+		}
+		h.refreshMu.Unlock()
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte, userID, originID string) {

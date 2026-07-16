@@ -50,7 +50,7 @@ func (h *proxyHandler) handleZAIAdd(w http.ResponseWriter, r *http.Request) {
 
 	validationURL := h.cfg.zaiBase.String() + "/v1/messages"
 	body := map[string]any{
-		"model":      "glm-5.1",
+		"model":      "glm-5.2",
 		"max_tokens": 1,
 		"messages": []map[string]string{
 			{"role": "user", "content": "hi"},

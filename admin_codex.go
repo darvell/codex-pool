@@ -357,6 +357,7 @@ func saveNewCodexAccount(poolDir, accountID string, tokens *CodexTokenResponse) 
 	}
 
 	authJSON := map[string]any{
+		"added_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"tokens": map[string]any{
 			"id_token":      tokens.IDToken,
 			"access_token":  tokens.AccessToken,

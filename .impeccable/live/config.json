@@ -1,0 +1,6 @@
+{
+  "files": ["templates/friend_landing.html"],
+  "insertBefore": "</body>",
+  "commentSyntax": "html",
+  "cspChecked": true
+}

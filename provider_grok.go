@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	grokOAuthClientID        = "b1a00492-073a-47ea-816f-4c329264a828"
-	grokDefaultTokenURL      = "https://auth.x.ai/oauth2/token"
-	grokClientIdentifier     = "grok-cli"
+	grokOAuthClientID    = "b1a00492-073a-47ea-816f-4c329264a828"
+	grokDefaultTokenURL  = "https://auth.x.ai/oauth2/token"
+	grokClientIdentifier = "grok-cli"
 	// Matches current Grok Build CLI (0.2.93 as of 2026-07-09).
 	grokDefaultClientVersion = "0.2.93"
 )
@@ -70,6 +70,28 @@ type grokDiscovery struct {
 	TokenEndpoint string `json:"token_endpoint"`
 }
 
+type grokBillingMoney struct {
+	Value float64 `json:"val"`
+}
+
+type grokBillingPeriod struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+type grokBillingConfig struct {
+	CurrentPeriod      *grokBillingPeriod `json:"currentPeriod"`
+	CreditUsagePercent *float64           `json:"creditUsagePercent"`
+	MonthlyLimit       *grokBillingMoney  `json:"monthlyLimit"`
+	Used               *grokBillingMoney  `json:"used"`
+	BillingPeriodStart string             `json:"billingPeriodStart"`
+	BillingPeriodEnd   string             `json:"billingPeriodEnd"`
+}
+
+type grokBillingResponse struct {
+	Config *grokBillingConfig `json:"config"`
+}
+
 func (p *GrokProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
 	if acc, err := loadGrokSimpleAccount(name, path, data); err != nil || acc != nil {
 		return acc, err
@@ -108,7 +130,7 @@ func loadGrokSimpleAccount(name, path string, data []byte) (*Account, error) {
 }
 
 func loadGrokCLIAccount(name, path string, data []byte) (*Account, error) {
-	var root map[string]grokCLIAuthEntry
+	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -120,7 +142,12 @@ func loadGrokCLIAccount(name, path string, data []byte) (*Account, error) {
 	var entryKey string
 	var entry grokCLIAuthEntry
 	for _, k := range keys {
-		v := root[k]
+		var v grokCLIAuthEntry
+		if err := json.Unmarshal(root[k], &v); err != nil {
+			// Common account metadata such as added_at is stored beside the
+			// keyed CLI credential object. Scalar metadata is not a credential.
+			continue
+		}
 		if strings.TrimSpace(v.Key) != "" || strings.TrimSpace(v.RefreshToken) != "" {
 			entryKey = k
 			entry = v
@@ -271,6 +298,104 @@ func grokUsageFromMap(obj map[string]any, usageMap map[string]any) *RequestUsage
 }
 
 func (p *GrokProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
+	if acc == nil || headers == nil {
+		return
+	}
+
+	now := time.Now()
+	snap := UsageSnapshot{RetrievedAt: now, Source: "headers"}
+	if used, ok := parseRateLimitUsageFromRemainingLimit(headers, "x-ratelimit-remaining-requests", "x-ratelimit-limit-requests"); ok {
+		snap.PrimaryUsed = used
+		snap.PrimaryUsedPercent = used
+		snap.primarySet = true
+	}
+	if used, ok := parseRateLimitUsageFromRemainingLimit(headers, "x-ratelimit-remaining-tokens", "x-ratelimit-limit-tokens"); ok {
+		snap.SecondaryUsed = used
+		snap.SecondaryUsedPercent = used
+		snap.secondarySet = true
+	}
+	if resetAt, ok := parseRateLimitReset(headers.Get("x-ratelimit-reset-requests")); ok {
+		snap.PrimaryResetAt = resetAt
+		snap.PrimaryWindowMinutes = rateLimitWindowMinutes(now, resetAt)
+	}
+	if resetAt, ok := parseRateLimitReset(headers.Get("x-ratelimit-reset-tokens")); ok {
+		snap.SecondaryResetAt = resetAt
+		snap.SecondaryWindowMinutes = rateLimitWindowMinutes(now, resetAt)
+	}
+	if !snap.primarySet && !snap.secondarySet {
+		return
+	}
+
+	acc.mu.Lock()
+	acc.Usage = mergeUsage(acc.Usage, snap)
+	acc.mu.Unlock()
+}
+
+func rateLimitWindowMinutes(now, resetAt time.Time) int {
+	if !resetAt.After(now) {
+		return 0
+	}
+	minutes := int(resetAt.Sub(now).Minutes())
+	if minutes < 1 {
+		return 1
+	}
+	return minutes
+}
+
+func parseGrokBillingUsage(monthlyBody, weeklyBody []byte, now time.Time) (UsageSnapshot, bool) {
+	snap := UsageSnapshot{RetrievedAt: now, Source: "grok_billing"}
+
+	var monthly grokBillingResponse
+	if json.Unmarshal(monthlyBody, &monthly) == nil && monthly.Config != nil && monthly.Config.MonthlyLimit != nil && monthly.Config.MonthlyLimit.Value > 0 && monthly.Config.Used != nil {
+		used := monthly.Config.Used.Value / monthly.Config.MonthlyLimit.Value
+		snap.PrimaryUsed = clampRateLimitPercent(used)
+		snap.PrimaryUsedPercent = snap.PrimaryUsed
+		snap.primarySet = true
+		applyGrokBillingPeriod(&snap.PrimaryResetAt, &snap.PrimaryWindowMinutes, monthly.Config.BillingPeriodStart, monthly.Config.BillingPeriodEnd, now)
+	}
+
+	var weekly grokBillingResponse
+	if json.Unmarshal(weeklyBody, &weekly) == nil && weekly.Config != nil && weekly.Config.CreditUsagePercent != nil {
+		used := *weekly.Config.CreditUsagePercent
+		if used > 1 {
+			used /= 100
+		}
+		snap.SecondaryUsed = clampRateLimitPercent(used)
+		snap.SecondaryUsedPercent = snap.SecondaryUsed
+		snap.secondarySet = true
+		if weekly.Config.CurrentPeriod != nil {
+			applyGrokBillingPeriod(&snap.SecondaryResetAt, &snap.SecondaryWindowMinutes, weekly.Config.CurrentPeriod.Start, weekly.Config.CurrentPeriod.End, now)
+		}
+	}
+
+	return snap, snap.primarySet || snap.secondarySet
+}
+
+func applyGrokBillingPeriod(resetAt *time.Time, windowMinutes *int, startRaw, endRaw string, now time.Time) {
+	end, ok := parseGrokTimeValue(endRaw)
+	if !ok {
+		return
+	}
+	*resetAt = end
+	start, startOK := parseGrokTimeValue(startRaw)
+	if startOK && end.After(start) {
+		*windowMinutes = int(end.Sub(start).Minutes())
+		return
+	}
+	*windowMinutes = rateLimitWindowMinutes(now, end)
+}
+
+func parseGrokTimeValue(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func (p *GrokProvider) UpstreamURL(path string) *url.URL {
@@ -299,6 +424,136 @@ type grokModelInfo struct {
 	ContextWindow int
 	MaxTokens     int
 	Aliases       []string
+}
+
+type grokClientModel struct {
+	ID                          string                `json:"id"`
+	Object                      string                `json:"object"`
+	OwnedBy                     string                `json:"owned_by"`
+	Model                       string                `json:"model"`
+	Name                        string                `json:"name"`
+	Description                 string                `json:"description"`
+	ContextWindow               int                   `json:"context_window"`
+	AutoCompactThresholdPercent int                   `json:"auto_compact_threshold_percent"`
+	SystemPromptLabel           string                `json:"system_prompt_label,omitempty"`
+	APIBackend                  string                `json:"api_backend"`
+	ReasoningEffort             string                `json:"reasoning_effort,omitempty"`
+	SupportsReasoningEffort     bool                  `json:"supports_reasoning_effort,omitempty"`
+	ReasoningEfforts            []grokReasoningEffort `json:"reasoning_efforts,omitempty"`
+	SupportsBackendSearch       bool                  `json:"supports_backend_search,omitempty"`
+	CompactionAtTokens          bool                  `json:"compaction_at_tokens,omitempty"`
+	ShowModelFingerprint        bool                  `json:"show_model_fingerprint,omitempty"`
+	AgentType                   string                `json:"agent_type,omitempty"`
+}
+
+type grokReasoningEffort struct {
+	ID          string `json:"id"`
+	Value       string `json:"value"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Default     bool   `json:"default"`
+}
+
+// grokCLIModelCatalog mirrors the model-discovery payload shipped to Grok Build
+// 0.2.101 by cli-chat-proxy. grok-build itself remains a CLI built-in.
+var grokCLIModelCatalog = []grokClientModel{
+	{
+		ID:                          "grok-4.5",
+		Object:                      "model",
+		OwnedBy:                     "xAI",
+		Model:                       "grok-4.5",
+		Name:                        "Grok 4.5",
+		Description:                 "SpaceXAI's new frontier model",
+		ContextWindow:               500000,
+		AutoCompactThresholdPercent: 80,
+		SystemPromptLabel:           "Grok 4.5",
+		APIBackend:                  "responses",
+		ReasoningEffort:             "high",
+		SupportsReasoningEffort:     true,
+		ReasoningEfforts: []grokReasoningEffort{
+			{ID: "high", Value: "high", Label: "High Effort", Description: "Highest implementation quality with extensive reasoning", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium Effort", Description: "Balanced effort with standard implementation and testing"},
+			{ID: "low", Value: "low", Label: "Low Effort", Description: "Quick, fast implementations"},
+		},
+		SupportsBackendSearch: true,
+		CompactionAtTokens:    true,
+		ShowModelFingerprint:  true,
+	},
+	{
+		ID:                          "grok-composer-2.5-fast",
+		Object:                      "model",
+		OwnedBy:                     "xAI",
+		Model:                       "grok-composer-2.5-fast",
+		Name:                        "Composer 2.5",
+		Description:                 "Cursor's latest coding model",
+		ContextWindow:               200000,
+		AutoCompactThresholdPercent: 90,
+		APIBackend:                  "responses",
+		AgentType:                   "cursor",
+	},
+}
+
+func serveGrokModels(w http.ResponseWriter) {
+	respondJSON(w, map[string]any{"object": "list", "data": grokModelsForClient()})
+}
+
+func grokModelsForClient() []grokClientModel {
+	models := append([]grokClientModel(nil), grokCLIModelCatalog...)
+	for _, model := range poolModels {
+		apiBackend := "messages"
+		if model.AccountType == AccountTypeCodex {
+			apiBackend = "chat_completions"
+		}
+		models = append(models, grokClientModel{
+			ID:                          model.ID,
+			Object:                      "model",
+			OwnedBy:                     "codex-pool",
+			Model:                       model.ID,
+			Name:                        model.DisplayName,
+			Description:                 model.Description,
+			ContextWindow:               model.ContextWindow,
+			AutoCompactThresholdPercent: 80,
+			SystemPromptLabel:           model.DisplayName,
+			APIBackend:                  apiBackend,
+		})
+	}
+	return models
+}
+
+func grokSetupModelIDs() []string {
+	models := grokSetupModels()
+	ids := make([]string, 0, len(models)+1)
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if _, ok := seen[model.ID]; ok {
+			continue
+		}
+		seen[model.ID] = struct{}{}
+		ids = append(ids, model.ID)
+	}
+	return ids
+}
+
+type grokSetupModel struct {
+	ID         string
+	APIBackend string
+}
+
+func grokSetupModels() []grokSetupModel {
+	catalog := grokModelsForClient()
+	models := make([]grokSetupModel, 0, len(catalog)+1)
+	seen := make(map[string]struct{}, len(catalog)+1)
+	for _, model := range catalog {
+		if _, ok := seen[model.ID]; ok {
+			continue
+		}
+		seen[model.ID] = struct{}{}
+		models = append(models, grokSetupModel{ID: model.ID, APIBackend: model.APIBackend})
+	}
+	if _, ok := seen["grok-build"]; !ok {
+		models = append(models, grokSetupModel{ID: "grok-build", APIBackend: "responses"})
+	}
+	return models
 }
 
 // Catalog sourced from cli-chat-proxy GET /v1/models (Grok Build 0.2.93) plus

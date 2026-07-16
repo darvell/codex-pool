@@ -52,18 +52,7 @@ func (bw *responsesBufferingWriter) scanEvents() {
 }
 
 func (bw *responsesBufferingWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return
 	}
@@ -116,6 +105,10 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 		if args != "" && callID != "" && !bw.callHasArgDelta[callID] {
 			bw.setFunctionCallArguments(callID, args)
 		}
+	case "response.image_generation_call.partial_image":
+		bw.addImageGenerationResult(obj, "partial_image_b64")
+	case "response.image_generation_call.completed":
+		bw.addImageGenerationResult(obj, "result")
 	case "response.completed":
 		bw.applyResponse(obj)
 		if bw.status == "" {
@@ -125,6 +118,23 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 		bw.applyResponse(obj)
 		bw.status = "failed"
 	}
+}
+
+func (bw *responsesBufferingWriter) addImageGenerationResult(event map[string]any, field string) {
+	result, _ := event[field].(string)
+	if result == "" {
+		return
+	}
+	if bw.imageGenerationCall == nil {
+		bw.imageGenerationCall = map[string]any{
+			"type": "image_generation_call",
+		}
+	}
+	if itemID, _ := event["item_id"].(string); itemID != "" {
+		bw.imageGenerationCall["id"] = itemID
+	}
+	bw.imageGenerationCall["result"] = result
+	bw.imageGenerationCall["status"] = "completed"
 }
 
 func (bw *responsesBufferingWriter) applyResponse(obj map[string]any) {
@@ -293,6 +303,12 @@ func (bw *responsesBufferingWriter) Result() []byte {
 	if status == "" {
 		status = "completed"
 	}
+	if bw.imageGenerationCall != nil {
+		if result, _ := bw.imageGenerationCall["result"].(string); result != "" {
+			status = "completed"
+			bw.imageGenerationCall["status"] = "completed"
+		}
+	}
 	output := []any{}
 	if bw.contentText != "" || len(bw.functionCalls) == 0 {
 		output = append(output, map[string]any{
@@ -369,18 +385,7 @@ func (rw *responsesToCompletionsWriter) scanAndTranslate() {
 }
 
 func (rw *responsesToCompletionsWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		rw.callback(data)
 	}
@@ -507,18 +512,7 @@ func (bw *responsesToCompletionsBufferingWriter) scanEvents() {
 }
 
 func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 	if len(data) > 0 && bw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		bw.callback(data)
 	}
@@ -678,21 +672,7 @@ func (rw *responsesToChatCompletionsWriter) scanAndTranslate() {
 }
 
 func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("event: ")) {
-			eventType = string(bytes.TrimSpace(line[7:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 
 	// Forward original data to usage callback
 	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
@@ -1065,21 +1045,7 @@ func (bw *responsesToChatCompletionsBufferingWriter) scanEvents() {
 }
 
 func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("event: ")) {
-			eventType = string(bytes.TrimSpace(line[7:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 
 	if len(data) > 0 && bw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		bw.callback(data)
@@ -1345,6 +1311,8 @@ type responsesToClaudeBufferingWriter struct {
 	model        string
 	contentText  string
 	toolUses     []map[string]any
+	toolIndex    map[string]int
+	itemToCallID map[string]string
 	inputTokens  int64
 	outputTokens int64
 	stopReason   string
@@ -1376,19 +1344,7 @@ func (bw *responsesToClaudeBufferingWriter) scanEvents() {
 }
 
 func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 
 	if len(data) > 0 && bw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		bw.callback(data)
@@ -1435,6 +1391,7 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 		}
 		if itemType, _ := item["type"].(string); itemType == "function_call" {
 			callID, _ := item["call_id"].(string)
+			itemID, _ := item["id"].(string)
 			name, _ := item["name"].(string)
 			bw.toolUses = append(bw.toolUses, map[string]any{
 				"type":  "tool_use",
@@ -1443,14 +1400,26 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 				"input": map[string]any{},
 				"_args": "",
 			})
+			if bw.toolIndex == nil {
+				bw.toolIndex = make(map[string]int)
+				bw.itemToCallID = make(map[string]string)
+			}
+			bw.toolIndex[callID] = len(bw.toolUses) - 1
+			if itemID != "" {
+				bw.itemToCallID[itemID] = callID
+			}
 		}
 	case "response.function_call_arguments.delta":
-		if delta, _ := obj["delta"].(string); delta != "" && len(bw.toolUses) > 0 {
-			last := bw.toolUses[len(bw.toolUses)-1]
-			last["_args"] = last["_args"].(string) + delta
+		if delta, _ := obj["delta"].(string); delta != "" {
+			if index, ok := bw.toolUseIndexForEvent(obj); ok {
+				tool := bw.toolUses[index]
+				tool["_args"] = tool["_args"].(string) + delta
+			}
 		}
 	case "response.output_item.done":
-		bw.finishToolUse()
+		if index, ok := bw.toolUseIndexForEvent(obj); ok {
+			bw.finishToolUse(index)
+		}
 	case "response.completed":
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
@@ -1488,19 +1457,38 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 	}
 }
 
-func (bw *responsesToClaudeBufferingWriter) finishToolUse() {
-	if len(bw.toolUses) == 0 {
+func (bw *responsesToClaudeBufferingWriter) toolUseIndexForEvent(obj map[string]any) (int, bool) {
+	callID, _ := obj["call_id"].(string)
+	if callID == "" {
+		itemID, _ := obj["item_id"].(string)
+		callID = bw.itemToCallID[itemID]
+	}
+	if callID == "" {
+		if item, _ := obj["item"].(map[string]any); item != nil {
+			callID, _ = item["call_id"].(string)
+			if callID == "" {
+				itemID, _ := item["id"].(string)
+				callID = bw.itemToCallID[itemID]
+			}
+		}
+	}
+	index, ok := bw.toolIndex[callID]
+	return index, ok
+}
+
+func (bw *responsesToClaudeBufferingWriter) finishToolUse(index int) {
+	if index < 0 || index >= len(bw.toolUses) {
 		return
 	}
-	last := bw.toolUses[len(bw.toolUses)-1]
-	args, _ := last["_args"].(string)
-	delete(last, "_args")
+	tool := bw.toolUses[index]
+	args, _ := tool["_args"].(string)
+	delete(tool, "_args")
 	if args == "" {
 		return
 	}
 	var input map[string]any
 	if json.Unmarshal([]byte(args), &input) == nil {
-		last["input"] = input
+		tool["input"] = input
 	}
 }
 
@@ -1613,21 +1601,7 @@ func (cw *claudeToResponsesWriter) scanAndTranslate() {
 }
 
 func (cw *claudeToResponsesWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("event: ")) {
-			eventType = string(bytes.TrimSpace(line[7:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 
 	if len(data) > 0 && cw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		cw.callback(data)
@@ -1954,21 +1928,7 @@ func (rw *responsesToClaudeWriter) scanAndTranslate() {
 }
 
 func (rw *responsesToClaudeWriter) processEvent(event []byte) {
-	var eventType string
-	var data []byte
-
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("event:")) {
-			eventType = string(bytes.TrimSpace(line[6:]))
-		} else if bytes.HasPrefix(line, []byte("event: ")) {
-			eventType = string(bytes.TrimSpace(line[7:]))
-		} else if bytes.HasPrefix(line, []byte("data: ")) {
-			data = bytes.TrimSpace(line[6:])
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			data = bytes.TrimSpace(line[5:])
-		}
-	}
+	eventType, data := parseSSEEvent(event)
 
 	// Forward original data to usage callback
 	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {

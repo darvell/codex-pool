@@ -175,7 +175,8 @@ func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, acctType Acc
 	}
 
 	authJSON := map[string]any{
-		"api_key": apiKey,
+		"api_key":  apiKey,
+		"added_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
 
 	data, err := json.MarshalIndent(authJSON, "", "  ")

@@ -253,57 +253,47 @@ func (p *CodexProvider) parseResponseUsage(obj map[string]any) *RequestUsage {
 }
 
 func (p *CodexProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
-	primaryStr := headers.Get("X-Codex-Primary-Used-Percent")
-	secondaryStr := headers.Get("X-Codex-Secondary-Used-Percent")
-	if primaryStr == "" && secondaryStr == "" {
+	if acc == nil {
+		return
+	}
+	primary := codexUsageWindowFromHeaders(headers, "Primary")
+	secondary := codexUsageWindowFromHeaders(headers, "Secondary")
+	snap, ok := normalizeCodexUsageWindows(primary, secondary, time.Now(), "headers")
+	if !ok {
 		return
 	}
 
+	if headers.Get("X-Codex-Credits-Has-Credits") != "" ||
+		headers.Get("X-Codex-Credits-Unlimited") != "" ||
+		headers.Get("X-Codex-Credits-Balance") != "" {
+		snap.creditsSet = true
+		snap.HasCredits = strings.EqualFold(headers.Get("X-Codex-Credits-Has-Credits"), "true")
+		snap.CreditsUnlimited = strings.EqualFold(headers.Get("X-Codex-Credits-Unlimited"), "true")
+		if balance := headers.Get("X-Codex-Credits-Balance"); balance != "" {
+			snap.CreditsBalance, _ = strconv.ParseFloat(balance, 64)
+		}
+	}
+
 	acc.mu.Lock()
-	defer acc.mu.Unlock()
-
-	snap := acc.Usage
-	snap.RetrievedAt = time.Now()
-	snap.Source = "headers"
-
-	if primaryStr != "" {
-		if f, err := strconv.ParseFloat(primaryStr, 64); err == nil {
-			snap.PrimaryUsedPercent = f / 100.0
-			snap.PrimaryUsed = snap.PrimaryUsedPercent
-		}
-	}
-	if secondaryStr != "" {
-		if f, err := strconv.ParseFloat(secondaryStr, 64); err == nil {
-			snap.SecondaryUsedPercent = f / 100.0
-			snap.SecondaryUsed = snap.SecondaryUsedPercent
-		}
-	}
-
-	if v := headers.Get("X-Codex-Primary-Window-Minutes"); v != "" {
-		snap.PrimaryWindowMinutes, _ = strconv.Atoi(v)
-	}
-	if v := headers.Get("X-Codex-Secondary-Window-Minutes"); v != "" {
-		snap.SecondaryWindowMinutes, _ = strconv.Atoi(v)
-	}
-	if v := headers.Get("X-Codex-Primary-Reset-At"); v != "" {
-		if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
-			snap.PrimaryResetAt = time.Unix(ts, 0)
-		}
-	}
-	if v := headers.Get("X-Codex-Secondary-Reset-At"); v != "" {
-		if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
-			snap.SecondaryResetAt = time.Unix(ts, 0)
-		}
-	}
-	if v := headers.Get("X-Codex-Credits-Balance"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			snap.CreditsBalance = f
-		}
-	}
-	snap.HasCredits = strings.EqualFold(headers.Get("X-Codex-Credits-Has-Credits"), "true")
-	snap.CreditsUnlimited = strings.EqualFold(headers.Get("X-Codex-Credits-Unlimited"), "true")
-
 	acc.Usage = mergeUsage(acc.Usage, snap)
+	acc.mu.Unlock()
+}
+
+func codexUsageWindowFromHeaders(headers http.Header, slot string) *codexUsageWindow {
+	used, _ := strconv.ParseFloat(headers.Get("X-Codex-"+slot+"-Used-Percent"), 64)
+	minutes, _ := strconv.Atoi(headers.Get("X-Codex-" + slot + "-Window-Minutes"))
+	resetUnix, _ := strconv.ParseInt(headers.Get("X-Codex-"+slot+"-Reset-At"), 10, 64)
+	if used == 0 && minutes == 0 && resetUnix == 0 {
+		return nil
+	}
+	window := &codexUsageWindow{
+		UsedPercent:   used / 100.0,
+		WindowMinutes: minutes,
+	}
+	if resetUnix > 0 {
+		window.ResetAt = time.Unix(resetUnix, 0)
+	}
+	return window
 }
 
 func (p *CodexProvider) UpstreamURL(path string) *url.URL {

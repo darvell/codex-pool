@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
@@ -13,9 +14,9 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 		"sonnet":      "claude-sonnet-5",
 		"sonnet[1m]":  "claude-sonnet-5 [1m]",
 		"sonnet [1m]": "claude-sonnet-5 [1m]",
-		"opus":        "claude-opus-4-7",
-		"opus[1m]":    "claude-opus-4-7 [1m]",
-		"opus [1m]":   "claude-opus-4-7 [1m]",
+		"opus":        "claude-opus-4-8",
+		"opus[1m]":    "claude-opus-4-8 [1m]",
+		"opus [1m]":   "claude-opus-4-8 [1m]",
 		"fable":       "claude-fable-5",
 		"haiku":       "claude-haiku-4-5-20251001",
 	}
@@ -60,13 +61,12 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		contextWindow int
 		maxTokens     int
 	}{
-		"gpt-5.6":             {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.6-sol":         {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.6-terra":       {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.6-luna":        {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.5":             {contextWindow: 272000, maxTokens: 128000},
-		"gpt-5.4":             {contextWindow: 1000000, maxTokens: 128000},
-		"gpt-5.3-codex":       {contextWindow: 272000, maxTokens: 128000},
+		"gpt-5.4":             {contextWindow: 272000, maxTokens: 128000},
+		"gpt-5.4-mini":        {contextWindow: 272000, maxTokens: 128000},
 		"gpt-5.3-codex-spark": {contextWindow: 128000, maxTokens: 128000},
 	}
 	for _, model := range cfg.Providers["codex"].Models {
@@ -106,24 +106,21 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	}
 
 	needClaudeIDs := map[string]bool{
-		"claude-haiku-4-5":       false,
-		"claude-sonnet-5":        false,
-		"claude-sonnet-5 [1m]":   false,
-		"claude-sonnet-4-6":      false,
-		"claude-sonnet-4-6 [1m]": false,
-		"claude-fable-5":         false,
-		"claude-opus-4-7":        false,
-		"claude-opus-4-7 [1m]":   false,
-		"claude-opus-4-6":        false,
-		"claude-opus-4-6 [1m]":   false,
+		"claude-haiku-4-5-20251001": false,
+		"claude-sonnet-5":           false,
+		"claude-sonnet-4-6":         false,
+		"claude-fable-5":            false,
+		"claude-opus-4-8":           false,
+		"claude-opus-4-7":           false,
+		"claude-opus-4-6":           false,
 	}
 	for _, model := range claude.Models {
 		if _, ok := needClaudeIDs[model.ID]; ok {
 			needClaudeIDs[model.ID] = true
 		}
-		if model.ID == "claude-haiku-4-5" {
+		if !ccModelSupportsEffort(model.ID) {
 			if model.Compat != nil || len(model.ThinkingLevelMap) != 0 {
-				t.Fatalf("haiku unexpectedly advertises adaptive thinking: %#v %#v", model.Compat, model.ThinkingLevelMap)
+				t.Fatalf("claude model %q unexpectedly advertises adaptive thinking: %#v %#v", model.ID, model.Compat, model.ThinkingLevelMap)
 			}
 			continue
 		}
@@ -150,8 +147,8 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		t.Fatalf("kimi model count = %d", len(kimi.Models))
 	}
 	needKimiIDs := map[string]bool{
-		"k2p5":             false,
-		"kimi-k2-thinking": false,
+		"kimi-for-coding":           false,
+		"kimi-for-coding-highspeed": false,
 	}
 	for _, model := range kimi.Models {
 		if _, ok := needKimiIDs[model.ID]; ok {
@@ -200,11 +197,10 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if zai.API != "anthropic-messages" {
 		t.Fatalf("zai api = %q", zai.API)
 	}
-	if len(zai.Models) != 2 {
+	if len(zai.Models) != 1 {
 		t.Fatalf("zai model count = %d", len(zai.Models))
 	}
 	wantZAIContexts := map[string]int{
-		"glm-5.1": 128000,
 		"glm-5.2": 1000000,
 	}
 	for _, model := range zai.Models {
@@ -215,8 +211,8 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		if model.ContextWindow != wantContext {
 			t.Fatalf("zai model %q context window = %d, want %d", model.ID, model.ContextWindow, wantContext)
 		}
-		if len(model.Input) != 2 || model.Input[0] != "text" || model.Input[1] != "image" {
-			t.Fatalf("zai model %q inputs = %#v, want text+image", model.ID, model.Input)
+		if len(model.Input) != 1 || model.Input[0] != "text" {
+			t.Fatalf("zai model %q inputs = %#v, want text", model.ID, model.Input)
 		}
 		delete(wantZAIContexts, model.ID)
 	}
@@ -250,6 +246,45 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	}
 }
 
+func TestGeneratedClientConfigsIncludeDiscoveredAntigravityModels(t *testing.T) {
+	antigravityModels.Reset()
+	t.Cleanup(antigravityModels.Reset)
+	antigravityModels.ReplaceAccount("antigravity-test", AntigravityAccountSnapshot{
+		FetchedAt: time.Now(),
+		Models: map[string]AntigravityModelInfo{
+			"gemini-live": {ID: "gemini-live", DisplayName: "Gemini Live", MaxTokens: 1000000, MaxOutputTokens: 65536, SupportsThinking: true},
+		},
+	})
+	piJSON, err := generatePiModelsJSON("https://pool.example.com", "codex-token", "claude-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var piConfig piModelsConfig
+	if err := json.Unmarshal(piJSON, &piConfig); err != nil {
+		t.Fatal(err)
+	}
+	if models := piConfig.Providers["antigravity"].Models; len(models) != 1 || models[0].ID != "antigravity/gemini-live" {
+		t.Fatalf("Pi Antigravity models = %#v", models)
+	}
+	cuteJSON, err := generateCuteCodeSettingsJSON("https://pool.example.com", "pool-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cuteConfig cuteCodeSettings
+	if err := json.Unmarshal(cuteJSON, &cuteConfig); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, model := range cuteConfig.CustomModels {
+		if model.ID == "antigravity/gemini-live" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Cute Code Antigravity model missing")
+	}
+}
+
 func TestIsKimiModelHandlesPiBuiltInIDs(t *testing.T) {
 	t.Parallel()
 
@@ -264,12 +299,9 @@ func TestMinimaxCanonicalModelHandlesPiBuiltInIDs(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"minimax":                "MiniMax-M2.5",
+		"minimax":                "MiniMax-M3",
 		"minimax-m3":             "MiniMax-M3",
 		"MiniMax-M3":             "MiniMax-M3",
-		"MiniMax-M2":             "MiniMax-M2",
-		"MiniMax-M2.1":           "MiniMax-M2.1",
-		"MiniMax-M2.5":           "MiniMax-M2.5",
 		"MiniMax-M2.7":           "MiniMax-M2.7",
 		"MiniMax-M2.7-highspeed": "MiniMax-M2.7-highspeed",
 	}

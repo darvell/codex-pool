@@ -30,18 +30,21 @@
             --bg-color: #050505;
             --card-bg: #0e0e0e;
             --text-main: #e0e0e0;
-            --text-muted: #666;
-            --gold-dim: #8a7039;
+            --text-muted: #858585;
+            --text-subtle: #a0a0a0;
+            --text-disabled: #737373;
+            --gold-dim: #a98b47;
             --gold-bright: #d4af37;
             --gold-glow: rgba(212, 175, 55, 0.15);
             --border-outer: #1a1a1a;
             --border-inner: #252525;
+            --border-strong: #333333;
             --code-bg: #080808;
             --success-green: #27ae60;
             --error-red: #c0392b;
             
             --panel-gradient: linear-gradient(145deg, #111, #0a0a0a);
-            --metallic-gradient: linear-gradient(135deg, #b38b38 0%, #d4af37 50%, #8a7039 100%);
+            --metallic-gradient: linear-gradient(135deg, var(--gold-dim) 0%, var(--gold-bright) 50%, var(--gold-dim) 100%);
             --inset-shadow: inset 2px 2px 5px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
             --outset-shadow: 5px 5px 10px rgba(0,0,0,0.5), -1px -1px 1px rgba(255,255,255,0.03);
         }
@@ -61,6 +64,15 @@
             padding: 20px;
             box-sizing: border-box;
             -webkit-font-smoothing: antialiased;
+        }
+
+        body.login-mode .container {
+            max-width: 560px;
+            padding: clamp(24px, 5vw, 48px);
+        }
+
+        body:not(.login-mode) {
+            align-items: flex-start;
         }
 
         /* The Monolith Container */
@@ -90,7 +102,7 @@
             content: "";
             position: absolute;
             bottom: 0; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, #333, transparent);
+            background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
             opacity: 0.5;
         }
 
@@ -122,9 +134,7 @@
             z-index: 10;
         }
         .friend-badge span {
-            background: var(--metallic-gradient);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: var(--gold-bright);
             font-weight: 500;
         }
 
@@ -183,21 +193,6 @@
             position: relative;
             animation: heroReveal 1s cubic-bezier(0.2, 0.8, 0.2, 1);
         }
-
-        .success-wrapper .hero-label {
-            position: absolute;
-            bottom: 10px;
-            left: 50%;
-            transform: translateX(-50%);
-            font-family: 'Space Mono', monospace;
-            font-size: 0.9rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.3em;
-            color: var(--gold-bright);
-            text-shadow: 0 2px 8px rgba(0,0,0,0.9), 0 0 20px rgba(0,0,0,0.8);
-            z-index: 5;
-        }
         .success-hero {
             width: 100%;
             height: auto;
@@ -227,9 +222,6 @@
             font-style: italic;
             font-family: 'Cormorant Garamond', serif;
             font-weight: 400;
-            background: var(--metallic-gradient);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
         }
 
         .product-mark {
@@ -245,7 +237,7 @@
 
         .subtitle {
             text-align: center;
-            color: #aaa;
+            color: var(--text-subtle);
             font-family: 'Cormorant Garamond', serif;
             font-size: 1.15rem;
             font-style: italic;
@@ -259,11 +251,20 @@
 
         /* Inputs & Form - Skeuomorphic "Slots" */
         .input-group {
-            margin-bottom: 1.5rem;
+            margin-bottom: 1.25rem;
             position: relative;
             max-width: 420px;
             margin-left: auto;
             margin-right: auto;
+        }
+
+        .field-label {
+            display: block;
+            margin: 0 0 8px 2px;
+            color: var(--text-subtle);
+            font-size: 0.72rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
         }
 
         input {
@@ -277,24 +278,32 @@
             text-align: center;
             border-radius: 6px;
             box-shadow: var(--inset-shadow);
-            transition: all 0.3s ease;
+            transition: color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
             box-sizing: border-box;
             border-bottom: 1px solid transparent;
         }
 
         input::placeholder {
-            color: #333;
+            color: #5f5f5f;
             font-family: 'Space Mono', monospace;
             font-size: 0.8rem;
             text-transform: uppercase;
             letter-spacing: 2px;
         }
 
-        input:focus { 
-            outline: none; 
+        input:focus {
+            outline: none;
             box-shadow: inset 1px 1px 3px rgba(0,0,0,1), inset -1px -1px 1px rgba(255,255,255,0.05), 0 0 15px rgba(212, 175, 55, 0.1);
             color: #fff;
             border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+        }
+
+        input:focus-visible,
+        button:focus-visible,
+        a:focus-visible,
+        summary:focus-visible {
+            outline: 2px solid var(--gold-bright);
+            outline-offset: 3px;
         }
 
         /* Luxury Button */
@@ -305,7 +314,7 @@
             margin: 2rem auto 0;
             background: linear-gradient(180deg, #2a2a2a, #1a1a1a);
             color: #888;
-            border: 1px solid #333;
+            border: 1px solid var(--border-strong);
             padding: 16px;
             font-family: 'Space Mono', monospace;
             font-weight: 700;
@@ -317,7 +326,7 @@
             box-shadow: 
                 0 4px 6px rgba(0,0,0,0.5), 
                 inset 0 1px 0 rgba(255,255,255,0.05);
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
             position: relative;
             overflow: hidden;
         }
@@ -375,7 +384,7 @@
         }
 
         .setup-heading-copy {
-            color: #8d8d8d;
+            color: var(--text-muted);
             font-size: 0.78rem;
             line-height: 1.55;
         }
@@ -401,7 +410,7 @@
             background: linear-gradient(180deg, #090909, #060606);
             padding: 12px;
             border: 1px solid #1b1b1b;
-            border-radius: 18px;
+            border-radius: 12px;
             box-shadow: var(--inset-shadow);
         }
 
@@ -419,15 +428,22 @@
         }
 
         .tab {
+            appearance: none;
+            width: 100%;
+            max-width: none;
+            margin: 0;
             cursor: pointer;
-            min-height: 42px;
-            font-size: 0.66rem;
+            min-height: 44px;
+            font-size: 0.72rem;
             text-transform: uppercase;
-            color: #696969;
+            text-align: left;
+            color: var(--text-subtle);
+            background: transparent;
             padding: 9px 10px;
             border: 1px solid transparent;
             border-radius: 12px;
-            transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+            box-shadow: none;
+            transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
             display: flex;
             align-items: center;
             justify-content: flex-start;
@@ -452,6 +468,20 @@
             color: #b7b7b7;
             border-color: #2a2a2a;
             background: rgba(255,255,255,0.025);
+            box-shadow: none;
+            transform: none;
+        }
+
+        .tab:hover.active,
+        .tab:active {
+            transform: none;
+        }
+
+        .tab:focus-visible,
+        .sub-tab:focus-visible,
+        .session-end:focus-visible {
+            outline: 2px solid var(--gold-bright);
+            outline-offset: 3px;
         }
 
         .setup-panel {
@@ -475,18 +505,31 @@
         }
 
         .sub-tab {
+            appearance: none;
+            width: auto;
+            max-width: none;
+            min-height: 40px;
+            margin: 0;
             font-size: 0.75rem;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: #555;
-            padding: 6px 14px;
+            color: var(--text-subtle);
+            padding: 8px 14px;
             border: 1px solid #222;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
             border-radius: 2px;
             background: linear-gradient(180deg, #151515, #101010);
+            box-shadow: none;
         }
 
-        .sub-tab:hover { color: #888; border-color: #333; }
+        .sub-tab:hover {
+            color: var(--text-main);
+            border-color: var(--border-strong);
+            box-shadow: none;
+            transform: none;
+        }
+        .sub-tab:active { transform: none; }
         .sub-tab.active {
             border-color: var(--gold-dim);
             color: var(--gold-bright);
@@ -614,10 +657,10 @@
         }
 
         .code-block {
-            padding: 20px;
+            padding: 48px 20px 20px;
             font-size: 0.85rem;
             line-height: 1.6;
-            color: #aaa;
+            color: var(--text-subtle);
             overflow-x: auto;
             font-family: 'Space Mono', monospace;
         }
@@ -630,14 +673,17 @@
             position: absolute;
             top: 8px; right: 8px;
             background: #111;
-            border: 1px solid #333;
-            color: #555;
+            border: 1px solid var(--border-strong);
+            color: var(--text-subtle);
             font-family: 'Space Mono', monospace;
-            font-size: 0.6rem;
-            padding: 4px 10px;
+            font-size: 0.68rem;
+            min-width: 58px;
+            min-height: 32px;
+            padding: 6px 10px;
             cursor: pointer;
             text-transform: uppercase;
-            transition: all 0.2s;
+            letter-spacing: 0.08em;
+            transition: color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
             width: auto;
             margin: 0;
             border-radius: 2px;
@@ -647,7 +693,7 @@
         .copy-btn:hover { 
             border-color: var(--gold-dim); 
             color: var(--gold-bright);
-            box-shadow: 0 0 8px rgba(212, 175, 55, 0.2);
+            box-shadow: none;
             transform: none;
         }
         .copy-btn.copied { border-color: var(--success-green); color: var(--success-green); }
@@ -680,41 +726,99 @@
             text-transform: uppercase;
             letter-spacing: 1px;
         }
-        
-        /* Stats Styling */
-        .stat-card {
-            background: linear-gradient(145deg, #111, #0c0c0c);
-            border: 1px solid #1a1a1a;
-            padding: 20px;
-            text-align: center;
-            border-radius: 6px;
-            box-shadow: 5px 5px 15px rgba(0,0,0,0.3), -5px -5px 15px rgba(255,255,255,0.01);
+
+        .reset-credit {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 7px;
+            color: var(--gold-bright);
+            font-size: 0.7rem;
+            font-family: 'Space Mono', monospace;
+            vertical-align: middle;
             position: relative;
-            overflow: hidden;
+            cursor: default;
+        }
+
+        .reset-credit svg {
+            width: 13px;
+            height: 13px;
+            stroke-width: 2;
+        }
+
+        .reset-credit-popover {
+            display: none;
+            position: absolute;
+            z-index: 20;
+            left: 0;
+            top: calc(100% + 7px);
+            min-width: 230px;
+            padding: 10px 12px;
+            background: #111;
+            border: 1px solid var(--border-strong);
+            border-radius: 5px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+            color: var(--text-main);
+            font-family: 'Space Mono', monospace;
+            font-size: 0.68rem;
+            line-height: 1.6;
+            white-space: nowrap;
+            text-align: left;
+        }
+
+        .reset-credit:hover .reset-credit-popover,
+        .reset-credit:focus-within .reset-credit-popover {
+            display: block;
+        }
+
+        .reset-credit-expiry {
+            color: var(--text-muted);
         }
         
-        .stat-card::after {
-            content: "";
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 2px;
-            background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
-            opacity: 0.5;
+        /* Stats Styling */
+        .stats-summary {
+            background: #0a0a0a;
+            border: 1px solid var(--border-outer);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .stat-card {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            padding: 15px 16px;
+            text-align: left;
+            border-right: 1px solid var(--border-outer);
+        }
+
+        .stat-card:last-child {
+            border-right: 0;
         }
 
         .stat-value {
             color: var(--text-main);
-            font-size: 2.2rem;
+            font-size: 1.9rem;
             font-family: 'Cormorant Garamond', serif;
             font-weight: 400;
-            margin-bottom: 5px;
+            line-height: 1;
+            margin-top: 7px;
             text-shadow: 0 2px 5px rgba(0,0,0,0.8);
         }
-        
+
         .stat-label {
+            order: -1;
             color: var(--text-muted);
-            font-size: 0.7rem;
+            font-size: 0.68rem;
             text-transform: uppercase;
             letter-spacing: 1px;
+        }
+
+        #cost-banner {
+            background: rgba(212, 175, 55, 0.045) !important;
+            border-color: rgba(212, 175, 55, 0.18) !important;
+            border-radius: 4px !important;
+            text-align: left !important;
         }
 
         .progress-track {
@@ -730,8 +834,9 @@
         .progress-bar {
             height: 100%;
             background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
-            width: 0%;
-            transition: width 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+            transform: scaleX(0);
+            transform-origin: left center;
+            transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
             box-shadow: 0 0 10px var(--gold-dim);
         }
 
@@ -762,9 +867,63 @@
             border-bottom: 1px solid #151515;
             color: #ccc;
         }
+
+        #accounts-table th,
+        #accounts-table td {
+            padding-left: 8px;
+            padding-right: 8px;
+            white-space: nowrap;
+        }
         
         tr:last-child td { border-bottom: none; }
-        
+
+        .analytics-disclosure {
+            border-top: 1px solid #1d1d1d;
+            border-bottom: 1px solid #1d1d1d;
+            margin-top: 24px;
+        }
+
+        .analytics-disclosure summary {
+            cursor: pointer;
+            color: var(--text-subtle);
+            font-size: 0.72rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: 14px 2px;
+            list-style: none;
+        }
+
+        .analytics-disclosure summary::-webkit-details-marker { display: none; }
+        .analytics-disclosure summary::after {
+            content: "+";
+            float: right;
+            color: var(--gold-dim);
+            font-size: 1rem;
+        }
+        .analytics-disclosure[open] summary::after { content: "−"; }
+        .analytics-disclosure-body { padding: 4px 0 18px; }
+
+        .session-end {
+            width: auto;
+            max-width: none;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            background: none;
+            box-shadow: none;
+            color: #777;
+            font-size: 0.68rem;
+            letter-spacing: 0.12em;
+            text-decoration: underline;
+            text-underline-offset: 4px;
+        }
+        .session-end:hover {
+            transform: none;
+            box-shadow: none;
+            color: var(--gold-bright);
+            border: 0;
+        }
+
         /* Responsive */
         @media (max-width: 600px) {
             body { padding: 12px; align-items: flex-start; }
@@ -781,16 +940,13 @@
                 max-width: 108px;
                 margin-bottom: 10px;
             }
-            .success-wrapper .hero-label {
-                font-size: 0.68rem;
-                letter-spacing: 0.22em;
-            }
             h1 { font-size: 1.8rem; }
             .setup-heading {
                 margin-bottom: 14px;
             }
             .setup-heading-copy {
-                font-size: 0.74rem;
+                font-size: 0.875rem;
+                line-height: 1.65;
             }
             .setup-layout {
                 display: block;
@@ -802,65 +958,115 @@
             }
             .tabs {
                 gap: 13px;
-                border-radius: 14px;
+                border-radius: 12px;
                 padding: 10px;
             }
             .tool-group-items {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
             .tab {
-                min-height: 44px;
-                font-size: 0.62rem;
-                padding: 9px 8px;
-                gap: 5px;
+                min-height: 48px;
+                font-size: 0.875rem;
+                padding: 10px 8px;
+                gap: 6px;
                 justify-content: center;
+                text-align: center;
             }
             .tab svg { width: 14px; height: 14px; }
             .sub-tabs {
                 flex-wrap: wrap;
+                justify-content: stretch;
+                gap: 8px;
+            }
+            .sub-tab {
+                flex: 1 1 auto;
+                min-height: 44px;
+                font-size: 0.875rem;
+                padding: 9px 12px;
+            }
+            .copy-btn {
+                min-width: 68px;
+                min-height: 44px;
+                font-size: 0.875rem;
+            }
+            .code-block {
+                padding-top: 62px;
+                font-size: 0.875rem;
+            }
+            .stats-summary .stat-card {
+                padding: 12px 9px;
+            }
+            .stat-value {
+                font-size: 1.65rem;
+            }
+            .stat-label {
+                font-size: 0.68rem;
+                line-height: 1.35;
             }
             .api-summary {
                 grid-template-columns: 1fr;
+            }
+            th, td {
+                padding: 10px;
+            }
+            #tab-stats .stats-summary {
+                gap: 8px !important;
+            }
+            #cost-banner-text {
+                font-size: 0.82rem !important;
+                line-height: 1.6;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                scroll-behavior: auto !important;
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
             }
         }
 
     </style>
 </head>
-<body>
+<body class="login-mode">
 
     <div class="container">
         <div class="texture-overlay"></div>
         <div class="friend-badge">Friends of <span>{{.FriendName}}</span></div>
         <div class="content-relative">
 
-            <div id="error-msg" class="error"></div>
+            <div id="error-msg" class="error" role="alert" aria-live="polite"></div>
 
             <!-- Login Section -->
             <div id="login-section">
                 <div class="hero-wrapper" id="login-hero">
-                    <img src="/hero.png" alt="AI Pool" class="hero-art">
+                    <img src="/hero.webp" alt="AI Pool" class="hero-art">
                     <div class="hero-label">AI Pool</div>
                 </div>
                 <p class="subtitle">{{.Tagline}}</p>
 
                 <form id="access-form">
                     <div class="input-group">
-                        <input type="text" id="friend_code" name="friend_code" required placeholder="Enter Friend Code" autocomplete="off">
+                        <label class="field-label" for="friend_code">Friend code</label>
+                        <input type="text" id="friend_code" name="friend_code" required placeholder="Enter code" autocomplete="off" spellcheck="false">
                     </div>
 
                     <div class="input-group">
-                        <input type="email" id="user_email" name="user_email" placeholder="Email Address (Optional)">
+                        <label class="field-label" for="user_email">Email <span style="color: var(--text-disabled);">(optional)</span></label>
+                        <input type="email" id="user_email" name="user_email" placeholder="you@example.com" autocomplete="email">
                     </div>
 
-                    <button type="submit" id="submit-btn">Verify</button>
+                    <button type="submit" id="submit-btn">Enter pool</button>
                 </form>
             </div>
 
             <!-- Success Section -->
             <div id="success-section" class="success-content">
                 <div class="success-wrapper">
-                    <img src="/hero.png" alt="Access Granted" class="success-hero">
-                    <div class="hero-label">AI Pool</div>
+                    <img src="/hero.webp" alt="AI Pool access granted" class="success-hero">
                 </div>
 
                 <div class="setup-heading">
@@ -874,55 +1080,55 @@
                             <div class="tool-group">
                                 <div class="tool-group-label">CLIs</div>
                                 <div class="tool-group-items">
-                                    <div class="tab active" data-tab="codex">
+                                    <button type="button" class="tab active" id="tool-tab-codex" data-tab="codex">
                                         <!-- Codex Icon -->
                                         <svg viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.0462 6.0462 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.4069-.6666zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2298V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4533l-.142.0805L8.704 5.4596a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l3.8556-2.2088 3.8556 2.2088v4.4162l-3.8556 2.2188-3.8556-2.2188z"/></svg>
                                         Codex
-                                    </div>
-                                    <div class="tab" data-tab="claude">
+                                    </button>
+                                    <button type="button" class="tab" id="tool-tab-claude" data-tab="claude">
                                         <!-- Claude Icon -->
                                         <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="currentColor"/></svg>
                                         Claude
-                                    </div>
-                                    <div class="tab" data-tab="gemini">
+                                    </button>
+                                    <button type="button" class="tab" id="tool-tab-gemini" data-tab="gemini">
                                         <!-- Gemini Icon -->
                                         <svg viewBox="0 0 24 24"><path d="M12,2 L14.5,9.5 L22,12 L14.5,14.5 L12,22 L9.5,14.5 L2,12 L9.5,9.5 L12,2 M6,12 L8,18 L14,12 L8,6 L6,12" fill="currentColor"/></svg>
                                         Gemini
-                                    </div>
-                                    <div class="tab" data-tab="cute-code">
+                                    </button>
+                                    <button type="button" class="tab" id="tool-tab-cute-code" data-tab="cute-code">
                                         <svg viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5l-2 3-2-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm2 4v2h2V8H7zm4 0v2h6V8h-6zm-4 4v2h6v-2H7zm8 0v2h2v-2h-2z" fill="currentColor"/></svg>
                                         Cute Code
-                                    </div>
-                                    <div class="tab" data-tab="pi">
+                                    </button>
+                                    <button type="button" class="tab" id="tool-tab-pi" data-tab="pi">
                                         <!-- Pi Icon -->
                                         <svg viewBox="0 0 24 24"><path d="M4 5h16v2H4V5zm5 4h2v10H9V9zm4 0h2v10h-2V9zm-6 8h10v2H7v-2z" fill="currentColor"/></svg>
                                         Pi
-                                    </div>
+                                    </button>
                                 </div>
                             </div>
                             <div class="tool-group">
                                 <div class="tool-group-label">SDKs</div>
                                 <div class="tool-group-items">
-                                    <div class="tab" data-tab="anthropic-api">
+                                    <button type="button" class="tab" id="tool-tab-anthropic-api" data-tab="anthropic-api">
                                         <!-- Anthropic API Icon -->
                                         <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4V4zm2 2v12h12V6H6zm2 3h8v2H8V9zm0 4h5v2H8v-2z" fill="currentColor"/></svg>
                                         Anthropic API
-                                    </div>
-                                    <div class="tab" data-tab="openai">
+                                    </button>
+                                    <button type="button" class="tab" id="tool-tab-openai" data-tab="openai">
                                         <!-- OpenAI-Compatible Icon (plug/connector) -->
                                         <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" fill="currentColor"/></svg>
                                         OpenAI API
-                                    </div>
+                                    </button>
                                 </div>
                             </div>
                             <div class="tool-group">
                                 <div class="tool-group-label">Pool</div>
                                 <div class="tool-group-items">
-                                    <div class="tab" data-tab="stats">
+                                    <button type="button" class="tab" id="tool-tab-stats" data-tab="stats">
                                         <!-- Stats Icon -->
                                         <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
                                         Analytics
-                                    </div>
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -949,14 +1155,14 @@ brew install codex</pre>
                     </div>
 
                     <div class="sub-tabs">
-                        <div class="sub-tab active" onclick="switchSubTab('codex', 'auto')">Automatic Config</div>
-                        <div class="sub-tab" onclick="switchSubTab('codex', 'manual')">Manual Config</div>
+                        <button type="button" class="sub-tab active" data-tool="codex" data-mode="auto">Automatic Config</button>
+                        <button type="button" class="sub-tab" data-tool="codex" data-mode="manual">Manual Config</button>
                     </div>
 
                     <!-- Codex Auto -->
                     <div id="codex-auto" class="sub-tab-content active">
                         <div class="step-label">One-Liner Execution</div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash)
                         </p>
                         <div class="code-wrapper">
@@ -965,7 +1171,7 @@ brew install codex</pre>
                                 <pre id="cmd-one-liner-unix"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             Windows (PowerShell)
                         </p>
                         <div class="code-wrapper">
@@ -974,7 +1180,7 @@ brew install codex</pre>
                                 <pre id="cmd-one-liner-windows"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin-top: 10px; font-style: italic;">
                             Automatically retrieves auth token and configures local environment.
                         </p>
                     </div>
@@ -982,7 +1188,7 @@ brew install codex</pre>
                     <!-- Codex Manual -->
                     <div id="codex-manual" class="sub-tab-content">
                         <div class="step-label">01 // Auth Credentials</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.codex/auth.json</code></p>
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.codex/auth.json</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('code-auth-json', this)">Copy</button>
                             <div class="code-block">
@@ -991,7 +1197,7 @@ brew install codex</pre>
                         </div>
 
                         <div class="step-label">02 // Configuration</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.codex/config.toml</code></p>
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.codex/config.toml</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('cmd-connect', this)">Copy</button>
                             <div class="code-block">
@@ -1021,14 +1227,14 @@ brew install gemini-cli</pre>
                     </div>
 
                     <div class="sub-tabs">
-                        <div class="sub-tab active" onclick="switchSubTab('gemini', 'auto')">Automatic Config</div>
-                        <div class="sub-tab" onclick="switchSubTab('gemini', 'manual')">Manual Config</div>
+                        <button type="button" class="sub-tab active" data-tool="gemini" data-mode="auto">Automatic Config</button>
+                        <button type="button" class="sub-tab" data-tool="gemini" data-mode="manual">Manual Config</button>
                     </div>
 
                     <!-- Gemini Auto -->
                     <div id="gemini-auto" class="sub-tab-content active">
                         <div class="step-label">One-Liner Execution</div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash)
                         </p>
                         <div class="code-wrapper">
@@ -1037,7 +1243,7 @@ brew install gemini-cli</pre>
                                 <pre id="gemini-one-liner-unix"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             Windows (PowerShell)
                         </p>
                         <div class="code-wrapper">
@@ -1046,7 +1252,7 @@ brew install gemini-cli</pre>
                                 <pre id="gemini-one-liner-windows"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin-top: 10px; font-style: italic;">
                             Automatically retrieves OAuth token and configures endpoint settings.
                         </p>
                     </div>
@@ -1054,8 +1260,8 @@ brew install gemini-cli</pre>
                     <!-- Gemini Manual -->
                     <div id="gemini-manual" class="sub-tab-content">
                         <div class="step-label">01 // Configuration</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code> + environment variable</p>
-                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code> + environment variable</p>
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash/zsh)
                         </p>
                         <div class="code-wrapper">
@@ -1064,7 +1270,7 @@ brew install gemini-cli</pre>
                                 <pre id="gemini-auth-json-unix"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             Windows (PowerShell)
                         </p>
                         <div class="code-wrapper">
@@ -1075,7 +1281,7 @@ brew install gemini-cli</pre>
                         </div>
 
                         <div class="step-label">02 // Settings Only</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code></p>
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.gemini/settings.json</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('gemini-connect', this)">Copy</button>
                             <div class="code-block">
@@ -1105,14 +1311,14 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="sub-tabs">
-                        <div class="sub-tab active" onclick="switchSubTab('claude', 'auto')">Automatic Config</div>
-                        <div class="sub-tab" onclick="switchSubTab('claude', 'manual')">Manual Config</div>
+                        <button type="button" class="sub-tab active" data-tool="claude" data-mode="auto">Automatic Config</button>
+                        <button type="button" class="sub-tab" data-tool="claude" data-mode="manual">Manual Config</button>
                     </div>
 
                     <!-- Claude Auto -->
                     <div id="claude-auto" class="sub-tab-content active">
                         <div class="step-label">One-Liner Execution</div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash/zsh)
                         </p>
                         <div class="code-wrapper">
@@ -1121,7 +1327,7 @@ brew install claude-code</pre>
                                 <pre id="claude-one-liner-unix"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             Windows (PowerShell)
                         </p>
                         <div class="code-wrapper">
@@ -1130,7 +1336,7 @@ brew install claude-code</pre>
                                 <pre id="claude-one-liner-windows"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin-top: 10px; font-style: italic;">
                             Sets ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN, and skips onboarding.
                         </p>
                     </div>
@@ -1138,8 +1344,8 @@ brew install claude-code</pre>
                     <!-- Claude Manual -->
                     <div id="claude-manual" class="sub-tab-content">
                         <div class="step-label">01 // Shell Environment (Required)</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code> (macOS/Linux) or <code>$PROFILE</code> (PowerShell). Claude Code reads env vars for auth.</p>
-                        <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.bashrc</code> or <code>~/.zshrc</code> (macOS/Linux) or <code>$PROFILE</code> (PowerShell). Claude Code reads env vars for auth.</p>
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             macOS / Linux (bash/zsh)
                         </p>
                         <div class="code-wrapper">
@@ -1148,7 +1354,7 @@ brew install claude-code</pre>
                                 <pre id="claude-env-unix"></pre>
                             </div>
                         </div>
-                        <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                        <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                             Windows (PowerShell)
                         </p>
                         <div class="code-wrapper">
@@ -1158,7 +1364,7 @@ brew install claude-code</pre>
                             </div>
                         </div>
                         <div class="step-label">02 // Skip Onboarding</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.claude.json</code></p>
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Add to <code>~/.claude.json</code></p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('claude-json', this)">Copy</button>
                             <div class="code-block">
@@ -1166,20 +1372,20 @@ brew install claude-code</pre>
                             </div>
                         </div>
                         <div class="step-label">03 // Available Models</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Use these model names in Claude Code (routed through the pool)</p>
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Use these model names in Claude Code (routed through the pool)</p>
                         <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px;">
                             <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">haiku</span>
                             <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">sonnet</span>
                             <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">opus</span>
-                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
-                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-k2-thinking</span>
+                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-for-coding</span>
+                            <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-for-coding-highspeed</span>
                             <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M3</span>
                             <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
                             <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
                             <span style="background: rgba(249,115,22,0.1); color: #fb923c; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">mimo-v2.5-pro[1m]</span>
                         </div>
                         <div class="step-label">04 // Optional: Settings.json</div>
-                        <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Claude Code ignores auth in <code>~/.claude/settings.json</code>; this is optional for other settings</p>
+                        <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Claude Code ignores auth in <code>~/.claude/settings.json</code>; this is optional for other settings</p>
                         <div class="code-wrapper">
                             <button class="copy-btn" onclick="copyToClipboard('claude-settings-json', this)">Copy</button>
                             <div class="code-block">
@@ -1216,9 +1422,9 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="sub-tabs">
-                        <div class="sub-tab active" onclick="switchSubTab('anthropic-api', 'python')">Anthropic SDK</div>
-                        <div class="sub-tab" onclick="switchSubTab('anthropic-api', 'claude')">Claude Agent SDK</div>
-                        <div class="sub-tab" onclick="switchSubTab('anthropic-api', 'env')">Env + curl</div>
+                        <button type="button" class="sub-tab active" data-tool="anthropic-api" data-mode="python">Anthropic SDK</button>
+                        <button type="button" class="sub-tab" data-tool="anthropic-api" data-mode="claude">Claude Agent SDK</button>
+                        <button type="button" class="sub-tab" data-tool="anthropic-api" data-mode="env">Env + curl</button>
                     </div>
 
                     <div id="anthropic-api-python" class="sub-tab-content active">
@@ -1269,13 +1475,12 @@ brew install claude-code</pre>
                     <div class="step-label">Model Names</div>
                     <div class="model-pills">
                         <span class="model-pill claude">claude-sonnet-5</span>
-                        <span class="model-pill claude">claude-opus-4-7</span>
-                        <span class="model-pill openai">gpt-5.6</span>
+                        <span class="model-pill claude">claude-opus-4-8</span>
+                        <span class="model-pill openai">gpt-5.6-sol</span>
                         <span class="model-pill openai">gpt-5.4</span>
-                        <span class="model-pill other">k2p5</span>
+                        <span class="model-pill other">kimi-for-coding</span>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
-                        <span class="model-pill red">glm-5.1</span>
                         <span class="model-pill red">glm-5.2</span>
                     </div>
                 </div>
@@ -1307,24 +1512,24 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="step-label">01 // Environment Variables</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Set these in your shell or tool config.</p>
-                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">macOS / Linux (bash/zsh)</p>
+                    <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Set these in your shell or tool config.</p>
+                    <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">macOS / Linux (bash/zsh)</p>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('openai-env-unix', this)">Copy</button>
                         <div class="code-block"><pre id="openai-env-unix"></pre></div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">Windows (PowerShell)</p>
+                    <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">Windows (PowerShell)</p>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('openai-env-windows', this)">Copy</button>
                         <div class="code-block"><pre id="openai-env-windows"></pre></div>
                     </div>
 
                     <div class="sub-tabs">
-                        <div class="sub-tab active" onclick="switchSubTab('openai', 'sdk')">OpenAI SDK</div>
-                        <div class="sub-tab" onclick="switchSubTab('openai', 'agents')">Python Agents</div>
-                        <div class="sub-tab" onclick="switchSubTab('openai', 'agents-ts')">TypeScript Agents</div>
-                        <div class="sub-tab" onclick="switchSubTab('openai', 'integrate')">Copy Paste</div>
-                        <div class="sub-tab" onclick="switchSubTab('openai', 'curl')">curl</div>
+                        <button type="button" class="sub-tab active" data-tool="openai" data-mode="sdk">OpenAI SDK</button>
+                        <button type="button" class="sub-tab" data-tool="openai" data-mode="agents">Python Agents</button>
+                        <button type="button" class="sub-tab" data-tool="openai" data-mode="agents-ts">TypeScript Agents</button>
+                        <button type="button" class="sub-tab" data-tool="openai" data-mode="integrate">Copy Paste</button>
+                        <button type="button" class="sub-tab" data-tool="openai" data-mode="curl">curl</button>
                     </div>
 
                     <div id="openai-sdk" class="sub-tab-content active">
@@ -1404,17 +1609,16 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="step-label">Model Names</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Use any model name. Requests are auto-routed to the right provider and translated if needed.</p>
+                    <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Use any model name. Requests are auto-routed to the right provider and translated if needed.</p>
                     <div class="model-pills">
-                        <span class="model-pill openai">gpt-5.6</span>
+                        <span class="model-pill openai">gpt-5.6-sol</span>
                         <span class="model-pill openai">gpt-5.4</span>
-                        <span class="model-pill openai">gpt-5.3-codex</span>
+                        <span class="model-pill openai">gpt-5.6-luna</span>
                         <span class="model-pill claude">claude-sonnet-5</span>
-                        <span class="model-pill claude">claude-opus-4-7</span>
-                        <span class="model-pill other">k2p5</span>
+                        <span class="model-pill claude">claude-opus-4-8</span>
+                        <span class="model-pill other">kimi-for-coding</span>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
-                        <span class="model-pill red">glm-5.1</span>
                         <span class="model-pill red">glm-5.2</span>
                         <span class="model-pill grok">grok-build</span>
                         <span class="model-pill grok">grok-composer-2.5-fast</span>
@@ -1435,8 +1639,8 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="step-label">01 // Install models.json</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.pi/agent/models.json</code></p>
-                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                    <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.pi/agent/models.json</code></p>
+                    <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                         macOS / Linux (bash/zsh)
                     </p>
                     <div class="code-wrapper">
@@ -1445,7 +1649,7 @@ brew install claude-code</pre>
                             <pre id="pi-install-unix"></pre>
                         </div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                    <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                         Windows (PowerShell)
                     </p>
                     <div class="code-wrapper">
@@ -1456,7 +1660,7 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="step-label">02 // Curated Providers</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Pi only gets the pool-backed providers, so the built-in Anthropic clutter stays out of the picker.</p>
+                    <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Pi only gets the pool-backed providers, so the built-in Anthropic clutter stays out of the picker.</p>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude</span>
                         <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi</span>
@@ -1469,14 +1673,14 @@ brew install claude-code</pre>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px;">
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-haiku-4-5</span>
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-sonnet-5</span>
-                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-7</span>
+                        <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-8</span>
                         <span style="background: rgba(139,92,246,0.1); color: #a78bfa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">claude-opus-4-6</span>
-                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">k2p5</span>
-                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-k2-thinking</span>
+                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-for-coding</span>
+                        <span style="background: rgba(59,130,246,0.1); color: #60a5fa; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">kimi-for-coding-highspeed</span>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M3</span>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
-                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.1</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
                         <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
                         <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-build</span>
                         <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-composer-2.5-fast</span>
@@ -1490,7 +1694,7 @@ brew install claude-code</pre>
                         </div>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">
-                        Replace the file, then fully restart Pi so it reloads the provider list.
+                        The installer merges these providers into your existing file. Open <code>/model</code> in Pi to reload it without restarting.
                     </p>
                 </div>
 
@@ -1507,7 +1711,7 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="step-label">01 // Install and configure</div>
-                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                    <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                         macOS / Linux (bash/zsh)
                     </p>
                     <div class="code-wrapper">
@@ -1516,7 +1720,7 @@ brew install claude-code</pre>
                             <pre id="cute-code-install-unix"></pre>
                         </div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
+                    <p style="color: var(--text-disabled); font-size: 0.75rem; margin: 16px 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">
                         Windows (PowerShell)
                     </p>
                     <div class="code-wrapper">
@@ -1527,7 +1731,7 @@ brew install claude-code</pre>
                     </div>
 
                     <div class="step-label">02 // Generated settings.json</div>
-                    <p style="color: #666; font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.claude/settings.json</code></p>
+                    <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Target: <code>~/.claude/settings.json</code></p>
                     <div class="code-wrapper">
                         <button class="copy-btn" onclick="copyToClipboard('cute-code-settings-json', this)">Copy</button>
                         <div class="code-block">
@@ -1535,7 +1739,7 @@ brew install claude-code</pre>
                         </div>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">
-                        After setup, run <code>cute-code --model gpt-5.6</code> or pick any configured model in the model selector.
+                        After setup, run <code>cute-code --model gpt-5.6-sol</code> or pick any configured model in the model selector.
                     </p>
                 </div>
 
@@ -1545,10 +1749,10 @@ brew install claude-code</pre>
                         <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
                         Pool Analytics
                     </div>
-                    <div id="stats-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
-                        Connecting to matrix...
+                    <div id="stats-loading" role="status" aria-live="polite" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
+                        Synchronizing pool statistics...
                     </div>
-                    <div id="stats-content" style="display: none;">
+                    <div id="stats-content" aria-busy="false" style="display: none;">
                         <!-- Aggregate Summary -->
                         <div class="stats-summary" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 15px;">
                             <div class="stat-card">
@@ -1647,10 +1851,11 @@ brew install claude-code</pre>
                                             <th>Plan</th>
                                             <th>Status</th>
                                             <th style="text-align: right;">Score</th>
+                                            <th style="text-align: center;">Resets</th>
                                             <th style="text-align: right;">5hr</th>
                                             <th style="text-align: right;">Week</th>
                                             <th style="text-align: right;">Tokens</th>
-                                            <th style="text-align: right;">Sub</th>
+                                            <th style="text-align: right;">Sub Spent</th>
                                             <th style="text-align: right;">API $</th>
                                             <th style="text-align: right;">ROI</th>
                                         </tr>
@@ -1658,29 +1863,6 @@ brew install claude-code</pre>
                                     <tbody id="accounts-tbody"></tbody>
                                 </table>
                             </div>
-                        </div>
-
-                        <!-- Add Codex Account -->
-                        <div class="step-label" style="margin-top: 30px;">Add Codex Account</div>
-                        <div id="codex-add-section" style="background: #0c0c0c; padding: 20px; border-radius: 6px; border: 1px solid #1a1a1a;">
-                            <div id="codex-add-init">
-                                <p style="color: var(--text-muted); font-size: 0.8rem; margin: 0 0 15px 0;">
-                                    Add a new Codex account via OAuth. Click the button to generate an authorization URL.
-                                </p>
-                                <button id="btn-codex-oauth" class="btn" onclick="startCodexOAuth()" style="width: 100%;">Generate OAuth URL</button>
-                            </div>
-                            <div id="codex-add-oauth" style="display: none;">
-                                <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0; text-transform: uppercase;">1. Open this URL in your browser:</p>
-                                <div style="position: relative; margin-bottom: 15px;">
-                                    <pre id="codex-oauth-url" style="background: #050505; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 0.7rem; color: var(--gold-bright); white-space: nowrap; margin: 0;"></pre>
-                                    <button class="copy-btn" onclick="copyToClipboard('codex-oauth-url', this)" style="position: absolute; top: 8px; right: 8px;">Copy</button>
-                                </div>
-                                <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0; text-transform: uppercase;">2. After logging in, paste the callback URL:</p>
-                                <input type="text" id="codex-callback-url" placeholder="http://localhost:1455/auth/callback?code=..." style="width: 100%; margin-bottom: 15px; font-size: 0.8rem; text-align: left;">
-                                <button id="btn-codex-exchange" class="btn" onclick="exchangeCodexCode()" style="width: 100%;">Add Account</button>
-                                <button class="btn" onclick="cancelCodexOAuth()" style="width: 100%; margin-top: 10px; background: transparent; border: 1px solid #333; color: var(--text-muted);">Cancel</button>
-                            </div>
-                            <div id="codex-add-status" style="margin-top: 15px;"></div>
                         </div>
 
                         <!-- CLAUDE SECTION -->
@@ -1712,7 +1894,7 @@ brew install claude-code</pre>
                                                     <th style="text-align: right;">Score</th>
                                                     <th style="text-align: right;">5hr</th>
                                                     <th style="text-align: right;">7day</th>
-                                                    <th style="text-align: right;">Sub</th>
+                                                    <th style="text-align: right;">Sub Spent</th>
                                                     <th style="text-align: right;">API $</th>
                                                     <th style="text-align: right;">ROI</th>
                                                 </tr>
@@ -1720,29 +1902,6 @@ brew install claude-code</pre>
                                             <tbody id="claude-tbody"></tbody>
                                         </table>
                                     </div>
-                                </div>
-                            </div>
-                            <!-- Add Claude Account -->
-                            <div style="margin-top: 15px;">
-                                <div id="claude-add-section" style="background: #0c0c0c; padding: 20px; border-radius: 6px; border: 1px solid #1a1a1a;">
-                                    <div id="claude-add-init">
-                                        <p style="color: var(--text-muted); font-size: 0.8rem; margin: 0 0 15px 0;">
-                                            Add a new Claude account via OAuth.
-                                        </p>
-                                        <button id="btn-claude-oauth" class="btn" onclick="startClaudeOAuth()" style="width: 100%;">Generate OAuth URL</button>
-                                    </div>
-                                    <div id="claude-add-oauth" style="display: none;">
-                                        <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0; text-transform: uppercase;">1. Open this URL in your browser:</p>
-                                        <div style="position: relative; margin-bottom: 15px;">
-                                            <pre id="claude-oauth-url" style="background: #050505; padding: 12px; overflow-x: auto; font-size: 0.7rem; color: var(--gold-bright); white-space: nowrap; margin: 0;"></pre>
-                                            <button class="copy-btn" onclick="copyToClipboard('claude-oauth-url', this)" style="position: absolute; top: 8px; right: 8px;">Copy</button>
-                                        </div>
-                                        <p style="color: var(--text-muted); font-size: 0.75rem; margin: 0 0 10px 0; text-transform: uppercase;">2. After logging in, get a code and paste it here:</p>
-                                        <input type="text" id="claude-callback-url" placeholder="code or code#state (or full callback URL)" style="width: 100%; margin-bottom: 15px; font-size: 0.8rem; text-align: left;">
-                                        <button id="btn-claude-exchange" class="btn" onclick="exchangeClaudeCode()" style="width: 100%;">Add Account</button>
-                                        <button class="btn" onclick="cancelClaudeOAuth()" style="width: 100%; margin-top: 10px; background: transparent; border: 1px solid #333; color: var(--text-muted);">Cancel</button>
-                                    </div>
-                                    <div id="claude-add-status" style="margin-top: 15px;"></div>
                                 </div>
                             </div>
                         </div>
@@ -1753,7 +1912,7 @@ brew install claude-code</pre>
                             <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;">
                                 <span style="background: rgba(52,211,153,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">gemini-2.5-pro</span>
                                 <span style="background: rgba(52,211,153,0.1); color: #34d399; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">gemini-2.5-flash</span>
-                                <span style="background: rgba(52,211,153,0.06); color: #666; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">+ all Gemini models</span>
+                                <span style="background: rgba(52,211,153,0.06); color: var(--text-disabled); padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">+ all Gemini models</span>
                             </div>
                             <div id="gemini-empty" style="color: var(--text-muted); font-style: italic; padding: 20px; text-align: center;">No Gemini accounts configured</div>
                             <div id="gemini-content" style="display: none;">
@@ -1793,14 +1952,6 @@ brew install claude-code</pre>
                                     <div id="kimi-accounts-list"></div>
                                 </div>
                             </div>
-                            <!-- Add Kimi API Key -->
-                            <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-top: 12px;">
-                                <div style="display: flex; gap: 10px; align-items: center;">
-                                    <input type="password" id="kimi-api-key" placeholder="sk-..." style="flex: 1; font-size: 0.8rem;">
-                                    <button class="btn" onclick="addKimiKey()" style="white-space: nowrap; padding: 8px 16px;">Add Key</button>
-                                </div>
-                                <div id="kimi-add-status" style="margin-top: 8px;"></div>
-                            </div>
                         </div>
 
                         <!-- MINIMAX SECTION -->
@@ -1817,14 +1968,6 @@ brew install claude-code</pre>
                                     <div id="minimax-accounts-list"></div>
                                 </div>
                             </div>
-                            <!-- Add MiniMax API Key -->
-                            <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-top: 12px;">
-                                <div style="display: flex; gap: 10px; align-items: center;">
-                                    <input type="password" id="minimax-api-key" placeholder="API key..." style="flex: 1; font-size: 0.8rem;">
-                                    <button class="btn" onclick="addMinimaxKey()" style="white-space: nowrap; padding: 8px 16px;">Add Key</button>
-                                </div>
-                                <div id="minimax-add-status" style="margin-top: 8px;"></div>
-                            </div>
                         </div>
 
                         <!-- XIAOMI SECTION -->
@@ -1839,14 +1982,6 @@ brew install claude-code</pre>
                                 <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a;">
                                     <div id="xiaomi-accounts-list"></div>
                                 </div>
-                            </div>
-                            <!-- Add Xiaomi API Key -->
-                            <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-top: 12px;">
-                                <div style="display: flex; gap: 10px; align-items: center;">
-                                    <input type="password" id="xiaomi-api-key" placeholder="tp-..." style="flex: 1; font-size: 0.8rem;">
-                                    <button class="btn" onclick="addXiaomiKey()" style="white-space: nowrap; padding: 8px 16px;">Add Key</button>
-                                </div>
-                                <div id="xiaomi-add-status" style="margin-top: 8px;"></div>
                             </div>
                         </div>
 
@@ -1863,13 +1998,6 @@ brew install claude-code</pre>
                                     <div id="grok-accounts-list"></div>
                                 </div>
                             </div>
-                            <!-- Import Grok OAuth JSON -->
-                            <div style="background: #0c0c0c; padding: 15px; border-radius: 6px; border: 1px solid #1a1a1a; margin-top: 12px;">
-                                <p class="api-note" style="margin-top: 0;">Paste the Grok CLI auth JSON from <code>~/.grok</code> or a pi-grok auth export.</p>
-                                <textarea id="grok-auth-json" placeholder='{"access":"...","refresh":"..."}' style="width: 100%; min-height: 90px; font-size: 0.75rem; font-family: monospace; margin-bottom: 8px;"></textarea>
-                                <button class="btn" onclick="addGrokAuth()" style="white-space: nowrap; padding: 8px 16px;">Import Grok Auth</button>
-                                <div id="grok-add-status" style="margin-top: 8px;"></div>
-                            </div>
                         </div>
 
                         <!-- Pool Users Section -->
@@ -1885,10 +2013,13 @@ brew install claude-code</pre>
                             </div>
                         </div>
 
-                        <div id="users-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
+                        <div id="users-loading" role="status" aria-live="polite" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
                             Loading user data...
                         </div>
                         <div id="users-content" style="display: none;">
+                            <details class="analytics-disclosure">
+                                <summary>Usage leaderboards</summary>
+                                <div class="analytics-disclosure-body">
                             <div class="table-container">
                                 <div style="overflow-x: auto;">
                                     <table id="users-table">
@@ -1927,57 +2058,132 @@ brew install claude-code</pre>
                             <p style="color: var(--text-muted); font-size: 0.7rem; margin-top: 15px; font-style: italic;">
                                 IP hashes use the pool salt, so they stay stable inside this pool and reveal repeated origins without exposing raw IP addresses.
                             </p>
+                                </div>
+                            </details>
                         </div>
                     </div>
                     </div>
                 </div>
 
                 <div class="reset-link">
-                    <a onclick="terminateSession()" style="cursor: pointer;">Terminate Session</a>
+                    <button type="button" class="session-end" onclick="terminateSession()">Sign out and clear saved access</button>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        // Tab switching
+        function adjacentTab(tabs, current, key) {
+            const currentIndex = tabs.indexOf(current);
+            if (key === 'Home') return tabs[0];
+            if (key === 'End') return tabs[tabs.length - 1];
+            if (key === 'ArrowRight' || key === 'ArrowDown') return tabs[(currentIndex + 1) % tabs.length];
+            if (key === 'ArrowLeft' || key === 'ArrowUp') return tabs[(currentIndex - 1 + tabs.length) % tabs.length];
+            return null;
+        }
+
+        // Primary setup navigation
+        function activateTab(tab) {
+            const tabName = tab.dataset.tab;
+            document.querySelectorAll('.tab').forEach(t => {
+                const active = t === tab;
+                t.classList.toggle('active', active);
+                t.setAttribute('aria-selected', String(active));
+                t.tabIndex = active ? 0 : -1;
+            });
+            document.querySelectorAll('.tab-content').forEach(panel => {
+                const active = panel.id === 'tab-' + tabName;
+                panel.classList.toggle('active', active);
+                panel.hidden = !active;
+            });
+            if (tabName === 'stats') loadStats();
+        }
+
+        document.querySelectorAll('.tabs').forEach(tabList => tabList.setAttribute('role', 'tablist'));
         document.querySelectorAll('.tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                tab.classList.add('active');
-                document.getElementById('tab-' + tab.getAttribute('data-tab')).classList.add('active');
-                if (tab.getAttribute('data-tab') === 'stats') {
-                    loadStats();
-                }
+            const panel = document.getElementById('tab-' + tab.dataset.tab);
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-controls', panel.id);
+            tab.setAttribute('aria-selected', String(tab.classList.contains('active')));
+            tab.tabIndex = tab.classList.contains('active') ? 0 : -1;
+            panel.setAttribute('role', 'tabpanel');
+            panel.setAttribute('aria-labelledby', tab.id);
+            panel.tabIndex = 0;
+            panel.hidden = !panel.classList.contains('active');
+            tab.addEventListener('click', () => activateTab(tab));
+            tab.addEventListener('keydown', event => {
+                const next = adjacentTab(Array.from(document.querySelectorAll('.tab')), tab, event.key);
+                if (!next) return;
+                event.preventDefault();
+                activateTab(next);
+                next.focus();
             });
         });
 
-        // Sub-Tab switching
+        // Per-tool configuration modes
         function switchSubTab(tool, mode) {
             const container = document.getElementById('tab-' + tool);
-            const tabs = container.querySelectorAll('.sub-tab');
-            tabs.forEach(t => {
-                if (t.innerText.toLowerCase().includes(mode)) t.classList.add('active');
-                else t.classList.remove('active');
+            container.querySelectorAll('.sub-tab').forEach(tab => {
+                const active = tab.dataset.mode === mode;
+                tab.classList.toggle('active', active);
+                tab.setAttribute('aria-selected', String(active));
+                tab.tabIndex = active ? 0 : -1;
             });
-            container.querySelectorAll('.sub-tab-content').forEach(c => c.classList.remove('active'));
-            document.getElementById(tool + '-' + mode).classList.add('active');
+            container.querySelectorAll('.sub-tab-content').forEach(panel => {
+                const active = panel.id === tool + '-' + mode;
+                panel.classList.toggle('active', active);
+                panel.hidden = !active;
+            });
         }
 
+        document.querySelectorAll('.sub-tabs').forEach((tabList, groupIndex) => {
+            tabList.setAttribute('role', 'tablist');
+            const tabs = Array.from(tabList.querySelectorAll('.sub-tab'));
+            tabs.forEach((tab, tabIndex) => {
+                const panel = document.getElementById(tab.dataset.tool + '-' + tab.dataset.mode);
+                if (!tab.id) tab.id = `sub-tab-${groupIndex}-${tabIndex}`;
+                tab.setAttribute('role', 'tab');
+                tab.setAttribute('aria-controls', panel.id);
+                tab.setAttribute('aria-selected', String(tab.classList.contains('active')));
+                tab.tabIndex = tab.classList.contains('active') ? 0 : -1;
+                panel.setAttribute('role', 'tabpanel');
+                panel.setAttribute('aria-labelledby', tab.id);
+                panel.tabIndex = 0;
+                panel.hidden = !panel.classList.contains('active');
+                tab.addEventListener('click', () => switchSubTab(tab.dataset.tool, tab.dataset.mode));
+                tab.addEventListener('keydown', event => {
+                    const next = adjacentTab(tabs, tab, event.key);
+                    if (!next) return;
+                    event.preventDefault();
+                    switchSubTab(next.dataset.tool, next.dataset.mode);
+                    next.focus();
+                });
+            });
+        });
+
         // Copy functionality
-        function copyToClipboard(elementId, btn) {
-            const text = document.getElementById(elementId).textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                const originalText = btn.textContent;
+        async function copyToClipboard(elementId, btn) {
+            const target = document.getElementById(elementId);
+            const originalText = btn.textContent;
+            try {
+                await navigator.clipboard.writeText(target.textContent);
                 btn.textContent = 'COPIED';
                 btn.classList.add('copied');
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.classList.remove('copied');
-                }, 2000);
-            });
+            } catch {
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(target);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                btn.textContent = 'SELECTED';
+            }
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.classList.remove('copied');
+            }, 2000);
         }
+
+        document.querySelectorAll('.copy-btn').forEach(btn => btn.setAttribute('aria-live', 'polite'));
 
         // Wrap fetch() and attach the friend code header when available.
         async function poolFetch(url, options = {}) {
@@ -2012,8 +2218,8 @@ brew install claude-code</pre>
                 return;
             }
             statsRefreshTimer = setInterval(() => {
-                const successVisible = document.getElementById('success-section').classList.contains('visible');
-                if (successVisible) {
+                const statsTab = document.querySelector('.tab[data-tab="stats"]');
+                if (statsTab && statsTab.classList.contains('active')) {
                     loadStats();
                 }
             }, 30000);
@@ -2022,13 +2228,14 @@ brew install claude-code</pre>
         // Check for saved friend code on page load
         document.addEventListener('DOMContentLoaded', async function() {
             const savedCode = localStorage.getItem('friendCode');
+            const savedEmail = localStorage.getItem('friendEmail') || '';
             const savedToken = localStorage.getItem('downloadToken');
             const savedPublicUrl = localStorage.getItem('publicUrl');
 
             if (savedCode && savedToken && savedPublicUrl) {
-                // Auto-login with saved credentials - fetch fresh auth data
+                // Revalidate saved access and preserve the same email identity.
                 window.friendCode = savedCode;
-                await setupSuccessState(savedPublicUrl, savedToken, savedCode);
+                await setupSuccessState(savedPublicUrl, savedToken, savedCode, savedEmail);
             }
         });
 
@@ -2065,7 +2272,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="claude-sonnet-5",  # or gpt-5.5, k2p5, MiniMax-M3, glm-5.2, mimo-v2.5-pro[1m]
+    model="claude-sonnet-5",  # or gpt-5.5, kimi-for-coding, MiniMax-M3, glm-5.2, mimo-v2.5-pro
     max_tokens=128,
     messages=[{"role": "user", "content": "Hello from the pool"}],
 )
@@ -2112,7 +2319,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.4-mini",  # or gpt-5.5, claude-sonnet-5, k2p5, MiniMax-M3
+    model="gpt-5.6-luna",  # or gpt-5.5, claude-sonnet-5, kimi-for-coding, MiniMax-M3
     messages=[{"role": "user", "content": "Hello from the pool"}],
     tools=[{
         "type": "function",
@@ -2139,7 +2346,7 @@ client = OpenAI(
 )
 
 completion = client.completions.create(
-    model="gpt-5.4-mini",
+    model="gpt-5.6-luna",
     prompt="Write a short release-note bullet for: agent routing now supports tool calls.",
     max_tokens=80,
     temperature=0,
@@ -2154,7 +2361,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-5.4-mini",
+    model="gpt-5.6-luna",
     input="Return JSON with marker pool-responses-ok and score 7.",
     text={
         "format": {
@@ -2221,7 +2428,7 @@ def lookup_order(order_id: str) -> str:
 agent = Agent(
     name="Pool Agent",
     instructions="Use tools when useful. Keep final answers short.",
-    model=OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client),
+    model=OpenAIResponsesModel(model="gpt-5.6-luna", openai_client=client),
     tools=[lookup_order],
 )
 
@@ -2255,7 +2462,7 @@ const lookupOrder = tool({
 const responsesAgent = new Agent({
   name: "Pool Responses Agent",
   instructions: "Use tools when useful. Keep final answers short.",
-  model: new OpenAIResponsesModel(client, "gpt-5.4-mini"),
+  model: new OpenAIResponsesModel(client, "gpt-5.6-luna"),
   tools: [lookupOrder],
 });
 
@@ -2269,7 +2476,7 @@ console.log(responsesResult.finalOutput);
 const chatAgent = new Agent({
   name: "Pool Chat Agent",
   instructions: "Use tools when useful. Keep final answers short.",
-  model: new OpenAIChatCompletionsModel(client, "gpt-5.4-mini"),
+  model: new OpenAIChatCompletionsModel(client, "gpt-5.6-luna"),
   tools: [lookupOrder],
 });
 
@@ -2289,11 +2496,11 @@ Implementation requirements:
 1. Find every OpenAI client initialization, raw OpenAI HTTP call, Agents SDK setup, LiteLLM/OpenAI-compatible provider config, and environment example in this repo.
 2. Configure them to use base URL ${publicUrl}/v1 and bearer/API key ${key}. For raw HTTP, send Authorization: Bearer ${key} and Content-Type: application/json.
 3. Keep normal OpenAI SDK method calls intact where possible. The proxy supports Responses, Chat Completions, legacy Completions, Images generate/edit, tool/function calls, structured outputs, and OpenAI Agents SDK usage.
-4. Use gpt-5.4-mini as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-7, k2p5, MiniMax-M3, and glm-5.2.
-5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
-6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.4-mini") or new OpenAIChatCompletionsModel(client, "gpt-5.4-mini") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
+4. Use gpt-5.6-luna as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-8, kimi-for-coding, MiniMax-M3, and glm-5.2.
+5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.6-luna", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
+6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.6-luna") or new OpenAIChatCompletionsModel(client, "gpt-5.6-luna") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
 7. Update README, .env.example, deployment config, tests, and CI secrets documentation so future runs use the proxy settings instead of api.openai.com.
-8. Run the project's most direct smoke test against the proxy. At minimum, verify one request returns a real model response using gpt-5.4-mini. If the project has agent/tool-call behavior, verify one tool-call path too. If it uses Images, verify images.generate or images.edit against the proxy rather than mocking it.
+8. Run the project's most direct smoke test against the proxy. At minimum, verify one request returns a real model response using gpt-5.6-luna. If the project has agent/tool-call behavior, verify one tool-call path too. If it uses Images, verify images.generate or images.edit against the proxy rather than mocking it.
 
 Reference snippets:
 Python OpenAI SDK:
@@ -2306,7 +2513,7 @@ Raw HTTP smoke test:
 curl ${publicUrl}/v1/responses \\
   -H "Authorization: Bearer ${key}" \\
   -H "Content-Type: application/json" \\
-  -d '{"model":"gpt-5.4-mini","input":"Reply with exactly: pool ok"}'
+  -d '{"model":"gpt-5.6-luna","input":"Reply with exactly: pool ok"}'
 
 Before you finish, report exactly which files changed and paste the smoke-test output. Do not claim this is complete unless the test actually hit ${publicUrl}/v1.`);
             setText('openai-curl-example', `curl ${publicUrl}/v1/chat/completions \\
@@ -2318,7 +2525,7 @@ Before you finish, report exactly which files changed and paste the smoke-test o
   }'`);
         }
 
-        async function setupSuccessState(publicUrl, downloadToken, friendCode) {
+        async function setupSuccessState(publicUrl, downloadToken, friendCode, friendEmail = '') {
             const loginSec = document.getElementById('login-section');
             const successSec = document.getElementById('success-section');
             const heroWrapper = document.getElementById('login-hero');
@@ -2336,19 +2543,29 @@ Before you finish, report exactly which files changed and paste the smoke-test o
                     const response = await fetch('/api/friend/claim', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ friend_code: friendCode })
+                        body: JSON.stringify({ friend_code: friendCode, user_email: friendEmail })
                     });
-                    if (response.ok) {
-                        const result = await response.json();
-                        authJson = result.auth_json || '# Unable to fetch';
-                        geminiAuthJson = result.gemini_auth_json || '# Unable to fetch';
-                        geminiApiKey = result.gemini_api_key || '';
-                        claudeApiKey = result.claude_api_key || '';
-                        piModelsJson = result.pi_models_json || '# Unable to fetch';
-                        cuteCodeSettingsJson = result.cute_code_settings_json || '# Unable to fetch';
+                    const result = await response.json();
+                    if (!response.ok) {
+                        throw new Error(result.error || 'Saved access is no longer valid');
                     }
-                } catch (e) {
-                    console.error('Failed to fetch auth data:', e);
+                    publicUrl = result.public_url || publicUrl;
+                    downloadToken = result.download_token || downloadToken;
+                    authJson = result.auth_json || '# Unable to fetch';
+                    geminiAuthJson = result.gemini_auth_json || '# Unable to fetch';
+                    geminiApiKey = result.gemini_api_key || '';
+                    claudeApiKey = result.claude_api_key || '';
+                    piModelsJson = result.pi_models_json || '# Unable to fetch';
+                    cuteCodeSettingsJson = result.cute_code_settings_json || '# Unable to fetch';
+                    localStorage.setItem('downloadToken', downloadToken);
+                    localStorage.setItem('publicUrl', publicUrl);
+                } catch (error) {
+                    clearSavedAccess();
+                    window.friendCode = '';
+                    const errorDiv = document.getElementById('error-msg');
+                    errorDiv.textContent = 'Saved access expired. Enter the friend code again.';
+                    errorDiv.style.display = 'block';
+                    return;
                 }
             }
 
@@ -2460,10 +2677,10 @@ $env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
             populateApiDocs(publicUrl, claudeApiKey || '');
             if (claudeApiKey) {
                 document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
-curl -sL "${publicUrl}/config/pi/${downloadToken}" -o ~/.pi/agent/models.json
+curl -sL "${publicUrl}/setup/pi/${downloadToken}" | bash
 chmod 600 ~/.pi/agent/models.json`;
                 document.getElementById('pi-install-windows').textContent = `New-Item -ItemType Directory -Force -Path "$HOME\\.pi\\agent" | Out-Null
-Invoke-WebRequest -UseBasicParsing -Uri "${publicUrl}/config/pi/${downloadToken}" -OutFile "$HOME\\.pi\\agent\\models.json"`;
+irm "${publicUrl}/setup/pi/${downloadToken}?shell=powershell" | iex`;
                 document.getElementById('pi-models-json').textContent = piModelsJson;
             } else {
                 document.getElementById('pi-install-unix').textContent = `# Log in first to get your Pi models.json`;
@@ -2472,11 +2689,11 @@ Invoke-WebRequest -UseBasicParsing -Uri "${publicUrl}/config/pi/${downloadToken}
             }
 
             // Show success state
+            document.body.classList.remove('login-mode');
             loginSec.style.display = 'none';
             heroWrapper.style.display = 'none';
             successSec.classList.add('visible');
             ensureStatsRefresh();
-            loadStats();
         }
 
         // Form submission
@@ -2490,7 +2707,8 @@ Invoke-WebRequest -UseBasicParsing -Uri "${publicUrl}/config/pi/${downloadToken}
             const heroWrapper = document.getElementById('login-hero');
 
             btn.disabled = true;
-            btn.innerHTML = 'Authenticating...';
+            btn.setAttribute('aria-busy', 'true');
+            btn.textContent = 'Authenticating...';
             errorDiv.style.display = 'none';
 
             const formData = new FormData(this);
@@ -2509,6 +2727,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${publicUrl}/config/pi/${downloadToken}
 
                 // Save credentials to localStorage
                 localStorage.setItem('friendCode', data.friend_code);
+                localStorage.setItem('friendEmail', data.user_email || '');
                 localStorage.setItem('downloadToken', result.download_token);
                 localStorage.setItem('publicUrl', result.public_url);
 
@@ -2619,10 +2838,10 @@ $env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
                 populateApiDocs(result.public_url, claudeApiKey || '');
                 if (claudeApiKey) {
                     document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
-curl -sL "${result.public_url}/config/pi/${result.download_token}" -o ~/.pi/agent/models.json
+curl -sL "${result.public_url}/setup/pi/${result.download_token}" | bash
 chmod 600 ~/.pi/agent/models.json`;
                     document.getElementById('pi-install-windows').textContent = `New-Item -ItemType Directory -Force -Path "$HOME\\.pi\\agent" | Out-Null
-Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result.download_token}" -OutFile "$HOME\\.pi\\agent\\models.json"`;
+irm "${result.public_url}/setup/pi/${result.download_token}?shell=powershell" | iex`;
                     document.getElementById('pi-models-json').textContent = piModelsJson;
                 } else {
                     document.getElementById('pi-install-unix').textContent = `# Log in first to get your Pi models.json`;
@@ -2634,19 +2853,22 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 loginSec.style.opacity = '0';
                 heroWrapper.style.opacity = '0';
 
+                const transitionDelay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 500;
                 setTimeout(() => {
+                    document.body.classList.remove('login-mode');
                     loginSec.style.display = 'none';
                     heroWrapper.style.display = 'none';
                     successSec.classList.add('visible');
                     ensureStatsRefresh();
-                    loadStats();
-                }, 500);
+                    document.querySelector('.tab.active')?.focus();
+                }, transitionDelay);
 
             } catch (err) {
                 errorDiv.textContent = err.message;
                 errorDiv.style.display = 'block';
                 btn.disabled = false;
-                btn.textContent = 'Initialize Session';
+                btn.setAttribute('aria-busy', 'false');
+                btn.textContent = 'Enter pool';
             }
         });
 
@@ -2655,14 +2877,22 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 return statsLoadPromise;
             }
 
+            const loadingEl = document.getElementById('stats-loading');
+            const contentEl = document.getElementById('stats-content');
+            contentEl.setAttribute('aria-busy', 'true');
+            if (contentEl.style.display === 'none') {
+                loadingEl.textContent = 'Synchronizing pool statistics...';
+                loadingEl.style.display = 'block';
+            }
+
             statsLoadPromise = (async () => {
             try {
                 const response = await poolFetch('/api/pool/stats');
                 if (!response.ok) throw new Error('Failed to load stats');
                 const stats = await response.json();
 
-                document.getElementById('stats-loading').style.display = 'none';
-                document.getElementById('stats-content').style.display = 'block';
+                loadingEl.style.display = 'none';
+                contentEl.style.display = 'block';
 
                 // All accounts across all providers
                 const allAccounts = stats.accounts || [];
@@ -2698,7 +2928,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                     const colors = providerColors[type] || { bg: 'rgba(128,128,128,0.15)', fg: '#888' };
                     const pCost = costByProvider[type];
                     const costInfo = pCost && pCost.api_cost > 0
-                        ? `<br><span style="font-size: 0.65rem; opacity: 0.7;">$${pCost.subscription_cost}/mo → ${formatCost(pCost.api_cost)} API${pCost.roi > 0 ? ' → ' + pCost.roi.toFixed(1) + 'x' : ''}</span>`
+                        ? `<br><span style="font-size: 0.65rem; opacity: 0.7;">${formatCost(pCost.subscription_cost)} spent · $${pCost.monthly_subscription_cost || 0}/mo → ${formatCost(pCost.api_cost)} API${pCost.roi > 0 ? ' → ' + pCost.roi.toFixed(1) + 'x' : ''}</span>`
                         : '';
                     breakdownEl.innerHTML += `<span style="background: ${colors.bg}; color: ${colors.fg}; padding: 4px 14px; border-radius: 12px; font-size: 0.8rem; font-family: 'Space Mono', monospace; text-align: center; line-height: 1.6;">${type} <span style="font-weight: bold;">${healthy}</span><span style="opacity: 0.5;">/${count}</span>${costInfo}</span>`;
                 });
@@ -2708,11 +2938,12 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                     const banner = document.getElementById('cost-banner');
                     banner.style.display = 'block';
                     const subCost = agg.total_subscription_cost || 0;
+                    const subMonthly = agg.total_subscription_monthly || 0;
                     const apiCost = agg.total_api_cost || 0;
                     const roi = agg.overall_roi || 0;
                     const roiStr = roi > 0 ? ` → <span style="color: ${roiColor(roi)}; font-weight: bold;">${roi.toFixed(1)}x ROI</span>` : '';
                     document.getElementById('cost-banner-text').innerHTML =
-                        `<span style="color: #888;">$${subCost.toFixed(0)}/mo subscription</span> → <span style="color: var(--success-green);">${formatCost(apiCost)} API value</span>${roiStr}`;
+                        `<span style="color: #888;">${formatCost(subCost)} subscription spend <span style="opacity: 0.65;">($${subMonthly.toFixed(0)}/mo current)</span></span> → <span style="color: var(--success-green);">${formatCost(apiCost)} API value</span>${roiStr}`;
                 }
 
                 // Cyber-policy safety net status — visible only when the
@@ -2764,22 +2995,23 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 document.getElementById('stat-cached-tokens').textContent = formatNumber(agg.total_cached_tokens || 0);
                 document.getElementById('stat-billable-tokens').textContent = formatNumber(agg.total_billable_tokens || 0);
 
-                // Calculate averages for codex accounts (exclude dead and 0% accounts)
+                // Average only windows that currently exist. A removed five-hour
+                // window is unavailable, not a real window at 0% utilization.
                 let primarySum = 0, primaryCount = 0;
                 let secondarySum = 0, secondaryCount = 0;
                 for (const acc of codexAccounts) {
                     if (isActiveStatus(acc.status)) {
-                        if (acc.primary_window_used_pct > 0) { primarySum += acc.primary_window_used_pct; primaryCount++; }
-                        if (acc.secondary_window_used_pct > 0) { secondarySum += acc.secondary_window_used_pct; secondaryCount++; }
+                        if (acc.primary_window_available) { primarySum += acc.primary_window_used_pct; primaryCount++; }
+                        if (acc.secondary_window_available) { secondarySum += acc.secondary_window_used_pct; secondaryCount++; }
                     }
                 }
                 const primaryPct = primaryCount > 0 ? Math.min(primarySum / primaryCount, 100) : 0;
                 const secondaryPct = secondaryCount > 0 ? Math.min(secondarySum / secondaryCount, 100) : 0;
 
-                document.getElementById('bar-primary').style.width = primaryPct + '%';
-                document.getElementById('bar-secondary').style.width = secondaryPct + '%';
-                document.getElementById('pct-primary').textContent = primaryPct.toFixed(0) + '%';
-                document.getElementById('pct-secondary').textContent = secondaryPct.toFixed(0) + '%';
+                document.getElementById('bar-primary').style.transform = `scaleX(${Math.min(primaryPct, 100) / 100})`;
+                document.getElementById('bar-secondary').style.transform = `scaleX(${Math.min(secondaryPct, 100) / 100})`;
+                document.getElementById('pct-primary').textContent = primaryCount > 0 ? primaryPct.toFixed(0) + '%' : '—';
+                document.getElementById('pct-secondary').textContent = secondaryCount > 0 ? secondaryPct.toFixed(0) + '%' : '—';
 
                 // Pace color helper
                 const getPaceColor = (usedPct, resetMins, windowMins) => {
@@ -2795,28 +3027,53 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 tbody.innerHTML = '';
                 for (const acc of codexAccounts) {
                     const rowStatusColor = statusColor(acc.status);
-                    const pri5hrReset = acc.primary_reset_minutes > 0 ? formatDuration(acc.primary_reset_minutes) : '-';
-                    const weekReset = acc.secondary_reset_minutes > 0 ? formatDuration(acc.secondary_reset_minutes) : '-';
+                    const pri5hrReset = acc.primary_window_available && acc.primary_reset_minutes > 0 ? formatDuration(acc.primary_reset_minutes) : '';
+                    const weekReset = acc.secondary_window_available && acc.secondary_reset_minutes > 0 ? formatDuration(acc.secondary_reset_minutes) : '';
+                    const primaryUsage = acc.primary_window_available ? formatPct(acc.primary_window_used_pct) : '—';
+                    const weeklyUsage = acc.secondary_window_available ? formatPct(acc.secondary_window_used_pct) : '—';
                     const tokens = acc.total_billable_tokens > 0 ? formatNumber(acc.total_billable_tokens) : '0';
-                    const priColor = getPaceColor(acc.primary_window_used_pct, acc.primary_reset_minutes, 300);
-                    const weekColor = getPaceColor(acc.secondary_window_used_pct, acc.secondary_reset_minutes, 10080);
+                    const priColor = acc.primary_window_available ? getPaceColor(acc.primary_window_used_pct, acc.primary_reset_minutes, 300) : 'inherit';
+                    const weekColor = acc.secondary_window_available ? getPaceColor(acc.secondary_window_used_pct, acc.secondary_reset_minutes, 10080) : 'inherit';
                     const scoreDisplay = acc.score > 0 ? acc.score.toFixed(2) : '-';
                     const scoreColor = acc.is_primary ? 'var(--gold-bright)' : (acc.score > 0.5 ? '#27ae60' : '#888');
                     const scoreTooltip = escapeAttr(acc.score_tooltip || 'No score details available');
                     const rowStyle = acc.is_primary ? 'background: rgba(212, 175, 55, 0.05);' : '';
                     const primaryBadge = acc.is_primary ? ' <span style="color: var(--gold-bright); font-size: 0.6rem;">★</span>' : '';
+                    const resetCount = acc.reset_credits_available || 0;
+                    const resetExpirations = acc.reset_credit_expirations || [];
+                    const resetRows = resetExpirations.length > 0
+                        ? resetExpirations.map(expiry => {
+                            const date = new Date(expiry);
+                            return `<div class="reset-credit-expiry">${formatResetExpiry(date)}</div>`;
+                        }).join('')
+                        : '<div class="reset-credit-expiry">Expiration details unavailable</div>';
+                    const resetBadge = acc.reset_credits_known ? `
+                        <span class="reset-credit" tabindex="0" aria-label="${resetCount} usage limit resets available">
+                            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 12a9 9 0 0 0-15.3-6.4L3 8"></path>
+                                <path d="M3 3v5h5"></path>
+                                <path d="M3 12a9 9 0 0 0 15.3 6.4L21 16"></path>
+                                <path d="M16 16h5v5"></path>
+                            </svg>
+                            <span>${resetCount}</span>
+                            <span class="reset-credit-popover" role="tooltip">
+                                <div>${resetCount} usage limit reset${resetCount === 1 ? '' : 's'}</div>
+                                ${resetRows}
+                            </span>
+                        </span>` : '';
 
                     const row = document.createElement('tr');
                     row.style.cssText = rowStyle;
                     row.innerHTML = `
                         <td style="font-family: monospace; color: #888;">${acc.id}${primaryBadge}</td>
-                        <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type}</td>
+                        <td style="text-transform: uppercase; color: var(--text-subtle);">${acc.plan_type}</td>
                         <td style="color: ${rowStatusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
                         <td title="${scoreTooltip}" style="${scoreCellStyle(scoreColor, acc.is_primary)}">${scoreDisplay}</td>
-                        <td style="text-align: right; font-family: monospace; color: ${priColor};">${formatPct(acc.primary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
-                        <td style="text-align: right; font-family: monospace; color: ${weekColor};">${formatPct(acc.secondary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
+                        <td style="text-align: center;">${resetBadge}</td>
+                        <td style="text-align: right; font-family: monospace; color: ${priColor};">${primaryUsage}${pri5hrReset ? ` <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span>` : ''}</td>
+                        <td style="text-align: right; font-family: monospace; color: ${weekColor};">${weeklyUsage}${weekReset ? ` <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span>` : ''}</td>
                         <td style="text-align: right; font-family: monospace; color: var(--gold-dim);">${tokens}</td>
-                        <td style="text-align: right; font-family: monospace; color: #888; font-size: 0.8rem;">$${acc.subscription_cost_monthly || 0}</td>
+                        <td title="${escapeAttr(subscriptionSpendTitle(acc))}" style="text-align: right; font-family: monospace; color: #888; font-size: 0.8rem;">${formatCost(acc.subscription_spend || 0)}</td>
                         <td style="text-align: right; font-family: monospace; color: var(--success-green); font-size: 0.8rem;">${formatCost(acc.api_cost_estimate)}</td>
                         <td style="text-align: right; font-family: monospace; color: ${roiColor(acc.roi)}; font-size: 0.8rem;">${formatROI(acc.roi)}</td>
                     `;
@@ -2861,12 +3118,12 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                         row.style.cssText = rowStyle;
                         row.innerHTML = `
                             <td style="font-family: monospace; color: #888;">${acc.id}${primaryBadge}</td>
-                            <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type || 'pro'}</td>
+                            <td style="text-transform: uppercase; color: var(--text-subtle);">${acc.plan_type || 'pro'}</td>
                             <td style="color: ${rowStatusColor}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${acc.status}</td>
                             <td title="${scoreTooltip}" style="${scoreCellStyle(scoreColor, acc.is_primary)}">${scoreDisplay}</td>
                             <td style="text-align: right; font-family: monospace;">${formatPct(acc.primary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${pri5hrReset}</span></td>
                             <td style="text-align: right; font-family: monospace;">${formatPct(acc.secondary_window_used_pct)} <span style="color: var(--text-muted); font-size: 0.7rem;">${weekReset}</span></td>
-                            <td style="text-align: right; font-family: monospace; color: #888; font-size: 0.8rem;">$${acc.subscription_cost_monthly || 0}</td>
+                            <td title="${escapeAttr(subscriptionSpendTitle(acc))}" style="text-align: right; font-family: monospace; color: #888; font-size: 0.8rem;">${formatCost(acc.subscription_spend || 0)}</td>
                             <td style="text-align: right; font-family: monospace; color: var(--success-green); font-size: 0.8rem;">${formatCost(acc.api_cost_estimate)}</td>
                             <td style="text-align: right; font-family: monospace; color: ${roiColor(acc.roi)}; font-size: 0.8rem;">${formatROI(acc.roi)}</td>
                         `;
@@ -2921,7 +3178,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                                 <div style="background: #1a1a1a; border-radius: 3px; height: 6px; overflow: hidden;">
                                     <div style="background: ${primaryPct > 80 ? '#c0392b' : '#60a5fa'}; width: ${Math.min(primaryPct, 100)}%; height: 100%;"></div>
                                 </div>
-                                <div style="font-size: 0.6rem; color: #666; text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
+                                <div style="font-size: 0.6rem; color: var(--text-disabled); text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
                             </div>` : '';
                         kimiList.innerHTML += `
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; ${kimiAccounts.indexOf(acc) < kimiAccounts.length - 1 ? 'border-bottom: 1px solid #1a1a1a;' : ''}">
@@ -2952,7 +3209,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                                 <div style="background: #1a1a1a; border-radius: 3px; height: 6px; overflow: hidden;">
                                     <div style="background: ${primaryPct > 80 ? '#c0392b' : '#fbbf24'}; width: ${Math.min(primaryPct, 100)}%; height: 100%;"></div>
                                 </div>
-                                <div style="font-size: 0.6rem; color: #666; text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
+                                <div style="font-size: 0.6rem; color: var(--text-disabled); text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
                             </div>` : '';
                         minimaxList.innerHTML += `
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; ${minimaxAccounts.indexOf(acc) < minimaxAccounts.length - 1 ? 'border-bottom: 1px solid #1a1a1a;' : ''}">
@@ -2983,7 +3240,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                                 <div style="background: #1a1a1a; border-radius: 3px; height: 6px; overflow: hidden;">
                                     <div style="background: ${primaryPct > 80 ? '#c0392b' : '#fb923c'}; width: ${Math.min(primaryPct, 100)}%; height: 100%;"></div>
                                 </div>
-                                <div style="font-size: 0.6rem; color: #666; text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
+                                <div style="font-size: 0.6rem; color: var(--text-disabled); text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
                             </div>` : '';
                         xiaomiList.innerHTML += `
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; ${xiaomiAccounts.indexOf(acc) < xiaomiAccounts.length - 1 ? 'border-bottom: 1px solid #1a1a1a;' : ''}">
@@ -3014,7 +3271,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                                 <div style="background: #1a1a1a; border-radius: 3px; height: 6px; overflow: hidden;">
                                     <div style="background: ${primaryPct > 80 ? '#c0392b' : '#22d3ee'}; width: ${Math.min(primaryPct, 100)}%; height: 100%;"></div>
                                 </div>
-                                <div style="font-size: 0.6rem; color: #666; text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
+                                <div style="font-size: 0.6rem; color: var(--text-disabled); text-align: center; margin-top: 2px;">${primaryPct.toFixed(0)}%</div>
                             </div>` : '';
                         grokList.innerHTML += `
                             <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; ${grokAccounts.indexOf(acc) < grokAccounts.length - 1 ? 'border-bottom: 1px solid #1a1a1a;' : ''}">
@@ -3033,8 +3290,10 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 loadUsers();
                 loadDailyChart();
             } catch (err) {
-                document.getElementById('stats-loading').textContent = 'Unable to synchronize with pool statistics.';
+                loadingEl.textContent = 'Unable to synchronize with pool statistics. Existing values may be stale.';
+                loadingEl.style.display = 'block';
             } finally {
+                contentEl.setAttribute('aria-busy', 'false');
                 statsLoadPromise = null;
             }
             })();
@@ -3144,6 +3403,24 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
             return days + 'd' + (remHours > 0 ? remHours + 'h' : '');
         }
 
+        function formatResetExpiry(date) {
+            if (Number.isNaN(date.getTime())) return 'Unknown expiration';
+            const absolute = new Intl.DateTimeFormat(undefined, {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                timeZoneName: 'short'
+            }).format(date);
+            const remainingMs = date.getTime() - Date.now();
+            if (remainingMs <= 0) return `${absolute} (expired)`;
+            const hours = Math.floor(remainingMs / 3600000);
+            const days = Math.floor(hours / 24);
+            const relative = days > 0 ? `in ${days}d ${hours % 24}h` : `in ${hours}h`;
+            return `${absolute} (${relative})`;
+        }
+
         function formatNumber(n) {
             if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
             if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
@@ -3156,6 +3433,16 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 return '0%';
             }
             return `${Math.max(0, Math.min(100, pct)).toFixed(0)}%`;
+        }
+
+        function subscriptionSpendTitle(account) {
+            const monthly = account.subscription_cost_monthly || 0;
+            const cycles = account.subscription_billing_cycles || 0;
+            const label = account.subscription_label || 'Subscription';
+            const start = account.cost_tracking_started_at
+                ? new Date(account.cost_tracking_started_at).toLocaleDateString()
+                : 'current billing cycle';
+            return `${label}: $${monthly}/mo × ${cycles} observed billing cycle${cycles === 1 ? '' : 's'} since ${start}`;
         }
 
         function formatCost(value) {
@@ -3234,7 +3521,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                     surfaces.forEach(([surface, val]) => {
                         const segHeight = (val / maxTotal) * 100;
                         const seg = document.createElement('div');
-                        seg.style.cssText = `height: ${segHeight}px; background: ${surfaceColors[surface] || '#666'}; width: 100%;`;
+                        seg.style.cssText = `height: ${segHeight}px; background: ${surfaceColors[surface] || 'var(--text-disabled)'}; width: 100%;`;
                         seg.title = `${day.date}: ${surface} ${val.toFixed(1)}%`;
                         barContainer.appendChild(seg);
                         totalHeight += segHeight;
@@ -3261,7 +3548,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 usedSurfaces.forEach(surface => {
                     const item = document.createElement('div');
                     item.style.cssText = 'display: flex; align-items: center; gap: 4px;';
-                    item.innerHTML = `<div style="width: 10px; height: 10px; background: ${surfaceColors[surface] || '#666'}; border-radius: 2px;"></div><span style="color: var(--text-muted);">${surface}</span>`;
+                    item.innerHTML = `<div style="width: 10px; height: 10px; background: ${surfaceColors[surface] || 'var(--text-disabled)'}; border-radius: 2px;"></div><span style="color: var(--text-muted);">${surface}</span>`;
                     legend.appendChild(item);
                 });
 
@@ -3300,7 +3587,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
                 entries.forEach(([type, cost]) => {
                     const pxHeight = Math.max(1, (cost / maxCost) * 100);
                     const seg = document.createElement('div');
-                    seg.style.cssText = `height: ${pxHeight}px; background: ${costProviderColors[type] || '#666'}; width: 100%;`;
+                    seg.style.cssText = `height: ${pxHeight}px; background: ${costProviderColors[type] || 'var(--text-disabled)'}; width: 100%;`;
                     seg.title = `${date}: ${type} $${cost.toFixed(4)}`;
                     bar.appendChild(seg);
                 });
@@ -3321,7 +3608,7 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
             usedTypes.forEach(type => {
                 const item = document.createElement('div');
                 item.style.cssText = 'display: flex; align-items: center; gap: 4px;';
-                item.innerHTML = `<div style="width: 10px; height: 10px; background: ${costProviderColors[type] || '#666'}; border-radius: 2px;"></div><span style="color: var(--text-muted);">${type}</span>`;
+                item.innerHTML = `<div style="width: 10px; height: 10px; background: ${costProviderColors[type] || 'var(--text-disabled)'}; border-radius: 2px;"></div><span style="color: var(--text-muted);">${type}</span>`;
                 legend.appendChild(item);
             });
         }
@@ -3679,10 +3966,15 @@ Invoke-WebRequest -UseBasicParsing -Uri "${result.public_url}/config/pi/${result
             }
         }
 
-        function terminateSession() {
+        function clearSavedAccess() {
             localStorage.removeItem('friendCode');
+            localStorage.removeItem('friendEmail');
             localStorage.removeItem('downloadToken');
             localStorage.removeItem('publicUrl');
+        }
+
+        function terminateSession() {
+            clearSavedAccess();
             window.location.reload();
         }
     </script>

@@ -10,9 +10,9 @@
 
 ---
 
-A reverse proxy that distributes your Agent (Codex/Claude/Gemini) sessions across multiple accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files.
+A reverse proxy that distributes coding-agent sessions across pooled provider accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files. Google subscription accounts use the Antigravity sign-in flow; Gemini remains the API-key provider.
 
-Works with **Codex CLI**, **Claude Code**, and **Gemini CLI**.
+The setup dashboard configures **Codex CLI**, **Claude Code**, **Gemini CLI**, **Grok Build**, **Pi**, and **Cute Code**. Grok Build runs through the proxy without its own login and can select the other pool models; Pi merges pool providers into its existing `models.json`.
 
 <p align="center">
   <img src="screenshots/analytics-dashboard.png" alt="Pool Analytics" width="700">
@@ -58,7 +58,7 @@ Share your pool with others using a friend code.
 ### 1. Add your accounts
 
 ```bash
-mkdir -p pool/codex pool/claude pool/gemini
+mkdir -p pool/codex pool/claude pool/gemini pool/antigravity
 
 # Codex accounts
 cp ~/.codex/auth.json pool/codex/work.json
@@ -114,6 +114,12 @@ export ANTHROPIC_API_KEY="pool"
 export CODE_ASSIST_ENDPOINT="http://127.0.0.1:8989"
 ```
 
+**Google Antigravity account**: open the dashboard, choose "Contribute an account", then press "Google Antigravity". The popup completes the callback automatically. Pasting the callback URL remains available when popups are blocked.
+
+The sign-in flow uses Antigravity's shipped Google OAuth client and its fixed `http://localhost:51121/oauth-callback` redirect, matching CLIProxyAPI and VibeProxy. When the pool runs on the same machine as the browser, the popup completes on its own. For a remote pool, paste the failed localhost callback URL into the contribution dialog; the state and PKCE verifier are still checked before exchange.
+
+`ANTIGRAVITY_OAUTH_CLIENT_ID`, `ANTIGRAVITY_OAUTH_CLIENT_SECRET`, and `ANTIGRAVITY_OAUTH_REDIRECT_URI` remain available for tests or a separately registered Google OAuth client. `ANTIGRAVITY_CLIENT_VERSION` overrides the Antigravity client version used in upstream requests. `UPSTREAM_ANTIGRAVITY_BASE`, `UPSTREAM_ANTIGRAVITY_DAILY_BASE`, and `UPSTREAM_ANTIGRAVITY_ONBOARD_BASE` override the production, generation, and onboarding Cloud Code Assist hosts.
+
 ---
 
 ## Friends Mode
@@ -166,6 +172,13 @@ Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request b
 ```json
 {"access_token": "ya29...", "refresh_token": "1//...", "expiry_date": 1234567890000}
 ```
+
+**Antigravity** - `pool/antigravity/*.json`
+```json
+{"type":"antigravity","access_token":"ya29...","refresh_token":"1//...","email":"person@example.com","project_id":"project-id","expiry_date":1234567890000}
+```
+
+Antigravity model names come from Google's live `fetchAvailableModels` response. Use `antigravity/<model-id>` to force this provider. `/api/pool/models`, `/v1/models`, `/v1beta/models`, Pi, Cute Code, and the Codex catalog consume the same registry. Temporary quota exhaustion changes `available_now` without removing a supported model from the catalog.
 
 ---
 

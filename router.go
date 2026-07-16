@@ -26,11 +26,39 @@ func normalizeNoopPath(path string) string {
 func isCodexAppsMCPPath(path string) bool {
 	path = normalizeNoopPath(path)
 	switch path {
-	case "/api/codex/apps", "/backend-api/wham/apps", "/wham/apps", "/apps":
+	case "/api/codex/apps",
+		"/backend-api/wham/apps",
+		"/wham/apps",
+		"/apps",
+		"/backend-api/ps/mcp",
+		"/api/codex/ps/mcp",
+		"/ps/mcp":
 		return true
 	}
 	return strings.HasSuffix(path, "/wham/apps") ||
-		strings.HasSuffix(path, "/codex/apps")
+		strings.HasSuffix(path, "/codex/apps") ||
+		strings.HasSuffix(path, "/ps/mcp")
+}
+
+func isCodexResetCreditsPath(path string) bool {
+	path = normalizeNoopPath(path)
+	return strings.HasSuffix(path, "/rate-limit-reset-credits") ||
+		strings.HasSuffix(path, "/rate-limit-reset-credits/consume")
+}
+
+func servePoolCodexResetCredits(w http.ResponseWriter, r *http.Request) {
+	path := normalizeNoopPath(r.URL.Path)
+	if strings.HasSuffix(path, "/consume") {
+		respondJSON(w, map[string]any{
+			"code":          "no_credit",
+			"windows_reset": 0,
+		})
+		return
+	}
+	respondJSON(w, map[string]any{
+		"available_count": 0,
+		"credits":         []any{},
+	})
 }
 
 func shouldNoopCodexPath(path string) bool {
@@ -161,7 +189,7 @@ func serveNoopCodexAppsMCP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// checkAdminAuth verifies the admin token from header or query param.
+// checkAdminAuth verifies the admin token from its request header.
 // Returns true if authorized, false if not (and sends 401 response).
 func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bool {
 	ip := getClientIP(r)
@@ -177,14 +205,11 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 		return false
 	}
 
-	// Check header first, then query param
+	// Secrets belong in headers, never URLs or logs.
 	token := r.Header.Get("X-Admin-Token")
-	if token == "" {
-		token = r.URL.Query().Get("admin_token")
-	}
 
 	if h.cfg.debug.Load() {
-		log.Printf("admin auth: provided=%q configured=%q", token, h.cfg.adminToken)
+		log.Printf("admin auth: credential_present=%v", token != "")
 	}
 
 	if token != h.cfg.adminToken {
@@ -215,11 +240,10 @@ func (h *proxyHandler) checkAdminOrFriendAuth(w http.ResponseWriter, r *http.Req
 		return true
 	}
 
-	// Admin token (header first, then query param)
+	// Admin credentials are header-only for the same reason as friend codes.
 	if h.cfg.adminToken != "" {
 		headerToken := r.Header.Get("X-Admin-Token")
-		queryToken := r.URL.Query().Get("admin_token")
-		if headerToken == h.cfg.adminToken || queryToken == h.cfg.adminToken {
+		if headerToken == h.cfg.adminToken {
 			if h.bruteForce != nil {
 				h.bruteForce.recordSuccess(ip)
 			}
@@ -227,11 +251,11 @@ func (h *proxyHandler) checkAdminOrFriendAuth(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Friend code (query param or header)
+	// Friend credentials are accepted only in a header. Query-string secrets
+	// leak into browser history, reverse-proxy logs, analytics, and referrers.
 	if h.cfg.friendCode != "" {
-		queryCode := r.URL.Query().Get("code")
 		headerCode := r.Header.Get("X-Friend-Code")
-		if queryCode == h.cfg.friendCode || headerCode == h.cfg.friendCode {
+		if headerCode == h.cfg.friendCode {
 			if h.bruteForce != nil {
 				h.bruteForce.recordSuccess(ip)
 			}
@@ -253,6 +277,12 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[%s] incoming %s %s", reqID, r.Method, r.URL.Path)
 	}
 
+	// Fingerprinted signal-room assets are embedded by the Go binary.
+	if strings.HasPrefix(r.URL.Path, "/assets/") {
+		h.serveSignalRoomAsset(w, r)
+		return
+	}
+
 	// Static routes
 	switch r.URL.Path {
 	case "/":
@@ -267,7 +297,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/og-image.png":
 		h.serveOGImage(w, r)
 		return
-	case "/hero.png":
+	case "/hero.png", "/hero.webp":
 		h.serveHeroImage(w, r)
 		return
 	case "/api/friend/claim":
@@ -305,6 +335,22 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleGlobalHourly(w, r)
+		return
+	case "/api/pool/signal":
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		h.handleSignalAnalytics(w, r)
+		return
+	case "/api/pool/catalog":
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		servePoolModels(w, h.pool)
 		return
 	case "/favicon.ico":
 		http.NotFound(w, r)
@@ -382,6 +428,23 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Account enable/disable: /admin/accounts/:id/{enable,disable}
+	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") &&
+		(strings.HasSuffix(r.URL.Path, "/enable") || strings.HasSuffix(r.URL.Path, "/disable")) {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
+		disabled := strings.HasSuffix(path, "/disable")
+		accountID := strings.TrimSuffix(strings.TrimSuffix(path, "/disable"), "/enable")
+		h.setAccountDisabled(w, accountID, disabled)
+		return
+	}
+
 	// Account resurrect: /admin/accounts/:id/resurrect
 	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && strings.HasSuffix(r.URL.Path, "/resurrect") {
 		if !h.checkAdminAuth(w, r) {
@@ -454,8 +517,58 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCuteCodeSetupScript(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/setup/grok/") {
+		h.serveGrokSetupScript(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/setup/pi/") {
+		h.servePiSetupScript(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/config/cute-code/") {
 		h.serveCuteCodeSettingsConfig(w, r)
+		return
+	}
+
+	// Friends may contribute new provider credentials, but cannot inspect raw
+	// account identities, remove accounts, or mutate existing provider state.
+	if strings.HasPrefix(r.URL.Path, "/api/pool/accounts/") {
+		if !h.checkAdminOrFriendAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		switch r.URL.Path {
+		case "/api/pool/accounts/codex/add":
+			h.handleCodexAdd(w, r)
+		case "/api/pool/accounts/codex/exchange":
+			h.handleCodexExchange(w, r)
+		case "/api/pool/accounts/claude/add":
+			h.handleClaudeAdd(w, r)
+		case "/api/pool/accounts/claude/exchange":
+			h.handleClaudeExchange(w, r)
+		case "/api/pool/accounts/antigravity/add":
+			h.handleAntigravityAdd(w, r)
+		case "/api/pool/accounts/antigravity/status":
+			h.handleAntigravityStatus(w, r)
+		case "/api/pool/accounts/antigravity/exchange":
+			h.handleAntigravityExchange(w, r)
+		case "/api/pool/accounts/kimi/add":
+			h.handleKimiAdd(w, r)
+		case "/api/pool/accounts/minimax/add":
+			h.handleMinimaxAdd(w, r)
+		case "/api/pool/accounts/zai/add":
+			h.handleZAIAdd(w, r)
+		case "/api/pool/accounts/xiaomi/add":
+			h.handleXiaomiAdd(w, r)
+		case "/api/pool/accounts/grok/add":
+			h.handleGrokImport(w, r)
+		default:
+			http.NotFound(w, r)
+		}
 		return
 	}
 
@@ -468,66 +581,83 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Claude account admin routes (friend auth - accessible from friend landing page)
-	// Note: /admin/claude/callback skips auth (OAuth redirect from Anthropic)
+	// Provider mutations require an explicit operator unlock. The Claude OAuth
+	// callback remains public because it is invoked by the upstream redirect;
+	// exchanging that callback for credentials still requires admin auth.
 	if strings.HasPrefix(r.URL.Path, "/admin/claude") {
-		if r.URL.Path != "/admin/claude/callback" {
-			if !h.checkAdminOrFriendAuth(w, r) {
-				return
-			}
+		if r.URL.Path != "/admin/claude/callback" && !h.checkAdminAuth(w, r) {
+			return
 		}
 		h.serveClaudeAdmin(w, r)
 		return
 	}
 
-	// Codex account admin routes (friend auth - accessible from friend landing page)
 	if strings.HasPrefix(r.URL.Path, "/admin/codex") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkAdminAuth(w, r) {
 			return
 		}
 		h.serveCodexAdmin(w, r)
 		return
 	}
 
-	// Kimi account admin routes (friend auth - accessible from friend landing page)
+	if strings.HasPrefix(r.URL.Path, "/admin/antigravity") {
+		if r.URL.Path == "/admin/antigravity/callback" {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			h.handleAntigravityCallback(w, r)
+			return
+		}
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		if r.URL.Path == "/admin/antigravity/models/sync" && r.Method == http.MethodPost {
+			h.handleAntigravityModelSync(w, r)
+			return
+		}
+		if r.URL.Path == "/admin/antigravity/models/verify" && r.Method == http.MethodPost {
+			h.handleAntigravityModelVerify(w, r)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+
 	if strings.HasPrefix(r.URL.Path, "/admin/kimi") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkAdminAuth(w, r) {
 			return
 		}
 		h.serveKimiAdmin(w, r)
 		return
 	}
 
-	// MiniMax account admin routes (friend auth - accessible from friend landing page)
 	if strings.HasPrefix(r.URL.Path, "/admin/minimax") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkAdminAuth(w, r) {
 			return
 		}
 		h.serveMinimaxAdmin(w, r)
 		return
 	}
 
-	// Z.ai account admin routes (friend auth - accessible from friend landing page)
 	if strings.HasPrefix(r.URL.Path, "/admin/zai") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkAdminAuth(w, r) {
 			return
 		}
 		h.serveZAIAdmin(w, r)
 		return
 	}
 
-	// Xiaomi account admin routes (friend auth - accessible from friend landing page)
 	if strings.HasPrefix(r.URL.Path, "/admin/xiaomi") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkAdminAuth(w, r) {
 			return
 		}
 		h.serveXiaomiAdmin(w, r)
 		return
 	}
 
-	// Grok account admin routes (friend auth - accessible from friend landing page)
 	if strings.HasPrefix(r.URL.Path, "/admin/grok") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkAdminAuth(w, r) {
 			return
 		}
 		h.serveGrokAdmin(w, r)
@@ -535,7 +665,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Config download routes (no auth - token is the auth)
-	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") || strings.HasPrefix(r.URL.Path, "/config/pi/") {
+	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") || strings.HasPrefix(r.URL.Path, "/config/pi/") || strings.HasPrefix(r.URL.Path, "/config/grok/") {
 		h.serveConfigDownload(w, r)
 		return
 	}
@@ -543,6 +673,13 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Fake refresh handler so Codex CLI never needs to hit the real auth server.
 	if strings.HasPrefix(r.URL.Path, "/oauth/token") {
 		h.serveFakeOAuthToken(w, r)
+		return
+	}
+
+	// Pool users never own reset credits. Redemption is reserved for the
+	// server-side account poller, which calls ChatGPT directly.
+	if isCodexResetCreditsPath(r.URL.Path) {
+		servePoolCodexResetCredits(w, r)
 		return
 	}
 

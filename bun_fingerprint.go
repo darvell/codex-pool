@@ -16,7 +16,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// bunSpec returns a ClientHelloSpec matching Bun 1.3.12's TLS fingerprint.
+// bunSpec returns a ClientHelloSpec matching the Node.js 24.x fingerprint used
+// by Claude Code. Bun 1.3.12 currently produces the same JA3/JA4 profile.
 // Captured from tls.peet.ws on 2026-05-26.
 // JA3: 44f88fca027f27bab4bb08d4af15f23e
 // JA4: t13d1714h1_5b57614c22b0_7baf387fc6ff
@@ -79,18 +80,16 @@ func bunSpec() *utls.ClientHelloSpec {
 			&utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}},
 			// status_request (OCSP stapling)
 			&utls.StatusRequestExtension{},
-			// signature_algorithms
+			// signature_algorithms (Node.js 24.x order)
 			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
 				utls.ECDSAWithP256AndSHA256,
-				utls.ECDSAWithP384AndSHA384,
-				utls.ECDSAWithP521AndSHA512,
 				utls.PSSWithSHA256,
-				utls.PSSWithSHA384,
-				utls.PSSWithSHA512,
 				utls.PKCS1WithSHA256,
+				utls.ECDSAWithP384AndSHA384,
+				utls.PSSWithSHA384,
 				utls.PKCS1WithSHA384,
+				utls.PSSWithSHA512,
 				utls.PKCS1WithSHA512,
-				utls.ECDSAWithSHA1,
 				utls.PKCS1WithSHA1,
 			}},
 			// signed_certificate_timestamp
@@ -116,14 +115,14 @@ type bunConn struct{ *utls.UConn }
 func (c *bunConn) ConnectionState() tls.ConnectionState {
 	cs := c.UConn.ConnectionState()
 	return tls.ConnectionState{
-		Version:         cs.Version,
-		HandshakeComplete: cs.HandshakeComplete,
-		DidResume:       cs.DidResume,
-		CipherSuite:     cs.CipherSuite,
+		Version:            cs.Version,
+		HandshakeComplete:  cs.HandshakeComplete,
+		DidResume:          cs.DidResume,
+		CipherSuite:        cs.CipherSuite,
 		NegotiatedProtocol: cs.NegotiatedProtocol,
-		ServerName:      cs.ServerName,
-		PeerCertificates: cs.PeerCertificates,
-		VerifiedChains:  cs.VerifiedChains,
+		ServerName:         cs.ServerName,
+		PeerCertificates:   cs.PeerCertificates,
+		VerifiedChains:     cs.VerifiedChains,
 	}
 }
 
@@ -133,13 +132,13 @@ type bunDialer struct {
 	proxyURL *url.URL
 }
 
-func newBunDialer() *bunDialer {
+func newBunDialer(proxyURL *url.URL) *bunDialer {
 	return &bunDialer{
 		dialer: &net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		},
-		proxyURL: getCodexProxyURL(),
+		proxyURL: proxyURL,
 	}
 }
 
@@ -155,9 +154,28 @@ func (d *bunDialer) DialTLSContext(ctx context.Context, network, addr string) (n
 
 	if d.proxyURL != nil {
 		// Connect through HTTP CONNECT proxy
-		proxyConn, err := d.dialer.DialContext(ctx, "tcp", d.proxyURL.Host)
+		proxyAddr := d.proxyURL.Host
+		if d.proxyURL.Port() == "" {
+			port := "80"
+			if d.proxyURL.Scheme == "https" {
+				port = "443"
+			}
+			proxyAddr = net.JoinHostPort(d.proxyURL.Hostname(), port)
+		}
+		proxyConn, err := d.dialer.DialContext(ctx, "tcp", proxyAddr)
 		if err != nil {
 			return nil, fmt.Errorf("dial proxy: %w", err)
+		}
+		if d.proxyURL.Scheme == "https" {
+			tlsProxyConn := tls.Client(proxyConn, &tls.Config{
+				ServerName: d.proxyURL.Hostname(),
+				MinVersion: tls.VersionTLS12,
+			})
+			if err := tlsProxyConn.HandshakeContext(ctx); err != nil {
+				proxyConn.Close()
+				return nil, fmt.Errorf("TLS handshake with proxy: %w", err)
+			}
+			proxyConn = tlsProxyConn
 		}
 
 		// Send CONNECT request
@@ -183,8 +201,6 @@ func (d *bunDialer) DialTLSContext(ctx context.Context, network, addr string) (n
 			proxyConn.Close()
 			return nil, fmt.Errorf("read CONNECT response: %w", err)
 		}
-		resp.Body.Close()
-
 		if resp.StatusCode != 200 {
 			proxyConn.Close()
 			return nil, fmt.Errorf("CONNECT failed: %s", resp.Status)
@@ -221,7 +237,11 @@ func (d *bunDialer) DialTLSContext(ctx context.Context, network, addr string) (n
 
 // createBunTransport creates an http.Transport with Bun-like TLS fingerprint.
 func createBunTransport() *http.Transport {
-	dialer := newBunDialer()
+	return createBunTransportWithProxy(getCodexProxyURL())
+}
+
+func createBunTransportWithProxy(proxyURL *url.URL) *http.Transport {
+	dialer := newBunDialer(proxyURL)
 
 	tr := &http.Transport{
 		DialContext: (&net.Dialer{

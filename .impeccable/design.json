@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-14T02:15:00Z",
+  "title": "Design System: Codex Pool",
+  "extensions": {
+    "colorMeta": {
+      "gilded": {"role": "primary", "displayName": "Gilded Brass", "canonical": "#d4af37"},
+      "aged-gold": {"role": "primary", "displayName": "Aged Gold", "canonical": "#a98b47"},
+      "void": {"role": "neutral", "displayName": "Console Void", "canonical": "#050505"},
+      "console": {"role": "neutral", "displayName": "Blackened Console", "canonical": "#0e0e0e"},
+      "code-well": {"role": "neutral", "displayName": "Recessed Code Well", "canonical": "#080808"}
+    },
+    "typographyMeta": {
+      "display": {"displayName": "Ceremonial Display", "purpose": "Entry titles and authenticated page identity only."},
+      "body": {"displayName": "Operational Mono", "purpose": "Instructions, controls, status, analytics, and code-adjacent copy."},
+      "label": {"displayName": "Instrument Label", "purpose": "Compact navigation, field labels, and control text."}
+    },
+    "shadows": [
+      {"name": "console-ambient", "value": "0 20px 50px rgba(0,0,0,0.8), 0 0 100px rgba(0,0,0,0.5)", "purpose": "Elevates the single outer console from the page void."},
+      {"name": "recessed-well", "value": "inset 2px 2px 5px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05)", "purpose": "Creates mechanical depth for fields and command surfaces."},
+      {"name": "raised-control", "value": "5px 5px 10px rgba(0,0,0,0.5), -1px -1px 1px rgba(255,255,255,0.03)", "purpose": "Marks selected or immediately actionable controls."}
+    ],
+    "motion": [
+      {"name": "state-fast", "value": "200ms cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Hover, focus, active, and compact UI state changes."},
+      {"name": "reveal", "value": "500ms cubic-bezier(0.2, 0.8, 0.2, 1)", "purpose": "Rare ceremonial hero or access-state reveal, with reduced-motion fallback."}
+    ],
+    "breakpoints": [
+      {"name": "mobile", "value": "700px", "purpose": "Reflows the navigation rail into a grouped path selector and protects command/table width."}
+    ],
+    "narrative": {
+      "northStar": "The Gilded Console",
+      "rules": ["The Threshold Rule", "The Quiet Until Selected Rule", "The Gold Has Meaning Rule", "The One Shell Rule"],
+      "componentPhilosophy": "Quiet until selected; tactile and mechanical where interaction benefits from physical depth."
+    }
+  }
+}

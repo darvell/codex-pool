@@ -356,6 +356,7 @@ func SaveClaudeAccount(poolDir, accountID string, tokens *ClaudeTokenResponse) e
 
 	data := ClaudeAuthJSON{
 		ClaudeAiOauth: oauthData,
+		AddedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 	}
 
 	return atomicWriteJSON(path, data)
@@ -377,6 +378,7 @@ func saveClaudeAccount(a *Account) error {
 	} else {
 		root = make(map[string]any)
 	}
+	persistAccountAddedAt(root, a)
 
 	// Update OAuth data
 	oauth := map[string]any{

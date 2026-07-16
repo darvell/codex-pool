@@ -650,7 +650,7 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 
 	// model
 	if m, ok := req["model"].(string); ok {
-		claude["model"] = m
+		claude["model"] = claudeCanonicalModel(m)
 	}
 
 	// instructions -> system
@@ -765,6 +765,9 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 			}
 		}
 	}
+	claudeMsgs = mergeConsecutiveClaudeMessages(claudeMsgs)
+	claudeMsgs = normalizeClaudeToolPairing(claudeMsgs)
+	claudeMsgs = mergeConsecutiveClaudeMessages(claudeMsgs)
 	claude["messages"] = claudeMsgs
 
 	if sysPrompt, ok := claude["system"].(string); ok && sysPrompt != "" {
@@ -821,6 +824,143 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 	}
 
 	return claudeOrderedBody(claude)
+}
+
+// normalizeClaudeToolPairing makes every tool_result immediately follow its
+// matching tool_use. Dangling tool calls and orphan results are discarded.
+func normalizeClaudeToolPairing(messages []map[string]any) []map[string]any {
+	results := make(map[string]map[string]any)
+	for _, message := range messages {
+		if role, _ := message["role"].(string); role != "user" {
+			continue
+		}
+		for _, block := range claudeContentBlocks(message["content"]) {
+			if blockType, _ := block["type"].(string); blockType != "tool_result" {
+				continue
+			}
+			if toolUseID, _ := block["tool_use_id"].(string); toolUseID != "" {
+				results[toolUseID] = block
+			}
+		}
+	}
+
+	normalized := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		role, _ := message["role"].(string)
+		blocks := claudeContentBlocks(message["content"])
+		switch role {
+		case "assistant":
+			var toolUses []map[string]any
+			var otherBlocks []map[string]any
+			for _, block := range blocks {
+				if blockType, _ := block["type"].(string); blockType == "tool_use" {
+					toolUses = append(toolUses, block)
+				} else {
+					otherBlocks = append(otherBlocks, block)
+				}
+			}
+			if len(toolUses) == 0 {
+				normalized = append(normalized, message)
+				continue
+			}
+
+			keptToolUses := make([]map[string]any, 0, len(toolUses))
+			for _, toolUse := range toolUses {
+				toolUseID, _ := toolUse["id"].(string)
+				if _, ok := results[toolUseID]; ok {
+					keptToolUses = append(keptToolUses, toolUse)
+				}
+			}
+			if len(keptToolUses) == 0 {
+				if len(otherBlocks) > 0 {
+					normalized = append(normalized, claudeMessageFromBlocks("assistant", otherBlocks))
+				}
+				continue
+			}
+
+			assistantBlocks := append(otherBlocks, keptToolUses...)
+			normalized = append(normalized, claudeMessageFromBlocks("assistant", assistantBlocks))
+
+			resultBlocks := make([]map[string]any, 0, len(keptToolUses))
+			for _, toolUse := range keptToolUses {
+				toolUseID, _ := toolUse["id"].(string)
+				resultBlocks = append(resultBlocks, results[toolUseID])
+			}
+			normalized = append(normalized, claudeMessageFromBlocks("user", resultBlocks))
+
+		case "user":
+			var nonResultBlocks []map[string]any
+			hasResult := false
+			for _, block := range blocks {
+				if blockType, _ := block["type"].(string); blockType == "tool_result" {
+					hasResult = true
+					continue
+				}
+				nonResultBlocks = append(nonResultBlocks, block)
+			}
+			if !hasResult {
+				normalized = append(normalized, message)
+			} else if len(nonResultBlocks) > 0 {
+				normalized = append(normalized, claudeMessageFromBlocks("user", nonResultBlocks))
+			}
+
+		default:
+			normalized = append(normalized, message)
+		}
+	}
+	return normalized
+}
+
+func mergeConsecutiveClaudeMessages(messages []map[string]any) []map[string]any {
+	if len(messages) <= 1 {
+		return messages
+	}
+
+	merged := make([]map[string]any, 0, len(messages))
+	for _, message := range messages {
+		role, _ := message["role"].(string)
+		if len(merged) == 0 {
+			merged = append(merged, message)
+			continue
+		}
+		lastRole, _ := merged[len(merged)-1]["role"].(string)
+		if lastRole != role {
+			merged = append(merged, message)
+			continue
+		}
+
+		blocks := append(claudeContentBlocks(merged[len(merged)-1]["content"]), claudeContentBlocks(message["content"])...)
+		merged[len(merged)-1] = claudeMessageFromBlocks(role, blocks)
+	}
+	return merged
+}
+
+func claudeMessageFromBlocks(role string, blocks []map[string]any) map[string]any {
+	content := make([]any, len(blocks))
+	for i, block := range blocks {
+		content[i] = block
+	}
+	return map[string]any{
+		"role":    role,
+		"content": content,
+	}
+}
+
+func claudeContentBlocks(content any) []map[string]any {
+	switch value := content.(type) {
+	case string:
+		return []map[string]any{{"type": "text", "text": value}}
+	case []any:
+		blocks := make([]map[string]any, 0, len(value))
+		for _, rawBlock := range value {
+			if block, ok := rawBlock.(map[string]any); ok {
+				blocks = append(blocks, block)
+			}
+		}
+		return blocks
+	default:
+		return nil
+	}
 }
 
 // convertResponsesContentToClaude converts Responses API content blocks to Claude content blocks.
@@ -938,15 +1078,15 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 		out["model"] = m
 	}
 
-	// system -> instructions
-	if sys := extractClaudeSystem(claude["system"]); sys != "" {
-		out["instructions"] = sys
-	} else {
-		out["instructions"] = ""
-	}
-
 	// messages -> input
 	var input []any
+	if systemParts := convertClaudeSystemToResponsesInput(claude["system"]); len(systemParts) > 0 {
+		input = append(input, map[string]any{
+			"type":    "message",
+			"role":    "developer",
+			"content": systemParts,
+		})
+	}
 	if rawMsgs, ok := claude["messages"].([]any); ok {
 		for _, rm := range rawMsgs {
 			m, ok := rm.(map[string]any)
@@ -1087,12 +1227,14 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 	// Codex backend requires stream=true always
 	out["stream"] = true
 
-	// temperature -> temperature
-	if v, ok := claude["temperature"]; ok {
-		out["temperature"] = v
-	}
-	if v, ok := claude["top_p"]; ok {
-		out["top_p"] = v
+	model, _ := claude["model"].(string)
+	if !isOpenAIReasoningModel(model) {
+		if v, ok := claude["temperature"]; ok {
+			out["temperature"] = v
+		}
+		if v, ok := claude["top_p"]; ok {
+			out["top_p"] = v
+		}
 	}
 
 	if effort := extractClaudeReasoningEffort(claude); effort != "" {
@@ -1105,6 +1247,11 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 		for _, t := range tools {
 			tool, ok := t.(map[string]any)
 			if !ok {
+				continue
+			}
+			toolType, _ := tool["type"].(string)
+			if strings.HasPrefix(toolType, "web_search") {
+				responsesTools = append(responsesTools, map[string]any{"type": "web_search"})
 				continue
 			}
 			name, _ := tool["name"].(string)
@@ -1128,10 +1275,56 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 		out["tools"] = responsesTools
 	}
 
+	if toolChoice, ok := claude["tool_choice"].(map[string]any); ok {
+		switch choiceType, _ := toolChoice["type"].(string); choiceType {
+		case "auto":
+			out["tool_choice"] = "auto"
+		case "any":
+			out["tool_choice"] = "required"
+		case "none":
+			out["tool_choice"] = "none"
+		case "tool":
+			if name, _ := toolChoice["name"].(string); name != "" {
+				out["tool_choice"] = map[string]any{"type": "function", "name": name}
+			}
+		}
+	}
+
+	out["include"] = []string{"reasoning.encrypted_content"}
+	out["parallel_tool_calls"] = true
+	out["text"] = map[string]any{"verbosity": "medium"}
 	// Codex backend requires store=false
 	out["store"] = false
 
 	return json.Marshal(out)
+}
+
+func isOpenAIReasoningModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "gpt-5") || strings.Contains(model, "codex")
+}
+
+func convertClaudeSystemToResponsesInput(system any) []any {
+	var blocks []any
+	switch value := system.(type) {
+	case string:
+		if value != "" && !strings.HasPrefix(value, "x-anthropic-billing-header: ") {
+			blocks = append(blocks, map[string]any{"type": "input_text", "text": value})
+		}
+	case []any:
+		for _, raw := range value {
+			block, ok := raw.(map[string]any)
+			if !ok || block["type"] != "text" {
+				continue
+			}
+			text, _ := block["text"].(string)
+			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+				continue
+			}
+			blocks = append(blocks, map[string]any{"type": "input_text", "text": text})
+		}
+	}
+	return blocks
 }
 
 func extractClaudeReasoningEffort(claude map[string]any) string {

@@ -8,16 +8,21 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
-//go:embed templates/friend_landing.html templates/local_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.png
+//go:embed templates/friend_landing.html templates/local_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.webp
 var friendContent embed.FS
+
+//go:embed web/dist/index.html web/dist/assets/*
+var signalRoomContent embed.FS
 
 func (h *proxyHandler) serveCuteCodeLanding(w http.ResponseWriter, r *http.Request) {
 	data, err := friendContent.ReadFile("templates/cute_code_landing.html")
@@ -39,42 +44,49 @@ func (h *proxyHandler) serveCuteCodeLanding(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *proxyHandler) serveFriendLanding(w http.ResponseWriter, r *http.Request) {
-	var templateFile string
-	var templateData map[string]string
-
-	if h.cfg.friendCode == "" {
-		// Local/personal mode - no friend code required
-		templateFile = "templates/local_landing.html"
-		templateData = map[string]string{
-			"BaseURL": getPublicURL(),
+	if h.cfg.friendCode != "" {
+		data, err := signalRoomContent.ReadFile("web/dist/index.html")
+		if err != nil {
+			http.Error(w, "internal error: signal room missing", http.StatusInternalServerError)
+			return
 		}
-		if templateData["BaseURL"] == "" {
-			templateData["BaseURL"] = "http://localhost:8989"
-		}
-	} else {
-		// Friend mode - requires friend code
-		templateFile = "templates/friend_landing.html"
-		templateData = map[string]string{
-			"FriendName": getFriendName(),
-			"Tagline":    getFriendTagline(),
-		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		_, _ = w.Write(data)
+		return
 	}
 
-	data, err := friendContent.ReadFile(templateFile)
+	data, err := friendContent.ReadFile("templates/local_landing.html")
 	if err != nil {
 		http.Error(w, "internal error: template missing", http.StatusInternalServerError)
 		return
 	}
-
+	templateData := map[string]string{"BaseURL": getPublicURL()}
+	if templateData["BaseURL"] == "" {
+		templateData["BaseURL"] = "http://localhost:8989"
+	}
 	tmpl, err := template.New("landing").Parse(string(data))
 	if err != nil {
 		http.Error(w, "internal error: template parse failed", http.StatusInternalServerError)
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	tmpl.Execute(w, templateData)
+	_ = tmpl.Execute(w, templateData)
+}
+
+func (h *proxyHandler) serveSignalRoomAsset(w http.ResponseWriter, r *http.Request) {
+	assetPath := strings.TrimPrefix(r.URL.Path, "/")
+	data, err := signalRoomContent.ReadFile("web/dist/" + assetPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if contentType := mime.TypeByExtension(filepath.Ext(assetPath)); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	_, _ = w.Write(data)
 }
 
 func (h *proxyHandler) serveOGImage(w http.ResponseWriter, r *http.Request) {
@@ -89,12 +101,12 @@ func (h *proxyHandler) serveOGImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *proxyHandler) serveHeroImage(w http.ResponseWriter, r *http.Request) {
-	data, err := friendContent.ReadFile("templates/og-image-transparent.png")
+	data, err := friendContent.ReadFile("templates/og-image-transparent.webp")
 	if err != nil {
 		http.Error(w, "image not found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Type", "image/webp")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Write(data)
 }
@@ -231,6 +243,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"public_url":              publicURL,
+		"origin_id":               hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)),
 		"download_token":          newUser.Token,
 		"auth_json":               string(authJSONBytes),
 		"gemini_auth_json":        string(geminiJSONBytes),
@@ -352,7 +365,7 @@ foreach ($prop in $incoming.PSObject.Properties) {
 
 Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 20)
 Write-Host "cute-code pool settings saved to $settingsFile"
-Write-Host 'Run: cute-code --model gpt-5.6'
+Write-Host 'Run: cute-code --model gpt-5.6-sol'
 `, publicURL, token)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
@@ -409,7 +422,7 @@ fi
 
 rm -f "$TMP_FILE"
 printf 'cute-code pool settings saved to %%s\n' "$SETTINGS_FILE"
-printf 'Run: cute-code --model gpt-5.6\n'
+printf 'Run: cute-code --model gpt-5.6-sol\n'
 `, publicURL, token)
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
@@ -1663,46 +1676,60 @@ type CyberPolicyStats struct {
 }
 
 type AccountStats struct {
-	ID                      string  `json:"id"` // hashed
-	Type                    string  `json:"type"`
-	PlanType                string  `json:"plan_type"`
-	Status                  string  `json:"status"` // healthy, degraded, dead
-	Penalty                 float64 `json:"penalty"`
-	PrimaryWindowUsed       float64 `json:"primary_window_used_pct"`
-	SecondaryWindowUsed     float64 `json:"secondary_window_used_pct"`
-	PrimaryResetMinutes     int     `json:"primary_reset_minutes"`
-	SecondaryResetMinutes   int     `json:"secondary_reset_minutes"`
-	TotalInputTokens        int64   `json:"total_input_tokens"`
-	TotalCachedTokens       int64   `json:"total_cached_tokens"`
-	TotalOutputTokens       int64   `json:"total_output_tokens"`
-	TotalReasoningTokens    int64   `json:"total_reasoning_tokens"`
-	TotalBillableTokens     int64   `json:"total_billable_tokens"`
-	CacheHitRate            float64 `json:"cache_hit_rate_pct"`
-	CreditsBalance          float64 `json:"credits_balance,omitempty"`
-	HasCredits              bool    `json:"has_credits"`
-	Score                   float64 `json:"score"`
-	ScoreTooltip            string  `json:"score_tooltip,omitempty"`
-	IsPrimary               bool    `json:"is_primary"` // highest score for this provider type
-	SubscriptionCostMonthly float64 `json:"subscription_cost_monthly"`
-	SubscriptionLabel       string  `json:"subscription_label"`
-	APICostEstimate         float64 `json:"api_cost_estimate"` // all-time
-	APICostLast30d          float64 `json:"api_cost_last_30d"` // last 30 days
-	ROI                     float64 `json:"roi"`               // api_cost / subscription_cost
+	ID                        string   `json:"id"` // hashed
+	Type                      string   `json:"type"`
+	PlanType                  string   `json:"plan_type"`
+	Status                    string   `json:"status"` // healthy, degraded, dead
+	Penalty                   float64  `json:"penalty"`
+	PrimaryWindowUsed         float64  `json:"primary_window_used_pct"`
+	SecondaryWindowUsed       float64  `json:"secondary_window_used_pct"`
+	PrimaryWindowAvailable    bool     `json:"primary_window_available"`
+	SecondaryWindowAvailable  bool     `json:"secondary_window_available"`
+	PrimaryResetMinutes       int      `json:"primary_reset_minutes"`
+	SecondaryResetMinutes     int      `json:"secondary_reset_minutes"`
+	PrimaryWindowMinutes      int      `json:"primary_window_minutes"`
+	SecondaryWindowMinutes    int      `json:"secondary_window_minutes"`
+	PrimaryPaceRatio          float64  `json:"primary_pace_ratio"`
+	SecondaryPaceRatio        float64  `json:"secondary_pace_ratio"`
+	AccountAddedAt            string   `json:"account_added_at,omitempty"`
+	TotalInputTokens          int64    `json:"total_input_tokens"`
+	TotalCachedTokens         int64    `json:"total_cached_tokens"`
+	TotalOutputTokens         int64    `json:"total_output_tokens"`
+	TotalReasoningTokens      int64    `json:"total_reasoning_tokens"`
+	TotalBillableTokens       int64    `json:"total_billable_tokens"`
+	CacheHitRate              float64  `json:"cache_hit_rate_pct"`
+	CreditsBalance            float64  `json:"credits_balance,omitempty"`
+	HasCredits                bool     `json:"has_credits"`
+	Score                     float64  `json:"score"`
+	ScoreTooltip              string   `json:"score_tooltip,omitempty"`
+	IsPrimary                 bool     `json:"is_primary"` // highest score for this provider type
+	SubscriptionCostMonthly   float64  `json:"subscription_cost_monthly"`
+	SubscriptionSpend         float64  `json:"subscription_spend"`
+	SubscriptionBillingCycles int      `json:"subscription_billing_cycles"`
+	CostTrackingStartedAt     string   `json:"cost_tracking_started_at,omitempty"`
+	SubscriptionLabel         string   `json:"subscription_label"`
+	APICostEstimate           float64  `json:"api_cost_estimate"` // all-time
+	APICostLast30d            float64  `json:"api_cost_last_30d"` // last 30 days
+	ROI                       float64  `json:"roi"`               // all-time API value / subscription spend
+	ResetCreditsAvailable     int      `json:"reset_credits_available"`
+	ResetCreditExpirations    []string `json:"reset_credit_expirations,omitempty"`
+	ResetCreditsKnown         bool     `json:"reset_credits_known"`
 }
 
 type AggregateStats struct {
-	TotalInputTokens      int64                          `json:"total_input_tokens"`
-	TotalCachedTokens     int64                          `json:"total_cached_tokens"`
-	TotalOutputTokens     int64                          `json:"total_output_tokens"`
-	TotalReasoningTokens  int64                          `json:"total_reasoning_tokens"`
-	TotalBillableTokens   int64                          `json:"total_billable_tokens"`
-	AvgPrimaryUsed        float64                        `json:"avg_primary_window_used_pct"`
-	AvgSecondaryUsed      float64                        `json:"avg_secondary_window_used_pct"`
-	OverallCacheHitRate   float64                        `json:"overall_cache_hit_rate_pct"`
-	TotalAPICost          float64                        `json:"total_api_cost"`
-	TotalSubscriptionCost float64                        `json:"total_subscription_cost"`
-	OverallROI            float64                        `json:"overall_roi"`
-	CostByProvider        map[string]ProviderCostSummary `json:"cost_by_provider,omitempty"`
+	TotalInputTokens         int64                          `json:"total_input_tokens"`
+	TotalCachedTokens        int64                          `json:"total_cached_tokens"`
+	TotalOutputTokens        int64                          `json:"total_output_tokens"`
+	TotalReasoningTokens     int64                          `json:"total_reasoning_tokens"`
+	TotalBillableTokens      int64                          `json:"total_billable_tokens"`
+	AvgPrimaryUsed           float64                        `json:"avg_primary_window_used_pct"`
+	AvgSecondaryUsed         float64                        `json:"avg_secondary_window_used_pct"`
+	OverallCacheHitRate      float64                        `json:"overall_cache_hit_rate_pct"`
+	TotalAPICost             float64                        `json:"total_api_cost"`
+	TotalSubscriptionCost    float64                        `json:"total_subscription_cost"`
+	TotalSubscriptionMonthly float64                        `json:"total_subscription_monthly"`
+	OverallROI               float64                        `json:"overall_roi"`
+	CostByProvider           map[string]ProviderCostSummary `json:"cost_by_provider,omitempty"`
 }
 
 // CapacityAnalysis contains token capacity estimation data for the stats API.
@@ -1724,11 +1751,26 @@ type PlanCapacityInfo struct {
 	EstimatedSecondaryCapacity int64   `json:"estimated_7d_capacity"`
 }
 
+// quotaPaceRatio compares current quota consumption with an even burn across
+// the elapsed portion of a reset window. Values over one will exhaust the
+// window early if the current pace holds.
+func quotaPaceRatio(usedPercent float64, resetMinutes, windowMinutes int) float64 {
+	if usedPercent <= 0 || resetMinutes <= 0 || windowMinutes <= 0 || resetMinutes >= windowMinutes {
+		return 0
+	}
+	elapsed := windowMinutes - resetMinutes
+	if elapsed <= 0 {
+		return 0
+	}
+	return usedPercent / (100 * float64(elapsed) / float64(windowMinutes))
+}
+
 func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 	accounts := h.pool.allAccounts()
 
 	stats := PoolStats{
 		TotalAccounts: len(accounts),
+		Accounts:      []AccountStats{},
 		GeneratedAt:   time.Now(),
 	}
 
@@ -1738,6 +1780,7 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 
 	var totalInput, totalCached, totalOutput, totalReasoning, totalBillable int64
 	var primarySum, secondarySum float64
+	var primaryCount, secondaryCount int
 	activeCount := 0
 
 	for _, acc := range accounts {
@@ -1777,6 +1820,9 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		primaryUsed := accountPrimaryUsageLocked(acc) * 100
+		secondaryUsed := accountSecondaryUsageLocked(acc) * 100
+
 		breakdown := scoreBreakdown{}
 		score := float64(0)
 		if !acc.Dead && !acc.Disabled {
@@ -1786,25 +1832,37 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		scoreTooltip := scoreTooltipFromBreakdownLocked(acc, stats.GeneratedAt, breakdown)
 
 		as := AccountStats{
-			ID:                    hashAccountID(acc.ID),
-			Type:                  accType,
-			PlanType:              formatPlanWithTier(acc.PlanType, acc.RateLimitTier),
-			Status:                status,
-			Penalty:               acc.Penalty,
-			PrimaryWindowUsed:     accountPrimaryUsageLocked(acc) * 100,
-			SecondaryWindowUsed:   accountSecondaryUsageLocked(acc) * 100,
-			PrimaryResetMinutes:   primaryReset,
-			SecondaryResetMinutes: secondaryReset,
-			TotalInputTokens:      acc.Totals.TotalInputTokens,
-			TotalCachedTokens:     acc.Totals.TotalCachedTokens,
-			TotalOutputTokens:     acc.Totals.TotalOutputTokens,
-			TotalReasoningTokens:  acc.Totals.TotalReasoningTokens,
-			TotalBillableTokens:   acc.Totals.TotalBillableTokens,
-			CacheHitRate:          cacheHitRate,
-			HasCredits:            acc.Usage.HasCredits,
-			CreditsBalance:        acc.Usage.CreditsBalance,
-			Score:                 score,
-			ScoreTooltip:          scoreTooltip,
+			ID:                       hashAccountID(acc.ID),
+			Type:                     accType,
+			PlanType:                 formatPlanWithTier(acc.PlanType, acc.RateLimitTier),
+			Status:                   status,
+			Penalty:                  acc.Penalty,
+			PrimaryWindowUsed:        primaryUsed,
+			SecondaryWindowUsed:      secondaryUsed,
+			PrimaryWindowAvailable:   usagePrimaryWindowAvailable(acc.Usage),
+			SecondaryWindowAvailable: usageSecondaryWindowAvailable(acc.Usage),
+			PrimaryResetMinutes:      primaryReset,
+			SecondaryResetMinutes:    secondaryReset,
+			PrimaryWindowMinutes:     acc.Usage.PrimaryWindowMinutes,
+			SecondaryWindowMinutes:   acc.Usage.SecondaryWindowMinutes,
+			PrimaryPaceRatio:         quotaPaceRatio(primaryUsed, primaryReset, acc.Usage.PrimaryWindowMinutes),
+			SecondaryPaceRatio:       quotaPaceRatio(secondaryUsed, secondaryReset, acc.Usage.SecondaryWindowMinutes),
+			AccountAddedAt:           acc.AddedAt.UTC().Format(time.RFC3339),
+			TotalInputTokens:         acc.Totals.TotalInputTokens,
+			TotalCachedTokens:        acc.Totals.TotalCachedTokens,
+			TotalOutputTokens:        acc.Totals.TotalOutputTokens,
+			TotalReasoningTokens:     acc.Totals.TotalReasoningTokens,
+			TotalBillableTokens:      acc.Totals.TotalBillableTokens,
+			CacheHitRate:             cacheHitRate,
+			HasCredits:               acc.Usage.HasCredits,
+			CreditsBalance:           acc.Usage.CreditsBalance,
+			Score:                    score,
+			ScoreTooltip:             scoreTooltip,
+			ResetCreditsAvailable:    acc.ResetCreditsAvailable,
+			ResetCreditsKnown:        !acc.ResetCreditsRetrievedAt.IsZero(),
+		}
+		for _, credit := range acc.RateLimitResetCredits {
+			as.ResetCreditExpirations = append(as.ResetCreditExpirations, credit.ExpiresAt.UTC().Format(time.RFC3339Nano))
 		}
 
 		totalInput += acc.Totals.TotalInputTokens
@@ -1812,8 +1870,14 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		totalOutput += acc.Totals.TotalOutputTokens
 		totalReasoning += acc.Totals.TotalReasoningTokens
 		totalBillable += acc.Totals.TotalBillableTokens
-		primarySum += acc.Usage.PrimaryUsedPercent
-		secondarySum += acc.Usage.SecondaryUsedPercent
+		if usagePrimaryWindowAvailable(acc.Usage) {
+			primarySum += accountPrimaryUsageLocked(acc)
+			primaryCount++
+		}
+		if usageSecondaryWindowAvailable(acc.Usage) {
+			secondarySum += accountSecondaryUsageLocked(acc)
+			secondaryCount++
+		}
 
 		acc.mu.Unlock()
 		stats.Accounts = append(stats.Accounts, as)
@@ -1841,9 +1905,11 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 
 	avgPrimary := float64(0)
 	avgSecondary := float64(0)
-	if len(accounts) > 0 {
-		avgPrimary = (primarySum / float64(len(accounts))) * 100
-		avgSecondary = (secondarySum / float64(len(accounts))) * 100
+	if primaryCount > 0 {
+		avgPrimary = (primarySum / float64(primaryCount)) * 100
+	}
+	if secondaryCount > 0 {
+		avgSecondary = (secondarySum / float64(secondaryCount)) * 100
 	}
 
 	stats.AggregateUsage = AggregateStats{
@@ -1904,23 +1970,29 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 	if h.store != nil {
 		if hourly, err := h.store.getGlobalHourlyUsage(24); err == nil {
 			for _, hu := range hourly {
-				stats.Last24hTokens += hu.BillableTokens
+				throughput := hu.InputTokens + hu.OutputTokens
+				if hu.AccountType == string(AccountTypeClaude) {
+					throughput += hu.CachedTokens
+				}
+				stats.Last24hTokens += throughput
 			}
 		}
 	}
 
 	// Populate cost data from analytics store
 	if h.analyticsStore != nil {
-		// Per-account costs (all-time and 30d)
-		allTimeCosts, _ := h.analyticsStore.getAllTimeAccountCosts()
+		// Per-account costs and their measurement periods.
+		allTimeCostStats, _ := h.analyticsStore.getAllTimeAccountCostStats()
 		last30dCosts, _ := h.analyticsStore.getCostByAccount(30)
 
 		// Build account ID -> real ID mapping for cost lookup
 		// (stats use hashed IDs, costs use real IDs)
 		accountIDMap := make(map[string]string) // hashed -> real
+		accountAddedAt := make(map[string]time.Time)
 		for _, acc := range accounts {
 			acc.mu.Lock()
 			accountIDMap[hashAccountID(acc.ID)] = acc.ID
+			accountAddedAt[acc.ID] = acc.AddedAt
 			acc.mu.Unlock()
 		}
 
@@ -1930,12 +2002,26 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			realID := accountIDMap[as.ID]
 
 			subCost, subLabel := getSubscriptionCost(AccountType(as.Type), accountPlanForSubscription(as.PlanType))
+			costStats := allTimeCostStats[realID]
 			as.SubscriptionCostMonthly = subCost
 			as.SubscriptionLabel = subLabel
-			as.APICostEstimate = allTimeCosts[realID]
+			as.APICostEstimate = costStats.CostUSD
 			as.APICostLast30d = last30dCosts[realID]
-			if subCost > 0 {
-				as.ROI = as.APICostEstimate / subCost
+			spendStart := accountAddedAt[realID]
+			if spendStart.IsZero() {
+				// Legacy in-memory fixtures can lack an admission timestamp. Keep
+				// historical cost data as their compatibility fallback only.
+				spendStart = costStats.FirstSeen
+			}
+			if spendStart.IsZero() {
+				// A paid account with no recorded API use still consumed its current
+				// subscription billing cycle.
+				spendStart = stats.GeneratedAt
+			}
+			as.CostTrackingStartedAt = spendStart.UTC().Format(time.RFC3339)
+			as.SubscriptionSpend, as.SubscriptionBillingCycles = estimateSubscriptionSpend(subCost, spendStart, stats.GeneratedAt)
+			if as.SubscriptionSpend > 0 {
+				as.ROI = as.APICostEstimate / as.SubscriptionSpend
 			}
 		}
 
@@ -1945,7 +2031,8 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			as := &stats.Accounts[i]
 			pcs := providerCosts[as.Type]
 			pcs.APICost += as.APICostEstimate
-			pcs.SubscriptionCost += as.SubscriptionCostMonthly
+			pcs.SubscriptionCost += as.SubscriptionSpend
+			pcs.MonthlySubscriptionCost += as.SubscriptionCostMonthly
 			pcs.AccountCount++
 			providerCosts[as.Type] = pcs
 		}
@@ -1957,14 +2044,18 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		}
 		stats.AggregateUsage.CostByProvider = providerCosts
 
-		// Pool-level totals
-		totalAPICost, _ := h.analyticsStore.getTotalCost()
-		stats.AggregateUsage.TotalAPICost = totalAPICost
-		var totalSubCost float64
+		// Pool-level ROI covers the same current-account set on both sides.
+		// Historical API value from removed accounts cannot be compared with the
+		// subscription spend of only the accounts still in the pool.
+		var totalAPICost, totalSubCost, totalSubMonthly float64
 		for _, pcs := range providerCosts {
+			totalAPICost += pcs.APICost
 			totalSubCost += pcs.SubscriptionCost
+			totalSubMonthly += pcs.MonthlySubscriptionCost
 		}
+		stats.AggregateUsage.TotalAPICost = totalAPICost
 		stats.AggregateUsage.TotalSubscriptionCost = totalSubCost
+		stats.AggregateUsage.TotalSubscriptionMonthly = totalSubMonthly
 		if totalSubCost > 0 {
 			stats.AggregateUsage.OverallROI = totalAPICost / totalSubCost
 		}
