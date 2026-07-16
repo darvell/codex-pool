@@ -17,13 +17,19 @@ type piProviderConfig struct {
 }
 
 type piModelConfig struct {
-	ID            string       `json:"id"`
-	Name          string       `json:"name,omitempty"`
-	Reasoning     *bool        `json:"reasoning,omitempty"`
-	Input         []string     `json:"input,omitempty"`
-	ContextWindow int          `json:"contextWindow,omitempty"`
-	MaxTokens     int          `json:"maxTokens,omitempty"`
-	Cost          *piModelCost `json:"cost,omitempty"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name,omitempty"`
+	Reasoning        *bool             `json:"reasoning,omitempty"`
+	ThinkingLevelMap map[string]string `json:"thinkingLevelMap,omitempty"`
+	Input            []string          `json:"input,omitempty"`
+	ContextWindow    int               `json:"contextWindow,omitempty"`
+	MaxTokens        int               `json:"maxTokens,omitempty"`
+	Cost             *piModelCost      `json:"cost,omitempty"`
+	Compat           *piModelCompat    `json:"compat,omitempty"`
+}
+
+type piModelCompat struct {
+	ForceAdaptiveThinking bool `json:"forceAdaptiveThinking,omitempty"`
 }
 
 type piModelCost struct {
@@ -66,18 +72,18 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				APIKey:  codexAPIKey,
 				API:     "openai-codex-responses",
 				Models: []piModelConfig{
-					piTextModel("gpt-5.6", "GPT-5.6", true, 372000, 128000),
-					piTextModel("gpt-5.6-sol", "GPT-5.6 Sol", true, 372000, 128000),
-					piTextModel("gpt-5.6-terra", "GPT-5.6 Terra", true, 372000, 128000),
-					piTextModel("gpt-5.6-luna", "GPT-5.6 Luna", true, 372000, 128000),
-					piTextModel("gpt-5.5", "GPT-5.5", true, 272000, 128000),
-					piTextModel("gpt-5.4", "GPT-5.4", true, 1000000, 128000),
-					piTextModel("gpt-5.3-codex", "GPT-5.3 Codex", true, 272000, 128000),
-					piTextModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", true, 128000, 128000),
-					piTextModel("gpt-5.2-codex", "GPT-5.2 Codex", true, 272000, 128000),
-					piTextModel("gpt-5.1-codex-max", "GPT-5.1 Codex Max", true, 272000, 128000),
-					piTextModel("gpt-5.2", "GPT-5.2", true, 272000, 128000),
-					piTextModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", true, 272000, 128000),
+					piCodexModel("gpt-5.6", "GPT-5.6", 372000, 128000),
+					piCodexModel("gpt-5.6-sol", "GPT-5.6 Sol", 372000, 128000),
+					piCodexModel("gpt-5.6-terra", "GPT-5.6 Terra", 372000, 128000),
+					piCodexModel("gpt-5.6-luna", "GPT-5.6 Luna", 372000, 128000),
+					piCodexModel("gpt-5.5", "GPT-5.5", 272000, 128000),
+					piCodexModel("gpt-5.4", "GPT-5.4", 1000000, 128000),
+					piCodexModel("gpt-5.3-codex", "GPT-5.3 Codex", 272000, 128000),
+					piCodexModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, 128000),
+					piCodexModel("gpt-5.2-codex", "GPT-5.2 Codex", 272000, 128000),
+					piCodexModel("gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, 128000),
+					piCodexModel("gpt-5.2", "GPT-5.2", 272000, 128000),
+					piCodexModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, 128000),
 				},
 			},
 			"claude": {
@@ -305,8 +311,16 @@ func piTextModel(id, name string, reasoning bool, contextWindow, maxTokens int) 
 	}
 }
 
+func piCodexModel(id, name string, contextWindow, maxTokens int) piModelConfig {
+	model := piTextModel(id, name, true, contextWindow, maxTokens)
+	if id == "gpt-5.6" || strings.HasPrefix(id, "gpt-5.6-") {
+		model.ThinkingLevelMap = map[string]string{"xhigh": "xhigh", "max": "max"}
+	}
+	return model
+}
+
 func piClaudeAlias(id, name string, contextWindow, maxTokens int, inputCost, outputCost, cacheReadCost, cacheWriteCost float64) piModelConfig {
-	return piModelConfig{
+	model := piModelConfig{
 		ID:            id,
 		Name:          name,
 		Reasoning:     boolPtr(true),
@@ -320,6 +334,15 @@ func piClaudeAlias(id, name string, contextWindow, maxTokens int, inputCost, out
 			CacheWrite: cacheWriteCost,
 		},
 	}
+	if ccModelSupportsEffort(id) {
+		model.ThinkingLevelMap = map[string]string{"max": "max"}
+		model.Compat = &piModelCompat{ForceAdaptiveThinking: true}
+		canonical := ccCanonicalClaudeModel(id)
+		if strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
+			model.ThinkingLevelMap["xhigh"] = "xhigh"
+		}
+	}
+	return model
 }
 
 func boolPtr(v bool) *bool {
