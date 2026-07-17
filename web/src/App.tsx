@@ -112,6 +112,53 @@ function ResetWindow({ label, available, used, resetMinutes, paceRatio, showPace
   return <span className="reset-window"><b>{label} {used.toFixed(0)}%</b><small>RESETS {formatReset(resetMinutes)}{showPace ? ` // ${paceLabel(paceRatio)}` : ""}</small></span>;
 }
 
+function formatResetCreditExpiry(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "UNKNOWN EXPIRATION";
+  const absolute = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+  const remainingMinutes = Math.floor((date.valueOf() - Date.now()) / 60_000);
+  if (remainingMinutes <= 0) return `${absolute} // EXPIRED`;
+  const days = Math.floor(remainingMinutes / 1440);
+  const hours = Math.floor((remainingMinutes % 1440) / 60);
+  const minutes = remainingMinutes % 60;
+  const relative = days > 0 ? `${days}D ${hours}H` : hours > 0 ? `${hours}H ${minutes}M` : `${minutes}M`;
+  return `${absolute} // IN ${relative}`;
+}
+
+function ResetCreditExpirations({ account }: { account: AccountStats }) {
+  const expirations = account.reset_credit_expirations ?? [];
+  const count = account.reset_credits_available ?? expirations.length;
+  const missing = Math.max(0, count - expirations.length);
+  return (
+    <>
+      {expirations.map((expiry, index) => <span key={`${expiry}-${index}`}>{formatResetCreditExpiry(expiry)}</span>)}
+      {missing > 0 && <span>{missing} EXPIRATION {missing === 1 ? "IS" : "ARE"} NOT REPORTED</span>}
+      {count === 0 && <span>NO BANKED RESETS</span>}
+    </>
+  );
+}
+
+function ResetCreditBadge({ account }: { account: AccountStats }) {
+  if (account.type !== "codex" || !account.reset_credits_known) return <span className="reset-credit unknown">—</span>;
+  const count = account.reset_credits_available ?? 0;
+  return (
+    <span className="reset-credit" aria-label={`${count} banked usage reset${count === 1 ? "" : "s"}; select account for expiration details`}>
+      <b aria-hidden="true">↻</b><strong>{count}</strong>
+      <span className="reset-credit-popover" role="tooltip">
+        <em>{count} BANKED USAGE RESET{count === 1 ? "" : "S"}</em>
+        <ResetCreditExpirations account={account} />
+      </span>
+    </span>
+  );
+}
+
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -720,7 +767,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
       <div className={classNames("accounts-layout", selectedAdmin && "inspecting")}>
         <div className="account-table" role="table" aria-label="Provider accounts">
           <div className="account-row account-head" role="row">
-            <span>PROVIDER / PLAN / ACCOUNT</span><span>STATE</span><span>WEEKLY LIMIT</span><span>RESET WINDOWS</span><span>BURN</span><span>VALUE</span><span>SPEND</span><span>ROI</span><span>TRACE</span>
+            <span>PROVIDER / PLAN / ACCOUNT</span><span>STATE</span><span>WEEKLY LIMIT</span><span>RESET WINDOWS</span><span>BANKED RESETS</span><span>BURN</span><span>VALUE</span><span>SPEND</span><span>ROI</span><span>TRACE</span>
           </div>
           {stats.accounts.map((account) => {
             const adminMatch = adminAccounts.find((candidate) => candidate.public_id === account.id);
@@ -734,6 +781,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                   <ResetWindow label="PRIMARY" available={account.primary_window_available} used={account.primary_window_used_pct} resetMinutes={account.primary_reset_minutes} />
                   <ResetWindow label="WEEKLY" available={account.secondary_window_available} used={account.secondary_window_used_pct} resetMinutes={account.secondary_reset_minutes} />
                 </span>
+                <ResetCreditBadge account={account} />
                 <span>{formatTokens(accountThroughput(account))}</span>
                 <span>{money.format(account.api_cost_estimate)}</span>
                 <span>{money.format(account.subscription_spend)}</span>
@@ -756,6 +804,15 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                   <ResetWindow label="PRIMARY WINDOW" available={selectedAccount.primary_window_available} used={selectedAccount.primary_window_used_pct} resetMinutes={selectedAccount.primary_reset_minutes} paceRatio={selectedAccount.primary_pace_ratio} showPace />
                   <ResetWindow label="WEEKLY WINDOW" available={selectedAccount.secondary_window_available} used={selectedAccount.secondary_window_used_pct} resetMinutes={selectedAccount.secondary_reset_minutes} paceRatio={selectedAccount.secondary_pace_ratio} showPace />
                 </div>
+                {selectedAccount.type === "codex" && (
+                  <section className="inspector-reset-credits" aria-label="Banked usage resets">
+                    <header><span>BANKED USAGE RESETS</span><strong>{selectedAccount.reset_credits_known ? selectedAccount.reset_credits_available ?? 0 : "—"}</strong></header>
+                    <div>
+                      {selectedAccount.reset_credits_known ? <ResetCreditExpirations account={selectedAccount} /> : <span>RESET CREDIT DATA NOT REPORTED</span>}
+                    </div>
+                    <small>EXPIRATIONS ARE SHOWN IN YOUR LOCAL TIME</small>
+                  </section>
+                )}
                 <div className="inspector-metrics">
                   <Instrument label="BURN" value={formatTokens(accountThroughput(selectedAccount))} accent />
                   <Instrument label="CACHE" value={`${selectedAccount.cache_hit_rate_pct.toFixed(1)}%`} />

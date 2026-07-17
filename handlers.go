@@ -163,9 +163,15 @@ func preserveUsageSnapshots(current, loaded []*Account) {
 		}
 		previous.mu.Lock()
 		usage := previous.Usage
+		resetCredits := append([]RateLimitResetCredit(nil), previous.RateLimitResetCredits...)
+		resetCreditsAvailable := previous.ResetCreditsAvailable
+		resetCreditsRetrievedAt := previous.ResetCreditsRetrievedAt
 		previous.mu.Unlock()
 		account.mu.Lock()
 		account.Usage = mergeUsage(account.Usage, usage)
+		account.RateLimitResetCredits = resetCredits
+		account.ResetCreditsAvailable = resetCreditsAvailable
+		account.ResetCreditsRetrievedAt = resetCreditsRetrievedAt
 		account.mu.Unlock()
 	}
 }

@@ -202,6 +202,12 @@ func TestAutoRedeemCodexResetCreditWaitsUntilThreshold(t *testing.T) {
 	}
 }
 
+func TestAutoRedeemCodexResetCreditWindowIsFifteenMinutes(t *testing.T) {
+	if resetCreditAutoRedeemWindow != 15*time.Minute {
+		t.Fatalf("auto-redeem window = %s, want 15m", resetCreditAutoRedeemWindow)
+	}
+}
+
 func TestCodexProviderUpstreamURLBackendAPIPathUsesWhamBase(t *testing.T) {
 	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
 	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")

@@ -46,6 +46,8 @@ export interface AccountStats {
   api_cost_last_30d: number;
   roi: number;
   reset_credits_available?: number;
+  reset_credit_expirations?: string[];
+  reset_credits_known?: boolean;
 }
 
 export interface PoolStats {
