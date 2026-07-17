@@ -107,8 +107,9 @@ function paceLabel(paceRatio?: number) {
   return paceRatio >= 1.1 ? `${paceRatio.toFixed(1)}× FAST` : `${paceRatio.toFixed(1)}× SAFE`;
 }
 
-function ResetWindow({ label, available, used, resetMinutes, paceRatio, showPace = false }: { label: string; available: boolean; used: number; resetMinutes: number; paceRatio?: number; showPace?: boolean }) {
-  if (!available) return <span className="reset-window unavailable"><b>{label}</b><small>NOT REPORTED</small></span>;
+function ResetWindow({ label, available, used, resetMinutes, paceRatio, showPace = false, compact = false }: { label: string; available: boolean; used: number; resetMinutes: number; paceRatio?: number; showPace?: boolean; compact?: boolean }) {
+  if (!available) return <span className={classNames("reset-window unavailable", compact && "compact")}><b>{label}</b><small>NOT REPORTED</small></span>;
+  if (compact) return <span className="reset-window compact" aria-label={`${label} ${used.toFixed(0)}%, resets in ${formatReset(resetMinutes)}`}><b>{label}</b><strong>{used.toFixed(0)}%</strong><small>{formatReset(resetMinutes)}</small></span>;
   return <span className="reset-window"><b>{label} {used.toFixed(0)}%</b><small>RESETS {formatReset(resetMinutes)}{showPace ? ` // ${paceLabel(paceRatio)}` : ""}</small></span>;
 }
 
@@ -778,8 +779,8 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                 <span className={`state ${account.status}`}>{account.status === "dead" ? "cooked" : account.status}</span>
                 <span className="quota-limit">{account.secondary_window_available ? <><b>{account.secondary_window_used_pct.toFixed(0)}%</b><small>{paceLabel(account.secondary_pace_ratio)}</small></> : "n/a"}</span>
                 <span className="account-windows">
-                  <ResetWindow label="PRIMARY" available={account.primary_window_available} used={account.primary_window_used_pct} resetMinutes={account.primary_reset_minutes} />
-                  <ResetWindow label="WEEKLY" available={account.secondary_window_available} used={account.secondary_window_used_pct} resetMinutes={account.secondary_reset_minutes} />
+                  <ResetWindow label="PRIMARY" available={account.primary_window_available} used={account.primary_window_used_pct} resetMinutes={account.primary_reset_minutes} compact />
+                  <ResetWindow label="WEEKLY" available={account.secondary_window_available} used={account.secondary_window_used_pct} resetMinutes={account.secondary_reset_minutes} compact />
                 </span>
                 <ResetCreditBadge account={account} />
                 <span>{formatTokens(accountThroughput(account))}</span>
