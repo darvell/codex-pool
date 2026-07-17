@@ -107,6 +107,33 @@ function paceLabel(paceRatio?: number) {
   return paceRatio >= 1.1 ? `${paceRatio.toFixed(1)}× FAST` : `${paceRatio.toFixed(1)}× SAFE`;
 }
 
+function WeeklyPace({ account }: { account: AccountStats }) {
+  if (!account.secondary_window_available) {
+    return <span className="quota-limit unavailable">N/A</span>;
+  }
+  const windowMinutes = account.secondary_window_minutes > 0 ? account.secondary_window_minutes : 7 * 1440;
+  const windowDays = windowMinutes / 1440;
+  const budgetPerDay = 100 / windowDays;
+  const elapsedMinutes = windowMinutes - account.secondary_reset_minutes;
+  if (elapsedMinutes <= 0 || account.secondary_window_used_pct <= 0) {
+    return (
+      <span className="quota-limit acquiring" aria-label={`Weekly budget ${budgetPerDay.toFixed(1)} percent per day; not enough history to forecast`}>
+        <b>—</b><small>BUDGET {budgetPerDay.toFixed(1)}%/D</small><em>ACQUIRING RATE</em>
+      </span>
+    );
+  }
+  const burnPerDay = account.secondary_window_used_pct / (elapsedMinutes / 1440);
+  const remainingPct = Math.max(0, 100 - account.secondary_window_used_pct);
+  const fullInMinutes = remainingPct / (burnPerDay / 1440);
+  const exhaustsEarly = fullInMinutes < account.secondary_reset_minutes;
+  const forecast = exhaustsEarly ? `FULL IN ${formatReset(Math.max(1, Math.floor(fullInMinutes)))}` : "LASTS TO RESET";
+  return (
+    <span className={classNames("quota-limit", exhaustsEarly ? "fast" : "safe")} aria-label={`Burning ${burnPerDay.toFixed(1)} percent per day against a ${budgetPerDay.toFixed(1)} percent daily budget. ${forecast.toLowerCase()}.`}>
+      <b>{burnPerDay.toFixed(1)}%/D</b><small>BUDGET {budgetPerDay.toFixed(1)}</small><em>{forecast}</em>
+    </span>
+  );
+}
+
 function ResetWindow({ label, available, used, resetMinutes, paceRatio, showPace = false, compact = false }: { label: string; available: boolean; used: number; resetMinutes: number; paceRatio?: number; showPace?: boolean; compact?: boolean }) {
   if (!available) return <span className={classNames("reset-window unavailable", compact && "compact")}><b>{label}</b><small>NOT REPORTED</small></span>;
   if (compact) return <span className="reset-window compact" aria-label={`${label} ${used.toFixed(0)}%, resets in ${formatReset(resetMinutes)}`}><b>{label}</b><strong>{used.toFixed(0)}%</strong><small>{formatReset(resetMinutes)}</small></span>;
@@ -768,7 +795,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
       <div className={classNames("accounts-layout", selectedAdmin && "inspecting")}>
         <div className="account-table" role="table" aria-label="Provider accounts">
           <div className="account-row account-head" role="row">
-            <span>PROVIDER / PLAN / ACCOUNT</span><span>STATE</span><span>WEEKLY LIMIT</span><span>RESET WINDOWS</span><span>BANKED RESETS</span><span>BURN</span><span>VALUE</span><span>SPEND</span><span>ROI</span><span>TRACE</span>
+            <span>PROVIDER / PLAN / ACCOUNT</span><span>STATE</span><span>WEEKLY PACE</span><span>RESET WINDOWS</span><span>BANKED RESETS</span><span>BURN</span><span>VALUE</span><span>SPEND</span><span>ROI</span><span>TRACE</span>
           </div>
           {stats.accounts.map((account) => {
             const adminMatch = adminAccounts.find((candidate) => candidate.public_id === account.id);
@@ -777,7 +804,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
               <button className={classNames("account-row", selected === rowID && "selected")} key={account.id} onClick={() => setSelected(rowID)} style={{ "--provider": PROVIDERS[account.type].color } as CSSProperties}>
                 <span className="account-identity"><i>{PROVIDERS[account.type].glyph}</i><b>{PROVIDERS[account.type].label}</b><small><em>{account.plan_type || "unknown plan"}</em><span>{operatorToken && adminMatch ? adminMatch.id : account.id}</span></small></span>
                 <span className={`state ${account.status}`}>{account.status === "dead" ? "cooked" : account.status}</span>
-                <span className="quota-limit">{account.secondary_window_available ? <><b>{account.secondary_window_used_pct.toFixed(0)}%</b><small>{paceLabel(account.secondary_pace_ratio)}</small></> : "n/a"}</span>
+                <WeeklyPace account={account} />
                 <span className="account-windows">
                   <ResetWindow label="PRIMARY" available={account.primary_window_available} used={account.primary_window_used_pct} resetMinutes={account.primary_reset_minutes} compact />
                   <ResetWindow label="WEEKLY" available={account.secondary_window_available} used={account.secondary_window_used_pct} resetMinutes={account.secondary_reset_minutes} compact />
