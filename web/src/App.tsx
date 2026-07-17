@@ -1089,10 +1089,10 @@ function ModelDemandTable({ rows }: { rows: ModelDailyUsage[] }) {
   return (
     <div className="model-demand-table">
       <div className="model-demand-controls">
-        <span>RANK BY</span>
+        <span>ALL {models.length} MODELS · RANK BY</span>
         {(["tokens", "requests", "apiValue"] as const).map((value) => <button className={metric === value ? "active" : ""} key={value} onClick={() => setMetric(value)}>{value === "apiValue" ? "API VALUE" : value.toUpperCase()}</button>)}
       </div>
-      {ranked.slice(0, 12).map((row, index) => {
+      {ranked.map((row, index) => {
         const provider = providerDisplay(row.provider);
         const share = total ? row[metric] / total * 100 : 0;
         return <div key={`${row.provider}-${row.model}`} style={{ "--provider": provider.color } as CSSProperties}>
