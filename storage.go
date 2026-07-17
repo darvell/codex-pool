@@ -1007,20 +1007,20 @@ func (s *usageStore) EstimateCapacity() (map[string]CapacityEstimate, error) {
 			est.ConfidenceLevel = "high"
 		}
 
-		// Estimate total capacity (effective tokens for 100% usage)
-		// If we know X effective tokens = Y%, then 100% = X * (100/Y)
+		// Deltas are stored as fractions of a full window (0.01 = one
+		// percentage point), so effective/delta already estimates 100%.
 		if cap.EffectivePerPrimaryPct > 0 {
-			est.EstimatedTotalPrimary = int64(cap.EffectivePerPrimaryPct * 100)
+			est.EstimatedTotalPrimary = int64(cap.EffectivePerPrimaryPct)
 		} else if cap.TokensPerPrimaryPct > 0 {
 			// Fallback to raw tokens if no weighted estimate
-			est.EstimatedTotalPrimary = int64(cap.TokensPerPrimaryPct * 100)
+			est.EstimatedTotalPrimary = int64(cap.TokensPerPrimaryPct)
 			est.Notes = "Using raw token estimate (no weighted data yet)"
 		}
 
 		if cap.EffectivePerSecondaryPct > 0 {
-			est.EstimatedTotalSecondary = int64(cap.EffectivePerSecondaryPct * 100)
+			est.EstimatedTotalSecondary = int64(cap.EffectivePerSecondaryPct)
 		} else if cap.TokensPerSecondaryPct > 0 {
-			est.EstimatedTotalSecondary = int64(cap.TokensPerSecondaryPct * 100)
+			est.EstimatedTotalSecondary = int64(cap.TokensPerSecondaryPct)
 		}
 
 		// Set default multipliers if not yet estimated
@@ -1056,6 +1056,43 @@ func (s *usageStore) getRecentSamples(limit int) ([]CapacitySample, error) {
 		return nil
 	})
 	return samples, err
+}
+
+// getRecentRequestUsage returns bounded raw observations for quota inference.
+// The caller receives no metadata beyond fields already captured on RequestUsage;
+// public response builders must aggregate and hash account identifiers.
+func (s *usageStore) getRecentRequestUsage(days int) ([]RequestUsage, error) {
+	var rows []RequestUsage
+	if s == nil || s.db == nil {
+		return rows, nil
+	}
+	if days <= 0 {
+		days = 30
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketUsageRequests))
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(_, value []byte) error {
+			var row RequestUsage
+			if err := json.Unmarshal(value, &row); err == nil && !row.Timestamp.Before(cutoff) {
+				rows = append(rows, row)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].AccountID != rows[j].AccountID {
+			return rows[i].AccountID < rows[j].AccountID
+		}
+		return rows[i].Timestamp.Before(rows[j].Timestamp)
+	})
+	return rows, nil
 }
 
 // getUserUsage returns aggregate usage for a specific user.

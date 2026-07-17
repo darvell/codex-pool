@@ -438,6 +438,7 @@ func main() {
 		pacer:                pacer,
 	}
 	h.startUsagePoller()
+	h.startQuotaIntelligenceRefresher()
 	startAntigravityVersionUpdater(context.Background())
 	h.startAntigravityModelPoller()
 
@@ -525,6 +526,9 @@ type proxyHandler struct {
 	refreshCallsMu  sync.Mutex
 	refreshCalls    map[string]*refreshCall
 	usagePollMu     sync.Mutex
+	quotaIntelMu    sync.RWMutex
+	quotaIntelBusy  bool
+	quotaIntel      quotaIntelligenceSnapshot
 }
 
 type refreshCall struct {

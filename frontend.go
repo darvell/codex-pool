@@ -1945,10 +1945,10 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 				}
 				var estPrimary, estSecondary int64
 				if cap.EffectivePerPrimaryPct > 0 {
-					estPrimary = int64(cap.EffectivePerPrimaryPct * 100)
+					estPrimary = int64(cap.EffectivePerPrimaryPct)
 				}
 				if cap.EffectivePerSecondaryPct > 0 {
-					estSecondary = int64(cap.EffectivePerSecondaryPct * 100)
+					estSecondary = int64(cap.EffectivePerSecondaryPct)
 				}
 				analysis.Plans[planType] = PlanCapacityInfo{
 					SampleCount:                cap.SampleCount,

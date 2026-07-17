@@ -17,11 +17,16 @@ type SignalEconomicsPoint struct {
 }
 
 type SignalAnalyticsResponse struct {
-	GeneratedAt     time.Time              `json:"generated_at"`
-	OriginDataSince time.Time              `json:"origin_data_since"`
-	Economics       []SignalEconomicsPoint `json:"economics"`
-	Hourly          []UserHourlyUsage      `json:"hourly"`
-	OriginWeekly    []OriginWeeklyUsage    `json:"origin_weekly"`
+	GeneratedAt       time.Time              `json:"generated_at"`
+	OriginDataSince   time.Time              `json:"origin_data_since"`
+	Economics         []SignalEconomicsPoint `json:"economics"`
+	Hourly            []UserHourlyUsage      `json:"hourly"`
+	OriginWeekly      []OriginWeeklyUsage    `json:"origin_weekly"`
+	ModelDaily        []ModelDailyUsageEntry `json:"model_daily"`
+	QuotaCapacity     []QuotaCapacityPoint   `json:"quota_capacity"`
+	ModelEfficiency   []ModelQuotaEfficiency `json:"model_efficiency"`
+	ResetObservations []ResetObservation     `json:"reset_observations"`
+	QuotaGeneratedAt  time.Time              `json:"quota_generated_at,omitempty"`
 }
 
 // handleSignalAnalytics returns chart-ready time series that preserve the
@@ -36,10 +41,14 @@ func (h *proxyHandler) handleSignalAnalytics(w http.ResponseWriter, r *http.Requ
 	}
 
 	response := SignalAnalyticsResponse{
-		GeneratedAt:  time.Now().UTC(),
-		Economics:    []SignalEconomicsPoint{},
-		Hourly:       []UserHourlyUsage{},
-		OriginWeekly: []OriginWeeklyUsage{},
+		GeneratedAt:       time.Now().UTC(),
+		Economics:         []SignalEconomicsPoint{},
+		Hourly:            []UserHourlyUsage{},
+		OriginWeekly:      []OriginWeeklyUsage{},
+		ModelDaily:        []ModelDailyUsageEntry{},
+		QuotaCapacity:     []QuotaCapacityPoint{},
+		ModelEfficiency:   []ModelQuotaEfficiency{},
+		ResetObservations: []ResetObservation{},
 	}
 	if h.store != nil {
 		response.OriginDataSince = response.GeneratedAt.Add(-h.store.retention)
@@ -56,6 +65,12 @@ func (h *proxyHandler) handleSignalAnalytics(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		response.Hourly = hourly
+
+		quota := h.quotaIntelligenceSnapshot()
+		response.QuotaCapacity = quota.capacity
+		response.ModelEfficiency = quota.modelEfficiency
+		response.ResetObservations = quota.resetEvents
+		response.QuotaGeneratedAt = quota.updatedAt
 	}
 
 	if h.analyticsStore != nil {
@@ -65,6 +80,12 @@ func (h *proxyHandler) handleSignalAnalytics(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		response.Economics = economics
+		modelDaily, err := h.analyticsStore.getModelDailyUsage(42)
+		if err != nil {
+			respondJSONError(w, http.StatusInternalServerError, "failed to build model demand mix")
+			return
+		}
+		response.ModelDaily = modelDaily
 	}
 
 	w.Header().Set("Content-Type", "application/json")

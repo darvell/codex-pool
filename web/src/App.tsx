@@ -40,16 +40,30 @@ import {
 	  startAntigravityOAuth,
   unlockOperator,
 } from "./api";
-import { capacityForecasts, dailyDemandSeries, demandSummary, type CapacityForecast } from "./insights";
+import {
+  accountFlow,
+  capacityForecasts,
+  dailyDemandSeries,
+  demandSummary,
+  modelMix,
+  originConcentration,
+  peakHeatmap,
+  type AccountFlow,
+  type CapacityForecast,
+} from "./insights";
 import type {
   AccountStats,
   AdminAccount,
   FriendSession,
   HourlyUsage,
+	ModelDailyUsage,
 	ModelDescriptor,
+  ModelQuotaEfficiency,
   OriginWeeklyUsage,
   PoolStats,
   Provider,
+  QuotaCapacityPoint,
+  ResetObservation,
   SignalAnalytics,
 } from "./types";
 
@@ -759,8 +773,389 @@ function CapacityForecastTable({ forecasts }: { forecasts: CapacityForecast[] })
   );
 }
 
+type InsightMode = "overview" | "capacity" | "flow" | "demand";
+
+function providerDisplay(provider: Provider | "unknown") {
+  return provider in PROVIDERS
+    ? PROVIDERS[provider as Provider]
+    : { label: "Unknown", color: "#9c967f", dither: "grey" as DitherColor, glyph: "·" };
+}
+
 function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void }) {
+  const [mode, setMode] = useState<InsightMode>("overview");
   if (!stats || !signal) return <SignalSkeleton />;
+  const tabs: Array<[InsightMode, string, string]> = [
+    ["overview", "OVERVIEW", "At-a-glance risk and actions"],
+    ["capacity", "CAPACITY", "Measured limits, resets, scenarios"],
+    ["flow", "FLOW", "Stranded supply and routing balance"],
+    ["demand", "DEMAND", "Peaks, models, concentration"],
+  ];
+  return (
+    <div className="signal-view insights-view">
+      <div className="view-title"><span>I.00</span><h1>Resource intelligence</h1><p>Measure the real limits, move demand intelligently, and know what changes next.</p></div>
+      <nav className="insight-tabs" aria-label="Insights dashboards">
+        {tabs.map(([id, label, description], index) => (
+          <button key={id} className={mode === id ? "active" : ""} onClick={() => setMode(id)} aria-pressed={mode === id}>
+            <span>I.{String(index + 1).padStart(2, "0")}</span><b>{label}</b><small>{description}</small>
+          </button>
+        ))}
+      </nav>
+      {mode === "overview" && <InsightsOverview stats={stats} signal={signal} onAccounts={onAccounts} />}
+      {mode === "capacity" && <CapacityDashboard stats={stats} signal={signal} onAccounts={onAccounts} />}
+      {mode === "flow" && <FlowDashboard stats={stats} signal={signal} onAccounts={onAccounts} />}
+      {mode === "demand" && <DemandDashboard stats={stats} signal={signal} />}
+    </div>
+  );
+}
+
+function CapacityHistoryChart({ rows }: { rows: QuotaCapacityPoint[] }) {
+  const eligible = rows.filter((row) => row.estimated_weekly_tokens > 0 && row.account_type in PROVIDERS);
+  const series = [...new Set(eligible.map((row) => `${row.account_type}|${row.plan_type}`))];
+  const weeks = [...new Set(eligible.map((row) => row.week_start))].sort();
+  const data = weeks.map((week) => {
+    const point: Record<string, string | number> = { week };
+    for (const row of eligible.filter((item) => item.week_start === week)) point[`${row.account_type}|${row.plan_type}`] = row.estimated_weekly_tokens;
+    return point;
+  });
+  if (data.length === 0) return <EmptyChart label="TOKEN CAPACITY MODEL ACQUIRING // QUOTA TICKS REQUIRED" />;
+  const config = Object.fromEntries(series.map((key) => {
+    const [provider, plan] = key.split("|") as [Provider, string];
+    return [key, { label: `${PROVIDERS[provider].label} ${plan}`, color: PROVIDERS[provider].dither }];
+  })) as ChartConfig;
+  return (
+    <div className="chart-stage large">
+      <LineChart data={data} config={config} margins={{ left: 52, bottom: 28 }} bloom="low" bloomOnHover>
+        <Grid horizontal />
+        {series.map((key) => <Line key={key} dataKey={key} isClickable />)}
+        <XAxis dataKey="week" tickFormatter={(value) => String(value).slice(5)} maxTicks={6} />
+        <YAxis tickFormatter={formatTokens} />
+        <Legend isClickable />
+        <Tooltip labelKey="week" valueFormatter={(value) => `${formatTokens(value)} tok/week`} />
+      </LineChart>
+    </div>
+  );
+}
+
+function CapacityEvidenceTable({ rows }: { rows: QuotaCapacityPoint[] }) {
+  const latestWeek = rows.reduce((latest, row) => row.week_start > latest ? row.week_start : latest, "");
+  const latest = rows.filter((row) => row.week_start === latestWeek).sort((a, b) => b.estimated_weekly_tokens - a.estimated_weekly_tokens);
+  return (
+    <div className="evidence-table" role="table" aria-label="Empirical token capacity estimates">
+      <div className="evidence-row evidence-head" role="row"><span>PLAN</span><span>WEEKLY TOKENS</span><span>RANGE</span><span>OBSERVED</span><span>CONFIDENCE</span></div>
+      {latest.length === 0 && <div className="empty-signal">NO QUOTA MOVEMENT SAMPLES YET</div>}
+      {latest.map((row) => {
+        const provider = providerDisplay(row.account_type);
+        return (
+          <div className="evidence-row" role="row" key={`${row.account_type}-${row.plan_type}`} style={{ "--provider": provider.color } as CSSProperties}>
+            <span className="evidence-plan"><i>{provider.glyph}</i><b>{provider.label}</b><small>{row.plan_type}</small></span>
+            <span><b>{formatTokens(row.estimated_weekly_tokens)}</b><small>OBSERVED MIX</small></span>
+            <span><b>{formatTokens(row.low_estimate_tokens)}–{formatTokens(row.high_estimate_tokens)}</b><small>INTERVAL IQR</small></span>
+            <span><b>{row.observed_quota_pct.toFixed(1)}%</b><small>{row.interval_count} TICKS</small></span>
+            <span className={`confidence ${row.confidence}`}><b>{row.confidence}</b><small>{row.request_count} REQUESTS</small></span>
+          </div>
+        );
+      })}
+      <footer>INFERRED FROM COMPLETE TOKEN INTERVALS BETWEEN WEEKLY QUOTA TICKS // RANGE IS OBSERVED, NOT A PROVIDER-PUBLISHED LIMIT</footer>
+    </div>
+  );
+}
+
+type CalendarEvent = { id: string; at: Date; provider: Provider | "unknown"; kind: string; detail: string; tone: "future" | "credit" | "risk" };
+
+function ResetCalendar({ stats, forecasts, observations }: { stats: PoolStats; forecasts: CapacityForecast[]; observations: ResetObservation[] }) {
+  const generated = new Date(stats.generated_at).valueOf();
+  const events: CalendarEvent[] = [];
+  for (const account of stats.accounts) {
+    if (account.secondary_window_available && account.secondary_reset_minutes >= 0) {
+      events.push({ id: `${account.id}-weekly`, at: new Date(generated + account.secondary_reset_minutes * 60000), provider: account.type, kind: "WEEKLY RESET", detail: `${account.secondary_window_used_pct.toFixed(0)}% used · ${account.id.slice(-5)}`, tone: "future" });
+    }
+    for (const [index, expiration] of (account.reset_credit_expirations ?? []).entries()) {
+      const at = new Date(expiration);
+      if (!Number.isNaN(at.valueOf())) events.push({ id: `${account.id}-credit-${index}`, at, provider: account.type, kind: "BANKED RESET EXPIRES", detail: `${account.id.slice(-5)} · redeemable capacity`, tone: "credit" });
+    }
+  }
+  for (const forecast of forecasts) {
+    if (forecast.earliestFullMinutes !== null) {
+      events.push({ id: `${forecast.provider}-full`, at: new Date(generated + forecast.earliestFullMinutes * 60000), provider: forecast.provider, kind: "PROJECTED EXHAUSTION", detail: `${forecast.loadEquivalents.toFixed(1)} account-eq load`, tone: "risk" });
+    }
+  }
+  events.sort((a, b) => a.at.valueOf() - b.at.valueOf());
+  return (
+    <div className="calendar-board">
+      <div className="calendar-list">
+        {events.slice(0, 14).map((event) => {
+          const provider = providerDisplay(event.provider);
+          return (
+            <div className={`calendar-event ${event.tone}`} key={event.id}>
+              <time>{event.at.toLocaleDateString([], { month: "short", day: "numeric" })}<b>{event.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</b></time>
+              <i style={{ color: provider.color }}>{provider.glyph}</i>
+              <span><b>{event.kind}</b><small>{provider.label} · {event.detail}</small></span>
+            </div>
+          );
+        })}
+        {events.length === 0 && <div className="empty-signal">NO UPCOMING RESET EVENTS REPORTED</div>}
+      </div>
+      <div className="reset-behavior">
+        <header><b>OBSERVED RESET BEHAVIOR</b><span>{observations.length} EVENTS / 30D</span></header>
+        {observations.slice(0, 8).map((event) => {
+          const provider = providerDisplay(event.account_type);
+          const deviation = event.deviation_minutes;
+          return (
+            <div className={`reset-observation ${event.timing}`} key={`${event.account_id}-${event.observed_at}`}>
+              <i style={{ color: provider.color }}>{provider.glyph}</i>
+              <span><b>{provider.label} {event.timing.replace("_", " ").toUpperCase()}</b><small>{event.from_used_pct.toFixed(0)}% → {event.to_used_pct.toFixed(0)}% · {new Date(event.observed_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</small></span>
+              <strong>{deviation === undefined ? "SCHEDULE UNKNOWN" : `${deviation > 0 ? "+" : ""}${Math.round(deviation / 60)}H`}</strong>
+            </div>
+          );
+        })}
+        {observations.length === 0 && <div className="empty-signal compact-empty">RESET TIMING BASELINE STARTS WITH THIS DEPLOY</div>}
+      </div>
+    </div>
+  );
+}
+
+function ScenarioPlanner({ forecasts, onAccounts }: { forecasts: CapacityForecast[]; onAccounts: () => void }) {
+  const [demandPct, setDemandPct] = useState(100);
+  const [reservePct, setReservePct] = useState(20);
+  const rows = forecasts.map((forecast) => {
+    const load = forecast.loadEquivalents * demandPct / 100;
+    const required = Math.ceil(load * (1 + reservePct / 100));
+    return { ...forecast, scenarioLoad: load, required, add: Math.max(0, required - forecast.activeAccounts) };
+  });
+  const totalAdds = rows.reduce((sum, row) => sum + row.add, 0);
+  return (
+    <div className="scenario-planner">
+      <div className="scenario-controls">
+        <label><span>DEMAND</span><b>{demandPct}%</b><input type="range" min="50" max="200" step="5" value={demandPct} onChange={(event) => setDemandPct(Number(event.target.value))} /></label>
+        <label><span>RESERVE</span><b>{reservePct}%</b><input type="range" min="0" max="50" step="5" value={reservePct} onChange={(event) => setReservePct(Number(event.target.value))} /></label>
+        <div className={classNames("scenario-outcome", totalAdds > 0 && "risk")}><span>POOL ACTION</span><strong>{totalAdds ? `ADD ${totalAdds}` : "CAPACITY HOLDS"}</strong><button onClick={onAccounts}>OPEN ACCOUNTS →</button></div>
+      </div>
+      <div className="scenario-rows">
+        {rows.map((row) => <div key={row.provider} style={{ "--provider": PROVIDERS[row.provider].color } as CSSProperties}><b>{PROVIDERS[row.provider].glyph} {PROVIDERS[row.provider].label}</b><span>{row.scenarioLoad.toFixed(1)} acct-eq demand</span><span>{row.activeAccounts} active</span><strong>{row.add ? `+${row.add} REQUIRED` : `${row.required} REQUIRED`}</strong></div>)}
+      </div>
+      <footer>SCENARIO SCALES THE CURRENT OBSERVED QUOTA DRAIN; IT DOES NOT ASSUME TOKENS ARE INTERCHANGEABLE BETWEEN PROVIDERS.</footer>
+    </div>
+  );
+}
+
+function ModelSubsidyTable({ rows }: { rows: ModelQuotaEfficiency[] }) {
+  const eligible = rows.filter((row) => row.api_value > 0 && row.observed_quota_pct > 0).slice(0, 12);
+  return (
+    <div className="subsidy-table">
+      <div className="subsidy-row subsidy-head"><span>MODEL</span><span>QUOTA</span><span>API VALUE</span><span>VALUE / 1%</span><span>VS PROVIDER</span><span>CONF.</span></div>
+      {eligible.map((row) => {
+        const provider = providerDisplay(row.account_type);
+        return <div className="subsidy-row" key={`${row.account_type}-${row.model}`} style={{ "--provider": provider.color } as CSSProperties}>
+          <span><i>{provider.glyph}</i><b>{row.model}</b><small>{provider.label}</small></span>
+          <span><b>{row.observed_quota_pct.toFixed(1)}%</b><small>{row.interval_count} intervals</small></span>
+          <span><b>{preciseMoney.format(row.api_value)}</b><small>{formatTokens(row.tokens)} tok</small></span>
+          <span><b>{preciseMoney.format(row.api_value_per_quota_pct)}</b><small>API-EQUIV</small></span>
+          <span className={row.relative_subsidy >= 1 ? "favorable" : "costly"}><b>{row.relative_subsidy.toFixed(2)}×</b><small>{row.relative_subsidy >= 1 ? "MORE SUBSIDIZED" : "LESS SUBSIDIZED"}</small></span>
+          <span className={`confidence ${row.confidence}`}><b>{row.confidence}</b></span>
+        </div>;
+      })}
+      {eligible.length === 0 && <div className="empty-signal">MODEL SUBSIDY ACQUIRING // NEEDS PRICED REQUESTS WITH QUOTA MOVEMENT</div>}
+      <footer>SUBSIDY INDEX COMPARES API-EQUIVALENT VALUE PER OBSERVED QUOTA POINT WITH OTHER MODELS ON THE SAME PROVIDER. 1.00× IS PROVIDER AVERAGE.</footer>
+    </div>
+  );
+}
+
+function CapacityDashboard({ stats, signal, onAccounts }: { stats: PoolStats; signal: SignalAnalytics; onAccounts: () => void }) {
+  const forecasts = capacityForecasts(stats.accounts);
+  const latestCapacity = signal.quota_capacity.filter((row) => row.week_start === signal.quota_capacity.reduce((latest, row) => row.week_start > latest ? row.week_start : latest, ""));
+  const measuredWeekly = latestCapacity.reduce((sum, row) => sum + row.estimated_weekly_tokens, 0);
+  const highConfidence = latestCapacity.filter((row) => row.confidence === "high").length;
+  const surpriseCount = signal.reset_observations.filter((event) => event.timing === "early" || event.timing === "late").length;
+  return (
+    <div className="insight-dashboard">
+      <section className="inline-instruments insights-instruments">
+        <Instrument label="MEASURED / WEEK" value={measuredWeekly ? formatTokens(measuredWeekly) : "acquiring"} accent />
+        <Instrument label="PLANS MEASURED" value={String(latestCapacity.length)} />
+        <Instrument label="HIGH CONFIDENCE" value={String(highConfidence)} accent />
+        <Instrument label="QUOTA INTERVALS" value={String(latestCapacity.reduce((sum, row) => sum + row.interval_count, 0))} />
+        <Instrument label="RESET SURPRISES / 30D" value={String(surpriseCount)} danger={surpriseCount > 0} />
+        <Instrument label="MODEL REFRESH" value={signal.quota_generated_at ? new Date(signal.quota_generated_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "acquiring"} />
+      </section>
+      <section className="capacity-history-grid">
+        <SignalPanel code="C.10" title="EMPIRICAL TOKEN CAPACITY // WEEK OVER WEEK"><CapacityHistoryChart rows={signal.quota_capacity} /></SignalPanel>
+        <SignalPanel code="C.11" title="LATEST CAPACITY EVIDENCE"><CapacityEvidenceTable rows={signal.quota_capacity} /></SignalPanel>
+      </section>
+      <SignalPanel code="C.20" title="CAPACITY CALENDAR // RETURNS · EXPIRATIONS · SURPRISES"><ResetCalendar stats={stats} forecasts={forecasts} observations={signal.reset_observations} /></SignalPanel>
+      <section className="capacity-lower-grid">
+        <SignalPanel code="C.30" title="WHAT-IF PLANNER // DEMAND × RESERVE"><ScenarioPlanner forecasts={forecasts} onAccounts={onAccounts} /></SignalPanel>
+        <SignalPanel code="C.31" title="MODEL SUBSIDY // API VALUE PER QUOTA POINT"><ModelSubsidyTable rows={signal.model_efficiency} /></SignalPanel>
+      </section>
+    </div>
+  );
+}
+
+function AccountFlowTable({ rows }: { rows: AccountFlow[] }) {
+  return (
+    <div className="flow-table">
+      <div className="flow-row flow-head"><span>ACCOUNT</span><span>USED</span><span>PROJECTED AT RESET</span><span>UNUSED</span><span>ROUTING CALL</span></div>
+      {rows.map((row) => {
+        const provider = PROVIDERS[row.provider];
+        const canReceiveShift = row.state === "stranded" && rows.some((candidate) => candidate.provider === row.provider && candidate.id !== row.id && (candidate.state === "exhausts" || candidate.state === "tight"));
+        return <div className={`flow-row ${row.state}`} key={row.id} style={{ "--provider": provider.color } as CSSProperties}>
+          <span><i>{provider.glyph}</i><b>{provider.label}</b><small>{row.id.slice(-7)}</small></span>
+          <span><b>{row.usedPct.toFixed(0)}%</b><small>NOW</small></span>
+          <span><div className="flow-meter"><i style={{ width: `${Math.min(100, row.projectedFinalPct)}%` }} /></div><b>{row.projectedFinalPct.toFixed(0)}%</b></span>
+          <span><b>{row.strandedPct.toFixed(0)}%</b><small>FORECAST</small></span>
+          <span><b>{row.state === "exhausts" ? "ROUTE AWAY" : canReceiveShift ? "ROUTE HERE" : row.state === "stranded" ? "SURPLUS" : row.state === "tight" ? "WATCH" : "BALANCED"}</b><small>RESETS IN {formatReset(row.resetMinutes)}</small></span>
+        </div>;
+      })}
+    </div>
+  );
+}
+
+function FlowDashboard({ stats, signal, onAccounts }: { stats: PoolStats; signal: SignalAnalytics; onAccounts: () => void }) {
+  const flows = accountFlow(stats.accounts);
+  const stranded = flows.reduce((sum, row) => sum + row.strandedPct / 100, 0);
+  const exhausting = flows.filter((row) => row.state === "exhausts");
+  const providers = [...new Set(flows.map((row) => row.provider))];
+  const routingCalls = providers.map((provider) => {
+    const rows = flows.filter((row) => row.provider === provider);
+    const hot = rows[0];
+    const cold = [...rows].sort((a, b) => a.projectedFinalPct - b.projectedFinalPct)[0];
+    const spread = hot && cold ? hot.projectedFinalPct - cold.projectedFinalPct : 0;
+    return { provider, hot, cold, spread, score: Math.max(0, 100 - spread) };
+  }).sort((a, b) => a.score - b.score);
+  const unhealthy = stats.accounts.filter((account) => account.status !== "healthy").length;
+  const cyberFailures = stats.cyber_policy?.counters?.swap_no_candidate ?? 0;
+  return (
+    <div className="insight-dashboard">
+      <section className="inline-instruments insights-instruments">
+        <Instrument label="STRANDED FORECAST" value={`${stranded.toFixed(1)} acct-eq`} accent />
+        <Instrument label="EXHAUSTING EARLY" value={String(exhausting.length)} danger={exhausting.length > 0} />
+        <Instrument label="BALANCED" value={String(flows.filter((row) => row.state === "balanced").length)} />
+        <Instrument label="ROUTING SPREAD" value={`${(routingCalls[0]?.spread ?? 0).toFixed(0)}pt`} danger={(routingCalls[0]?.spread ?? 0) > 40} />
+        <Instrument label="UNHEALTHY ACCOUNTS" value={String(unhealthy)} danger={unhealthy > 0} />
+        <Instrument label="UNSERVED POLICY SWAPS" value={String(cyberFailures)} danger={cyberFailures > 0} />
+      </section>
+      <section className="flow-grid">
+        <SignalPanel code="F.10" title="ACCOUNT FLOW // PROJECTED WEEK-END UTILIZATION"><AccountFlowTable rows={flows} /></SignalPanel>
+        <SignalPanel code="F.11" title="ROUTING BALANCE // WITHIN PROVIDER">
+          <div className="routing-calls">
+            {routingCalls.map((call) => <div className={call.score < 60 ? "risk" : ""} key={call.provider} style={{ "--provider": PROVIDERS[call.provider].color } as CSSProperties}>
+              <span><i>{PROVIDERS[call.provider].glyph}</i><b>{PROVIDERS[call.provider].label}</b><small>{call.score.toFixed(0)}/100 BALANCE</small></span>
+              <p>{call.hot && call.cold && call.hot.id !== call.cold.id && call.spread > 20 ? <>Shift new traffic from <b>{call.hot.id.slice(-5)}</b> toward <b>{call.cold.id.slice(-5)}</b>; projected utilization differs by {call.spread.toFixed(0)} points.</> : <>Current accounts are draining within a reasonable range.</>}</p>
+            </div>)}
+          </div>
+        </SignalPanel>
+      </section>
+      <section className="flow-lower-grid">
+        <SignalPanel code="F.20" title="STRANDED CAPACITY // LIKELY TO RESET UNUSED">
+          <div className="stranded-list">
+            {flows.filter((row) => row.strandedPct >= 20).slice(0, 10).map((row) => <div key={row.id}><span style={{ color: PROVIDERS[row.provider].color }}>{PROVIDERS[row.provider].glyph}</span><b>{PROVIDERS[row.provider].label} {row.id.slice(-5)}</b><div><i style={{ width: `${row.strandedPct}%` }} /></div><strong>{row.strandedPct.toFixed(0)}% UNUSED</strong></div>)}
+            {flows.every((row) => row.strandedPct < 20) && <div className="empty-signal">NO MATERIAL STRANDED WEEKLY CAPACITY</div>}
+          </div>
+        </SignalPanel>
+        <SignalPanel code="F.21" title="LIVE HEALTH // CURRENT PROCESS WINDOW">
+          <div className="health-board">
+            <div><span>HEALTHY</span><b>{stats.accounts.filter((account) => account.status === "healthy").length}</b><small>routing normally</small></div>
+            <div><span>DEGRADED</span><b>{stats.accounts.filter((account) => account.status === "degraded").length}</b><small>penalty elevated</small></div>
+            <div><span>COOLDOWN</span><b>{stats.accounts.filter((account) => account.status === "cooldown").length}</b><small>temporarily unavailable</small></div>
+            <div><span>DEAD</span><b>{stats.accounts.filter((account) => account.status === "dead").length}</b><small>not in supply</small></div>
+            <footer>RELIABILITY COUNTERS ARE PROCESS-LIFETIME SIGNALS TODAY. DURABLE LATENCY AND FAILURE HISTORY IS NOT YET RECORDED, SO THIS PANEL DOES NOT CLAIM A LONG-TERM SLA.</footer>
+            <button onClick={onAccounts}>INSPECT ACCOUNTS →</button>
+          </div>
+        </SignalPanel>
+      </section>
+    </div>
+  );
+}
+
+function PeakDemandHeatmap({ hourly }: { hourly: HourlyUsage[] }) {
+  const cells = peakHeatmap(hourly);
+  const maximum = Math.max(1, ...cells.map((cell) => cell.averageTokens));
+  const days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+  return (
+    <div className="peak-heatmap">
+      <div className="heatmap-hours">{Array.from({ length: 24 }, (_, hour) => <span key={hour}>{hour % 3 === 0 ? String(hour).padStart(2, "0") : ""}</span>)}</div>
+      {days.map((day, dayIndex) => <div className="heatmap-row" key={day}><b>{day}</b><div>{cells.filter((cell) => cell.day === dayIndex).map((cell) => {
+        const intensity = cell.averageTokens / maximum;
+        return <i key={cell.hour} title={`${day} ${String(cell.hour).padStart(2, "0")}:00 UTC · ${formatTokens(cell.averageTokens)} tokens · ${cell.averageRequests.toFixed(1)} requests`} style={{ opacity: 0.12 + intensity * 0.88 }} />;
+      })}</div></div>)}
+      <footer><span>QUIET</span><i /><i /><i /><i /><i /><span>PEAK</span><b>UTC · 14D HOURLY AVERAGE</b></footer>
+    </div>
+  );
+}
+
+function ModelDemandTable({ rows }: { rows: ModelDailyUsage[] }) {
+  const models = modelMix(rows);
+  const [metric, setMetric] = useState<"tokens" | "requests" | "apiValue">("tokens");
+  const ranked = [...models].sort((a, b) => b[metric] - a[metric]);
+  const total = ranked.reduce((sum, row) => sum + row[metric], 0);
+  return (
+    <div className="model-demand-table">
+      <div className="model-demand-controls">
+        <span>RANK BY</span>
+        {(["tokens", "requests", "apiValue"] as const).map((value) => <button className={metric === value ? "active" : ""} key={value} onClick={() => setMetric(value)}>{value === "apiValue" ? "API VALUE" : value.toUpperCase()}</button>)}
+      </div>
+      {ranked.slice(0, 12).map((row, index) => {
+        const provider = providerDisplay(row.provider);
+        const share = total ? row[metric] / total * 100 : 0;
+        return <div key={`${row.provider}-${row.model}`} style={{ "--provider": provider.color } as CSSProperties}>
+          <span><i>{String(index + 1).padStart(2, "0")}</i><b>{row.model}</b><small>{provider.label}</small></span>
+          <div><i style={{ width: `${Math.max(1, share)}%` }} /></div>
+          <strong>{share.toFixed(1)}%</strong><span><b>{metric === "tokens" ? formatTokens(row.tokens) : metric === "requests" ? `${compact.format(row.requests)} req` : preciseMoney.format(row.apiValue)}</b><small>{formatTokens(row.requests ? row.tokens / row.requests : 0)}/req · {preciseMoney.format(row.apiValue)}</small></span>
+        </div>;
+      })}
+      {models.length === 0 && <div className="empty-signal">MODEL DEMAND HISTORY ACQUIRING</div>}
+    </div>
+  );
+}
+
+function ConservationBoard({ stats, signal }: { stats: PoolStats; signal: SignalAnalytics }) {
+  const concentration = originConcentration(signal.origin_weekly);
+  const models = modelMix(signal.model_daily);
+  const totalTokens = models.reduce((sum, row) => sum + row.tokens, 0);
+  const totalRequests = models.reduce((sum, row) => sum + row.requests, 0);
+  const cacheShare = stats.aggregate.total_input_tokens ? stats.aggregate.total_cached_tokens / stats.aggregate.total_input_tokens * 100 : 0;
+  const reasoningShare = stats.aggregate.total_billable_tokens ? stats.aggregate.total_reasoning_tokens / stats.aggregate.total_billable_tokens * 100 : 0;
+  const calls = [
+    { label: "CACHE REUSE", value: `${cacheShare.toFixed(1)}%`, state: cacheShare < 20 ? "review" : "good", copy: cacheShare < 20 ? "Low observed cache share. Repeated large contexts are the first conservation target." : "Cache reuse is materially reducing repeated input work." },
+    { label: "REASONING LOAD", value: `${reasoningShare.toFixed(1)}%`, state: reasoningShare > 30 ? "review" : "good", copy: reasoningShare > 30 ? "Reasoning is a large share of billable work. Check whether every origin needs the current effort level." : "Reasoning share is within the current operating band." },
+    { label: "AVG REQUEST", value: formatTokens(totalRequests ? totalTokens / totalRequests : 0), state: "neutral", copy: "Use the model and origin tables to investigate workloads far above this pool-wide baseline." },
+    { label: "TOP ORIGIN", value: `${concentration.topOriginShare.toFixed(1)}%`, state: concentration.topOriginShare > 40 ? "review" : "good", copy: concentration.topOriginShare > 40 ? "One origin drives a large share of this week’s drain. Review it before adding broad capacity." : "Demand is not dominated by a single origin." },
+  ];
+  return <div className="conservation-board">{calls.map((call) => <div className={call.state} key={call.label}><span>{call.label}</span><b>{call.value}</b><p>{call.copy}</p></div>)}</div>;
+}
+
+function DemandDashboard({ stats, signal }: { stats: PoolStats; signal: SignalAnalytics }) {
+  const concentration = originConcentration(signal.origin_weekly);
+  const models = modelMix(signal.model_daily);
+  const topModel = models[0];
+  const demand = demandSummary(signal.hourly);
+  return (
+    <div className="insight-dashboard">
+      <section className="inline-instruments insights-instruments">
+        <Instrument label="24H DEMAND" value={formatTokens(demand.current24)} accent />
+        <Instrument label="P95 BURST" value={`${demand.peakFactor.toFixed(1)}×`} danger={demand.peakFactor > 2} />
+        <Instrument label="ACTIVE ORIGINS" value={String(concentration.origins)} />
+        <Instrument label="TOP ORIGIN SHARE" value={`${concentration.topOriginShare.toFixed(1)}%`} danger={concentration.topOriginShare > 40} />
+        <Instrument label="TOP 3 SHARE" value={`${concentration.topThreeShare.toFixed(1)}%`} />
+        <Instrument label="TOP MODEL" value={topModel?.model ?? "acquiring"} accent />
+      </section>
+      <section className="demand-grid">
+        <SignalPanel code="D.10" title="PEAK DEMAND MAP // WHEN THE POOL GETS HIT"><PeakDemandHeatmap hourly={signal.hourly} /></SignalPanel>
+        <SignalPanel code="D.11" title="MODEL MIX // 14D TOKENS · REQUESTS · VALUE"><ModelDemandTable rows={signal.model_daily} /></SignalPanel>
+      </section>
+      <section className="demand-lower-grid">
+        <SignalPanel code="D.20" title="CONCENTRATION // CURRENT WEEK">
+          <div className="concentration-board">
+            <div className="concentration-gauge" style={{ "--share": `${concentration.topOriginShare}%` } as CSSProperties}><strong>{concentration.topOriginShare.toFixed(1)}%</strong><span>TOP ORIGIN</span></div>
+            <div><span>ACTIVE ORIGINS</span><b>{concentration.origins}</b></div><div><span>TOP THREE</span><b>{concentration.topThreeShare.toFixed(1)}%</b></div><div><span>GINI</span><b>{concentration.gini.toFixed(2)}</b></div>
+            <p>{concentration.topOriginShare > 40 ? "Demand is concentrated enough that one workload can materially change account requirements." : "Demand is distributed; broad pool growth matters more than a single origin."}</p>
+          </div>
+        </SignalPanel>
+        <SignalPanel code="D.21" title="CONSERVATION CALLS // OBSERVED SIGNALS"><ConservationBoard stats={stats} signal={signal} /></SignalPanel>
+      </section>
+    </div>
+  );
+}
+
+function InsightsOverview({ stats, signal, onAccounts }: { stats: PoolStats; signal: SignalAnalytics; onAccounts: () => void }) {
   const demand = demandSummary(signal.hourly);
   const forecasts = capacityForecasts(stats.accounts);
   const minimumAdds = forecasts.reduce((sum, forecast) => sum + forecast.minimumToAdd, 0);
@@ -772,8 +1167,7 @@ function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; sign
   const demandDirection = demand.deltaPct >= 0 ? `+${demand.deltaPct.toFixed(1)}%` : `${demand.deltaPct.toFixed(1)}%`;
 
   return (
-    <div className="signal-view insights-view">
-      <div className="view-title"><span>I.00</span><h1>Capacity intelligence</h1><p>How demand is moving, where the pool runs dry, and what to add before it does.</p></div>
+    <>
       <section className="inline-instruments insights-instruments" aria-label="Capacity planning summary">
         <Instrument label="DEMAND / 24H" value={formatTokens(demand.current24)} accent />
         <Instrument label="DAY / DAY" value={demandDirection} danger={demand.deltaPct > 20} />
@@ -816,7 +1210,7 @@ function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; sign
         <b>HOW THE ACCOUNT NUMBER WORKS</b>
         <span>For each provider: sum <code>weekly used % ÷ expected used % by now</code>, then round up. “+20%” adds an operating reserve. Recommendations are current-plan equivalents and update every 30 seconds.</span>
       </section>
-    </div>
+    </>
   );
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { capacityForecasts, dailyDemandSeries, demandSummary } from "./insights";
-import type { AccountStats, HourlyUsage } from "./types";
+import { accountFlow, capacityForecasts, dailyDemandSeries, demandSummary, modelMix, originConcentration, peakHeatmap } from "./insights";
+import type { AccountStats, HourlyUsage, ModelDailyUsage, OriginWeeklyUsage } from "./types";
 
 function account(overrides: Partial<AccountStats>): AccountStats {
   return {
@@ -92,5 +92,44 @@ describe("demand trend", () => {
       { date: "2026-07-16", demand: 2400, trend: 2400 },
       { date: "2026-07-17", demand: 4800, trend: 3600 },
     ]);
+  });
+});
+
+describe("resource dashboards", () => {
+  it("identifies accounts that exhaust and accounts with stranded capacity", () => {
+    const rows = accountFlow([
+      account({ id: "hot", secondary_window_used_pct: 45 }),
+      account({ id: "cold", secondary_window_used_pct: 5 }),
+    ]);
+    expect(rows.find((row) => row.id === "hot")?.state).toBe("exhausts");
+    expect(rows.find((row) => row.id === "cold")?.state).toBe("stranded");
+  });
+
+  it("builds a complete weekday-hour heatmap including zero-demand slots", () => {
+    const cells = peakHeatmap([
+      { hour: "2026-07-13T10", account_type: "codex", input_tokens: 100, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0, billable_tokens: 100, request_count: 1 },
+      { hour: "2026-07-20T10", account_type: "codex", input_tokens: 300, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0, billable_tokens: 300, request_count: 1 },
+    ]);
+    expect(cells).toHaveLength(168);
+    expect(cells.find((cell) => cell.day === 1 && cell.hour === 10)?.averageTokens).toBe(200);
+  });
+
+  it("measures current-week origin concentration", () => {
+    const rows: OriginWeeklyUsage[] = [70, 20, 10].map((tokens, index) => ({
+      week_start: "2026-07-13", origin_id: `origin-${index}`, account_id: "acct", account_type: "codex",
+      input_tokens: tokens, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0, billable_tokens: tokens, request_count: 1,
+    }));
+    const concentration = originConcentration(rows);
+    expect(concentration.topOriginShare).toBe(70);
+    expect(concentration.topThreeShare).toBe(100);
+  });
+
+  it("ranks model demand across the selected recent days", () => {
+    const rows: ModelDailyUsage[] = [
+      { date: "2026-07-16", account_type: "codex", model: "large", input_tokens: 200, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0, request_count: 1, cost_usd: 2 },
+      { date: "2026-07-16", account_type: "codex", model: "small", input_tokens: 100, cached_tokens: 0, output_tokens: 0, reasoning_tokens: 0, request_count: 2, cost_usd: 1 },
+    ];
+    expect(modelMix(rows)[0].model).toBe("large");
+    expect(modelMix(rows)[0].share).toBeCloseTo(200 / 3);
   });
 });

@@ -171,6 +171,12 @@ type RequestUsage struct {
 	// Rate limit snapshot after this request
 	PrimaryUsedPct   float64
 	SecondaryUsedPct float64
+	// Reset metadata snapshots let analytics compare observed quota rollovers
+	// with the schedule advertised when the request was served.
+	PrimaryResetAt         time.Time
+	SecondaryResetAt       time.Time
+	PrimaryWindowMinutes   int
+	SecondaryWindowMinutes int
 	// Model and provider info
 	Model       string      `json:"model,omitempty"`        // e.g., "claude-sonnet-4-5-20250929", "o4-mini"
 	AccountType AccountType `json:"account_type,omitempty"` // "claude", "codex", "gemini"

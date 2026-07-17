@@ -68,6 +68,26 @@ export interface PoolStats {
     total_subscription_monthly: number;
     overall_roi: number;
   };
+  capacity_analysis?: {
+    total_samples: number;
+    model_formula: string;
+    plans: Record<string, {
+      sample_count: number;
+      confidence: "low" | "medium" | "high";
+      total_input_tokens: number;
+      total_output_tokens: number;
+      total_cached_tokens: number;
+      total_reasoning_tokens: number;
+      output_multiplier: number;
+      estimated_5h_capacity: number;
+      estimated_7d_capacity: number;
+    }>;
+  };
+  cyber_policy?: {
+    healthy: boolean;
+    cyber_candidates_available: number;
+    counters: Record<string, number>;
+  };
   generated_at: string;
 }
 
@@ -130,12 +150,68 @@ export interface OriginWeeklyUsage {
   request_count: number;
 }
 
+export interface ModelDailyUsage {
+  date: string;
+  account_type: Provider | "unknown";
+  model: string;
+  input_tokens: number;
+  cached_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  request_count: number;
+  cost_usd: number;
+}
+
+export interface QuotaCapacityPoint {
+  week_start: string;
+  account_type: Provider | "unknown";
+  plan_type: string;
+  window_minutes: number;
+  estimated_window_tokens: number;
+  estimated_weekly_tokens: number;
+  low_estimate_tokens: number;
+  high_estimate_tokens: number;
+  observed_quota_pct: number;
+  interval_count: number;
+  request_count: number;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface ModelQuotaEfficiency {
+  account_type: Provider | "unknown";
+  model: string;
+  tokens: number;
+  request_count: number;
+  api_value: number;
+  observed_quota_pct: number;
+  api_value_per_quota_pct: number;
+  relative_subsidy: number;
+  interval_count: number;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface ResetObservation {
+  account_id: string;
+  account_type: Provider | "unknown";
+  observed_at: string;
+  expected_at?: string;
+  deviation_minutes?: number;
+  from_used_pct: number;
+  to_used_pct: number;
+  timing: "early" | "late" | "on_time" | "observed";
+}
+
 export interface SignalAnalytics {
   generated_at: string;
   origin_data_since: string;
   economics: SignalEconomicsPoint[];
   hourly: HourlyUsage[];
   origin_weekly: OriginWeeklyUsage[];
+  model_daily: ModelDailyUsage[];
+  quota_capacity: QuotaCapacityPoint[];
+  model_efficiency: ModelQuotaEfficiency[];
+  reset_observations: ResetObservation[];
+  quota_generated_at?: string;
 }
 
 export interface AdminAccount {

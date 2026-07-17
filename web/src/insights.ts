@@ -1,4 +1,4 @@
-import type { AccountStats, HourlyUsage, Provider } from "./types";
+import type { AccountStats, HourlyUsage, ModelDailyUsage, OriginWeeklyUsage, Provider } from "./types";
 
 export interface CapacityForecast {
   provider: Provider;
@@ -28,6 +28,40 @@ export interface DailyDemandPoint {
   date: string;
   demand: number;
   trend: number;
+}
+
+export interface AccountFlow {
+  id: string;
+  provider: Provider;
+  usedPct: number;
+  projectedFinalPct: number;
+  strandedPct: number;
+  resetMinutes: number;
+  state: "exhausts" | "tight" | "balanced" | "stranded";
+}
+
+export interface PeakCell {
+  day: number;
+  hour: number;
+  averageTokens: number;
+  averageRequests: number;
+}
+
+export interface OriginConcentration {
+  week: string;
+  origins: number;
+  topOriginShare: number;
+  topThreeShare: number;
+  gini: number;
+}
+
+export interface ModelMixRow {
+  model: string;
+  provider: Provider | "unknown";
+  tokens: number;
+  requests: number;
+  apiValue: number;
+  share: number;
 }
 
 function throughput(row: Pick<HourlyUsage, "account_type" | "input_tokens" | "cached_tokens" | "output_tokens">) {
@@ -110,4 +144,100 @@ export function dailyDemandSeries(hourly: HourlyUsage[]): DailyDemandPoint[] {
     const window = completeDays.slice(Math.max(0, index - 2), index + 1);
     return { date, demand, trend: window.reduce((sum, row) => sum + row[1].demand, 0) / window.length };
   });
+}
+
+export function accountFlow(accounts: AccountStats[]): AccountFlow[] {
+  return accounts.flatMap((account) => {
+    if (account.status === "dead" || !account.secondary_window_available) return [];
+    const windowMinutes = account.secondary_window_minutes > 0 ? account.secondary_window_minutes : 7 * 1440;
+    const elapsedMinutes = windowMinutes - account.secondary_reset_minutes;
+    if (elapsedMinutes <= 0) return [];
+    const projectedFinalPct = account.secondary_window_used_pct > 0
+      ? account.secondary_window_used_pct / (elapsedMinutes / windowMinutes)
+      : 0;
+    const strandedPct = Math.max(0, 100 - projectedFinalPct);
+    const state: AccountFlow["state"] = projectedFinalPct >= 100 ? "exhausts"
+      : projectedFinalPct >= 85 ? "tight"
+        : projectedFinalPct < 55 ? "stranded"
+          : "balanced";
+    return [{
+      id: account.id,
+      provider: account.type,
+      usedPct: account.secondary_window_used_pct,
+      projectedFinalPct,
+      strandedPct,
+      resetMinutes: account.secondary_reset_minutes,
+      state,
+    }];
+  }).sort((a, b) => b.projectedFinalPct - a.projectedFinalPct);
+}
+
+export function peakHeatmap(hourly: HourlyUsage[]): PeakCell[] {
+  const totals = hourlyTotals(hourly);
+  if (totals.length === 0) return [];
+  const tokenByHour = new Map(totals.map((row) => [row.hour, row.total]));
+  const requestsByHour = new Map<string, number>();
+  for (const row of hourly) requestsByHour.set(row.hour, (requestsByHour.get(row.hour) ?? 0) + row.request_count);
+  const first = new Date(`${totals[0].hour}:00:00Z`);
+  const last = new Date(`${totals.at(-1)!.hour}:00:00Z`);
+  const buckets = new Map<string, { tokens: number; requests: number; samples: number }>();
+  for (let cursor = first.valueOf(); cursor <= last.valueOf(); cursor += 60 * 60 * 1000) {
+    const date = new Date(cursor);
+    const key = `${date.getUTCDay()}|${date.getUTCHours()}`;
+    const hour = date.toISOString().slice(0, 13);
+    const bucket = buckets.get(key) ?? { tokens: 0, requests: 0, samples: 0 };
+    bucket.tokens += tokenByHour.get(hour) ?? 0;
+    bucket.requests += requestsByHour.get(hour) ?? 0;
+    bucket.samples++;
+    buckets.set(key, bucket);
+  }
+  const cells: PeakCell[] = [];
+  for (let day = 0; day < 7; day++) {
+    for (let hour = 0; hour < 24; hour++) {
+      const bucket = buckets.get(`${day}|${hour}`) ?? { tokens: 0, requests: 0, samples: 1 };
+      cells.push({ day, hour, averageTokens: bucket.tokens / bucket.samples, averageRequests: bucket.requests / bucket.samples });
+    }
+  }
+  return cells;
+}
+
+export function originConcentration(rows: OriginWeeklyUsage[]): OriginConcentration {
+  const week = rows.reduce((latest, row) => row.week_start > latest ? row.week_start : latest, "");
+  const totals = new Map<string, number>();
+  for (const row of rows.filter((item) => item.week_start === week)) {
+    totals.set(row.origin_id, (totals.get(row.origin_id) ?? 0) + throughput(row));
+  }
+  const values = [...totals.values()].sort((a, b) => b - a);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const ascending = [...values].sort((a, b) => a - b);
+  const weighted = ascending.reduce((sum, value, index) => sum + (index + 1) * value, 0);
+  const gini = total && ascending.length > 1
+    ? (2 * weighted) / (ascending.length * total) - (ascending.length + 1) / ascending.length
+    : 0;
+  return {
+    week,
+    origins: values.length,
+    topOriginShare: total ? (values[0] ?? 0) / total * 100 : 0,
+    topThreeShare: total ? values.slice(0, 3).reduce((sum, value) => sum + value, 0) / total * 100 : 0,
+    gini,
+  };
+}
+
+export function modelMix(rows: ModelDailyUsage[], days = 14): ModelMixRow[] {
+  const dates = [...new Set(rows.map((row) => row.date))].sort();
+  const included = new Set(dates.slice(-days));
+  const models = new Map<string, Omit<ModelMixRow, "share">>();
+  for (const row of rows.filter((item) => included.has(item.date))) {
+    const model = row.model || "unknown";
+    const key = `${row.account_type}|${model}`;
+    const aggregate = models.get(key) ?? { model, provider: row.account_type, tokens: 0, requests: 0, apiValue: 0 };
+    aggregate.tokens += throughput(row);
+    aggregate.requests += row.request_count;
+    aggregate.apiValue += row.cost_usd;
+    models.set(key, aggregate);
+  }
+  const total = [...models.values()].reduce((sum, row) => sum + row.tokens, 0);
+  return [...models.values()]
+    .map((row) => ({ ...row, share: total ? row.tokens / total * 100 : 0 }))
+    .sort((a, b) => b.tokens - a.tokens);
 }

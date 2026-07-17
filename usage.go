@@ -262,6 +262,20 @@ func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 	if a == nil {
 		return
 	}
+	a.mu.Lock()
+	if ru.PrimaryResetAt.IsZero() {
+		ru.PrimaryResetAt = a.Usage.PrimaryResetAt
+	}
+	if ru.SecondaryResetAt.IsZero() {
+		ru.SecondaryResetAt = a.Usage.SecondaryResetAt
+	}
+	if ru.PrimaryWindowMinutes == 0 {
+		ru.PrimaryWindowMinutes = a.Usage.PrimaryWindowMinutes
+	}
+	if ru.SecondaryWindowMinutes == 0 {
+		ru.SecondaryWindowMinutes = a.Usage.SecondaryWindowMinutes
+	}
+	a.mu.Unlock()
 	a.applyRequestUsage(ru)
 	if h.store != nil {
 		_ = h.store.record(ru)

@@ -61,6 +61,11 @@ export async function loadSignalAnalytics(): Promise<SignalAnalytics> {
     economics: signal.economics ?? [],
     hourly: signal.hourly ?? [],
     origin_weekly: signal.origin_weekly ?? [],
+    model_daily: signal.model_daily ?? [],
+    quota_capacity: signal.quota_capacity ?? [],
+    model_efficiency: signal.model_efficiency ?? [],
+    reset_observations: signal.reset_observations ?? [],
+    quota_generated_at: signal.quota_generated_at,
   };
 }
 
