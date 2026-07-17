@@ -40,6 +40,7 @@ import {
 	  startAntigravityOAuth,
   unlockOperator,
 } from "./api";
+import { capacityForecasts, dailyDemandSeries, demandSummary, type CapacityForecast } from "./insights";
 import type {
   AccountStats,
   AdminAccount,
@@ -52,7 +53,7 @@ import type {
   SignalAnalytics,
 } from "./types";
 
-type View = "pulse" | "usage" | "accounts" | "models" | "setup";
+type View = "pulse" | "insights" | "usage" | "accounts" | "models" | "setup";
 
 const PROVIDERS: Record<Provider, { label: string; color: string; dither: DitherColor; glyph: string }> = {
   codex: { label: "Codex", color: "#39e75f", dither: "green", glyph: "◎" },
@@ -282,6 +283,7 @@ export function App() {
         <main className="signal-main" id="main-content">
           {error && <div className="signal-error" role="alert">SIGNAL INTERRUPTED // {error}</div>}
           {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
+          {view === "insights" && <Insights stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
           {view === "usage" && <Usage stats={stats} signal={signal} session={session} />}
           {view === "accounts" && (
             <Accounts
@@ -398,6 +400,7 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
 function Navigation({ view, onChange, onSignOut }: { view: View; onChange: (view: View) => void; onSignOut: () => void }) {
   const items: Array<[View, string, string]> = [
     ["pulse", "PULSE", "⌁"],
+    ["insights", "INSIGHTS", "△"],
     ["usage", "USAGE", "╱"],
     ["accounts", "ACCOUNTS", "▦"],
 	["models", "MODELS", "◇"],
@@ -709,6 +712,110 @@ function OriginWeeklyChart({ rows }: { rows: OriginWeeklyUsage[] }) {
         <Legend isClickable />
         <Tooltip labelKey="week" valueFormatter={(value) => `${formatTokens(value)} tok`} />
       </BarChart>
+    </div>
+  );
+}
+
+function DemandTrendChart({ hourly }: { hourly: HourlyUsage[] }) {
+  const data = dailyDemandSeries(hourly);
+  if (data.length < 2) return <EmptyChart label="DAILY DEMAND HISTORY ACQUIRING" />;
+  const config: ChartConfig = {
+    demand: { label: "Daily demand", color: "gold" },
+    trend: { label: "3-day trend", color: "cyan" },
+  };
+  return (
+    <div className="chart-stage large">
+      <LineChart data={data} config={config} margins={{ left: 52, bottom: 28 }} bloom="low" bloomOnHover>
+        <Grid horizontal />
+        <Line dataKey="demand" isClickable />
+        <Line dataKey="trend" isClickable />
+        <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} maxTicks={7} />
+        <YAxis tickFormatter={formatTokens} />
+        <Legend isClickable />
+        <Tooltip labelKey="date" valueFormatter={(value) => `${formatTokens(value)} tok`} />
+      </LineChart>
+    </div>
+  );
+}
+
+function CapacityForecastTable({ forecasts }: { forecasts: CapacityForecast[] }) {
+  return (
+    <div className="capacity-table" role="table" aria-label="Provider capacity forecast">
+      <div className="capacity-row capacity-head" role="row"><span>PROVIDER</span><span>LOAD</span><span>SUPPLY</span><span>MIN</span><span>+20%</span><span>ACTION</span></div>
+      {forecasts.map((forecast) => {
+        const state = forecast.minimumToAdd > 0 ? "gap" : forecast.bufferedToAdd > 0 ? "buffer" : "covered";
+        return (
+          <div className={classNames("capacity-row", state)} role="row" key={forecast.provider} style={{ "--provider": PROVIDERS[forecast.provider].color } as CSSProperties}>
+            <span className="capacity-provider"><i>{PROVIDERS[forecast.provider].glyph}</i><b>{PROVIDERS[forecast.provider].label}</b><small>{forecast.measuredAccounts} measured</small></span>
+            <span><b>{forecast.loadEquivalents.toFixed(1)}</b><small>ACCT-EQ</small></span>
+            <span><b>{forecast.activeAccounts}</b><small>ACTIVE</small></span>
+            <span><b>{forecast.baselineAccounts}</b><small>BASELINE</small></span>
+            <span><b>{forecast.bufferedAccounts}</b><small>TARGET</small></span>
+            <span className="capacity-action"><b>{forecast.minimumToAdd > 0 ? `+${forecast.minimumToAdd} NOW` : forecast.bufferedToAdd > 0 ? `+${forecast.bufferedToAdd} BUFFER` : "COVERED"}</b><small>{forecast.earliestFullMinutes !== null ? `FULL IN ${formatReset(Math.floor(forecast.earliestFullMinutes))}` : "LASTS TO RESET"}</small></span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void }) {
+  if (!stats || !signal) return <SignalSkeleton />;
+  const demand = demandSummary(signal.hourly);
+  const forecasts = capacityForecasts(stats.accounts);
+  const minimumAdds = forecasts.reduce((sum, forecast) => sum + forecast.minimumToAdd, 0);
+  const bufferedAdds = forecasts.reduce((sum, forecast) => sum + forecast.bufferedToAdd, 0);
+  const primaryRisk = forecasts.find((forecast) => forecast.minimumToAdd > 0) ?? forecasts.find((forecast) => forecast.bufferedToAdd > 0) ?? forecasts[0];
+  const modeledProviders = new Set(forecasts.map((forecast) => forecast.provider));
+  const unmodeled = [...new Set(stats.accounts.map((account) => account.type))].filter((provider) => !modeledProviders.has(provider));
+  const sampleDays = forecasts.reduce((sum, forecast) => sum + forecast.sampleAccountDays, 0);
+  const demandDirection = demand.deltaPct >= 0 ? `+${demand.deltaPct.toFixed(1)}%` : `${demand.deltaPct.toFixed(1)}%`;
+
+  return (
+    <div className="signal-view insights-view">
+      <div className="view-title"><span>I.00</span><h1>Capacity intelligence</h1><p>How demand is moving, where the pool runs dry, and what to add before it does.</p></div>
+      <section className="inline-instruments insights-instruments" aria-label="Capacity planning summary">
+        <Instrument label="DEMAND / 24H" value={formatTokens(demand.current24)} accent />
+        <Instrument label="DAY / DAY" value={demandDirection} danger={demand.deltaPct > 20} />
+        <Instrument label="7D DAILY AVG" value={formatTokens(demand.averageDay7d)} />
+        <Instrument label="P95 BURST" value={`${demand.peakFactor.toFixed(1)}×`} danger={demand.peakFactor > 2} />
+        <Instrument label="MINIMUM ADDS" value={`+${minimumAdds}`} danger={minimumAdds > 0} />
+        <Instrument label="20% BUFFER ADDS" value={`+${bufferedAdds}`} accent />
+      </section>
+
+      <section className={classNames("capacity-directive", minimumAdds > 0 ? "urgent" : bufferedAdds > 0 ? "advisory" : "clear")}>
+        <span>PRIMARY ACTION</span>
+        {primaryRisk ? (
+          <>
+            <strong>{primaryRisk.minimumToAdd > 0 ? `ADD ${primaryRisk.minimumToAdd} ${PROVIDERS[primaryRisk.provider].label.toUpperCase()} ACCOUNT${primaryRisk.minimumToAdd === 1 ? "" : "S"} MINIMUM` : primaryRisk.bufferedToAdd > 0 ? `ADD ${primaryRisk.bufferedToAdd} ${PROVIDERS[primaryRisk.provider].label.toUpperCase()} FOR RESERVE` : "CURRENT CAPACITY HOLDS"}</strong>
+            <p>Observed drain equals {primaryRisk.loadEquivalents.toFixed(1)} current-plan account equivalents against {primaryRisk.activeAccounts} active. Target {primaryRisk.bufferedAccounts} for a 20% operating buffer.</p>
+          </>
+        ) : <><strong>CAPACITY MODEL ACQUIRING</strong><p>No provider is reporting enough weekly-window history yet.</p></>}
+        <button onClick={onAccounts}>OPEN ACCOUNTS →</button>
+      </section>
+
+      <section className="insights-grid">
+        <SignalPanel code="I.10" title="DAILY DEMAND // COMPLETE DAYS + 3D TREND"><DemandTrendChart hourly={signal.hourly} /></SignalPanel>
+        <SignalPanel code="I.11" title="ACCOUNT CAPACITY // CURRENT PACE"><CapacityForecastTable forecasts={forecasts} /></SignalPanel>
+      </section>
+
+      <section className="insight-actions">
+        <header><span>I.20</span><h2>OPERATING CALLS</h2><small>{sampleDays.toFixed(1)} ACCOUNT-DAYS OBSERVED</small></header>
+        {forecasts.map((forecast) => (
+          <div className="insight-action-row" key={forecast.provider}>
+            <span style={{ color: PROVIDERS[forecast.provider].color }}>{PROVIDERS[forecast.provider].glyph}</span>
+            <b>{PROVIDERS[forecast.provider].label.toUpperCase()}</b>
+            <p>{forecast.minimumToAdd > 0 ? `Add ${forecast.minimumToAdd} now to make the current weekly drain sustainable; add ${forecast.bufferedToAdd} total for the 20% reserve.` : forecast.bufferedToAdd > 0 ? `Baseline is covered. Add ${forecast.bufferedToAdd} for a 20% reserve against demand growth and uneven routing.` : "Current supply covers observed demand with the 20% reserve intact."}</p>
+            <strong>{forecast.headroomPct >= 0 ? `${forecast.headroomPct.toFixed(0)}% HEADROOM` : `${Math.abs(forecast.headroomPct).toFixed(0)}% OVER CAPACITY`}</strong>
+          </div>
+        ))}
+        {unmodeled.length > 0 && <footer>CAPACITY UNMODELED // {unmodeled.map((provider) => PROVIDERS[provider].label.toUpperCase()).join(" · ")} DO NOT REPORT A WEEKLY LIMIT. THEIR TOKENS ARE INCLUDED IN DEMAND TRENDS, NOT ACCOUNT RECOMMENDATIONS.</footer>}
+      </section>
+
+      <section className="insight-method">
+        <b>HOW THE ACCOUNT NUMBER WORKS</b>
+        <span>For each provider: sum <code>weekly used % ÷ expected used % by now</code>, then round up. “+20%” adds an operating reserve. Recommendations are current-plan equivalents and update every 30 seconds.</span>
+      </section>
     </div>
   );
 }
