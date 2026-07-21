@@ -265,6 +265,35 @@ func TestCandidateSoftlyPrefersCyberAccessForOrdinaryTraffic(t *testing.T) {
 	}
 }
 
+func TestCandidateWeightsOrdinaryTrafficWithoutStarvingNonCyberAccounts(t *testing.T) {
+	accounts := []*Account{
+		{ID: "cyber-a", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true, Usage: UsageSnapshot{SecondaryUsedPercent: 0.10}},
+		{ID: "cyber-b", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true, Usage: UsageSnapshot{SecondaryUsedPercent: 0.10}},
+		{ID: "ordinary-a", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{SecondaryUsedPercent: 0.10}},
+		{ID: "ordinary-b", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{SecondaryUsedPercent: 0.10}},
+	}
+	pool := newPoolState(accounts, false)
+	counts := make(map[string]int)
+	for range 60 {
+		candidate := pool.candidate("", nil, AccountTypeCodex, "", "")
+		if candidate == nil {
+			t.Fatal("expected a Codex candidate")
+		}
+		counts[candidate.ID]++
+	}
+
+	for _, id := range []string{"cyber-a", "cyber-b"} {
+		if counts[id] != 20 {
+			t.Fatalf("%s selections = %d, want 20", id, counts[id])
+		}
+	}
+	for _, id := range []string{"ordinary-a", "ordinary-b"} {
+		if counts[id] != 10 {
+			t.Fatalf("%s selections = %d, want 10", id, counts[id])
+		}
+	}
+}
+
 func TestCandidateDoesNotPreferBadlyDrainedCyberAccess(t *testing.T) {
 	ordinary := &Account{
 		ID: "ordinary", Type: AccountTypeCodex, PlanType: "pro",
@@ -346,7 +375,7 @@ func TestCandidateSkipsAccountWhenClientIPNotAllowed(t *testing.T) {
 
 func TestCandidateAllowsRestrictedAccountWhenClientIPMatches(t *testing.T) {
 	restricted := &Account{ID: "restricted", Type: AccountTypeCodex, PlanType: "pro", AllowedSourceIPs: []string{"199.45.144.95"}, Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
-	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.2}}
+	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.4}}
 	p := newPoolState([]*Account{restricted, fallback}, false)
 
 	got := p.candidate("", nil, AccountTypeCodex, "", "199.45.144.95")

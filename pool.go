@@ -27,10 +27,13 @@ const (
 	AccountTypeXiaomi      AccountType = "xiaomi"
 	AccountTypeGrok        AccountType = "grok"
 
-	// Prefer cyber-approved accounts for ordinary traffic when their quota
-	// health is competitive, without overriding cooldowns or large headroom
-	// differences.
-	cyberAccessPreferenceBonus = 0.15
+	// For ordinary Codex traffic, cyber-approved accounts receive twice the
+	// routing weight of non-cyber accounts when their quota health is
+	// competitive. Explicit cyber-policy retries use candidateWithCyberAccess
+	// and remain cyber-only.
+	cyberAccessRoutingWeight      = 2
+	ordinaryRoutingWeight         = 1
+	competitiveRoutingScoreWindow = 0.15
 )
 
 type Account struct {
@@ -744,103 +747,121 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 
 	selectCandidate := func(accounts []scoredAccount) *Account {
 		threshold := p.tierThreshold
-		// Try Tier 1 accounts below threshold
-		var bestTier1Below *scoredAccount
-		var bestTier1Any *scoredAccount
+		var tier1Below, tier1Any []*scoredAccount
+		var tier2Below, tier2Any []*scoredAccount
+		var tier3Below, tier3Any []*scoredAccount
 		for i := range accounts {
 			sa := &accounts[i]
-			if sa.tier == 1 {
-				if bestTier1Any == nil || sa.score > bestTier1Any.score {
-					bestTier1Any = sa
-				}
+			switch sa.tier {
+			case 1:
+				tier1Any = append(tier1Any, sa)
 				if sa.secondaryPct < threshold {
-					if bestTier1Below == nil || sa.score > bestTier1Below.score {
-						bestTier1Below = sa
-					}
+					tier1Below = append(tier1Below, sa)
+				}
+			case 2:
+				tier2Any = append(tier2Any, sa)
+				if sa.secondaryPct < threshold {
+					tier2Below = append(tier2Below, sa)
+				}
+			case 3:
+				tier3Any = append(tier3Any, sa)
+				if sa.secondaryPct < threshold {
+					tier3Below = append(tier3Below, sa)
 				}
 			}
-		}
-		if bestTier1Below != nil {
-			p.rr++
-			return bestTier1Below.acc
 		}
 
-		// Try Tier 2 accounts below threshold
-		var bestTier2Below *scoredAccount
-		var bestTier2Any *scoredAccount
-		for i := range accounts {
-			sa := &accounts[i]
-			if sa.tier == 2 {
-				if bestTier2Any == nil || sa.score > bestTier2Any.score {
-					bestTier2Any = sa
+		best := func(candidates []*scoredAccount) *scoredAccount {
+			var selected *scoredAccount
+			for _, candidate := range candidates {
+				if selected == nil || candidate.score > selected.score {
+					selected = candidate
 				}
-				if sa.secondaryPct < threshold {
-					if bestTier2Below == nil || sa.score > bestTier2Below.score {
-						bestTier2Below = sa
+			}
+			return selected
+		}
+
+		choose := func(candidates []*scoredAccount) *Account {
+			selected := best(candidates)
+			if selected == nil {
+				return nil
+			}
+			if accountType == AccountTypeCodex {
+				minimumCompetitiveScore := selected.score - competitiveRoutingScoreWindow
+				competitive := make([]*scoredAccount, 0, len(candidates))
+				for _, candidate := range candidates {
+					if candidate.score >= minimumCompetitiveScore {
+						competitive = append(competitive, candidate)
+					}
+				}
+				sort.Slice(competitive, func(i, j int) bool {
+					return competitive[i].acc.ID < competitive[j].acc.ID
+				})
+				totalWeight := 0
+				for _, candidate := range competitive {
+					if candidate.acc.CyberAccess {
+						totalWeight += cyberAccessRoutingWeight
+					} else {
+						totalWeight += ordinaryRoutingWeight
+					}
+				}
+				if totalWeight > 0 {
+					slot := int(p.rr % uint64(totalWeight))
+					for _, candidate := range competitive {
+						weight := ordinaryRoutingWeight
+						if candidate.acc.CyberAccess {
+							weight = cyberAccessRoutingWeight
+						}
+						if slot < weight {
+							selected = candidate
+							break
+						}
+						slot -= weight
 					}
 				}
 			}
+			p.rr++
+			return selected.acc
+		}
+
+		// Try Tier 1 accounts below threshold.
+		if len(tier1Below) > 0 {
+			return choose(tier1Below)
 		}
 
 		// If tier 1 accounts exist above threshold, prefer them over tier 2 below threshold.
 		// Only fall to tier 2 if no tier 1 accounts at all.
-		if bestTier1Any != nil {
+		if len(tier1Any) > 0 {
 			// Tier 1 exists but all above threshold. Still prefer tier 1 by score
 			// unless a tier 2 below threshold has significantly better score.
+			bestTier1Any := best(tier1Any)
+			bestTier2Below := best(tier2Below)
 			if accountType != AccountTypeCodex && bestTier2Below != nil && bestTier2Below.score > bestTier1Any.score+0.3 {
-				p.rr++
-				return bestTier2Below.acc
+				return choose(tier2Below)
 			}
-			p.rr++
-			return bestTier1Any.acc
+			return choose(tier1Any)
 		}
-		if bestTier2Below != nil {
-			p.rr++
-			return bestTier2Below.acc
+		if len(tier2Below) > 0 {
+			return choose(tier2Below)
 		}
-		if bestTier2Any != nil {
-			p.rr++
-			return bestTier2Any.acc
+		if len(tier2Any) > 0 {
+			return choose(tier2Any)
 		}
 
-		// Tier 3: last resort (e.g. Claude pro accounts)
-		var bestTier3Below *scoredAccount
-		var bestTier3Any *scoredAccount
-		for i := range accounts {
-			sa := &accounts[i]
-			if sa.tier == 3 {
-				if bestTier3Any == nil || sa.score > bestTier3Any.score {
-					bestTier3Any = sa
-				}
-				if sa.secondaryPct < threshold {
-					if bestTier3Below == nil || sa.score > bestTier3Below.score {
-						bestTier3Below = sa
-					}
-				}
-			}
+		// Tier 3: last resort (e.g. Claude pro accounts).
+		if len(tier3Below) > 0 {
+			return choose(tier3Below)
 		}
-		if bestTier3Below != nil {
-			p.rr++
-			return bestTier3Below.acc
-		}
-		if bestTier3Any != nil {
-			p.rr++
-			return bestTier3Any.acc
+		if len(tier3Any) > 0 {
+			return choose(tier3Any)
 		}
 
-		// Absolute fallback — pick the one with highest score (most headroom)
-		var bestAll *scoredAccount
+		// Absolute fallback — use weighted fairness among competitive accounts.
+		all := make([]*scoredAccount, 0, len(accounts))
 		for i := range accounts {
-			sa := &accounts[i]
-			if bestAll == nil || sa.score > bestAll.score {
-				bestAll = sa
-			}
+			all = append(all, &accounts[i])
 		}
-		if bestAll != nil {
-			p.rr++
-			return bestAll.acc
-		}
-		return nil
+		return choose(all)
 	}
 
 	if len(eligible) == 0 {
@@ -1000,7 +1021,6 @@ type scoreBreakdown struct {
 	ClampedToFloor     bool
 	RecentUseBonus     float64
 	CreditBonus        float64
-	CyberAccessBonus   float64
 	HeadroomPreCredit  float64
 }
 
@@ -1138,10 +1158,7 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 	}
 
 	out.HeadroomPreCredit = headroom
-	if a.CyberAccess {
-		out.CyberAccessBonus = cyberAccessPreferenceBonus
-	}
-	out.Score = headroom*out.CreditBonus + out.CyberAccessBonus
+	out.Score = headroom * out.CreditBonus
 	return out
 }
 
@@ -1195,8 +1212,8 @@ func scoreTooltipFromBreakdownLocked(a *Account, now time.Time, breakdown scoreB
 	if breakdown.CreditBonus > 1.0 {
 		lines = append(lines, fmt.Sprintf("Credits multiplier: x%.2f", breakdown.CreditBonus))
 	}
-	if breakdown.CyberAccessBonus > 0 {
-		lines = append(lines, fmt.Sprintf("Cyber-access preference: +%.2f", breakdown.CyberAccessBonus))
+	if a.CyberAccess {
+		lines = append(lines, "Cyber routing weight: 2x when quota health is competitive.")
 	}
 	if accountCoolingDownLocked(a, now) {
 		lines = append(lines, "Cooldown is separate from score; this account is currently cooling down.")
