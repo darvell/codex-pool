@@ -26,6 +26,11 @@ const (
 	AccountTypeZAI         AccountType = "zai"
 	AccountTypeXiaomi      AccountType = "xiaomi"
 	AccountTypeGrok        AccountType = "grok"
+
+	// Prefer cyber-approved accounts for ordinary traffic when their quota
+	// health is competitive, without overriding cooldowns or large headroom
+	// differences.
+	cyberAccessPreferenceBonus = 0.15
 )
 
 type Account struct {
@@ -995,6 +1000,7 @@ type scoreBreakdown struct {
 	ClampedToFloor     bool
 	RecentUseBonus     float64
 	CreditBonus        float64
+	CyberAccessBonus   float64
 	HeadroomPreCredit  float64
 }
 
@@ -1132,7 +1138,10 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 	}
 
 	out.HeadroomPreCredit = headroom
-	out.Score = headroom * out.CreditBonus
+	if a.CyberAccess {
+		out.CyberAccessBonus = cyberAccessPreferenceBonus
+	}
+	out.Score = headroom*out.CreditBonus + out.CyberAccessBonus
 	return out
 }
 
@@ -1185,6 +1194,9 @@ func scoreTooltipFromBreakdownLocked(a *Account, now time.Time, breakdown scoreB
 	}
 	if breakdown.CreditBonus > 1.0 {
 		lines = append(lines, fmt.Sprintf("Credits multiplier: x%.2f", breakdown.CreditBonus))
+	}
+	if breakdown.CyberAccessBonus > 0 {
+		lines = append(lines, fmt.Sprintf("Cyber-access preference: +%.2f", breakdown.CyberAccessBonus))
 	}
 	if accountCoolingDownLocked(a, now) {
 		lines = append(lines, "Cooldown is separate from score; this account is currently cooling down.")

@@ -249,6 +249,38 @@ func TestCandidateWithCyberAccessOnlyReturnsMarkedAccounts(t *testing.T) {
 	}
 }
 
+func TestCandidateSoftlyPrefersCyberAccessForOrdinaryTraffic(t *testing.T) {
+	ordinary := &Account{
+		ID: "ordinary", Type: AccountTypeCodex, PlanType: "pro",
+		Usage: UsageSnapshot{SecondaryUsedPercent: 0.10},
+	}
+	cyber := &Account{
+		ID: "cyber", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true,
+		Usage: UsageSnapshot{SecondaryUsedPercent: 0.20},
+	}
+	pool := newPoolState([]*Account{ordinary, cyber}, false)
+
+	if got := pool.candidate("", nil, AccountTypeCodex, "", ""); got != cyber {
+		t.Fatalf("candidate = %v, want cyber account when quota health is competitive", got)
+	}
+}
+
+func TestCandidateDoesNotPreferBadlyDrainedCyberAccess(t *testing.T) {
+	ordinary := &Account{
+		ID: "ordinary", Type: AccountTypeCodex, PlanType: "pro",
+		Usage: UsageSnapshot{SecondaryUsedPercent: 0.10},
+	}
+	cyber := &Account{
+		ID: "cyber", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true,
+		Usage: UsageSnapshot{SecondaryUsedPercent: 0.50},
+	}
+	pool := newPoolState([]*Account{ordinary, cyber}, false)
+
+	if got := pool.candidate("", nil, AccountTypeCodex, "", ""); got != ordinary {
+		t.Fatalf("candidate = %v, want substantially healthier ordinary account", got)
+	}
+}
+
 // Regression: when the only cyber-access account has an expired access
 // token, candidateWithCyberAccess must still return it — the caller's
 // dial path will lazy-refresh. Excluding expired accounts here causes
