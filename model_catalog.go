@@ -35,6 +35,7 @@ var poolModels = []poolModel{
 	{AccountType: AccountTypeClaude, ID: "claude-sonnet-4-5-20250929", DisplayName: "Claude Sonnet 4.5", ContextWindow: 200000, MaxTokens: 64000, Reasoning: true, Input: []string{"text", "image"}, Cost: &piModelCost{Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}},
 	{AccountType: AccountTypeClaude, ID: "claude-opus-4-1-20250805", DisplayName: "Claude Opus 4.1", ContextWindow: 200000, MaxTokens: 32000, Reasoning: true, Input: []string{"text", "image"}, Cost: &piModelCost{Input: 15, Output: 75, CacheRead: 1.5, CacheWrite: 18.75}},
 
+	{AccountType: AccountTypeKimi, ID: "k3", DisplayName: "Kimi K3", Description: "Kimi's flagship model for coding, games, 3D, and knowledge tasks.", ContextWindow: 1048576, MaxTokens: 32768, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeKimi, ID: "kimi-for-coding", DisplayName: "kimi-for-coding", ContextWindow: 262144, MaxTokens: 32768, Reasoning: true, Input: []string{"text", "image"}, Aliases: []string{"kimi", "k2p5", "kimi-k2-thinking"}},
 	{AccountType: AccountTypeKimi, ID: "kimi-for-coding-highspeed", DisplayName: "kimi-for-coding-highspeed", ContextWindow: 262144, MaxTokens: 32768, Reasoning: true, Input: []string{"text", "image"}},
 

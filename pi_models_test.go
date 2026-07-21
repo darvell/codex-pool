@@ -143,10 +143,11 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if kimi.API != "anthropic-messages" {
 		t.Fatalf("kimi api = %q", kimi.API)
 	}
-	if len(kimi.Models) != 2 {
+	if len(kimi.Models) != 3 {
 		t.Fatalf("kimi model count = %d", len(kimi.Models))
 	}
 	needKimiIDs := map[string]bool{
+		"k3":                        false,
 		"kimi-for-coding":           false,
 		"kimi-for-coding-highspeed": false,
 	}
@@ -156,6 +157,9 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		}
 		if len(model.Input) != 2 || model.Input[0] != "text" || model.Input[1] != "image" {
 			t.Fatalf("kimi model %q inputs = %#v, want text+image", model.ID, model.Input)
+		}
+		if model.ID == "k3" && model.ContextWindow != 1048576 {
+			t.Fatalf("k3 context window = %d, want 1048576", model.ContextWindow)
 		}
 	}
 	for id, found := range needKimiIDs {
@@ -288,7 +292,7 @@ func TestGeneratedClientConfigsIncludeDiscoveredAntigravityModels(t *testing.T) 
 func TestIsKimiModelHandlesPiBuiltInIDs(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"kimi", "kimi-for-coding", "k2p5", "kimi-k2-thinking"} {
+	for _, model := range []string{"k3", "kimi", "kimi-for-coding", "k2p5", "kimi-k2-thinking"} {
 		if !isKimiModel(model) {
 			t.Fatalf("expected %q to route to kimi", model)
 		}
