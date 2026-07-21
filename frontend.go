@@ -1759,7 +1759,11 @@ func quotaPaceRatio(usedPercent float64, resetMinutes, windowMinutes int) float6
 		return 0
 	}
 	elapsed := windowMinutes - resetMinutes
-	if elapsed <= 0 {
+	// Usage is reported in percentage-point increments. Before one point of
+	// even-burn budget has elapsed, extrapolating the first non-zero reading is
+	// dominated by measurement resolution (for example, 1% in 23 minutes of a
+	// seven-day window appears to be 62.6%/day).
+	if float64(elapsed) < float64(windowMinutes)/100 {
 		return 0
 	}
 	return usedPercent / (100 * float64(elapsed) / float64(windowMinutes))

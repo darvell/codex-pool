@@ -48,6 +48,7 @@ import {
   modelMix,
   originConcentration,
   peakHeatmap,
+  weeklyQuotaEstimate,
   type AccountFlow,
   type CapacityForecast,
 } from "./insights";
@@ -129,22 +130,19 @@ function WeeklyPace({ account }: { account: AccountStats }) {
   const windowMinutes = account.secondary_window_minutes > 0 ? account.secondary_window_minutes : 7 * 1440;
   const windowDays = windowMinutes / 1440;
   const budgetPerDay = 100 / windowDays;
-  const elapsedMinutes = windowMinutes - account.secondary_reset_minutes;
-  if (elapsedMinutes <= 0 || account.secondary_window_used_pct <= 0) {
+  const estimate = weeklyQuotaEstimate(account);
+  if (!estimate || account.secondary_window_used_pct <= 0) {
     return (
       <span className="quota-limit acquiring" aria-label={`Weekly budget ${budgetPerDay.toFixed(1)} percent per day; not enough history to forecast`}>
         <b>—</b><small>BUDGET {budgetPerDay.toFixed(1)}%/D</small><em>ACQUIRING RATE</em>
       </span>
     );
   }
-  const burnPerDay = account.secondary_window_used_pct / (elapsedMinutes / 1440);
-  const remainingPct = Math.max(0, 100 - account.secondary_window_used_pct);
-  const fullInMinutes = remainingPct / (burnPerDay / 1440);
-  const exhaustsEarly = fullInMinutes < account.secondary_reset_minutes;
-  const forecast = exhaustsEarly ? `FULL IN ${formatReset(Math.max(1, Math.floor(fullInMinutes)))}` : "LASTS TO RESET";
+  const exhaustsEarly = estimate.fullInMinutes < account.secondary_reset_minutes;
+  const forecast = exhaustsEarly ? `FULL IN ${formatReset(Math.max(1, Math.floor(estimate.fullInMinutes)))}` : "LASTS TO RESET";
   return (
-    <span className={classNames("quota-limit", exhaustsEarly ? "fast" : "safe")} aria-label={`Burning ${burnPerDay.toFixed(1)} percent per day against a ${budgetPerDay.toFixed(1)} percent daily budget. ${forecast.toLowerCase()}.`}>
-      <b>{burnPerDay.toFixed(1)}%/D</b><small>BUDGET {budgetPerDay.toFixed(1)}</small><em>{forecast}</em>
+    <span className={classNames("quota-limit", exhaustsEarly ? "fast" : "safe")} aria-label={`Burning ${estimate.burnPerDay.toFixed(1)} percent per day against a ${budgetPerDay.toFixed(1)} percent daily budget. ${forecast.toLowerCase()}.`}>
+      <b>{estimate.burnPerDay.toFixed(1)}%/D</b><small>BUDGET {budgetPerDay.toFixed(1)}</small><em>{forecast}</em>
     </span>
   );
 }

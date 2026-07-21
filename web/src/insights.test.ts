@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accountFlow, capacityForecasts, dailyDemandSeries, demandSummary, modelMix, originConcentration, peakHeatmap } from "./insights";
+import { accountFlow, capacityForecasts, dailyDemandSeries, demandSummary, modelMix, originConcentration, peakHeatmap, weeklyQuotaEstimate } from "./insights";
 import type { AccountStats, HourlyUsage, ModelDailyUsage, OriginWeeklyUsage } from "./types";
 
 function account(overrides: Partial<AccountStats>): AccountStats {
@@ -39,6 +39,19 @@ function account(overrides: Partial<AccountStats>): AccountStats {
 }
 
 describe("capacityForecasts", () => {
+  it("does not extrapolate a new window before one percentage point of budget has elapsed", () => {
+    const fresh = account({ secondary_window_used_pct: 1, secondary_reset_minutes: 10050 });
+    expect(weeklyQuotaEstimate(fresh)).toBeNull();
+    expect(capacityForecasts([fresh])).toEqual([]);
+  });
+
+  it("starts forecasting once the quota reading has enough time resolution", () => {
+    const established = account({ secondary_window_used_pct: 2, secondary_reset_minutes: 9960 });
+    const estimate = weeklyQuotaEstimate(established);
+    expect(estimate?.burnPerDay).toBeCloseTo(24);
+    expect(estimate?.projectedFinalPct).toBeCloseTo(168);
+  });
+
   it("converts weekly quota drain into account-equivalent demand", () => {
     const forecast = capacityForecasts([
       account({ id: "one", secondary_window_used_pct: 45 }),
@@ -96,6 +109,12 @@ describe("demand trend", () => {
 });
 
 describe("resource dashboards", () => {
+  it("omits acquiring windows from account-flow classifications", () => {
+    expect(accountFlow([
+      account({ id: "fresh", secondary_window_used_pct: 1, secondary_reset_minutes: 10050 }),
+    ])).toEqual([]);
+  });
+
   it("identifies accounts that exhaust and accounts with stranded capacity", () => {
     const rows = accountFlow([
       account({ id: "hot", secondary_window_used_pct: 45 }),

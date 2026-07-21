@@ -40,6 +40,38 @@ export interface AccountFlow {
   state: "exhausts" | "tight" | "balanced" | "stranded";
 }
 
+export interface WeeklyQuotaEstimate {
+  elapsedMinutes: number;
+  burnPerDay: number;
+  loadEquivalent: number;
+  projectedFinalPct: number;
+  fullInMinutes: number;
+}
+
+// The provider reports quota usage in percentage-point increments. Until at
+// least one percentage point of the window's even-burn budget has elapsed, a
+// non-zero reading is mostly quantization noise: 1% after 23 minutes in a
+// seven-day window naively becomes 62.6%/day. Acquire a longer baseline before
+// extrapolating it into routing-capacity advice.
+export function weeklyQuotaEstimate(account: Pick<AccountStats,
+  "secondary_window_used_pct" | "secondary_reset_minutes" | "secondary_window_minutes"
+>): WeeklyQuotaEstimate | null {
+  const windowMinutes = account.secondary_window_minutes > 0 ? account.secondary_window_minutes : 7 * 1440;
+  const elapsedMinutes = windowMinutes - account.secondary_reset_minutes;
+  const minimumElapsedMinutes = windowMinutes / 100;
+  if (elapsedMinutes < minimumElapsedMinutes || elapsedMinutes > windowMinutes || account.secondary_window_used_pct < 0) return null;
+
+  const burnPerMinute = account.secondary_window_used_pct / elapsedMinutes;
+  const loadEquivalent = (account.secondary_window_used_pct / 100) * (windowMinutes / elapsedMinutes);
+  return {
+    elapsedMinutes,
+    burnPerDay: burnPerMinute * 1440,
+    loadEquivalent,
+    projectedFinalPct: loadEquivalent * 100,
+    fullInMinutes: burnPerMinute > 0 ? (100 - account.secondary_window_used_pct) / burnPerMinute : Number.POSITIVE_INFINITY,
+  };
+}
+
 export interface PeakCell {
   day: number;
   hour: number;
@@ -75,13 +107,9 @@ export function capacityForecasts(accounts: AccountStats[], bufferRatio = 0.2): 
     const activeAccounts = rows.filter((account) => account.status === "healthy" || account.status === "degraded").length;
     const measured = rows.flatMap((account) => {
       if (account.status === "dead" || !account.secondary_window_available || account.secondary_window_used_pct < 0) return [];
-      const windowMinutes = account.secondary_window_minutes > 0 ? account.secondary_window_minutes : 7 * 1440;
-      const elapsedMinutes = windowMinutes - account.secondary_reset_minutes;
-      if (elapsedMinutes <= 0) return [];
-      const loadEquivalents = (account.secondary_window_used_pct / 100) * (windowMinutes / elapsedMinutes);
-      const burnPerMinute = account.secondary_window_used_pct / elapsedMinutes;
-      const fullInMinutes = burnPerMinute > 0 ? (100 - account.secondary_window_used_pct) / burnPerMinute : Number.POSITIVE_INFINITY;
-      return [{ loadEquivalents, elapsedMinutes, fullInMinutes, resetMinutes: account.secondary_reset_minutes }];
+      const estimate = weeklyQuotaEstimate(account);
+      if (!estimate) return [];
+      return [{ loadEquivalents: estimate.loadEquivalent, elapsedMinutes: estimate.elapsedMinutes, fullInMinutes: estimate.fullInMinutes, resetMinutes: account.secondary_reset_minutes }];
     });
     if (measured.length === 0) return [];
     const loadEquivalents = measured.reduce((sum, row) => sum + row.loadEquivalents, 0);
@@ -149,12 +177,9 @@ export function dailyDemandSeries(hourly: HourlyUsage[]): DailyDemandPoint[] {
 export function accountFlow(accounts: AccountStats[]): AccountFlow[] {
   return accounts.flatMap((account) => {
     if (account.status === "dead" || !account.secondary_window_available) return [];
-    const windowMinutes = account.secondary_window_minutes > 0 ? account.secondary_window_minutes : 7 * 1440;
-    const elapsedMinutes = windowMinutes - account.secondary_reset_minutes;
-    if (elapsedMinutes <= 0) return [];
-    const projectedFinalPct = account.secondary_window_used_pct > 0
-      ? account.secondary_window_used_pct / (elapsedMinutes / windowMinutes)
-      : 0;
+    const estimate = weeklyQuotaEstimate(account);
+    if (!estimate) return [];
+    const projectedFinalPct = estimate.projectedFinalPct;
     const strandedPct = Math.max(0, 100 - projectedFinalPct);
     const state: AccountFlow["state"] = projectedFinalPct >= 100 ? "exhausts"
       : projectedFinalPct >= 85 ? "tight"

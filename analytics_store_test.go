@@ -103,6 +103,9 @@ func TestPoolStatsROIUsesCumulativeSubscriptionSpendForCurrentAccounts(t *testin
 }
 
 func TestQuotaPaceRatioSignalsEarlyExhaustion(t *testing.T) {
+	if got := quotaPaceRatio(1, 10050, 10080); got != 0 {
+		t.Fatalf("fresh quantized sample pace = %v, want acquiring (0)", got)
+	}
 	if got := quotaPaceRatio(50, 150, 300); got != 1 {
 		t.Fatalf("even pace = %v, want 1", got)
 	}
