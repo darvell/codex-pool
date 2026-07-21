@@ -141,14 +141,29 @@ func TestAutoRedeemExpiringCodexResetCredit(t *testing.T) {
 					Header:     make(http.Header),
 				}, nil
 			case 2:
-				if req.Method != http.MethodGet {
-					t.Fatalf("method = %s", req.Method)
+				if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/rate-limit-reset-credits") {
+					t.Fatalf("reset credits request = %s %s", req.Method, req.URL.Path)
 				}
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Status:     "200 OK",
 					Body:       io.NopCloser(strings.NewReader(`{"available_count":0,"credits":[]}`)),
 					Header:     make(http.Header),
+				}, nil
+			case 3:
+				if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/wham/usage") {
+					t.Fatalf("usage request = %s %s", req.Method, req.URL.Path)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Body: io.NopCloser(strings.NewReader(`{
+						"rate_limit": {
+							"primary_window": {"used_percent": 0, "reset_at": 1783828800, "limit_window_seconds": 18000},
+							"secondary_window": {"used_percent": 0, "reset_at": 1784433600, "limit_window_seconds": 604800}
+						}
+					}`)),
+					Header: make(http.Header),
 				}, nil
 			default:
 				t.Fatalf("unexpected request %d", requests)
@@ -164,16 +179,29 @@ func TestAutoRedeemExpiringCodexResetCredit(t *testing.T) {
 			{ID: "credit-due", ExpiresAt: now.Add(10 * time.Minute)},
 		},
 		ResetCreditsAvailable: 1,
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.68,
+			SecondaryUsedPercent: 0.68,
+			PrimaryUsed:          0.68,
+			SecondaryUsed:        0.68,
+			RetrievedAt:          now.Add(-time.Minute),
+		},
 	}
 
 	if err := h.autoRedeemExpiringCodexResetCredit(now, account); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 2 {
+	if requests != 3 {
 		t.Fatalf("requests = %d", requests)
 	}
 	if account.ResetCreditsAvailable != 0 || len(account.RateLimitResetCredits) != 0 {
 		t.Fatalf("credits were not refreshed after redemption: %+v", account.RateLimitResetCredits)
+	}
+	if got := usagePrimaryUsed(account.Usage); got != 0 {
+		t.Fatalf("primary usage = %.2f, want 0 after redemption", got)
+	}
+	if got := usageSecondaryUsed(account.Usage); got != 0 {
+		t.Fatalf("secondary usage = %.2f, want 0 after redemption", got)
 	}
 }
 

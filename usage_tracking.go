@@ -564,7 +564,19 @@ func (h *proxyHandler) autoRedeemExpiringCodexResetCredit(now time.Time, a *Acco
 		code,
 		windowsReset,
 	)
-	return h.fetchCodexResetCredits(a)
+
+	creditsErr := h.fetchCodexResetCredits(a)
+	usageErr := h.fetchUsage(time.Now(), a)
+	switch {
+	case creditsErr != nil && usageErr != nil:
+		return fmt.Errorf("refresh reset credits: %v; refresh usage: %v", creditsErr, usageErr)
+	case creditsErr != nil:
+		return fmt.Errorf("refresh reset credits: %w", creditsErr)
+	case usageErr != nil:
+		return fmt.Errorf("refresh usage: %w", usageErr)
+	default:
+		return nil
+	}
 }
 
 func (h *proxyHandler) consumeCodexResetCredit(a *Account, credit RateLimitResetCredit) (string, int, error) {
