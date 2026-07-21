@@ -311,17 +311,20 @@ func pumpFrames(
 			default:
 			}
 			data := frame.data
-			if debug {
-				logRelayFrame(logLabel, label, frame.msgType, data)
-			}
 			if inspect != nil {
 				rewritten, err := inspect(data)
 				if err != nil {
 					return err
 				}
 				if rewritten != nil {
+					if len(rewritten) == 0 {
+						continue
+					}
 					data = rewritten
 				}
+			}
+			if debug {
+				logRelayFrame(logLabel, label, frame.msgType, data)
 			}
 			if err := dst.Write(ctx, frame.msgType, data); err != nil {
 				return fmt.Errorf("%s write: %w", label, err)
@@ -360,6 +363,13 @@ func isTerminalCodexWebSocketEvent(data []byte) bool {
 
 func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 	s.recordCompletedUsage(data)
+	filtered, drop, changed := filterHostedMCPResponseJSON(data)
+	if drop {
+		return []byte{}, nil
+	}
+	if changed {
+		data = filtered
+	}
 	if !isCyberPolicyError(data) {
 		return data, nil
 	}
@@ -383,6 +393,13 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if isCodexResponseCreate(data) {
 		data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
+		filtered, changed, err := filterHostedMCPRequestJSON(data)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			data = filtered
+		}
 		s.lastResponseCreate = append(s.lastResponseCreate[:0], data...)
 		s.requestedModel = extractRequestedModelFromJSON(data)
 	}
