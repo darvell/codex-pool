@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -68,6 +70,7 @@ type config struct {
 	websocketHeartbeatInterval time.Duration // Send downstream app-level websocket heartbeats this often (0 = disabled)
 	websocketReadLimit         int64         // Maximum websocket message size
 	websocketCompression       bool          // Enable per-message websocket compression (off by default for latency)
+	shutdownGrace              time.Duration // Let active websocket turns finish before forcing a restart close
 	tierThreshold              float64       // Secondary usage % at which we stop preferring a tier (default 0.50)
 }
 
@@ -229,6 +232,12 @@ func buildConfig() *config {
 		}
 	}
 	cfg.websocketCompression = parseBoolEnv("WEBSOCKET_COMPRESSION", false)
+	cfg.shutdownGrace = 30 * time.Second
+	if v := getenv("PROXY_SHUTDOWN_GRACE_SECONDS", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n >= 0 {
+			cfg.shutdownGrace = time.Duration(n) * time.Second
+		}
+	}
 
 	// Tier threshold: secondary usage % at which we stop preferring a tier (default 50%)
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.50)
@@ -496,9 +505,63 @@ func main() {
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	shutdownCtx, stopShutdownSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopShutdownSignals()
+	if err := serveUntilShutdown(srv, h, shutdownCtx.Done(), cfg.shutdownGrace); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+func serveUntilShutdown(srv *http.Server, h *proxyHandler, shutdown <-chan struct{}, grace time.Duration) error {
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-shutdown:
+	}
+
+	registry := h.webSocketRegistry()
+	registry.beginDrain()
+	log.Printf("shutdown requested: draining %d websocket sessions for up to %s", registry.count(), grace)
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- srv.Shutdown(drainCtx)
+	}()
+
+	drained := registry.wait(drainCtx)
+	if !drained {
+		remaining := registry.count()
+		log.Printf("shutdown grace expired with %d websocket sessions; sending service-restart closes", remaining)
+		registry.forceCloseAll()
+	}
+	_ = srv.Close()
+
+	select {
+	case err := <-shutdownDone:
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-time.After(time.Second):
+	}
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-time.After(time.Second):
+	}
+	log.Printf("shutdown complete")
+	return nil
 }
 
 type proxyHandler struct {
@@ -519,6 +582,8 @@ type proxyHandler struct {
 	inflight             int64
 	startTime            time.Time
 	pacer                *requestPacer // Per-session request pacing
+	webSocketRegistryMu  sync.Mutex
+	webSockets           *webSocketRegistry
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -2996,6 +3061,11 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		if swap.finalAccount != nil {
 			finalAcc = swap.finalAccount
 		}
+		termination := swap.termination
+		if termination.Side == "" {
+			termination = classifyWebSocketTermination(swap.err)
+		}
+		h.recordWebSocketTermination(reqID, finalAcc.ID, termination, time.Since(start))
 		if swap.err != nil {
 			h.recent.add(swap.err.Error())
 			h.metrics.inc("error", finalAcc.ID)
@@ -3014,14 +3084,17 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		return
 	}
 
-	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
+	relay := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		CompressionEnabled:          h.cfg.websocketCompression,
 		LogLabel:                    relayLabel,
 		Debug:                       h.cfg.debug.Load(),
+		Registry:                    h.webSocketRegistry(),
 	})
+	statusCode, err := relay.statusCode, relay.err
+	h.recordWebSocketTermination(reqID, acc.ID, relay.termination, time.Since(start))
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -3120,14 +3193,18 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	if providerType == AccountTypeCodex {
 		downstreamHeartbeatInterval = h.cfg.websocketHeartbeatInterval
 	}
-	statusCode, err := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
+	relayOpts := webSocketRelayOptions{
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		CompressionEnabled:          h.cfg.websocketCompression,
 		LogLabel:                    reqID + " passthrough",
 		Debug:                       h.cfg.debug.Load(),
-	})
+	}
+	relayOpts.Registry = h.webSocketRegistry()
+	relay := relayWebSocket(w, r, outURL, upstreamHeaders, relayOpts)
+	statusCode, err := relay.statusCode, relay.err
+	h.recordWebSocketTermination(reqID, "passthrough", relay.termination, time.Since(start))
 
 	if err != nil {
 		h.recent.add(err.Error())
@@ -3165,6 +3242,13 @@ type webSocketRelayOptions struct {
 	OnUpstreamResponse          func(*http.Response)
 	OnUpstreamMessage           func([]byte) error
 	OnClientMessage             func([]byte) error
+	Registry                    *webSocketRegistry
+}
+
+type webSocketRelayResult struct {
+	statusCode  int
+	err         error
+	termination webSocketTermination
 }
 
 const codexWebSocketReadLimit = 512 * 1024 * 1024
@@ -3185,16 +3269,21 @@ func relayWebSocket(
 	upstreamURL *url.URL,
 	upstreamHeaders http.Header,
 	opts webSocketRelayOptions,
-) (int, error) {
+) webSocketRelayResult {
 	ctx := clientReq.Context()
 
 	wsURL := *upstreamURL
 	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(ctx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return 0, err
+		return webSocketRelayResult{err: err, termination: classifyWebSocketTermination(err)}
 	}
-	defer upstreamConn.CloseNow()
+	upstreamClosing := false
+	defer func() {
+		if !upstreamClosing {
+			upstreamConn.CloseNow()
+		}
+	}()
 	if opts.OnUpstreamResponse != nil {
 		opts.OnUpstreamResponse(upstreamResp)
 	}
@@ -3216,10 +3305,21 @@ func relayWebSocket(
 	clientConn, err := websocket.Accept(w, clientReq, acceptOpts)
 	if err != nil {
 		upstreamConn.Close(websocket.StatusInternalError, "client accept failed")
-		return 0, fmt.Errorf("accept client WS: %w", err)
+		err = fmt.Errorf("accept client WS: %w", err)
+		return webSocketRelayResult{err: err, termination: classifyWebSocketTermination(err)}
 	}
-	defer clientConn.CloseNow()
+	clientClosing := false
+	defer func() {
+		if !clientClosing {
+			clientConn.CloseNow()
+		}
+	}()
 	clientConn.SetReadLimit(opts.ReadLimit)
+	var session *trackedWebSocketSession
+	if opts.Registry != nil {
+		session = opts.Registry.register(clientConn)
+		defer opts.Registry.unregister(session)
+	}
 
 	log.Printf("[ws-relay %s] connected to %s, relaying messages", opts.LogLabel, wsURL.Host)
 
@@ -3229,41 +3329,59 @@ func relayWebSocket(
 	clientWriter := &webSocketWriter{conn: clientConn}
 	upstreamWriter := &webSocketWriter{conn: upstreamConn}
 
-	errc := make(chan error, 2)
-	stopHeartbeat := startWebSocketHeartbeat(relayCtx, clientWriter, opts.DownstreamHeartbeatInterval)
-	defer stopHeartbeat()
+	errCh := make(chan error, 2)
+	clientHeartbeatErr, stopClientHeartbeat := startWebSocketHeartbeat(relayCtx, clientWriter, opts.DownstreamHeartbeatInterval, "client")
+	defer stopClientHeartbeat()
+	upstreamHeartbeatErr, stopUpstreamHeartbeat := startWebSocketHeartbeat(relayCtx, upstreamWriter, opts.DownstreamHeartbeatInterval, "upstream")
+	defer stopUpstreamHeartbeat()
+	markClientForwarded := func(data []byte) {
+		if session != nil && isCodexResponseCreate(data) {
+			session.setActive(true)
+		}
+	}
+	markUpstreamForwarded := func(data []byte) {
+		if session != nil && isTerminalCodexWebSocketEvent(data) {
+			session.setActive(false)
+		}
+	}
 
 	go func() {
-		errc <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.Debug, opts.OnUpstreamMessage)
+		errCh <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.Debug, opts.OnUpstreamMessage, markUpstreamForwarded)
 	}()
 	go func() {
-		errc <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, opts.Debug, opts.OnClientMessage)
+		errCh <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, opts.Debug, opts.OnClientMessage, markClientForwarded)
 	}()
 
-	relayErr := <-errc
+	var relayErr error
+	select {
+	case relayErr = <-errCh:
+	case relayErr = <-clientHeartbeatErr:
+	case relayErr = <-upstreamHeartbeatErr:
+	}
 	relayCancel()
-
-	closeCode := websocket.StatusNormalClosure
-	closeMsg := "relay ended"
-	if relayErr != nil {
-		if code := websocket.CloseStatus(relayErr); code != -1 {
-			closeCode = code
-		}
-		closeMsg = relayErr.Error()
-		if len(closeMsg) > 120 {
-			closeMsg = closeMsg[:120]
-		}
+	termination := normalizeCompletedWebSocketTermination(classifyWebSocketTermination(relayErr), session)
+	closeCode, closeReason := termination.wireCloseCode(), termination.wireReason()
+	switch termination.Side {
+	case "upstream":
+		upstreamConn.CloseNow()
+		upstreamClosing = true
+		clientClosing = true
+		beginWebSocketClose(clientConn, closeCode, closeReason)
+	case "client":
+		clientConn.CloseNow()
+		clientClosing = true
+		upstreamClosing = true
+		beginWebSocketClose(upstreamConn, closeCode, closeReason)
+	default:
+		clientClosing = true
+		upstreamClosing = true
+		beginWebSocketClose(clientConn, closeCode, closeReason)
+		beginWebSocketClose(upstreamConn, closeCode, closeReason)
 	}
-	clientConn.Close(closeCode, closeMsg)
-	upstreamConn.Close(closeCode, closeMsg)
-
-	if relayErr != nil && !errors.Is(relayErr, context.Canceled) &&
-		!strings.Contains(relayErr.Error(), "closed") &&
-		!strings.Contains(relayErr.Error(), "EOF") &&
-		websocket.CloseStatus(relayErr) == -1 {
-		return 101, relayErr
+	if relayErr != nil && !termination.accountFailure() {
+		relayErr = nil
 	}
-	return 101, nil
+	return webSocketRelayResult{statusCode: http.StatusSwitchingProtocols, err: relayErr, termination: termination}
 }
 
 type webSocketWriter struct {
@@ -3298,31 +3416,6 @@ func (w *webSocketWriter) CopyFrom(ctx context.Context, msgType websocket.Messag
 	return closeErr
 }
 
-func startWebSocketHeartbeat(ctx context.Context, dst *webSocketWriter, interval time.Duration) func() {
-	if interval <= 0 {
-		return func() {}
-	}
-	done := make(chan struct{})
-	go func() {
-		timer := time.NewTimer(interval)
-		defer timer.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			case <-timer.C:
-				if err := dst.Ping(ctx); err != nil {
-					return
-				}
-				timer.Reset(interval)
-			}
-		}
-	}()
-	return func() { close(done) }
-}
-
 // relayMessages reads messages from src and writes them to dst until
 // the context is cancelled or an error occurs. If idleTimeout > 0 the
 // connection is force-closed when no frame arrives within that window.
@@ -3330,8 +3423,8 @@ func startWebSocketHeartbeat(ctx context.Context, dst *webSocketWriter, interval
 // We use a time.AfterFunc watchdog instead of context.WithTimeout because
 // coder/websocket closes the connection when the read context is cancelled,
 // which would tear the relay down on every successful frame.
-func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, debug bool, onMessage func([]byte) error) error {
-	if !debug && onMessage == nil {
+func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, debug bool, onMessage func([]byte) error, afterForward func([]byte)) error {
+	if !debug && onMessage == nil && afterForward == nil {
 		return relayMessagesStreaming(ctx, src, dst, label, idleTimeout)
 	}
 	var idleTimer *time.Timer
@@ -3359,6 +3452,9 @@ func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWrite
 		}
 		if err := dst.Write(ctx, msgType, data); err != nil {
 			return fmt.Errorf("%s write: %w", label, err)
+		}
+		if afterForward != nil {
+			afterForward(data)
 		}
 	}
 }

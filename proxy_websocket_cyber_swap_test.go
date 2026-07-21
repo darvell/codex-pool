@@ -145,6 +145,61 @@ func mustReadUntil(t *testing.T, conn *websocket.Conn, marker string, timeout ti
 	return seen
 }
 
+func newAbnormalCloseFixture(t *testing.T) (*codexProxyFixture, *Account) {
+	t.Helper()
+	upstream := newFakeCodexUpstream(t)
+	upstream.on("acct_close", func(ctx context.Context, conn *websocket.Conn) {
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusInternalError, "upstream exploded")
+	})
+	upURL, _ := url.Parse(upstream.server.URL)
+	account := &Account{Type: AccountTypeCodex, ID: "close", AccessToken: "token", AccountID: "acct_close", PlanType: "pro"}
+	return newCodexProxyFixture(t, upURL, []*Account{account}), account
+}
+
+func TestCodexRelayPropagatesAbnormalUpstreamClose(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+	fx, _ := newAbnormalCloseFixture(t)
+	conn := dialClientWS(t, fx, http.Header{
+		"Authorization": []string{"Bearer " + generateClaudePoolToken("test-secret", "close-user")},
+	})
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.5"}`)); err != nil {
+		t.Fatal(err)
+	}
+	readCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := conn.Read(readCtx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+		t.Fatalf("downstream close status = %d, want upstream 1011; err=%v", got, err)
+	}
+}
+
+func TestCodexRelayDoesNotCountAbnormalUpstreamCloseAsSuccess(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+	fx, account := newAbnormalCloseFixture(t)
+	conn := dialClientWS(t, fx, http.Header{
+		"Authorization": []string{"Bearer " + generateClaudePoolToken("test-secret", "close-user")},
+	})
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.5"}`)); err != nil {
+		t.Fatal(err)
+	}
+	readCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_, _, _ = conn.Read(readCtx)
+	cancel()
+	waitForZeroInflight(t, fx.handler, []*Account{account})
+	account.mu.Lock()
+	lastUsed := account.LastUsed
+	account.mu.Unlock()
+	if !lastUsed.IsZero() {
+		t.Fatalf("abnormal upstream close was recorded as successful use at %s", lastUsed)
+	}
+	if got := fx.handler.metrics.webSocketTerminationCount("close", "upstream", int(websocket.StatusInternalError), "error"); got != 1 {
+		t.Fatalf("upstream 1011 termination metric = %d, want 1", got)
+	}
+}
+
 func TestCodexWebSocketCompletionRecordsUsageOnce(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
@@ -480,7 +535,7 @@ func TestCyberSwapResultSwappedFlagIsActiveAccountChange(t *testing.T) {
 				opts:          codexCyberSwapOptions{InitialAccount: tc.initial},
 				activeAccount: tc.active,
 			}
-			got := s.result(101, tc.relayErr)
+			got := s.result(101, tc.relayErr, classifyWebSocketTermination(tc.relayErr))
 			if got.swapped != tc.wantSwapped {
 				t.Fatalf("swapped = %v, want %v", got.swapped, tc.wantSwapped)
 			}
