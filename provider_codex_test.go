@@ -33,6 +33,30 @@ func TestCodexProviderNormalizeResponsesPaths(t *testing.T) {
 	}
 }
 
+func TestCodexProviderRoutesRealtimeAndLiveToTheirNativeOrigins(t *testing.T) {
+	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	realtimeBase, _ := url.Parse("https://api.openai.com")
+	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
+	provider := NewCodexProviderWithRealtime(responsesBase, realtimeBase, whamBase, nil)
+
+	for _, path := range []string{"/v1/realtime", "/v1/realtime/calls"} {
+		if got := provider.UpstreamURL(path); got.String() != realtimeBase.String() {
+			t.Fatalf("UpstreamURL(%q) = %s, want %s", path, got, realtimeBase)
+		}
+	}
+	for _, path := range []string{"/v1/live", "/v1/live/call_123"} {
+		if got := provider.UpstreamURL(path); got.String() != responsesBase.String() {
+			t.Fatalf("UpstreamURL(%q) = %s, want %s", path, got, responsesBase)
+		}
+		if got := provider.NormalizePath(path); got != "/realtime/calls" {
+			t.Fatalf("NormalizePath(%q) = %s, want /realtime/calls", path, got)
+		}
+	}
+	if got := provider.UpstreamURL("/v1/responses"); got.String() != responsesBase.String() {
+		t.Fatalf("UpstreamURL(/v1/responses) = %s, want %s", got, responsesBase)
+	}
+}
+
 func TestCodexProviderDetectsSSEFromContentType(t *testing.T) {
 	provider := &CodexProvider{}
 	if provider.DetectsSSE("/v1/models", "application/json") {

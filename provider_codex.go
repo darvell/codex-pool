@@ -19,14 +19,24 @@ import (
 // CodexProvider handles OpenAI Codex accounts.
 type CodexProvider struct {
 	responsesBase *url.URL
+	realtimeBase  *url.URL
 	whamBase      *url.URL
 	refreshBase   *url.URL
 }
 
 // NewCodexProvider creates a new Codex provider.
 func NewCodexProvider(responsesBase, whamBase, refreshBase *url.URL) *CodexProvider {
+	realtimeBase, _ := url.Parse("https://api.openai.com")
+	return NewCodexProviderWithRealtime(responsesBase, realtimeBase, whamBase, refreshBase)
+}
+
+// NewCodexProviderWithRealtime allows Realtime v2 to use its own public API
+// origin. GPT Live remains on the ChatGPT Codex backend because it uses that
+// backend's OAuth call shape.
+func NewCodexProviderWithRealtime(responsesBase, realtimeBase, whamBase, refreshBase *url.URL) *CodexProvider {
 	return &CodexProvider{
 		responsesBase: responsesBase,
+		realtimeBase:  realtimeBase,
 		whamBase:      whamBase,
 		refreshBase:   refreshBase,
 	}
@@ -297,10 +307,33 @@ func codexUsageWindowFromHeaders(headers http.Header, slot string) *codexUsageWi
 }
 
 func (p *CodexProvider) UpstreamURL(path string) *url.URL {
+	if isCodexLivePath(path) {
+		// GPT Live is part of the ChatGPT OAuth backend, not the public
+		// Realtime API. The request body is adapted to that backend shape by
+		// rewriteCodexLiveCall in the HTTP proxy.
+		return p.responsesBase
+	}
+	if isCodexRealtimePath(path) {
+		return p.realtimeBase
+	}
 	if strings.HasPrefix(path, "/backend-api/") {
 		return p.whamBase
 	}
 	return p.responsesBase
+}
+
+// isCodexRealtimePath is intentionally restricted to the native Realtime
+// transports so ordinary /v1 requests retain their existing ChatGPT routing.
+func isCodexRealtimePath(path string) bool {
+	path = normalizeNoopPath(path)
+	return path == "/v1/realtime" ||
+		strings.HasPrefix(path, "/v1/realtime/") ||
+		isCodexLivePath(path)
+}
+
+func isCodexLivePath(path string) bool {
+	path = normalizeNoopPath(path)
+	return path == "/v1/live" || strings.HasPrefix(path, "/v1/live/")
 }
 
 func (p *CodexProvider) MatchesPath(path string) bool {
@@ -312,6 +345,9 @@ func (p *CodexProvider) MatchesPath(path string) bool {
 }
 
 func (p *CodexProvider) NormalizePath(path string) string {
+	if isCodexLivePath(path) {
+		return "/realtime/calls"
+	}
 	if mapped := mapResponsesPath(path); mapped != "" {
 		return mapped
 	}

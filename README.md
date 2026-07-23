@@ -14,6 +14,8 @@ A reverse proxy that distributes coding-agent sessions across pooled provider ac
 
 The setup dashboard configures **Codex CLI**, **Claude Code**, **Gemini CLI**, **Grok Build**, **Pi**, and **Cute Code**. Grok Build runs through the proxy without its own login and can select the other pool models; Pi merges pool providers into its existing `models.json`.
 
+For browser, mobile, or CLI speech-to-speech agents, see [Realtime voice agents through codex-pool](docs/realtime-voice-agent.md). It uses a pooled ephemeral secret followed by a direct WebRTC session.
+
 <p align="center">
   <img src="screenshots/analytics-dashboard.png" alt="Pool Analytics" width="700">
 </p>

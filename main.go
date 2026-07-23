@@ -31,6 +31,7 @@ import (
 type config struct {
 	listenAddr             string
 	responsesBase          *url.URL
+	realtimeBase           *url.URL
 	whamBase               *url.URL
 	refreshBase            *url.URL
 	geminiBase             *url.URL // Gemini CloudCode endpoint (for OAuth/Code Assist mode)
@@ -129,6 +130,9 @@ func buildConfig() *config {
 
 	cfg.listenAddr = getConfigString("PROXY_LISTEN_ADDR", fileCfg.ListenAddr, "127.0.0.1:8989")
 	cfg.responsesBase = mustParse(getenv("UPSTREAM_RESPONSES_BASE", "https://chatgpt.com/backend-api/codex"))
+	// Realtime is served by the public OpenAI API, not the ChatGPT Codex
+	// Responses backend. Codex OAuth access tokens are accepted there.
+	cfg.realtimeBase = mustParse(getenv("UPSTREAM_REALTIME_BASE", "https://api.openai.com"))
 	cfg.whamBase = mustParse(getenv("UPSTREAM_WHAM_BASE", "https://chatgpt.com/backend-api"))
 	cfg.refreshBase = mustParse(getenv("UPSTREAM_REFRESH_BASE", "https://auth.openai.com"))
 	cfg.geminiBase = mustParse(getenv("UPSTREAM_GEMINI_BASE", "https://cloudcode-pa.googleapis.com"))
@@ -252,7 +256,7 @@ func main() {
 	startCodexFingerprintUpdater()
 
 	// Create provider registry
-	codexProvider := NewCodexProvider(cfg.responsesBase, cfg.whamBase, cfg.refreshBase)
+	codexProvider := NewCodexProviderWithRealtime(cfg.responsesBase, cfg.realtimeBase, cfg.whamBase, cfg.refreshBase)
 	claudeProvider := NewClaudeProvider(cfg.claudeBase)
 	geminiProvider := NewGeminiProvider(cfg.geminiBase, cfg.geminiAPIBase)
 	antigravityProvider := NewAntigravityProvider(cfg.antigravityDailyBase, cfg.antigravityProdBase)
@@ -1820,6 +1824,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if accountType == AccountTypeCodex && isCodexLivePath(r.URL.Path) {
+		bodyBytes, err = rewriteCodexLiveCall(bodyBytes, r.Header.Get("Content-Type"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		r.Header.Set("Content-Type", "application/json")
+		r.ContentLength = int64(len(bodyBytes))
+	}
 	if strings.HasPrefix(r.URL.Path, "/v1/images/generations") {
 		if n := imagesGenerationCount(bodyBytes); n > 1 {
 			if h.handleImagesGenerationFanout(w, r, bodyBytes, n, reqID) {
@@ -3073,6 +3086,12 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	tmpReq := &http.Request{Header: upstreamHeaders}
 	provider.SetAuthHeaders(tmpReq, acc)
 	upstreamHeaders = tmpReq.Header
+	// The Codex Responses relay still uses its websocket beta header, but the
+	// GA Realtime API explicitly rejects that legacy beta shape. Preserve the
+	// client-provided Realtime headers (for example openai-alpha) instead.
+	if accountType == AccountTypeCodex && isCodexRealtimePath(r.URL.Path) {
+		upstreamHeaders.Del("OpenAI-Beta")
+	}
 
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] websocket tunnel -> %s (account=%s)", reqID, outURL.String(), acc.ID)
@@ -4697,6 +4716,12 @@ func (h *proxyHandler) tryOnce(
 	outURL.Host = targetBase.Host
 	// Use provider's NormalizePath method for path handling
 	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(in.URL.Path))
+	if provider.Type() == AccountTypeCodex && isCodexLivePath(in.URL.Path) {
+		q := outURL.Query()
+		q.Set("intent", "quicksilver")
+		q.Set("architecture", "avas")
+		outURL.RawQuery = q.Encode()
+	}
 
 	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
 	if provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
@@ -4739,6 +4764,11 @@ func (h *proxyHandler) tryOnce(
 
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
+		// GPT Live uses the Quicksilver alpha contract. The Codex Responses
+		// websocket beta header is rejected by that backend.
+		if provider.Type() == AccountTypeCodex && isCodexLivePath(in.URL.Path) {
+			outReq.Header.Del("OpenAI-Beta")
+		}
 		if provider.Type() == AccountTypeGrok {
 			outReq.Header.Set("x-grok-model-override", grokCanonicalModel(requestedModel))
 			outReq.Header.Set("x-grok-context-window", strconv.Itoa(grokModelContextWindow(requestedModel)))

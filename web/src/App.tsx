@@ -1618,7 +1618,7 @@ function Models({ models }: { models: ModelDescriptor[] }) {
 }
 
 function Setup({ session }: { session: FriendSession }) {
-  const [tool, setTool] = useState<"codex" | "claude" | "gemini" | "grok" | "cute" | "pi" | "api">("codex");
+  const [tool, setTool] = useState<"codex" | "claude" | "gemini" | "grok" | "cute" | "pi" | "realtime" | "api">("codex");
 	const [piModels, setPiModels] = useState(session.pi_models_json);
 	const [cuteCodeSettings, setCuteCodeSettings] = useState(session.cute_code_settings_json);
 	useEffect(() => {
@@ -1639,6 +1639,13 @@ function Setup({ session }: { session: FriendSession }) {
     grok: { title: "Grok Build CLI", note: "Runs Grok entirely through the pool, including the other pool models. Existing Grok OAuth is deactivated and backed up.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/grok/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/grok/${session.download_token}?shell=powershell" | iex`], ["VERIFY", `grok inspect\ngrok models`]] },
 	  cute: { title: "Cute Code", note: "Generated from the live catalog. Re-run this installer after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/cute-code/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/cute-code/${session.download_token}?shell=powershell" | iex`], ["SETTINGS.JSON", cuteCodeSettings]] },
 	  pi: { title: "Pi", note: "Generated from the live catalog. Re-run this installer, then open /model, after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/pi/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/pi/${session.download_token}?shell=powershell" | iex`], ["MODELS.JSON", piModels]] },
+    realtime: { title: "GPT Realtime 2.1", note: "Verified: the pool mints a short-lived key; WebRTC media goes directly to OpenAI.", commands: [["EPHEMERAL KEY", `curl -sS "${session.public_url}/v1/realtime/client_secrets" \\
+  -H "Authorization: Bearer ${session.claude_api_key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"session":{"type":"realtime","model":"gpt-realtime-2.1","audio":{"output":{"voice":"marin"}}}}'`], ["VERIFIED VOICE SMOKE", `git clone https://github.com/darvell/codex-pool.git && cd codex-pool
+POOL_URL="${session.public_url}" \\
+POOL_TOKEN="${session.claude_api_key}" \\
+go run ./cmd/realtime-voice-smoke -say 'Say verified and nothing else.'`]] },
     api: { title: "Raw APIs", note: "Anthropic-compatible and OpenAI-compatible. Pick your poison.", commands: [["ANTHROPIC", `export ANTHROPIC_BASE_URL="${session.public_url}"\nexport ANTHROPIC_API_KEY="${session.claude_api_key}"`], ["OPENAI", `export OPENAI_BASE_URL="${session.public_url}/v1"\nexport OPENAI_API_KEY="${session.claude_api_key}"`], ["SMOKE TEST", `curl ${session.public_url}/v1/responses \\\n  -H "Authorization: Bearer ${session.claude_api_key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gpt-5.6-luna","input":"Reply with exactly: pool ok"}'`]] },
   };
   return (
@@ -1646,7 +1653,7 @@ function Setup({ session }: { session: FriendSession }) {
       <div className="view-title"><span>S.00</span><h1>Setup frequencies</h1><p>Pick the client. Copy the signal. Pretend this was difficult.</p></div>
       <div className="setup-grid">
         <div className="setup-tools">
-          {Object.entries({ codex: "Codex", claude: "Claude", gemini: "Gemini", grok: "Grok Build", cute: "Cute Code", pi: "Pi", api: "Raw APIs" }).map(([id, label]) => <button key={id} className={tool === id ? "active" : ""} onClick={() => setTool(id as typeof tool)}>{label}</button>)}
+          {Object.entries({ codex: "Codex", claude: "Claude", gemini: "Gemini", grok: "Grok Build", cute: "Cute Code", pi: "Pi", realtime: "GPT Realtime", api: "Raw APIs" }).map(([id, label]) => <button key={id} className={tool === id ? "active" : ""} onClick={() => setTool(id as typeof tool)}>{label}</button>)}
         </div>
         <section className="setup-console">
           <span>SIGNAL // {tool.toUpperCase()}</span><h2>{setup[tool].title}</h2><p>{setup[tool].note}</p>
