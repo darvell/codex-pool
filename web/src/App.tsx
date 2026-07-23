@@ -1639,13 +1639,21 @@ function Setup({ session }: { session: FriendSession }) {
     grok: { title: "Grok Build CLI", note: "Runs Grok entirely through the pool, including the other pool models. Existing Grok OAuth is deactivated and backed up.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/grok/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/grok/${session.download_token}?shell=powershell" | iex`], ["VERIFY", `grok inspect\ngrok models`]] },
 	  cute: { title: "Cute Code", note: "Generated from the live catalog. Re-run this installer after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/cute-code/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/cute-code/${session.download_token}?shell=powershell" | iex`], ["SETTINGS.JSON", cuteCodeSettings]] },
 	  pi: { title: "Pi", note: "Generated from the live catalog. Re-run this installer, then open /model, after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/pi/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/pi/${session.download_token}?shell=powershell" | iex`], ["MODELS.JSON", piModels]] },
-    realtime: { title: "GPT Realtime 2.1", note: "Verified: the pool mints a short-lived key; WebRTC media goes directly to OpenAI.", commands: [["EPHEMERAL KEY", `curl -sS "${session.public_url}/v1/realtime/client_secrets" \\
-  -H "Authorization: Bearer ${session.claude_api_key}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"session":{"type":"realtime","model":"gpt-realtime-2.1","audio":{"output":{"voice":"marin"}}}}'`], ["VERIFIED VOICE SMOKE", `git clone https://github.com/darvell/codex-pool.git && cd codex-pool
-POOL_URL="${session.public_url}" \\
-POOL_TOKEN="${session.claude_api_key}" \\
-go run ./cmd/realtime-voice-smoke -say 'Say verified and nothing else.'`]] },
+    realtime: { title: "GPT Realtime 2.1", note: "Use the OpenAI Agents SDK. Your server mints a short-lived key through the pool; the SDK connects media directly to OpenAI.", commands: [["SERVER: /api/realtime-token", `export async function POST() {
+  const response = await fetch("${session.public_url}/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: { Authorization: "Bearer ${session.claude_api_key}", "Content-Type": "application/json" },
+    body: JSON.stringify({ session: { type: "realtime", model: "gpt-realtime-2.1", audio: { output: { voice: "marin" } } } }),
+  });
+  return Response.json({ value: (await response.json()).value });
+}`], ["CLIENT: OPENAI AGENTS SDK", `npm install @openai/agents
+
+import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
+
+const agent = new RealtimeAgent({ name: "Voice assistant", instructions: "Be concise and helpful." });
+const session = new RealtimeSession(agent, { model: "gpt-realtime-2.1" });
+const { value: apiKey } = await fetch("/api/realtime-token", { method: "POST" }).then((r) => r.json());
+await session.connect({ apiKey });`]] },
     api: { title: "Raw APIs", note: "Anthropic-compatible and OpenAI-compatible. Pick your poison.", commands: [["ANTHROPIC", `export ANTHROPIC_BASE_URL="${session.public_url}"\nexport ANTHROPIC_API_KEY="${session.claude_api_key}"`], ["OPENAI", `export OPENAI_BASE_URL="${session.public_url}/v1"\nexport OPENAI_API_KEY="${session.claude_api_key}"`], ["SMOKE TEST", `curl ${session.public_url}/v1/responses \\\n  -H "Authorization: Bearer ${session.claude_api_key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gpt-5.6-luna","input":"Reply with exactly: pool ok"}'`]] },
   };
   return (
