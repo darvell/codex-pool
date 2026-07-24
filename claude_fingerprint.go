@@ -149,7 +149,8 @@ func ccModelSupportsContextManagement(model string) bool {
 
 func ccModelSupportsEffort(model string) bool {
 	m := ccCanonicalClaudeModel(model)
-	return strings.Contains(m, "opus-4-6") ||
+	return strings.Contains(m, "opus-5") ||
+		strings.Contains(m, "opus-4-6") ||
 		strings.Contains(m, "opus-4-7") ||
 		strings.Contains(m, "opus-4-8") ||
 		strings.Contains(m, "fable-5") ||
@@ -160,6 +161,7 @@ func ccModelSupportsEffort(model string) bool {
 func ccModelSupportsStructuredOutputs(model string) bool {
 	m := ccCanonicalClaudeModel(model)
 	return strings.Contains(m, "claude-sonnet-5") ||
+		strings.Contains(m, "claude-opus-5") ||
 		strings.Contains(m, "claude-sonnet-4-6") ||
 		strings.Contains(m, "claude-sonnet-4-5") ||
 		strings.Contains(m, "claude-opus-4-1") ||

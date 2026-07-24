@@ -435,6 +435,7 @@ func TestServeCuteCodeSettingsConfig(t *testing.T) {
 		`"id": "gpt-5.5"`,
 		`"id": "claude-fable-5"`,
 		`"id": "claude-opus-4-8"`,
+		`"id": "claude-opus-5"`,
 		`"id": "MiniMax-M3"`,
 		`"id": "MiniMax-M2.7"`,
 		`"id": "glm-5.2"`,

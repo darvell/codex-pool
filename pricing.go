@@ -135,6 +135,13 @@ func (pd *PricingData) loadFromJSON(data []byte) {
 		}
 		models[key] = mp
 	}
+	// Keep newly released Anthropic models priced while the embedded snapshot
+	// catches up or the live LiteLLM refresh is unavailable.
+	models["claude-opus-5"] = ModelPricing{
+		InputCostPerToken:  5e-6,
+		OutputCostPerToken: 25e-6,
+		CacheReadCost:      0.5e-6,
+	}
 
 	pd.mu.Lock()
 	pd.models = models
@@ -177,6 +184,8 @@ func (pd *PricingData) startPricingRefresh() {
 }
 
 var pricingModelAliases = map[string]string{
+	"claude-opus-5 [1m]":   "claude-opus-5",
+	"claude-opus-5[1m]":    "claude-opus-5",
 	"claude-sonnet-5":      "claude-sonnet-4-6",
 	"claude-sonnet-5 [1m]": "claude-sonnet-4-6",
 	"claude-sonnet-5[1m]":  "claude-sonnet-4-6",

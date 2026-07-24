@@ -20,6 +20,7 @@ func TestPoolModelDescriptorsCoverEveryProvider(t *testing.T) {
 	tests := map[string]string{
 		"gpt-5.6-sol":     "openai",
 		"claude-sonnet-5": "anthropic",
+		"claude-opus-5":   "anthropic",
 		"k3":              "anthropic",
 		"kimi-for-coding": "anthropic",
 		"MiniMax-M3":      "anthropic",

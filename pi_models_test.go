@@ -14,9 +14,9 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 		"sonnet":      "claude-sonnet-5",
 		"sonnet[1m]":  "claude-sonnet-5 [1m]",
 		"sonnet [1m]": "claude-sonnet-5 [1m]",
-		"opus":        "claude-opus-4-8",
-		"opus[1m]":    "claude-opus-4-8 [1m]",
-		"opus [1m]":   "claude-opus-4-8 [1m]",
+		"opus":        "claude-opus-5",
+		"opus[1m]":    "claude-opus-5 [1m]",
+		"opus [1m]":   "claude-opus-5 [1m]",
 		"fable":       "claude-fable-5",
 		"haiku":       "claude-haiku-4-5-20251001",
 	}
@@ -113,6 +113,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		"claude-opus-4-8":           false,
 		"claude-opus-4-7":           false,
 		"claude-opus-4-6":           false,
+		"claude-opus-5":             false,
 	}
 	for _, model := range claude.Models {
 		if _, ok := needClaudeIDs[model.ID]; ok {
@@ -128,7 +129,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 			t.Fatalf("claude model %q missing adaptive max metadata: %#v %#v", model.ID, model.Compat, model.ThinkingLevelMap)
 		}
 		canonical := ccCanonicalClaudeModel(model.ID)
-		wantXHigh := strings.Contains(canonical, "sonnet-5") || strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5")
+		wantXHigh := strings.Contains(canonical, "sonnet-5") || strings.Contains(canonical, "opus-5") || strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5")
 		if gotXHigh := model.ThinkingLevelMap["xhigh"] == "xhigh"; gotXHigh != wantXHigh {
 			t.Fatalf("claude model %q xhigh support = %v, want %v", model.ID, gotXHigh, wantXHigh)
 		}

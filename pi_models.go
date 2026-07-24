@@ -263,7 +263,7 @@ func piClaudeAlias(id, name string, contextWindow, maxTokens int, inputCost, out
 		model.ThinkingLevelMap = map[string]string{"max": "max"}
 		model.Compat = &piModelCompat{ForceAdaptiveThinking: true}
 		canonical := ccCanonicalClaudeModel(id)
-		if strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
+		if strings.Contains(canonical, "opus-5") || strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
 			model.ThinkingLevelMap["xhigh"] = "xhigh"
 		}
 	}
@@ -294,7 +294,7 @@ func piModelsForProvider(accountType AccountType) []piModelConfig {
 			config.ThinkingLevelMap = map[string]string{"max": "max"}
 			config.Compat = &piModelCompat{ForceAdaptiveThinking: true}
 			canonical := ccCanonicalClaudeModel(model.ID)
-			if strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
+			if strings.Contains(canonical, "opus-5") || strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
 				config.ThinkingLevelMap["xhigh"] = "xhigh"
 			}
 		}

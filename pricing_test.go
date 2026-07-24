@@ -75,3 +75,21 @@ func TestLookupPricingUsesClaudeSonnet5Alias(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupPricingIncludesClaudeOpus5Fallback(t *testing.T) {
+	t.Parallel()
+
+	pd := newPricingData()
+	got, ok := pd.lookupPricing("claude-opus-5")
+	if !ok {
+		t.Fatal("missing Claude Opus 5 fallback pricing")
+	}
+	if got.InputCostPerToken != 5e-6 || got.OutputCostPerToken != 25e-6 || got.CacheReadCost != 0.5e-6 {
+		t.Fatalf("Claude Opus 5 pricing = %#v", got)
+	}
+	for _, model := range []string{"claude-opus-5 [1m]", "claude-opus-5[1m]"} {
+		if aliased, ok := pd.lookupPricing(model); !ok || aliased != got {
+			t.Fatalf("lookupPricing(%q) = %#v, %v; want %#v, true", model, aliased, ok, got)
+		}
+	}
+}

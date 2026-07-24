@@ -1253,7 +1253,7 @@ func claudeCanonicalModel(model string) string {
 	} else {
 		switch baseLower {
 		case "opus":
-			canonical = "claude-opus-4-8"
+			canonical = "claude-opus-5"
 		case "fable":
 			canonical = "claude-fable-5"
 		case "sonnet":

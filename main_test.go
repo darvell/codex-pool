@@ -507,7 +507,7 @@ func TestClaudePoolTranslatesResponsesClientFormat(t *testing.T) {
 	if upstreamPath != "/v1/messages" {
 		t.Fatalf("upstream path = %q", upstreamPath)
 	}
-	if upstreamModel != "claude-opus-4-8" {
+	if upstreamModel != "claude-opus-5" {
 		t.Fatalf("upstream model = %q", upstreamModel)
 	}
 }
