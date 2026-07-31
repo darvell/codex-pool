@@ -44,6 +44,16 @@ func TestServeGrokModelsReturnsGrokClientCatalog(t *testing.T) {
 	t.Fatal("grok-4.5 missing from catalog")
 }
 
+func TestGrokPublicAliasesDoNotAdvertiseInternalResponseModel(t *testing.T) {
+	model, ok := grokModelByName("grok-4.5")
+	if !ok {
+		t.Fatal("grok-4.5 missing from catalog")
+	}
+	if aliases := grokPublicAliases(model); slices.Contains(aliases, "grok-4.5-build") {
+		t.Fatalf("internal model alias leaked into discovery: %#v", aliases)
+	}
+}
+
 func TestGrokClientCatalogIncludesPoolModels(t *testing.T) {
 	models := grokModelsForClient()
 	want := map[string]struct {
@@ -70,10 +80,17 @@ func TestGrokClientCatalogIncludesPoolModels(t *testing.T) {
 	}
 
 	ids := grokSetupModelIDs()
-	for _, id := range []string{"grok-build", "gpt-5.6-luna", "claude-sonnet-5"} {
+	for _, id := range []string{"grok-4.5", "gpt-5.6-luna", "claude-sonnet-5"} {
 		if !slices.Contains(ids, id) {
 			t.Fatalf("setup model IDs missing %q", id)
 		}
+	}
+}
+
+func TestGrokProviderNormalizesCodexResponsesPath(t *testing.T) {
+	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
+	if got := provider.NormalizePath("/backend-api/codex/responses"); got != "/responses" {
+		t.Fatalf("normalized path = %q, want /responses", got)
 	}
 }
 
@@ -261,15 +278,15 @@ func TestGrokProviderSetsBearerHeaders(t *testing.T) {
 }
 
 func TestSanitizeGrokRequestBodyRemovesUnsupportedFields(t *testing.T) {
-	body := []byte(`{"model":"grok-build","input":"hello","metadata":{"conversation_id":"c"},"prompt_cache_retention":"24h","external_web_access":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"abc","service_tier":"priority","response_format":{"type":"json_object"},"reasoning":{"effort":"high"},"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true},{"type":"function","name":"ok","description":"ok","parameters":{"type":"object"},"strict":true}],"tool_choice":"auto","parallel_tool_calls":true}`)
-	rewritten := sanitizeGrokRequestBody(body, "grok-build")
+	body := []byte(`{"model":"grok-4.5","input":"hello","metadata":{"conversation_id":"c"},"prompt_cache_retention":"24h","external_web_access":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"abc","service_tier":"priority","response_format":{"type":"json_object"},"reasoning":{"effort":"high"},"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true},{"type":"function","name":"ok","description":"ok","parameters":{"type":"object"},"strict":true}],"tool_choice":"auto","parallel_tool_calls":true}`)
+	rewritten := sanitizeGrokRequestBody(body, "grok-4.5")
 	text := string(rewritten)
-	for _, forbidden := range []string{"metadata", "external_web_access", "response_format", "reasoningEffort", `"reasoning"`} {
+	for _, forbidden := range []string{"metadata", "external_web_access", "response_format", "reasoningEffort"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("rewritten body still contains %q: %s", forbidden, text)
 		}
 	}
-	for _, preserved := range []string{"prompt_cache_retention", `"store":false`, "reasoning.encrypted_content", "prompt_cache_key", "service_tier", "web_search", `"strict":true`, `"tool_choice":"auto"`, `"parallel_tool_calls":true`} {
+	for _, preserved := range []string{"prompt_cache_retention", `"store":false`, "reasoning.encrypted_content", "prompt_cache_key", "service_tier", "web_search", `"strict":true`, `"tool_choice":"auto"`, `"parallel_tool_calls":true`, `"reasoning":{"effort":"high"}`} {
 		if !strings.Contains(text, preserved) {
 			t.Fatalf("rewritten body missing preserved field %q: %s", preserved, text)
 		}
@@ -403,6 +420,26 @@ func TestParseGrokBillingUsage(t *testing.T) {
 	}
 }
 
+// Live cli-chat-proxy /v1/billing?format=credits reports creditUsagePercent in
+// percent units, so small single-digit values must stay small. A magnitude
+// heuristic read 1.0 as 100% and hard-excluded healthy accounts from the pool.
+func TestParseGrokBillingUsageLowWeeklyPercentIsNotFullyUsed(t *testing.T) {
+	now := time.Date(2026, 7, 31, 18, 0, 0, 0, time.UTC)
+	weekly := []byte(`{"config":{"currentPeriod":{"start":"2026-07-30T09:46:16Z","end":"2026-08-06T09:46:16Z"},"creditUsagePercent":1.0,"productUsage":[{"product":"GrokBuild","usagePercent":1.0}]}}`)
+
+	snap, ok := parseGrokBillingUsage(nil, weekly, now)
+	if !ok {
+		t.Fatal("expected billing usage")
+	}
+	if math.Abs(snap.SecondaryUsedPercent-0.01) > 0.000001 {
+		t.Fatalf("weekly utilization = %v, want 0.01", snap.SecondaryUsedPercent)
+	}
+	if snap.SecondaryUsedPercent >= secondaryHardExcludeThreshold {
+		t.Fatalf("1%% weekly credit usage must not hard-exclude the account (got %v, threshold %v)",
+			snap.SecondaryUsedPercent, secondaryHardExcludeThreshold)
+	}
+}
+
 func TestFetchGrokUsageFromBillingEndpoints(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("X-Xai-Token-Auth") != "xai-grok-cli" {
@@ -434,7 +471,7 @@ func TestFetchGrokUsageFromBillingEndpoints(t *testing.T) {
 func TestGrokUsageParsesResponsesUsage(t *testing.T) {
 	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
 	ru := provider.ParseUsage(map[string]any{
-		"model": "grok-build",
+		"model": "grok-4.5",
 		"usage": map[string]any{
 			"input_tokens":  float64(100),
 			"output_tokens": float64(25),
@@ -446,18 +483,18 @@ func TestGrokUsageParsesResponsesUsage(t *testing.T) {
 	if ru == nil {
 		t.Fatal("expected usage")
 	}
-	if ru.Model != "grok-build" || ru.InputTokens != 100 || ru.OutputTokens != 25 || ru.CachedInputTokens != 40 || ru.BillableTokens != 85 {
+	if ru.Model != "grok-4.5" || ru.InputTokens != 100 || ru.OutputTokens != 25 || ru.CachedInputTokens != 40 || ru.BillableTokens != 85 {
 		t.Fatalf("usage = %+v", ru)
 	}
 }
 
 func TestGrokSanitizesTranslatedRequestBody(t *testing.T) {
-	chatBody := []byte(`{"model":"grok-build","messages":[{"role":"user","content":"hello"}],"external_web_access":true,"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true}]}`)
+	chatBody := []byte(`{"model":"grok-4.5","messages":[{"role":"user","content":"hello"}],"external_web_access":true,"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true}]}`)
 	translated, err := translateChatCompletionsToResponses(chatBody)
 	if err != nil {
 		t.Fatalf("translateChatCompletionsToResponses: %v", err)
 	}
-	sanitized := rewriteAndSanitizeGrokRequestBody(translated, "grok-build")
+	sanitized := rewriteAndSanitizeGrokRequestBody(translated, "grok-4.5")
 	text := string(sanitized)
 	for _, forbidden := range []string{"external_web_access", "reasoningEffort", `"reasoning"`} {
 		if strings.Contains(text, forbidden) {

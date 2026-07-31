@@ -31,15 +31,16 @@ type clientSecretResponse struct {
 
 func main() {
 	var (
-		poolURL     = flag.String("pool-url", envOr("POOL_URL", "https://codex.ppflix.net"), "codex-pool URL")
-		token       = flag.String("token", os.Getenv("POOL_TOKEN"), "pool JWT; prefer POOL_TOKEN")
-		model       = flag.String("model", "gpt-realtime-2.1", "Realtime model")
-		text        = flag.String("say", "Hello. Please briefly confirm that you can hear me.", "text synthesized with macOS say")
-		audio       = flag.String("audio", "", "audio file to send instead of -say")
-		opusOgg     = flag.String("opus-ogg", "", "pre-encoded 48 kHz Opus Ogg file; avoids requiring ffmpeg on this host")
-		voice       = flag.String("voice", "marin", "Realtime output voice")
-		liveViaPool = flag.Bool("live-via-pool", false, "send a GPT Live SDP offer through the pool's Codex OAuth adapter (diagnostic)")
-		timeout     = flag.Duration("timeout", 45*time.Second, "whole-call timeout")
+		poolURL         = flag.String("pool-url", envOr("POOL_URL", "https://codex.ppflix.net"), "codex-pool URL")
+		token           = flag.String("token", os.Getenv("POOL_TOKEN"), "pool JWT; prefer POOL_TOKEN")
+		model           = flag.String("model", "gpt-realtime-2.1", "Realtime model")
+		text            = flag.String("say", "Hello. Please briefly confirm that you can hear me.", "text synthesized with macOS say")
+		audio           = flag.String("audio", "", "audio file to send instead of -say")
+		opusOgg         = flag.String("opus-ogg", "", "pre-encoded 48 kHz Opus Ogg file; avoids requiring ffmpeg on this host")
+		voice           = flag.String("voice", "marin", "Realtime output voice")
+		liveViaPool     = flag.Bool("live-via-pool", false, "send a GPT Live SDP offer through the pool's Codex OAuth adapter (diagnostic)")
+		realtimeViaPool = flag.Bool("realtime-via-pool", false, "send the standard Realtime SDP call and sideband through the pool")
+		timeout         = flag.Duration("timeout", 45*time.Second, "whole-call timeout")
 	)
 	flag.Parse()
 	if strings.TrimSpace(*token) == "" {
@@ -61,11 +62,21 @@ func main() {
 
 	signalURL := "https://api.openai.com/v1/realtime/calls"
 	signalCredential := ""
-	if *liveViaPool {
-		signalURL = strings.TrimRight(*poolURL, "/") + "/v1/live"
+	multipartSession := false
+	liveAlpha := false
+	switch {
+	case *liveViaPool:
+		signalURL = strings.TrimRight(*poolURL, "/") + "/live"
 		signalCredential = *token
+		multipartSession = true
+		liveAlpha = true
 		fmt.Println("sending GPT Live SDP through the pool")
-	} else {
+	case *realtimeViaPool:
+		signalURL = strings.TrimRight(*poolURL, "/") + "/v1/realtime/calls"
+		signalCredential = *token
+		multipartSession = true
+		fmt.Println("sending standard Realtime SDP through the pool")
+	default:
 		secret, err := createClientSecret(ctx, *poolURL, *token, *model, *voice)
 		if err != nil {
 			fatalf("create pooled client secret: %v", err)
@@ -77,7 +88,7 @@ func main() {
 		fmt.Println("pool issued ephemeral client secret")
 	}
 
-	if err := runWebRTC(ctx, signalURL, signalCredential, *model, *voice, input, *opusOgg, *liveViaPool); err != nil {
+	if err := runWebRTC(ctx, signalURL, signalCredential, *model, *voice, input, *opusOgg, multipartSession, liveAlpha); err != nil {
 		fatalf("realtime call: %v", err)
 	}
 }
@@ -110,7 +121,7 @@ func createClientSecret(ctx context.Context, poolURL, token, model, voice string
 	return result.Value, nil
 }
 
-func runWebRTC(ctx context.Context, signalURL, credential, model, voice, input, opusOgg string, live bool) error {
+func runWebRTC(ctx context.Context, signalURL, credential, model, voice, input, opusOgg string, multipartSession, liveAlpha bool) error {
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		return err
@@ -190,7 +201,7 @@ func runWebRTC(ctx context.Context, signalURL, credential, model, voice, input, 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	answer, err := createWebRTCCall(ctx, signalURL, credential, pc.LocalDescription().SDP, model, voice, live)
+	answer, err := createWebRTCCall(ctx, signalURL, credential, pc.LocalDescription().SDP, model, voice, multipartSession, liveAlpha)
 	if err != nil {
 		return err
 	}
@@ -203,7 +214,7 @@ func runWebRTC(ctx context.Context, signalURL, credential, model, voice, input, 
 		return ctx.Err()
 	}
 
-	if !live {
+	if !liveAlpha {
 		update, _ := json.Marshal(map[string]any{"type": "session.update", "session": map[string]any{
 			"type": "realtime", "model": model, "output_modalities": []string{"audio"},
 			"audio":        map[string]any{"output": map[string]any{"voice": voice}},
@@ -221,7 +232,7 @@ func runWebRTC(ctx context.Context, signalURL, credential, model, voice, input, 
 	} else if err := streamAudio(ctx, track, input); err != nil {
 		return err
 	}
-	if !live {
+	if !liveAlpha {
 		if err := channel.SendText(`{"type":"input_audio_buffer.commit"}`); err != nil {
 			return err
 		}
@@ -273,13 +284,19 @@ func streamOggOpus(ctx context.Context, track *webrtc.TrackLocalStaticSample, pa
 	}
 }
 
-func createWebRTCCall(ctx context.Context, endpoint, credential, offer, model, voice string, live bool) (string, error) {
+func createWebRTCCall(ctx context.Context, endpoint, credential, offer, model, voice string, multipartSession, liveAlpha bool) (string, error) {
 	var body io.Reader = strings.NewReader(offer)
 	contentType := "application/sdp"
-	if live {
+	if multipartSession {
 		var form bytes.Buffer
 		const boundary = "codex-pool-live-call-boundary"
-		session, _ := json.Marshal(map[string]any{"model": model, "instructions": "You are a concise voice assistant. Answer the speaker directly.", "audio": map[string]any{"output": map[string]any{"voice": voice}}, "delegation": map[string]any{"type": "client"}})
+		sessionObject := map[string]any{"model": model, "instructions": "You are a concise voice assistant. Answer the speaker directly.", "audio": map[string]any{"output": map[string]any{"voice": voice}}}
+		if liveAlpha {
+			sessionObject["delegation"] = map[string]any{"type": "client"}
+		} else {
+			sessionObject["type"] = "realtime"
+		}
+		session, _ := json.Marshal(sessionObject)
 		fmt.Fprintf(&form, "--%s\r\nContent-Disposition: form-data; name=\"sdp\"\r\nContent-Type: application/sdp\r\n\r\n%s\r\n", boundary, offer)
 		fmt.Fprintf(&form, "--%s\r\nContent-Disposition: form-data; name=\"session\"\r\nContent-Type: application/json\r\n\r\n%s\r\n--%s--\r\n", boundary, session, boundary)
 		body = &form
@@ -291,7 +308,7 @@ func createWebRTCCall(ctx context.Context, endpoint, credential, offer, model, v
 	}
 	req.Header.Set("Authorization", "Bearer "+credential)
 	req.Header.Set("Content-Type", contentType)
-	if live {
+	if liveAlpha {
 		req.Header.Set("OpenAI-Alpha", "quicksilver=v2")
 	}
 	resp, err := http.DefaultClient.Do(req)

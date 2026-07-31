@@ -307,10 +307,9 @@ func codexUsageWindowFromHeaders(headers http.Header, slot string) *codexUsageWi
 }
 
 func (p *CodexProvider) UpstreamURL(path string) *url.URL {
-	if isCodexLivePath(path) {
-		// GPT Live is part of the ChatGPT OAuth backend, not the public
-		// Realtime API. The request body is adapted to that backend shape by
-		// rewriteCodexLiveCall in the HTTP proxy.
+	if isCodexLegacyLiveCallCreatePath(path) {
+		// Codex creates Frameless WebRTC calls through the ChatGPT backend, but
+		// joins their sideband sockets through the direct Realtime origin.
 		return p.responsesBase
 	}
 	if isCodexRealtimePath(path) {
@@ -331,9 +330,22 @@ func isCodexRealtimePath(path string) bool {
 		isCodexLivePath(path)
 }
 
-func isCodexLivePath(path string) bool {
+func isCodexPublicLivePath(path string) bool {
+	path = normalizeNoopPath(path)
+	return path == "/live" || strings.HasPrefix(path, "/live/")
+}
+
+func isCodexLegacyLivePath(path string) bool {
 	path = normalizeNoopPath(path)
 	return path == "/v1/live" || strings.HasPrefix(path, "/v1/live/")
+}
+
+func isCodexLegacyLiveCallCreatePath(path string) bool {
+	return normalizeNoopPath(path) == "/v1/live"
+}
+
+func isCodexLivePath(path string) bool {
+	return isCodexPublicLivePath(path) || isCodexLegacyLivePath(path)
 }
 
 func (p *CodexProvider) MatchesPath(path string) bool {
@@ -345,8 +357,18 @@ func (p *CodexProvider) MatchesPath(path string) bool {
 }
 
 func (p *CodexProvider) NormalizePath(path string) string {
-	if isCodexLivePath(path) {
+	normalized := normalizeNoopPath(path)
+	if normalized == "/live" {
+		return "/v1/live"
+	}
+	if strings.HasPrefix(normalized, "/live/") {
+		return "/v1/live/" + strings.TrimPrefix(normalized, "/live/")
+	}
+	if normalized == "/v1/live" {
 		return "/realtime/calls"
+	}
+	if strings.HasPrefix(normalized, "/v1/live/") {
+		return normalized
 	}
 	if mapped := mapResponsesPath(path); mapped != "" {
 		return mapped

@@ -356,10 +356,10 @@ func parseGrokBillingUsage(monthlyBody, weeklyBody []byte, now time.Time) (Usage
 
 	var weekly grokBillingResponse
 	if json.Unmarshal(weeklyBody, &weekly) == nil && weekly.Config != nil && weekly.Config.CreditUsagePercent != nil {
-		used := *weekly.Config.CreditUsagePercent
-		if used > 1 {
-			used /= 100
-		}
+		// creditUsagePercent is always percent units (0-100), matching the
+		// sibling productUsage[].usagePercent field. Never ratio units, so a
+		// magnitude heuristic would read 1% as 100% and strand fresh accounts.
+		used := *weekly.Config.CreditUsagePercent / 100
 		snap.SecondaryUsed = clampRateLimitPercent(used)
 		snap.SecondaryUsedPercent = snap.SecondaryUsed
 		snap.secondarySet = true
@@ -410,6 +410,11 @@ func (p *GrokProvider) NormalizePath(path string) string {
 	if strings.HasPrefix(path, "/v1/") {
 		return strings.TrimPrefix(path, "/v1")
 	}
+	// Model overrides can originate on Codex's private Responses path. Grok's
+	// OpenAI-compatible endpoint only accepts the public /responses route.
+	if strings.HasSuffix(strings.TrimRight(path, "/"), "/responses") {
+		return "/responses"
+	}
 	return path
 }
 
@@ -454,8 +459,7 @@ type grokReasoningEffort struct {
 	Default     bool   `json:"default"`
 }
 
-// grokCLIModelCatalog mirrors the model-discovery payload shipped to Grok Build
-// 0.2.101 by cli-chat-proxy. grok-build itself remains a CLI built-in.
+// grokCLIModelCatalog mirrors cli-chat-proxy's live model-discovery payload.
 var grokCLIModelCatalog = []grokClientModel{
 	{
 		ID:                          "grok-4.5",
@@ -478,18 +482,6 @@ var grokCLIModelCatalog = []grokClientModel{
 		SupportsBackendSearch: true,
 		CompactionAtTokens:    true,
 		ShowModelFingerprint:  true,
-	},
-	{
-		ID:                          "grok-composer-2.5-fast",
-		Object:                      "model",
-		OwnedBy:                     "xAI",
-		Model:                       "grok-composer-2.5-fast",
-		Name:                        "Composer 2.5",
-		Description:                 "Cursor's latest coding model",
-		ContextWindow:               200000,
-		AutoCompactThresholdPercent: 90,
-		APIBackend:                  "responses",
-		AgentType:                   "cursor",
 	},
 }
 
@@ -541,8 +533,8 @@ type grokSetupModel struct {
 
 func grokSetupModels() []grokSetupModel {
 	catalog := grokModelsForClient()
-	models := make([]grokSetupModel, 0, len(catalog)+1)
-	seen := make(map[string]struct{}, len(catalog)+1)
+	models := make([]grokSetupModel, 0, len(catalog))
+	seen := make(map[string]struct{}, len(catalog))
 	for _, model := range catalog {
 		if _, ok := seen[model.ID]; ok {
 			continue
@@ -550,22 +542,14 @@ func grokSetupModels() []grokSetupModel {
 		seen[model.ID] = struct{}{}
 		models = append(models, grokSetupModel{ID: model.ID, APIBackend: model.APIBackend})
 	}
-	if _, ok := seen["grok-build"]; !ok {
-		models = append(models, grokSetupModel{ID: "grok-build", APIBackend: "responses"})
-	}
 	return models
 }
 
 // Catalog sourced from cli-chat-proxy GET /v1/models (Grok Build 0.2.93) plus
 // still-routable legacy IDs verified against the same Responses API.
 var grokModelCatalog = []grokModelInfo{
+	// Verified against cli-chat-proxy /v1/models on 2026-07-31.
 	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
-	{ID: "grok-composer-2.5-fast", Name: "Composer 2.5", Reasoning: false, ContextWindow: 200000, MaxTokens: 30000, Aliases: []string{"grok-composer", "grok-code-fast"}},
-	{ID: "grok-build", Name: "Grok Build", Reasoning: true, ContextWindow: 512000, MaxTokens: 30000},
-	{ID: "grok-4.3", Name: "Grok 4.3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 30000},
-	{ID: "grok-4.20-0309-reasoning", Name: "Grok 4.20 Reasoning", Reasoning: true, ContextWindow: 2000000, MaxTokens: 30000},
-	{ID: "grok-4.20-0309-non-reasoning", Name: "Grok 4.20 Non-Reasoning", Reasoning: false, ContextWindow: 2000000, MaxTokens: 30000},
-	{ID: "grok-4.20-multi-agent-0309", Name: "Grok 4.20 Multi-Agent", Reasoning: true, ContextWindow: 2000000, MaxTokens: 30000},
 }
 
 func grokModelByName(model string) (grokModelInfo, bool) {
@@ -595,6 +579,19 @@ func grokCanonicalModel(model string) string {
 	return model
 }
 
+// grokPublicAliases returns request-compatible names that clients may discover.
+// grok-4.5-build is an internal xAI response identifier, not a public model.
+func grokPublicAliases(model grokModelInfo) []string {
+	aliases := make([]string, 0, len(model.Aliases))
+	for _, alias := range model.Aliases {
+		if strings.EqualFold(alias, "grok-4.5-build") {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases
+}
+
 func grokClientVersion() string {
 	if v := strings.TrimSpace(os.Getenv("GROK_CLIENT_VERSION")); v != "" {
 		return v
@@ -617,12 +614,7 @@ func grokModelMaxCompletionTokens(model string) int {
 }
 
 func grokModelSupportsReasoningEffort(model string) bool {
-	m := strings.ToLower(grokCanonicalModel(model))
-	// Live /v1/models (2026-07-09): grok-4.5 advertises supports_reasoning_effort
-	// with high/medium/low. Legacy multi-agent + 4.3 keep the prior allowlist.
-	return strings.HasPrefix(m, "grok-4.5") ||
-		strings.HasPrefix(m, "grok-4.3") ||
-		strings.HasPrefix(m, "grok-4.20-multi-agent")
+	return strings.EqualFold(grokCanonicalModel(model), "grok-4.5")
 }
 
 func rewriteAndSanitizeGrokRequestBody(body []byte, model string) []byte {

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -277,6 +279,81 @@ func TestCodexWebSocketCompletionRecordsUsageOnce(t *testing.T) {
 	}
 	if len(origins) != 1 || origins[0].OriginID == "" || origins[0].AccountID == "" || origins[0].BillableTokens != 2250000 {
 		t.Fatalf("unexpected websocket origin usage: %+v", origins)
+	}
+}
+
+func TestCodexWebSocketPinsEveryConversationToTheResponseChainAccount(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	upstream := newFakeCodexUpstream(t)
+	turns := make(chan map[string]any, 2)
+	upstream.on("acct_first", func(ctx context.Context, conn *websocket.Conn) {
+		for _, responseID := range []string{"resp_first", "resp_second"} {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			var turn map[string]any
+			if json.Unmarshal(data, &turn) != nil {
+				return
+			}
+			turns <- turn
+			_ = conn.Write(ctx, websocket.MessageText, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed"}}`, responseID)))
+		}
+	})
+	upstream.on("acct_second", func(ctx context.Context, conn *websocket.Conn) {
+		t.Error("response chain must not switch to the second account")
+	})
+
+	upURL, _ := url.Parse(upstream.server.URL)
+	first := &Account{Type: AccountTypeCodex, ID: "first", AccessToken: "first-token", AccountID: "acct_first", PlanType: "pro"}
+	second := &Account{Type: AccountTypeCodex, ID: "second", AccessToken: "second-token", AccountID: "acct_second", PlanType: "pro"}
+	fx := newCodexProxyFixture(t, upURL, []*Account{first, second})
+	fx.handler.pool.pin("conv-first", "first")
+	fx.handler.pool.pin("conv-second", "second")
+
+	conn := dialClientWS(t, fx, http.Header{
+		"Authorization": []string{"Bearer " + generateClaudePoolToken("test-secret", "multi-conversation-user")},
+		"session_id":    []string{"conv-first"},
+	})
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.6","prompt_cache_key":"conv-first"}`)); err != nil {
+		t.Fatalf("write first turn: %v", err)
+	}
+	if frames := mustReadUntil(t, conn, `"resp_first"`, 3*time.Second); len(frames) == 0 {
+		t.Fatal("first conversation did not complete")
+	}
+
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.6","prompt_cache_key":"conv-second","previous_response_id":"resp_first"}`)); err != nil {
+		t.Fatalf("write second turn: %v", err)
+	}
+	if frames := mustReadUntil(t, conn, `"resp_second"`, 3*time.Second); len(frames) == 0 {
+		t.Fatal("second conversation did not complete")
+	}
+
+	firstTurn := <-turns
+	secondTurn := <-turns
+	if got := extractConversationIDFromObject(firstTurn); got != "conv-first" {
+		t.Fatalf("first upstream conversation = %q, want conv-first", got)
+	}
+	if got := extractConversationIDFromObject(secondTurn); got != "conv-second" {
+		t.Fatalf("second upstream conversation = %q, want conv-second", got)
+	}
+	if got, _ := secondTurn["previous_response_id"].(string); got != "resp_first" {
+		t.Fatalf("previous_response_id = %q, want resp_first", got)
+	}
+
+	fx.handler.pool.mu.RLock()
+	firstPin := fx.handler.pool.convPin["conv-first"]
+	secondPin := fx.handler.pool.convPin["conv-second"]
+	fx.handler.pool.mu.RUnlock()
+	if firstPin != "first" || secondPin != "first" {
+		t.Fatalf("conversation pins = (%q, %q), want both first", firstPin, secondPin)
+	}
+	if got := upstream.hitCount("acct_first"); got != 1 {
+		t.Fatalf("first account websocket connections = %d, want 1", got)
+	}
+	if got := upstream.hitCount("acct_second"); got != 0 {
+		t.Fatalf("second account websocket connections = %d, want 0", got)
 	}
 }
 

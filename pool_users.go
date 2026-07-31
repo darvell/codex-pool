@@ -347,7 +347,10 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
 
 	return &CodexAuthJSON{
-		OpenAIKey: nil,
+		// Codex Desktop resolves auth.json files with OPENAI_API_KEY as API-key
+		// auth. Use the same pool JWT as the OAuth-shaped access token so both
+		// Desktop and CLI authenticate to the configured pool provider.
+		OpenAIKey: &accessToken,
 		Tokens: &TokenData{
 			IDToken:      idToken,
 			AccessToken:  accessToken,

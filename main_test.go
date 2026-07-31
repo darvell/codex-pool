@@ -14,7 +14,35 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
+
+func TestDebugHeaderSummaryRedactsCredentials(t *testing.T) {
+	headers := http.Header{
+		"Authorization":     []string{"Bearer secret-token"},
+		"Cookie":            []string{"session=secret-cookie"},
+		"X-Oai-Attestation": []string{"secret-attestation"},
+		"User-Agent":        []string{"Codex Desktop"},
+	}
+
+	got := strings.Join(debugHeaderSummary(headers), " ")
+	for _, secret := range []string{"secret-token", "secret-cookie", "secret-attestation"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("debug header summary leaked %q: %s", secret, got)
+		}
+	}
+	for _, want := range []string{
+		"Authorization=<redacted>",
+		"Cookie=<redacted>",
+		"User-Agent=Codex Desktop",
+		"X-Oai-Attestation=<redacted>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("debug header summary %q missing %q", got, want)
+		}
+	}
+}
 
 func TestBuildWhamUsageURLKeepsBackendAPI(t *testing.T) {
 	base, _ := url.Parse("https://chatgpt.com/backend-api")
@@ -302,14 +330,48 @@ func TestModelRouteOverrideRoutesGrokCodeModels(t *testing.T) {
 		),
 	}
 
-	provider, overrideBase, rewritten := handler.modelRouteOverride("/v1/responses", "grok-composer", []byte(`{"model":"grok-composer","input":"hello"}`))
+	provider, overrideBase, rewritten := handler.modelRouteOverride("/v1/responses", "grok-4.5-build", []byte(`{"model":"grok-4.5-build","input":"hello"}`))
 	if provider == nil || provider.Type() != AccountTypeGrok {
 		t.Fatalf("provider = %v, want grok", provider)
 	}
 	if overrideBase == nil || overrideBase.String() != base.String() {
 		t.Fatalf("overrideBase = %v, want %v", overrideBase, base)
 	}
-	if !bytes.Contains(rewritten, []byte(`"model":"grok-composer-2.5-fast"`)) {
+	if !bytes.Contains(rewritten, []byte(`"model":"grok-4.5"`)) {
+		t.Fatalf("rewritten body = %s", rewritten)
+	}
+}
+
+func TestDecodeZstdRequestBodyEnablesGrokRouting(t *testing.T) {
+	plain := []byte(`{"model":"grok-4.5","input":"hello"}`)
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed := encoder.EncodeAll(plain, nil)
+	encoder.Close()
+
+	decoded, changed, err := decodeRequestBody("zstd", compressed, 1<<20)
+	if err != nil {
+		t.Fatalf("decode zstd request: %v", err)
+	}
+	if !changed || !bytes.Equal(decoded, plain) {
+		t.Fatalf("decoded body = %q, changed=%v", decoded, changed)
+	}
+
+	base, _ := url.Parse("https://example.test/v1")
+	handler := &proxyHandler{registry: NewProviderRegistry(
+		NewCodexProvider(base, base, nil),
+		NewClaudeProvider(base),
+		NewGeminiProvider(base, base),
+		NewGrokProvider(base),
+	)}
+	model := extractRequestedModelFromJSON(decoded)
+	provider, _, rewritten := handler.modelRouteOverride("/backend-api/codex/responses", model, decoded)
+	if provider == nil || provider.Type() != AccountTypeGrok {
+		t.Fatalf("zstd Grok request routed to %v, want grok", provider)
+	}
+	if !bytes.Contains(rewritten, []byte(`"model":"grok-4.5"`)) {
 		t.Fatalf("rewritten body = %s", rewritten)
 	}
 }

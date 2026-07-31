@@ -122,17 +122,18 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 	defer relayCancel()
 
 	state := &codexRelayState{
-		h:             h,
-		opts:          opts,
-		ctx:           relayCtx,
-		clientConn:    clientConn,
-		clientWriter:  &webSocketWriter{conn: clientConn},
-		upstreamConn:  upstreamConn,
-		activeAccount: opts.InitialAccount,
-		subprotocols:  subprotocols,
-		clientCh:      startWebSocketReader(relayCtx, clientConn),
-		upstreamCh:    startWebSocketReader(relayCtx, upstreamConn),
-		session:       session,
+		h:                    h,
+		opts:                 opts,
+		ctx:                  relayCtx,
+		clientConn:           clientConn,
+		clientWriter:         &webSocketWriter{conn: clientConn},
+		upstreamConn:         upstreamConn,
+		activeAccount:        opts.InitialAccount,
+		subprotocols:         subprotocols,
+		clientCh:             startWebSocketReader(relayCtx, clientConn),
+		upstreamCh:           startWebSocketReader(relayCtx, upstreamConn),
+		session:              session,
+		activeConversationID: opts.ConversationID,
 		// Already on a cyber account — no further swap is meaningful.
 		swapDone: opts.InitialAccount.CyberAccess,
 	}
@@ -166,11 +167,12 @@ type codexRelayState struct {
 	// lastResponseCreate holds the most recent client-originated
 	// response.create frame so the swap path can replay it on the new
 	// upstream.
-	lastResponseCreate []byte
-	requestedModel     string
-	recordedResponses  map[string]struct{}
-	clientClosing      bool
-	upstreamClosing    bool
+	lastResponseCreate   []byte
+	activeConversationID string
+	requestedModel       string
+	recordedResponses    map[string]struct{}
+	clientClosing        bool
+	upstreamClosing      bool
 }
 
 func (s *codexRelayState) run() (int, error) {
@@ -391,18 +393,41 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 }
 
 func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
-	if isCodexResponseCreate(data) {
-		data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
-		filtered, changed, err := filterHostedMCPRequestJSON(data)
-		if err != nil {
-			return nil, err
-		}
-		if changed {
-			data = filtered
-		}
-		s.lastResponseCreate = append(s.lastResponseCreate[:0], data...)
-		s.requestedModel = extractRequestedModelFromJSON(data)
+	if !isCodexResponseCreate(data) {
+		return data, nil
 	}
+
+	data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
+	filtered, changed, err := filterHostedMCPRequestJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		data = filtered
+	}
+	s.lastResponseCreate = append(s.lastResponseCreate[:0], data...)
+	s.requestedModel = extractRequestedModelFromJSON(data)
+	if s.activeAccount != nil {
+		s.swapDone = s.activeAccount.CyberAccess
+	}
+
+	conversationID := extractConversationIDFromJSON(data)
+	if conversationID == "" {
+		conversationID = s.activeConversationID
+	}
+	if conversationID == "" {
+		return data, nil
+	}
+	s.activeConversationID = conversationID
+	if s.h == nil || s.h.pool == nil || s.activeAccount == nil {
+		return data, nil
+	}
+
+	// Response IDs are scoped to the upstream account that minted them. A
+	// downstream websocket may carry multiple logical conversations, but every
+	// one of those conversations must remain on this socket's active account so
+	// previous_response_id continues to resolve.
+	s.h.pool.pin(conversationID, s.activeAccount.ID)
 	return data, nil
 }
 
@@ -508,8 +533,8 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	if s.opts.SetActiveAccount != nil {
 		s.opts.SetActiveAccount(cand)
 	}
-	if s.opts.ConversationID != "" {
-		s.h.pool.pin(s.opts.ConversationID, cand.ID)
+	if s.activeConversationID != "" {
+		s.h.pool.pin(s.activeConversationID, cand.ID)
 	}
 
 	s.upstreamConn.CloseNow()
@@ -531,10 +556,10 @@ func (s *codexRelayState) pickCyberAccessCandidate() *Account {
 }
 
 func (s *codexRelayState) legacyPin() {
-	if s.opts.ConversationID == "" {
+	if s.activeConversationID == "" {
 		return
 	}
-	s.h.pinConversationToCyberAccess(s.opts.ConversationID, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, s.activeAccount.ID, s.opts.ReqID)
+	s.h.pinConversationToCyberAccess(s.activeConversationID, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, s.activeAccount.ID, s.opts.ReqID)
 }
 
 // cyberPolicyHTTPSuppressor wires sseInterceptWriter.onEvent so the

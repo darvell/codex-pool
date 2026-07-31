@@ -71,7 +71,7 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 			MaxOutputTokens:    model.MaxTokens,
 			Protocols:          []string{"openai"},
 			Capabilities:       map[string]bool{"reasoning": model.Reasoning, "tools": true},
-			Aliases:            append([]string(nil), model.Aliases...),
+			Aliases:            grokPublicAliases(model),
 			SupportingAccounts: supportingAccounts,
 			AvailableAccounts:  availableAccounts,
 			AvailableNow:       availableNow,

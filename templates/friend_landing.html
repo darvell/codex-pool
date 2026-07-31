@@ -1621,8 +1621,8 @@ brew install claude-code</pre>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
                         <span class="model-pill red">glm-5.2</span>
-                        <span class="model-pill grok">grok-build</span>
-                        <span class="model-pill grok">grok-composer-2.5-fast</span>
+                        <span class="model-pill grok">grok-4.5</span>
+                        <span class="model-pill grok">grok-4.5</span>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">Claude models sent to <code>/v1/chat/completions</code> are translated to Anthropic Messages and back. OpenAI models sent to <code>/v1/messages</code> are translated to Codex Responses and back.</p>
                 </div>
@@ -1684,8 +1684,8 @@ brew install claude-code</pre>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
                         <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
                         <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
-                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-build</span>
-                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-composer-2.5-fast</span>
+                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-4.5</span>
+                        <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-4.5</span>
                     </div>
 
                     <div class="step-label">03 // Raw models.json</div>
@@ -1992,8 +1992,8 @@ brew install claude-code</pre>
                         <div class="step-label" style="margin-top: 40px;">Grok</div>
                         <div id="grok-section">
                             <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;">
-                                <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">grok-build</span>
-                                <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">grok-composer-2.5-fast</span>
+                                <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">grok-4.5</span>
+                                <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.7rem; font-family: monospace;">grok-4.5</span>
                             </div>
                             <div id="grok-empty" style="color: var(--text-muted); font-style: italic; padding: 20px; text-align: center;">No Grok accounts configured</div>
                             <div id="grok-content" style="display: none;">
@@ -2579,6 +2579,10 @@ Before you finish, report exactly which files changed and paste the smoke-test o
             document.getElementById('code-auth-json').textContent = authJson;
             document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
 chatgpt_base_url = "${publicUrl}/backend-api"
+experimental_realtime_webrtc_call_base_url = "${publicUrl}/v1"
+experimental_realtime_ws_base_url = "${publicUrl}/v1"
+realtime.version = "v3"
+realtime.transport = "webrtc"
 model_catalog_json = "~/.codex/model_catalog.json"
 
 [model_providers.codex-pool]

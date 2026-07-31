@@ -25,6 +25,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/net/http2"
 )
 
@@ -1107,7 +1108,7 @@ func extractConversationIDFromJSON(blob []byte) string {
 }
 
 func extractConversationIDFromObject(obj map[string]any) string {
-	for _, key := range []string{"conversation_id", "conversation", "session_id"} {
+	for _, key := range []string{"conversation_id", "conversation", "session_id", "prompt_cache_key"} {
 		if v, ok := obj[key].(string); ok && v != "" {
 			return v
 		}
@@ -1641,6 +1642,47 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 	return body
 }
 
+// decodeRequestBody makes compressed JSON routable and rewritable. We must not
+// forward encoded bytes after a model-based provider override: the selected
+// provider needs the rewritten JSON, not the original Codex wire payload.
+func decodeRequestBody(contentEncoding string, body []byte, maxBytes int64) ([]byte, bool, error) {
+	encoding := strings.ToLower(strings.TrimSpace(contentEncoding))
+	if len(body) == 0 || encoding == "" || encoding == "identity" {
+		return body, false, nil
+	}
+	if maxBytes <= 0 {
+		maxBytes = 16 << 20
+	}
+
+	var reader io.ReadCloser
+	switch encoding {
+	case "gzip":
+		gzipReader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, false, fmt.Errorf("decode gzip request body: %w", err)
+		}
+		reader = gzipReader
+	case "zstd":
+		zstdReader, err := zstd.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, false, fmt.Errorf("decode zstd request body: %w", err)
+		}
+		reader = zstdReader.IOReadCloser()
+	default:
+		return body, false, nil
+	}
+	defer reader.Close()
+
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("decode %s request body: %w", encoding, err)
+	}
+	if int64(len(decoded)) > maxBytes {
+		return nil, false, fmt.Errorf("decoded request body exceeds %d byte limit", maxBytes)
+	}
+	return decoded, true, nil
+}
+
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
 	authHeader := r.Header.Get("Authorization")
@@ -1824,7 +1866,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if accountType == AccountTypeCodex && isCodexLivePath(r.URL.Path) {
+	if decoded, changed, err := decodeRequestBody(r.Header.Get("Content-Encoding"), bodyBytes, h.cfg.maxInMemoryBodyBytes); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	} else if changed {
+		bodyBytes = decoded
+		r.Header.Del("Content-Encoding")
+		r.Header.Del("Content-Length")
+		r.ContentLength = int64(len(bodyBytes))
+	}
+	if accountType == AccountTypeCodex && isCodexLegacyLivePath(r.URL.Path) {
 		bodyBytes, err = rewriteCodexLiveCall(bodyBytes, r.Header.Get("Content-Type"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -2262,6 +2313,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				lastErr = fmt.Errorf("claude organization disabled for account %s", acc.ID)
 				h.recent.add(lastErr.Error())
 				continue
+			}
+
+			if acc.Type == AccountTypeCodex && isCodexVoiceAccessDenied(errBody) {
+				// AVAS voice entitlement is account-independent for this pool. Retrying
+				// every account only delays the same terminal response and leaves the
+				// caller holding a Location header without a valid SDP answer.
+				errClass = ErrorClassInvalid
 			}
 
 			// Cloudflare bot challenges return 403 with HTML — not an auth failure.
@@ -2997,6 +3055,9 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	conversationID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 	if conversationID == "" {
 		conversationID = extractConversationIDFromHeaders(r.Header)
+	}
+	if conversationID == "" && accountType == AccountTypeCodex {
+		conversationID = codexRealtimeCallPinKey(codexRealtimeCallIDFromRequest(r.URL.Path, r.URL.Query()))
 	}
 	// Use Claude Code session ID as fallback for conversation stickiness
 	if conversationID == "" {
@@ -4716,7 +4777,7 @@ func (h *proxyHandler) tryOnce(
 	outURL.Host = targetBase.Host
 	// Use provider's NormalizePath method for path handling
 	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(in.URL.Path))
-	if provider.Type() == AccountTypeCodex && isCodexLivePath(in.URL.Path) {
+	if provider.Type() == AccountTypeCodex && isCodexLegacyLivePath(in.URL.Path) {
 		q := outURL.Query()
 		q.Set("intent", "quicksilver")
 		q.Set("architecture", "avas")
@@ -4764,9 +4825,9 @@ func (h *proxyHandler) tryOnce(
 
 		// Use provider's SetAuthHeaders method for provider-specific auth
 		provider.SetAuthHeaders(outReq, acc)
-		// GPT Live uses the Quicksilver alpha contract. The Codex Responses
-		// websocket beta header is rejected by that backend.
-		if provider.Type() == AccountTypeCodex && isCodexLivePath(in.URL.Path) {
+		// Native Realtime and GPT Live reject the Codex Responses websocket beta
+		// header. Keep it only on the Responses transport that requires it.
+		if provider.Type() == AccountTypeCodex && isCodexRealtimePath(in.URL.Path) {
 			outReq.Header.Del("OpenAI-Beta")
 		}
 		if provider.Type() == AccountTypeGrok {
@@ -4945,17 +5006,8 @@ func (h *proxyHandler) tryOnce(
 			outReq.Header.Del("Content-Length")
 		}
 
-		// Debug: log ALL outgoing headers
 		if h.cfg.debug.Load() {
-			var hdrs []string
-			for k, v := range outReq.Header {
-				val := v[0]
-				if len(val) > 80 {
-					val = val[:80]
-				}
-				hdrs = append(hdrs, fmt.Sprintf("%s=%s", k, val))
-			}
-			log.Printf("[%s] ALL outgoing headers (%s): %v", reqID, provider.Type(), hdrs)
+			log.Printf("[%s] outgoing headers (%s): %v", reqID, provider.Type(), debugHeaderSummary(outReq.Header))
 		}
 
 		// Keep the original User-Agent from the client - don't override it
@@ -5070,6 +5122,21 @@ func (h *proxyHandler) tryOnce(
 		} else {
 			// No refresh token available - can't recover from 401/403
 			refreshFailed = true
+		}
+	}
+
+	if provider.Type() == AccountTypeCodex && isCodexRealtimeCallCreatePath(in.URL.Path) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if callID := codexRealtimeCallIDFromLocation(resp.Header.Get("Location")); callID != "" {
+			h.pool.pin(codexRealtimeCallPinKey(callID), acc.ID)
+			// OpenAI currently returns 201 with text/plain even though the body is
+			// an SDP answer. Normalize the public contract for Codex clients that
+			// require the documented signaling shape.
+			resp.StatusCode = http.StatusOK
+			resp.Status = "200 OK"
+			resp.Header.Set("Content-Type", "application/sdp")
+			if h.cfg.debug.Load() {
+				log.Printf("[%s] pinned realtime call %s to account %s", reqID, callID, acc.ID)
+			}
 		}
 	}
 

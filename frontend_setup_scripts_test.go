@@ -35,6 +35,16 @@ func TestServeCodexSetupScript_PowerShell(t *testing.T) {
 	if !strings.Contains(body, "model_catalog_json = ") {
 		t.Fatalf("expected model catalog config in script body, got:\n%s", body)
 	}
+	for _, setting := range []string{
+		"experimental_realtime_webrtc_call_base_url",
+		"experimental_realtime_ws_base_url",
+		`realtime.version = "v3"`,
+		`realtime.transport = "webrtc"`,
+	} {
+		if !strings.Contains(body, setting) {
+			t.Fatalf("expected %s in PowerShell setup script", setting)
+		}
+	}
 	if !strings.Contains(body, "[mcp_servers.model_sync]") {
 		t.Fatalf("expected MCP sidecar config in script body, got:\n%s", body)
 	}
@@ -43,6 +53,9 @@ func TestServeCodexSetupScript_PowerShell(t *testing.T) {
 	}
 	if !strings.Contains(body, "$firstLine = [Console]::In.ReadLine()") {
 		t.Fatalf("expected MCP JSONL transport support in PowerShell body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "features enable realtime_conversation") {
+		t.Fatal("expected PowerShell setup to enable realtime_conversation")
 	}
 }
 
@@ -66,11 +79,24 @@ func TestServeCodexSetupScript_Bash(t *testing.T) {
 	if !strings.Contains(body, "model_catalog_json = ") {
 		t.Fatalf("expected model catalog config in bash script body, got:\n%s", body)
 	}
+	for _, setting := range []string{
+		"experimental_realtime_webrtc_call_base_url",
+		"experimental_realtime_ws_base_url",
+		`realtime.version = "v3"`,
+		`realtime.transport = "webrtc"`,
+	} {
+		if !strings.Contains(body, setting) {
+			t.Fatalf("expected %s in bash setup script", setting)
+		}
+	}
 	if !strings.Contains(body, "[mcp_servers.model_sync]") {
 		t.Fatalf("expected MCP sidecar config in bash script body, got:\n%s", body)
 	}
 	if !strings.Contains(body, "MCP_TRANSPORT_MODE=\"jsonl\"") {
 		t.Fatalf("expected MCP JSONL transport support in bash body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "features enable realtime_conversation") {
+		t.Fatal("expected bash setup to enable realtime_conversation")
 	}
 }
 
@@ -84,7 +110,7 @@ func TestServeGrokSetupScript_Bash(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"[endpoints]", `models_base_url = \"`, `[model."%s"]`, "grok-build", "gpt-5.6-luna", "claude-sonnet-5", "auth.json.before-codex-pool", "/config/grok/$TOKEN"} {
+	for _, want := range []string{"[endpoints]", `models_base_url = \"`, `[model."%s"]`, "grok-4.5", "gpt-5.6-luna", "claude-sonnet-5", "auth.json.before-codex-pool", "/config/grok/$TOKEN"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected Grok setup script to contain %q", want)
 		}
@@ -114,7 +140,7 @@ func TestServeGrokSetupScript_BashPreservesConfigAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	configFile := filepath.Join(configDir, "config.toml")
-	initial := "[cli]\nauto_update = true\n\n[models]\ndefault = \"grok-build\"\n"
+	initial := "[cli]\nauto_update = true\n\n[models]\ndefault = \"grok-4.5\"\n"
 	if err := os.WriteFile(configFile, []byte(initial), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +171,7 @@ func TestServeGrokSetupScript_BashPreservesConfigAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := string(data)
-	for _, want := range []string{"[cli]", "auto_update = true", `default = "grok-build"`, `[endpoints]`, `models_base_url = "http://example.com/v1"`, `api_key = "pool-jwt"`} {
+	for _, want := range []string{"[cli]", "auto_update = true", `default = "grok-4.5"`, `[endpoints]`, `models_base_url = "http://example.com/v1"`, `api_key = "pool-jwt"`} {
 		if !strings.Contains(config, want) {
 			t.Fatalf("installed config missing %q:\n%s", want, config)
 		}
@@ -153,8 +179,8 @@ func TestServeGrokSetupScript_BashPreservesConfigAndIsIdempotent(t *testing.T) {
 	if strings.Contains(config, "codex-pool-grok") {
 		t.Fatalf("installer must not create or select a synthetic model:\n%s", config)
 	}
-	if count := strings.Count(config, `[model."grok-build"]`); count != 1 {
-		t.Fatalf("grok-build credential override count = %d, want 1:\n%s", count, config)
+	if count := strings.Count(config, `[model."grok-4.5"]`); count != 1 {
+		t.Fatalf("grok-4.5 credential override count = %d, want 1:\n%s", count, config)
 	}
 	if _, err := os.Stat(authFile); !os.IsNotExist(err) {
 		t.Fatalf("active Grok OAuth file still exists: %v", err)

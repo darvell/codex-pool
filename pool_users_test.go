@@ -121,6 +121,9 @@ func TestGenerateCodexAuth(t *testing.T) {
 	if auth.Tokens.AccessToken == "" {
 		t.Error("access_token is empty")
 	}
+	if auth.OpenAIKey == nil || *auth.OpenAIKey != auth.Tokens.AccessToken {
+		t.Fatal("OPENAI_API_KEY must contain the pool access token for Codex Desktop")
+	}
 	if auth.Tokens.IDToken == "" {
 		t.Error("id_token is empty")
 	}

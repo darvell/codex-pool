@@ -44,13 +44,29 @@ func TestCodexProviderRoutesRealtimeAndLiveToTheirNativeOrigins(t *testing.T) {
 			t.Fatalf("UpstreamURL(%q) = %s, want %s", path, got, realtimeBase)
 		}
 	}
-	for _, path := range []string{"/v1/live", "/v1/live/call_123"} {
-		if got := provider.UpstreamURL(path); got.String() != responsesBase.String() {
-			t.Fatalf("UpstreamURL(%q) = %s, want %s", path, got, responsesBase)
+	publicLivePaths := map[string]string{
+		"/live":          "/v1/live",
+		"/live/call_123": "/v1/live/call_123",
+	}
+	for path, wantPath := range publicLivePaths {
+		if got := provider.UpstreamURL(path); got.String() != realtimeBase.String() {
+			t.Fatalf("UpstreamURL(%q) = %s, want %s", path, got, realtimeBase)
 		}
-		if got := provider.NormalizePath(path); got != "/realtime/calls" {
-			t.Fatalf("NormalizePath(%q) = %s, want /realtime/calls", path, got)
+		if got := provider.NormalizePath(path); got != wantPath {
+			t.Fatalf("NormalizePath(%q) = %s, want %s", path, got, wantPath)
 		}
+	}
+	if got := provider.UpstreamURL("/v1/live"); got.String() != responsesBase.String() {
+		t.Fatalf("UpstreamURL(/v1/live) = %s, want %s", got, responsesBase)
+	}
+	if got := provider.NormalizePath("/v1/live"); got != "/realtime/calls" {
+		t.Fatalf("NormalizePath(/v1/live) = %s, want /realtime/calls", got)
+	}
+	if got := provider.UpstreamURL("/v1/live/rtc_123"); got.String() != realtimeBase.String() {
+		t.Fatalf("UpstreamURL(/v1/live/rtc_123) = %s, want %s", got, realtimeBase)
+	}
+	if got := provider.NormalizePath("/v1/live/rtc_123"); got != "/v1/live/rtc_123" {
+		t.Fatalf("NormalizePath(/v1/live/rtc_123) = %s, want /v1/live/rtc_123", got)
 	}
 	if got := provider.UpstreamURL("/v1/responses"); got.String() != responsesBase.String() {
 		t.Fatalf("UpstreamURL(/v1/responses) = %s, want %s", got, responsesBase)

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"sort"
 	"strings"
 )
 
@@ -128,6 +129,34 @@ func cloneHeader(h http.Header) http.Header {
 		out[k] = cpy
 	}
 	return out
+}
+
+func debugHeaderSummary(h http.Header) []string {
+	headers := make([]string, 0, len(h))
+	for name, values := range h {
+		value := ""
+		if len(values) > 0 {
+			value = values[0]
+		}
+		if isSensitiveHeader(name) {
+			value = "<redacted>"
+		} else if len(value) > 80 {
+			value = value[:80]
+		}
+		headers = append(headers, name+"="+value)
+	}
+	sort.Strings(headers)
+	return headers
+}
+
+func isSensitiveHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie",
+		"x-api-key", "api-key", "x-goog-api-key", "x-oai-attestation":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyHeader(dst, src http.Header) {

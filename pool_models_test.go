@@ -136,6 +136,21 @@ func TestPoolModelDescriptorsReportAliasesAndAccountAvailability(t *testing.T) {
 	}
 }
 
+func TestPoolModelDescriptorsDoNotAdvertiseGrokInternalAlias(t *testing.T) {
+	for _, descriptor := range poolModelDescriptors() {
+		if descriptor.ID != "grok-4.5" {
+			continue
+		}
+		for _, alias := range descriptor.Aliases {
+			if alias == "grok-4.5-build" {
+				t.Fatalf("grok discovery leaked internal alias: %#v", descriptor.Aliases)
+			}
+		}
+		return
+	}
+	t.Fatal("grok-4.5 descriptor missing")
+}
+
 func TestPoolModelDescriptorsUseOneCanonicalAntigravityRow(t *testing.T) {
 	antigravityModels.Reset()
 	t.Cleanup(antigravityModels.Reset)

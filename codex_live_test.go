@@ -4,8 +4,26 @@ import (
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
+	"net/url"
 	"testing"
 )
+
+func TestCodexRealtimeCallIdentity(t *testing.T) {
+	if got := codexRealtimeCallIDFromLocation("https://api.openai.com/v1/realtime/calls/rtc_test?foo=bar"); got != "rtc_test" {
+		t.Fatalf("location call ID = %q, want rtc_test", got)
+	}
+	if got := codexRealtimeCallIDFromRequest("/v1/realtime", url.Values{"call_id": []string{"rtc_test"}}); got != "rtc_test" {
+		t.Fatalf("query call ID = %q, want rtc_test", got)
+	}
+	for _, path := range []string{"/live/rtc_test", "/v1/live/rtc_test"} {
+		if got := codexRealtimeCallIDFromRequest(path, nil); got != "rtc_test" {
+			t.Fatalf("live path %s call ID = %q, want rtc_test", path, got)
+		}
+	}
+	if got := codexRealtimeCallPinKey("rtc_test"); got != "realtime-call:rtc_test" {
+		t.Fatalf("pin key = %q", got)
+	}
+}
 
 func TestRewriteCodexLiveCall(t *testing.T) {
 	var body bytes.Buffer
@@ -34,7 +52,14 @@ func TestRewriteCodexLiveCall(t *testing.T) {
 	if parsed.SDP != "v=0\r\n" {
 		t.Fatalf("sdp = %q", parsed.SDP)
 	}
-	if string(parsed.Session) != `{"model":"gpt-live-1-boulder-alpha","delegation":{"type":"client"}}` {
-		t.Fatalf("session = %s", parsed.Session)
+	var session map[string]any
+	if err := json.Unmarshal(parsed.Session, &session); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := session["model"].(string); got != "gpt-live-1-boulder-alpha" {
+		t.Fatalf("Codex Live session model = %q", got)
+	}
+	if delegation, ok := session["delegation"].(map[string]any); !ok || delegation["type"] != "client" {
+		t.Fatalf("session delegation = %#v", session["delegation"])
 	}
 }

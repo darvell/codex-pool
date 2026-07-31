@@ -36,6 +36,108 @@ func TestIsWebSocketUpgradeRequest(t *testing.T) {
 	}
 }
 
+func TestRealtimeCallAndSidebandUseSamePooledAccount(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	callAccount := make(chan string, 1)
+	sidebandAccount := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/realtime/calls":
+			if beta := r.Header.Get("OpenAI-Beta"); beta != "" {
+				t.Errorf("Realtime call forwarded legacy OpenAI-Beta header %q", beta)
+			}
+			callAccount <- r.Header.Get("ChatGPT-Account-ID")
+			w.Header().Set("Location", "/v1/realtime/calls/rtc_pool_test")
+			w.Header().Set("Content-Type", "application/sdp")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte("v=0\r\n"))
+		case isWebSocketUpgradeRequest(r) && r.URL.Path == "/v1/realtime" && r.URL.Query().Get("call_id") == "rtc_pool_test":
+			sidebandAccount <- r.Header.Get("ChatGPT-Account-ID")
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"session.updated"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex := NewCodexProviderWithRealtime(baseURL, baseURL, baseURL, baseURL)
+	registry := NewProviderRegistry(codex, NewClaudeProvider(baseURL), NewGeminiProvider(baseURL, baseURL))
+	accounts := []*Account{
+		{Type: AccountTypeCodex, ID: "first", AccessToken: "first-token", AccountID: "acct_first", PlanType: "pro"},
+		{Type: AccountTypeCodex, ID: "second", AccessToken: "second-token", AccountID: "acct_second", PlanType: "pro"},
+	}
+	h := &proxyHandler{
+		cfg:       &config{requestTimeout: 5 * time.Second, maxAttempts: 1, maxInMemoryBodyBytes: 1024, disableRefresh: true, websocketReadLimit: 8 << 20},
+		transport: http.DefaultTransport,
+		pool:      newPoolState(accounts, false),
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+	auth := "Bearer " + generateClaudePoolToken("test-secret", "voice-user")
+
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/realtime/calls", strings.NewReader("offer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("Content-Type", "application/sdp")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create call: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create call status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/sdp" {
+		t.Fatalf("create call Content-Type = %q, want application/sdp", got)
+	}
+	if got := resp.Header.Get("Location"); got != "/v1/realtime/calls/rtc_pool_test" {
+		t.Fatalf("create call Location = %q", got)
+	}
+
+	wsURL, _ := url.Parse(proxy.URL)
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/v1/realtime"
+	wsURL.RawQuery = "call_id=rtc_pool_test"
+	conn, _, err := websocket.Dial(context.Background(), wsURL.String(), &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{auth}}})
+	if err != nil {
+		t.Fatalf("join sideband: %v", err)
+	}
+	defer conn.CloseNow()
+	if _, _, err := conn.Read(context.Background()); err != nil {
+		t.Fatalf("read sideband: %v", err)
+	}
+
+	var createdOn, joinedOn string
+	select {
+	case createdOn = <-callAccount:
+	case <-time.After(time.Second):
+		t.Fatal("call creation did not reach upstream")
+	}
+	select {
+	case joinedOn = <-sidebandAccount:
+	case <-time.After(time.Second):
+		t.Fatal("sideband did not reach upstream")
+	}
+	if createdOn == "" || joinedOn != createdOn {
+		t.Fatalf("call account = %q, sideband account = %q", createdOn, joinedOn)
+	}
+}
+
 func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 

@@ -727,6 +727,10 @@ if ($existing -notmatch 'codex-pool') {
 # Codex Pool Proxy Config
 model_provider = "codex-pool"
 chatgpt_base_url = "$BaseUrl/backend-api"
+experimental_realtime_webrtc_call_base_url = "$BaseUrl/v1"
+experimental_realtime_ws_base_url = "$BaseUrl/v1"
+realtime.version = "v3"
+realtime.transport = "webrtc"
 model_catalog_json = "$modelCatalogToml"
 
 $existing
@@ -756,6 +760,21 @@ args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
     $updated = $true
   }
 
+  if ($existing -notmatch '(?m)^[ \t]*experimental_realtime_webrtc_call_base_url[ \t]*=') {
+    $existing = 'experimental_realtime_webrtc_call_base_url = "' + $BaseUrl + '/v1"' + $nl + $existing
+    $updated = $true
+  }
+
+  if ($existing -notmatch '(?m)^[ \t]*experimental_realtime_ws_base_url[ \t]*=') {
+    $existing = 'experimental_realtime_ws_base_url = "' + $BaseUrl + '/v1"' + $nl + $existing
+    $updated = $true
+  }
+
+  if ($existing -notmatch '(?m)^[ \t]*realtime\.version[ \t]*=' -and $existing -notmatch '(?m)^\[realtime\]') {
+    $existing = 'realtime.version = "v3"' + $nl + 'realtime.transport = "webrtc"' + $nl + $existing
+    $updated = $true
+  }
+
   if ($existing -match '(?m)^\[mcp_servers\.codex_pool_model_sync\]') {
     $existing = $existing -replace '(?m)^\[mcp_servers\.codex_pool_model_sync\]', '[mcp_servers.model_sync]'
     $updated = $true
@@ -777,6 +796,12 @@ args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
     Write-Host "Configuration already present in $configFile. Skipping."
   }
 }
+
+try {
+  if (Get-Command codex -ErrorAction SilentlyContinue) {
+    & codex features enable realtime_conversation | Out-Null
+  }
+} catch {}
 
 Write-Host 'Setup complete! You are ready to use the pool.'
 `, token, publicURL)
@@ -956,6 +981,10 @@ if ! grep -q "codex-pool" "$CONFIG_FILE"; then
 # Codex Pool Proxy Config
 model_provider = "codex-pool"
 chatgpt_base_url = "$BASE_URL/backend-api"
+experimental_realtime_webrtc_call_base_url = "$BASE_URL/v1"
+experimental_realtime_ws_base_url = "$BASE_URL/v1"
+realtime.version = "v3"
+realtime.transport = "webrtc"
 model_catalog_json = "$MODEL_CATALOG"
 
 EOF
@@ -996,6 +1025,37 @@ EOF
         UPDATED=1
     fi
 
+    if ! grep -Eq '^[[:space:]]*experimental_realtime_webrtc_call_base_url[[:space:]]*=' "$CONFIG_FILE"; then
+        TEMP_FILE=$(mktemp)
+        cat <<EOF > "$TEMP_FILE"
+experimental_realtime_webrtc_call_base_url = "$BASE_URL/v1"
+EOF
+        cat "$CONFIG_FILE" >> "$TEMP_FILE"
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+        UPDATED=1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*experimental_realtime_ws_base_url[[:space:]]*=' "$CONFIG_FILE"; then
+        TEMP_FILE=$(mktemp)
+        cat <<EOF > "$TEMP_FILE"
+experimental_realtime_ws_base_url = "$BASE_URL/v1"
+EOF
+        cat "$CONFIG_FILE" >> "$TEMP_FILE"
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+        UPDATED=1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*realtime\.version[[:space:]]*=' "$CONFIG_FILE" && ! grep -q '^\[realtime\]' "$CONFIG_FILE"; then
+        TEMP_FILE=$(mktemp)
+        cat <<EOF > "$TEMP_FILE"
+realtime.version = "v3"
+realtime.transport = "webrtc"
+EOF
+        cat "$CONFIG_FILE" >> "$TEMP_FILE"
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+        UPDATED=1
+    fi
+
     if grep -q '^\[mcp_servers\.codex_pool_model_sync\]' "$CONFIG_FILE"; then
         TEMP_FILE=$(mktemp)
         sed 's/^\[mcp_servers\.codex_pool_model_sync\]/[mcp_servers.model_sync]/' "$CONFIG_FILE" > "$TEMP_FILE"
@@ -1019,6 +1079,10 @@ EOF
     else
         echo "Configuration already present in $CONFIG_FILE. Skipping."
     fi
+fi
+
+if command -v codex >/dev/null 2>&1; then
+    codex features enable realtime_conversation >/dev/null 2>&1 || true
 fi
 
 echo "Setup complete! You are ready to use the pool."

@@ -232,22 +232,12 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if grok.BaseURL != "https://pool.example.com" {
 		t.Fatalf("grok baseUrl = %q", grok.BaseURL)
 	}
-	if len(grok.Models) != 7 {
+	if len(grok.Models) != 1 {
 		t.Fatalf("grok model count = %d", len(grok.Models))
 	}
-	wantGrokContexts := map[string]int{
-		"grok-4.5":                     500000,
-		"grok-composer-2.5-fast":       200000,
-		"grok-build":                   512000,
-		"grok-4.3":                     1000000,
-		"grok-4.20-0309-reasoning":     2000000,
-		"grok-4.20-0309-non-reasoning": 2000000,
-		"grok-4.20-multi-agent-0309":   2000000,
-	}
-	for _, model := range grok.Models {
-		if want, ok := wantGrokContexts[model.ID]; !ok || model.ContextWindow != want || model.MaxTokens != 30000 {
-			t.Fatalf("grok model %q limits = (%d, %d)", model.ID, model.ContextWindow, model.MaxTokens)
-		}
+	model := grok.Models[0]
+	if model.ID != "grok-4.5" || model.ContextWindow != 500000 || model.MaxTokens != 30000 {
+		t.Fatalf("grok model = %#v", model)
 	}
 }
 
@@ -324,25 +314,20 @@ func TestMinimaxCanonicalModelHandlesPiBuiltInIDs(t *testing.T) {
 func TestGrokCanonicalModelHandlesCodeAliases(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]string{
-		"grok-4.5":                     "grok-4.5",
-		"grok-4.5-build":               "grok-4.5",
-		"grok-build":                   "grok-build",
-		"grok-composer-2.5-fast":       "grok-composer-2.5-fast",
-		"grok-composer":                "grok-composer-2.5-fast",
-		"grok-code-fast":               "grok-composer-2.5-fast",
-		"grok-4.3":                     "grok-4.3",
-		"grok-4.20-0309-reasoning":     "grok-4.20-0309-reasoning",
-		"grok-4.20-0309-non-reasoning": "grok-4.20-0309-non-reasoning",
-		"grok-4.20-multi-agent-0309":   "grok-4.20-multi-agent-0309",
-	}
-
-	for input, want := range tests {
+	for input, want := range map[string]string{
+		"grok-4.5":       "grok-4.5",
+		"grok-4.5-build": "grok-4.5",
+	} {
 		if got := grokCanonicalModel(input); got != want {
 			t.Fatalf("grokCanonicalModel(%q) = %q, want %q", input, got, want)
 		}
 		if !isGrokModel(input) {
 			t.Fatalf("expected %q to route to grok", input)
+		}
+	}
+	for _, retired := range []string{"grok-build", "grok-composer-2.5-fast", "grok-4.3", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning", "grok-4.20-multi-agent-0309"} {
+		if isGrokModel(retired) {
+			t.Fatalf("retired model %q must not route to Grok", retired)
 		}
 	}
 }

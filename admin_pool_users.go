@@ -255,9 +255,9 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 		respondJSON(w, map[string]any{
 			"api_key":        auth.AccessToken,
 			"base_url":       strings.TrimRight(h.getEffectivePublicURL(r), "/") + "/v1",
-			"model":          "grok-build",
+			"model":          "grok-4.5",
 			"api_backend":    "responses",
-			"context_window": 512000,
+			"context_window": 500000,
 		})
 	}
 }

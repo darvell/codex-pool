@@ -737,6 +737,10 @@ cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
 `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'
 model_provider = "codex-pool"
 chatgpt_base_url = "${BASE_URL}/backend-api"
+experimental_realtime_webrtc_call_base_url = "${BASE_URL}/v1"
+experimental_realtime_ws_base_url = "${BASE_URL}/v1"
+realtime.version = "v3"
+realtime.transport = "webrtc"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
@@ -754,6 +758,10 @@ echo "  cp pool/ACCOUNT.json ~/.codex/auth.json"`;
             document.getElementById('codex-config').textContent =
 `model_provider = "codex-pool"
 chatgpt_base_url = "${BASE_URL}/backend-api"
+experimental_realtime_webrtc_call_base_url = "${BASE_URL}/v1"
+experimental_realtime_ws_base_url = "${BASE_URL}/v1"
+realtime.version = "v3"
+realtime.transport = "webrtc"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
