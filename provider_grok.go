@@ -298,37 +298,12 @@ func grokUsageFromMap(obj map[string]any, usageMap map[string]any) *RequestUsage
 }
 
 func (p *GrokProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
-	if acc == nil || headers == nil {
-		return
-	}
-
-	now := time.Now()
-	snap := UsageSnapshot{RetrievedAt: now, Source: "headers"}
-	if used, ok := parseRateLimitUsageFromRemainingLimit(headers, "x-ratelimit-remaining-requests", "x-ratelimit-limit-requests"); ok {
-		snap.PrimaryUsed = used
-		snap.PrimaryUsedPercent = used
-		snap.primarySet = true
-	}
-	if used, ok := parseRateLimitUsageFromRemainingLimit(headers, "x-ratelimit-remaining-tokens", "x-ratelimit-limit-tokens"); ok {
-		snap.SecondaryUsed = used
-		snap.SecondaryUsedPercent = used
-		snap.secondarySet = true
-	}
-	if resetAt, ok := parseRateLimitReset(headers.Get("x-ratelimit-reset-requests")); ok {
-		snap.PrimaryResetAt = resetAt
-		snap.PrimaryWindowMinutes = rateLimitWindowMinutes(now, resetAt)
-	}
-	if resetAt, ok := parseRateLimitReset(headers.Get("x-ratelimit-reset-tokens")); ok {
-		snap.SecondaryResetAt = resetAt
-		snap.SecondaryWindowMinutes = rateLimitWindowMinutes(now, resetAt)
-	}
-	if !snap.primarySet && !snap.secondarySet {
-		return
-	}
-
-	acc.mu.Lock()
-	acc.Usage = mergeUsage(acc.Usage, snap)
-	acc.mu.Unlock()
+	// Grok response x-ratelimit-* headers are API RPM/TPM capacity, not the
+	// product quotas the pool UI and router care about (monthly $ / weekly
+	// credits from /v1/billing). Writing them into Primary/Secondary overwrites
+	// real billing utilization with near-0% every request and makes accounts
+	// look empty or thrash routing. Product quota is polled via fetchGrokUsage.
+	return
 }
 
 func rateLimitWindowMinutes(now, resetAt time.Time) int {

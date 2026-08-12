@@ -80,6 +80,7 @@ const PROVIDERS: Record<Provider, { label: string; color: string; dither: Dither
   zai: { label: "Z.ai", color: "#ff5454", dither: "red", glyph: "◆" },
   xiaomi: { label: "Xiaomi", color: "#ff7b2d", dither: "orange", glyph: "◫" },
   grok: { label: "Grok", color: "#86efff", dither: "cyan", glyph: "⌁" },
+  adverserial: { label: "Adverserial", color: "#ff5454", dither: "red", glyph: "◬" },
 };
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
@@ -472,11 +473,14 @@ function Pulse({ stats, signal, onAccounts }: { stats: PoolStats | null; signal:
       {intervention.length > 0 && (
         <button className="intervention-strip" onClick={onAccounts}>
           <span>INTERVENTION QUEUE</span>
-          {intervention.slice(0, 5).map((account) => (
-            <b key={account.id} style={{ color: PROVIDERS[account.type].color }}>
-              {PROVIDERS[account.type].label.toUpperCase()} {account.status === "dead" ? "COOKED" : account.secondary_window_used_pct >= 80 ? "LEANING HARD" : account.status.toUpperCase()}
-            </b>
-          ))}
+          {intervention.slice(0, 5).map((account) => {
+            const provider = providerDisplay(account.type);
+            return (
+              <b key={account.id} style={{ color: provider.color }}>
+                {provider.label.toUpperCase()} {account.status === "dead" ? "COOKED" : account.secondary_window_used_pct >= 80 ? "LEANING HARD" : account.status.toUpperCase()}
+              </b>
+            );
+          })}
           <i>OPEN ACCOUNTS →</i>
         </button>
       )}
@@ -773,7 +777,7 @@ function CapacityForecastTable({ forecasts }: { forecasts: CapacityForecast[] })
 
 type InsightMode = "overview" | "capacity" | "flow" | "demand";
 
-function providerDisplay(provider: Provider | "unknown") {
+export function providerDisplay(provider: string) {
   return provider in PROVIDERS
     ? PROVIDERS[provider as Provider]
     : { label: "Unknown", color: "#9c967f", dither: "grey" as DitherColor, glyph: "·" };
@@ -1299,9 +1303,10 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
           {stats.accounts.map((account) => {
             const adminMatch = adminAccounts.find((candidate) => candidate.public_id === account.id);
             const rowID = adminMatch?.id ?? account.id;
+            const provider = providerDisplay(account.type);
             return (
-              <button className={classNames("account-row", selected === rowID && "selected")} key={account.id} onClick={() => setSelected(rowID)} style={{ "--provider": PROVIDERS[account.type].color } as CSSProperties}>
-                <span className="account-identity"><i>{PROVIDERS[account.type].glyph}</i><b>{PROVIDERS[account.type].label}</b><small><em>{account.plan_type || "unknown plan"}</em><span>{operatorToken && adminMatch ? adminMatch.id : account.id}</span></small></span>
+              <button className={classNames("account-row", selected === rowID && "selected")} key={account.id} onClick={() => setSelected(rowID)} style={{ "--provider": provider.color } as CSSProperties}>
+                <span className="account-identity"><i>{provider.glyph}</i><b>{provider.label}</b><small><em>{account.plan_type || "unknown plan"}</em><span>{operatorToken && adminMatch ? adminMatch.id : account.id}</span></small></span>
                 <span className={`state ${account.status}`}>{account.status === "dead" ? "cooked" : account.status}</span>
                 <WeeklyPace account={account} />
                 <span className="account-windows">
@@ -1313,7 +1318,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                 <span>{money.format(account.api_cost_estimate)}</span>
                 <span>{money.format(account.subscription_spend)}</span>
                 <strong>{account.subscription_spend ? `${account.roi.toFixed(2)}×` : "—"}</strong>
-                <span className="account-spark"><Sparkline data={[0, account.total_input_tokens, accountThroughput(account), account.total_output_tokens]} color={PROVIDERS[account.type].dither} /></span>
+                <span className="account-spark"><Sparkline data={[0, account.total_input_tokens, accountThroughput(account), account.total_output_tokens]} color={provider.dither} /></span>
               </button>
             );
           })}
@@ -1325,7 +1330,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
               <>
                 <span className="inspector-code">ACCOUNT // SIGNAL VIEW</span>
                 <h2>{selectedAccount.id}</h2>
-                <div className="inspector-provider" style={{ color: PROVIDERS[selectedAccount.type].color }}>{PROVIDERS[selectedAccount.type].label.toUpperCase()} / {selectedAccount.plan_type}</div>
+                <div className="inspector-provider" style={{ color: providerDisplay(selectedAccount.type).color }}>{providerDisplay(selectedAccount.type).label.toUpperCase()} / {selectedAccount.plan_type}</div>
                 <div className="account-admission">IN POOL {formatAdmission(selectedAccount.account_added_at)} // SPEND {money.format(selectedAccount.subscription_spend)}</div>
                 <div className="inspector-windows" aria-label="Account usage reset windows">
                   <ResetWindow label="PRIMARY WINDOW" available={selectedAccount.primary_window_available} used={selectedAccount.primary_window_used_pct} resetMinutes={selectedAccount.primary_reset_minutes} paceRatio={selectedAccount.primary_pace_ratio} showPace />

@@ -46,6 +46,7 @@ type config struct {
 	zaiBase                *url.URL // Z.ai Anthropic-compatible endpoint
 	xiaomiBase             *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
 	grokBase               *url.URL // Grok Code OpenAI-compatible endpoint
+	adverserialBase        *url.URL // platform.adverserial.ai Anthropic-compatible endpoint
 	poolDir                string
 
 	disableRefresh  bool
@@ -58,6 +59,7 @@ type config struct {
 	claudeTraceBodyLimit       int64
 	claudeTraceSecrets         bool
 	maxInMemoryBodyBytes       int64
+	maxSpoolBodyBytes          int64
 	flushInterval              time.Duration
 	usageRefresh               time.Duration
 	maxAttempts                int
@@ -147,6 +149,7 @@ func buildConfig() *config {
 	cfg.zaiBase = mustParse(getenv("UPSTREAM_ZAI_BASE", "https://api.z.ai/api/anthropic"))
 	cfg.xiaomiBase = mustParse(getenv("UPSTREAM_XIAOMI_BASE", "https://token-plan-sgp.xiaomimimo.com/anthropic"))
 	cfg.grokBase = mustParse(getConfigString("UPSTREAM_GROK_BASE", fileCfg.GrokBase, "https://cli-chat-proxy.grok.com/v1"))
+	cfg.adverserialBase = mustParse(getenv("UPSTREAM_ADVERSERIAL_BASE", "https://platform.adverserial.ai/api"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -173,6 +176,12 @@ func buildConfig() *config {
 	if v := getenv("PROXY_MAX_INMEM_BODY_BYTES", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.maxInMemoryBodyBytes = n
+		}
+	}
+	cfg.maxSpoolBodyBytes = 1024 * 1024 * 1024 // 1 GiB disk-backed request ceiling
+	if v := getenv("PROXY_MAX_SPOOL_BODY_BYTES", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n > 0 {
+			cfg.maxSpoolBodyBytes = n
 		}
 	}
 	cfg.flushInterval = 0
@@ -266,7 +275,8 @@ func main() {
 	zaiProvider := NewZAIProvider(cfg.zaiBase)
 	xiaomiProvider := NewXiaomiProvider(cfg.xiaomiBase)
 	grokProvider := NewGrokProvider(cfg.grokBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider)
+	adverserialProvider := NewAdverserialProvider(cfg.adverserialBase)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -284,6 +294,7 @@ func main() {
 	zaiCount := pool.countByType(AccountTypeZAI)
 	xiaomiCount := pool.countByType(AccountTypeXiaomi)
 	grokCount := pool.countByType(AccountTypeGrok)
+	adverserialCount := pool.countByType(AccountTypeAdverserial)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
@@ -361,28 +372,25 @@ func main() {
 		log.Printf("anthropic proxy enabled: %s", proxyURL.Host)
 	}
 
-	// Create refresh transport - may use a proxy for token refresh operations
-	var refreshTransport http.RoundTripper = transport
+	// Token refreshes must use the server's direct egress. Refresh is a
+	// credential-maintenance operation, not provider traffic, and sending it
+	// through the Anthropic/residential proxy makes transient proxy failures
+	// look like account failures.
+	refreshTransport := &http.Transport{
+		Proxy: nil,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 5 * time.Second,
+		MaxIdleConns:          20,
+		MaxIdleConnsPerHost:   10,
+	}
+	_ = http2.ConfigureTransport(refreshTransport)
 	if cfg.refreshProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.refreshProxyURL)
-		if err != nil {
-			log.Fatalf("invalid refresh proxy URL %q: %v", cfg.refreshProxyURL, err)
-		}
-		refreshProxyTransport := &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			IdleConnTimeout:       90 * time.Second,
-			ExpectContinueTimeout: 5 * time.Second,
-			MaxIdleConns:          20,
-			MaxIdleConnsPerHost:   10,
-		}
-		_ = http2.ConfigureTransport(refreshProxyTransport)
-		refreshTransport = refreshProxyTransport
-		log.Printf("refresh operations will use proxy: %s", proxyURL.Host)
+		log.Printf("ignoring refresh_proxy_url; token refreshes always use direct server egress")
 	}
 
 	// Initialize pool users store if configured
@@ -410,6 +418,7 @@ func main() {
 		log.Printf("warning: failed to open analytics store: %v (cost tracking disabled)", err)
 	} else {
 		defer analyticsStore.Close()
+		analyticsStore.enableAsyncWrites()
 		analyticsStore.seedFromBoltDB(store, pricing)
 		analyticsStore.startDailyRollup()
 		log.Printf("analytics store initialized at %s", analyticsDBPath)
@@ -450,9 +459,14 @@ func main() {
 		recent:               newRecentErrors(50),
 		startTime:            time.Now(),
 		pacer:                pacer,
+		largeReplayBodies:    make(chan struct{}, 1),
 	}
 	h.startUsagePoller()
-	h.startQuotaIntelligenceRefresher()
+	if getenv("PROXY_ENABLE_QUOTA_INTELLIGENCE", "1") != "0" {
+		h.startQuotaIntelligenceRefresher()
+	} else {
+		log.Printf("quota intelligence disabled by PROXY_ENABLE_QUOTA_INTELLIGENCE")
+	}
 	startAntigravityVersionUpdater(context.Background())
 	h.startAntigravityModelPoller()
 
@@ -505,8 +519,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -589,6 +603,9 @@ type proxyHandler struct {
 	pacer                *requestPacer // Per-session request pacing
 	webSocketRegistryMu  sync.Mutex
 	webSockets           *webSocketRegistry
+	// Large JSON rewrites temporarily hold several copies of a request. This
+	// deliberately serializes only those requests on a small production host.
+	largeReplayBodies chan struct{}
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -604,6 +621,19 @@ type proxyHandler struct {
 type refreshCall struct {
 	done chan struct{}
 	err  error
+}
+
+const largeReplayBodyThreshold = 8 * 1024 * 1024
+
+// acquireLargeReplayBody serializes requests whose JSON rewrite retains large
+// raw, decoded, and re-marshaled copies simultaneously. Small requests remain
+// fully concurrent. A missing channel keeps lightweight test handlers working.
+func (h *proxyHandler) acquireLargeReplayBody(contentLength int64) func() {
+	if h == nil || h.largeReplayBodies == nil || contentLength >= 0 && contentLength <= largeReplayBodyThreshold {
+		return func() {}
+	}
+	h.largeReplayBodies <- struct{}{}
+	return func() { <-h.largeReplayBodies }
 }
 
 func (h *proxyHandler) pickUpstream(path string, headers http.Header) (Provider, *url.URL) {
@@ -1280,6 +1310,14 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		rewritten := rewriteModelInBody(body, canonical)
 		return p, p.UpstreamURL(path), rewritten
 	}
+	if isAdverserialModel(model) {
+		p := h.registry.ForType(AccountTypeAdverserial)
+		if p == nil {
+			return nil, nil, nil
+		}
+		rewritten := rewriteAndClampAdverserialRequestBody(body, model)
+		return p, p.UpstreamURL(path), rewritten
+	}
 	if isGrokModel(model) {
 		p := h.registry.ForType(AccountTypeGrok)
 		if p == nil {
@@ -1388,6 +1426,7 @@ func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, 
 		{AccountTypeZAI, isZAIModel, zaiCanonicalModel},
 		{AccountTypeXiaomi, isXiaomiModel, xiaomiCanonicalModel},
 		{AccountTypeGrok, isGrokModel, grokCanonicalModel},
+		{AccountTypeAdverserial, isAdverserialModel, adverserialCanonicalModel},
 	}
 	for _, candidate := range routes {
 		if !candidate.matches(model) {
@@ -1820,7 +1859,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	originID := hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode))
 	originIP := getClientIP(r)
 	if h.store != nil && originID != "" && originIP != "" {
-		_ = h.store.recordOriginMetadata(originID, originIP, userID, r.UserAgent(), r.URL.Path, time.Now())
+		h.store.enqueueOriginMetadata(originID, originIP, userID, r.UserAgent(), r.URL.Path, time.Now())
 	}
 
 	provider, targetBase := h.pickUpstream(r.URL.Path, r.Header)
@@ -1846,10 +1885,62 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		accountType = provider.Type()
 		streamBody = streamBody || accountType == AccountTypeXiaomi
 	}
-	// Native Codex Responses bodies must be inspected so hosted MCP tools and
-	// transcript items cannot bypass the filter by crossing the streaming-body
-	// size threshold.
+	// Native Codex Responses requests need rewriting and hosted-MCP filtering,
+	// but large prompts must not be decoded into map[string]any. Transform them
+	// token-by-token into a disk-backed body, then stream that body upstream.
 	if accountType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) {
+		largeOrChunked := r.ContentLength < 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes
+		encoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
+		uncompressedJSON := encoding == "" || encoding == "identity"
+		isCompact := strings.HasSuffix(normalizeNoopPath(r.URL.Path), "/compact")
+		if largeOrChunked && uncompressedJSON && !isCompact {
+			releaseSpool := h.acquireLargeReplayBody(r.ContentLength)
+			defer releaseSpool()
+			rewriteModel := func(model string) string {
+				model = strings.TrimSpace(model)
+				if resolved, ok := h.aliases.resolve(model); ok {
+					model = resolved
+				}
+				if base, _, hasSuffix := parseThinkingSuffix(model); hasSuffix {
+					model = base
+				}
+				return model
+			}
+			spoolStarted := time.Now()
+			spooled, spoolErr := streamCodexResponsesRequest(r.Body, h.cfg.maxSpoolBodyBytes, rewriteModel)
+			if spoolErr != nil {
+				status := http.StatusBadRequest
+				if errors.Is(spoolErr, errResponsesSpoolTooLarge) {
+					status = http.StatusRequestEntityTooLarge
+				}
+				http.Error(w, "streaming Responses rewrite: "+spoolErr.Error(), status)
+				return
+			}
+			defer spooled.Close()
+			if spooled.ClientWantsNonStreaming {
+				http.Error(w, "oversized Responses requests currently require stream=true", http.StatusBadRequest)
+				return
+			}
+			if spooled.Model != "" && !isOpenAIModel(spooled.Model) {
+				http.Error(w, "oversized Responses requests currently require a Codex model", http.StatusBadRequest)
+				return
+			}
+			r.Body = spooled.File
+			r.ContentLength = spooled.Size
+			r.Header.Del("Content-Length")
+			r.Header.Set("Content-Type", "application/json")
+			log.Printf("[%s] disk-streaming Responses request: bytes=%d model=%s transform_ms=%d",
+				reqID, spooled.Size, spooled.Model, time.Since(spoolStarted).Milliseconds())
+			h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
+			return
+		}
+		streamBody = false
+	}
+	// Adverserial rejects any effort outside low/high/max with a 400, and the
+	// streamed path rewrites only the model name. Buffer the body so the effort
+	// clamp runs for chunked and oversized requests too; otherwise the clamp is
+	// advisory and a large request fails upstream instead.
+	if accountType == AccountTypeAdverserial {
 		streamBody = false
 	}
 	if streamBody {
@@ -1861,9 +1952,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.logBodies, h.cfg.bodyLogLimit)
+	releaseLargeBody := h.acquireLargeReplayBody(r.ContentLength)
+	defer releaseLargeBody()
+	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.maxInMemoryBodyBytes, h.cfg.logBodies, h.cfg.bodyLogLimit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if errors.Is(err, errReplayBodyTooLarge) {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 	if decoded, changed, err := decodeRequestBody(r.Header.Get("Content-Encoding"), bodyBytes, h.cfg.maxInMemoryBodyBytes); err != nil {
@@ -3832,13 +3929,22 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	headerSecondaryPct := acc.Usage.SecondaryUsedPercent
 	acc.mu.Unlock()
 
+	// Keep hosted MCP output filtering identical for streamed-body requests even
+	// when the upstream returns a non-SSE JSON response.
+	respContentType := resp.Header.Get("Content-Type")
+	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
+	if !isSSE && accountType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) {
+		if err := filterHostedMCPNonStreamingResponse(resp); err != nil {
+			http.Error(w, "hosted MCP response filtering error", http.StatusBadGateway)
+			return
+		}
+	}
+
 	// Write response to client.
 	copyHeader(w.Header(), resp.Header)
 	removeHopByHopHeaders(w.Header())
 	h.replaceUsageHeaders(w.Header())
 	flusher, _ := w.(http.Flusher)
-	respContentType := resp.Header.Get("Content-Type")
-	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
 	if isSSE {
 		applyStreamingResponseHeaders(w.Header())
 	}
@@ -4154,6 +4260,28 @@ func isRateLimitError(err error) bool {
 	return strings.Contains(msg, "rate limited") || strings.Contains(msg, "too many requests") || strings.Contains(msg, "429")
 }
 
+// isPermanentRefreshTokenError reports auth-server failures that mean the
+// refresh token can never recover without a fresh login. OpenAI currently
+// returns code refresh_token_invalidated ("Your session has ended") rather
+// than classic invalid_grant; both (and reuse) must retire the account.
+func isPermanentRefreshTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"invalid_grant",
+		"refresh_token_reused",
+		"refresh_token_invalidated",
+		"session has ended",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseRetryAfter(h http.Header) (time.Duration, bool) {
 	if h == nil {
 		return 0, false
@@ -4360,9 +4488,15 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.logBodies, h.cfg.bodyLogLimit)
+	releaseLargeBody := h.acquireLargeReplayBody(r.ContentLength)
+	defer releaseLargeBody()
+	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.maxInMemoryBodyBytes, h.cfg.logBodies, h.cfg.bodyLogLimit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if errors.Is(err, errReplayBodyTooLarge) {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -5201,7 +5335,7 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.RefreshToken == "" {
+	if a.RefreshToken == "" || a.RefreshBlocked {
 		return false
 	}
 	now := time.Now()
@@ -5265,6 +5399,18 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	}()
 
 	err := h.refreshAccountOnce(ctx, a)
+	if err == nil {
+		a.mu.Lock()
+		a.RefreshBlocked = false
+		a.mu.Unlock()
+	} else if !isPermanentRefreshTokenError(err) && !isRateLimitError(err) {
+		// A transport or upstream availability failure says nothing about the
+		// current access token. Keep using it until an authenticated request
+		// proves that it no longer works.
+		a.mu.Lock()
+		a.RefreshBlocked = true
+		a.mu.Unlock()
+	}
 	call.err = err
 	return err
 }
@@ -5272,6 +5418,7 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 func (h *proxyHandler) refreshAccountAfterAuthFailure(ctx context.Context, a *Account) error {
 	a.mu.Lock()
 	a.LastRefresh = time.Time{}
+	a.RefreshBlocked = false
 	a.mu.Unlock()
 	return h.refreshAccount(ctx, a)
 }

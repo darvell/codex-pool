@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -100,16 +101,24 @@ func shouldStreamBody(r *http.Request, maxInMem int64) bool {
 	return r.ContentLength > maxInMem
 }
 
-// readBodyForReplay reads the full body into memory so we can retry requests across accounts.
-// It also returns a bounded sample for logging.
-func readBodyForReplay(body io.ReadCloser, wantSample bool, sampleLimit int64) (full []byte, sample []byte, err error) {
+var errReplayBodyTooLarge = errors.New("request body exceeds replay buffer limit")
+
+// readBodyForReplay reads a bounded body for paths that need retries or JSON
+// rewriting. Reading without a limit lets one client reserve the entire host.
+func readBodyForReplay(body io.ReadCloser, maxBytes int64, wantSample bool, sampleLimit int64) (full []byte, sample []byte, err error) {
 	if body == nil {
 		return nil, nil, nil
 	}
 	defer body.Close()
-	full, err = io.ReadAll(body)
+	if maxBytes <= 0 {
+		return nil, nil, errReplayBodyTooLarge
+	}
+	full, err = io.ReadAll(io.LimitReader(body, maxBytes+1))
 	if err != nil {
 		return nil, nil, err
+	}
+	if int64(len(full)) > maxBytes {
+		return nil, nil, errReplayBodyTooLarge
 	}
 	if wantSample && sampleLimit > 0 {
 		if int64(len(full)) > sampleLimit {

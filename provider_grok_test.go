@@ -368,32 +368,31 @@ func TestGrokUsagePollerDoesNotDeadMarkAccount(t *testing.T) {
 	}
 }
 
-func TestGrokProviderParsesQuotaHeaders(t *testing.T) {
+func TestGrokProviderIgnoresAPIRateLimitHeaders(t *testing.T) {
 	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
-	account := &Account{Type: AccountTypeGrok}
-	requestsReset := time.Now().UTC().Add(15 * time.Minute).Truncate(time.Second)
-	tokensReset := time.Now().UTC().Add(45 * time.Minute).Truncate(time.Second)
+	account := &Account{
+		Type: AccountTypeGrok,
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.31,
+			SecondaryUsedPercent: 0.08,
+			primarySet:           true,
+			secondarySet:         true,
+			Source:               "grok_billing",
+		},
+	}
+	before := account.Usage
 
 	provider.ParseUsageHeaders(account, http.Header{
-		"X-Ratelimit-Limit-Requests":     []string{"100"},
-		"X-Ratelimit-Remaining-Requests": []string{"25"},
-		"X-Ratelimit-Reset-Requests":     []string{strconv.FormatInt(requestsReset.Unix(), 10)},
-		"X-Ratelimit-Limit-Tokens":       []string{"1000000"},
-		"X-Ratelimit-Remaining-Tokens":   []string{"750000"},
-		"X-Ratelimit-Reset-Tokens":       []string{tokensReset.Format(time.RFC3339)},
+		"X-Ratelimit-Limit-Requests":     []string{"8300"},
+		"X-Ratelimit-Remaining-Requests": []string{"8300"},
+		"X-Ratelimit-Limit-Tokens":       []string{"53000000"},
+		"X-Ratelimit-Remaining-Tokens":   []string{"53000000"},
 	})
 
-	if got := account.Usage.PrimaryUsedPercent; got != 0.75 {
-		t.Fatalf("request utilization = %v, want 0.75", got)
-	}
-	if got := account.Usage.SecondaryUsedPercent; got != 0.25 {
-		t.Fatalf("token utilization = %v, want 0.25", got)
-	}
-	if !account.Usage.PrimaryResetAt.Equal(requestsReset) {
-		t.Fatalf("request reset = %v, want %v", account.Usage.PrimaryResetAt, requestsReset)
-	}
-	if !account.Usage.SecondaryResetAt.Equal(tokensReset) {
-		t.Fatalf("token reset = %v, want %v", account.Usage.SecondaryResetAt, tokensReset)
+	if account.Usage.PrimaryUsedPercent != before.PrimaryUsedPercent ||
+		account.Usage.SecondaryUsedPercent != before.SecondaryUsedPercent ||
+		account.Usage.Source != "grok_billing" {
+		t.Fatalf("API rate-limit headers must not overwrite billing usage: got %+v", account.Usage)
 	}
 }
 

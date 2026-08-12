@@ -293,7 +293,7 @@ func TestCodexPassthroughStripsHostedMCPFromLargeRequestAndJSONResponse(t *testi
 		cfg: &config{
 			requestTimeout:       5 * time.Second,
 			streamTimeout:        5 * time.Second,
-			maxInMemoryBodyBytes: 64,
+			maxInMemoryBodyBytes: 2048,
 		},
 		transport: http.DefaultTransport,
 		pool:      newPoolState(nil, false),

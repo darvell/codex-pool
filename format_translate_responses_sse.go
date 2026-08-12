@@ -13,7 +13,7 @@ type responsesBufferingWriter struct {
 	buf                 []byte
 	id                  string
 	model               string
-	contentText         string
+	contentText         []byte
 	functionCalls       []any
 	imageGenerationCall map[string]any
 	functionCallIndex   int
@@ -68,7 +68,7 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 		bw.applyResponse(obj)
 	case "response.output_text.delta":
 		if delta, _ := obj["delta"].(string); delta != "" {
-			bw.contentText += delta
+			bw.contentText = append(bw.contentText, delta...)
 		}
 	case "response.output_item.added":
 		item, _ := obj["item"].(map[string]any)
@@ -310,14 +310,14 @@ func (bw *responsesBufferingWriter) Result() []byte {
 		}
 	}
 	output := []any{}
-	if bw.contentText != "" || len(bw.functionCalls) == 0 {
+	if len(bw.contentText) != 0 || len(bw.functionCalls) == 0 {
 		output = append(output, map[string]any{
 			"id":     "msg_" + id,
 			"type":   "message",
 			"status": status,
 			"role":   "assistant",
 			"content": []any{
-				map[string]any{"type": "output_text", "text": bw.contentText, "annotations": []any{}},
+				map[string]any{"type": "output_text", "text": string(bw.contentText), "annotations": []any{}},
 			},
 		})
 	}
@@ -478,7 +478,7 @@ type responsesToCompletionsBufferingWriter struct {
 	reqID        string
 	id           string
 	model        string
-	contentText  string
+	contentText  []byte
 	inputTokens  int64
 	outputTokens int64
 	cachedTokens int64
@@ -541,7 +541,7 @@ func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
 		}
 	case "response.output_text.delta":
 		if delta, _ := obj["delta"].(string); delta != "" {
-			bw.contentText += delta
+			bw.contentText = append(bw.contentText, delta...)
 		}
 	case "response.completed":
 		if resp, _ := obj["response"].(map[string]any); resp != nil {
@@ -588,7 +588,7 @@ func (bw *responsesToCompletionsBufferingWriter) Result() []byte {
 	if model == "" {
 		model = "unknown"
 	}
-	text := bw.contentText
+	text := string(bw.contentText)
 	if bw.errMsg != "" {
 		text = "[Error: " + bw.errMsg + "]"
 	}
@@ -1006,7 +1006,7 @@ type responsesToChatCompletionsBufferingWriter struct {
 	// State accumulated from SSE events
 	id                  string
 	model               string
-	contentText         string
+	contentText         []byte
 	toolCalls           []any
 	toolCallIndex       int
 	toolCallIDToIndex   map[string]int
@@ -1080,7 +1080,7 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 
 	case "response.output_text.delta":
 		delta, _ := obj["delta"].(string)
-		bw.contentText += delta
+		bw.contentText = append(bw.contentText, delta...)
 
 	case "response.output_item.added":
 		item, _ := obj["item"].(map[string]any)
@@ -1256,7 +1256,7 @@ func (bw *responsesToChatCompletionsBufferingWriter) Result() []byte {
 		model = "unknown"
 	}
 
-	content := bw.contentText
+	content := string(bw.contentText)
 	if bw.errMsg != "" {
 		content = "[Error: " + bw.errMsg + "]"
 	}
@@ -1309,7 +1309,7 @@ type responsesToClaudeBufferingWriter struct {
 
 	id           string
 	model        string
-	contentText  string
+	contentText  []byte
 	toolUses     []map[string]any
 	toolIndex    map[string]int
 	itemToCallID map[string]string
@@ -1382,7 +1382,7 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 		}
 	case "response.output_text.delta":
 		if delta, _ := obj["delta"].(string); delta != "" {
-			bw.contentText += delta
+			bw.contentText = append(bw.contentText, delta...)
 		}
 	case "response.output_item.added":
 		item, _ := obj["item"].(map[string]any)
@@ -1505,7 +1505,7 @@ func (bw *responsesToClaudeBufferingWriter) Result() []byte {
 	}
 
 	content := make([]any, 0, 1+len(bw.toolUses))
-	text := bw.contentText
+	text := string(bw.contentText)
 	if bw.errMsg != "" {
 		text = "[Error: " + bw.errMsg + "]"
 	}

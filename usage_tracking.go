@@ -67,7 +67,10 @@ func (h *proxyHandler) pollUpstreamUsage() {
 		resetCreditsRetrievedAt := a.ResetCreditsRetrievedAt
 		a.mu.Unlock()
 
-		if !hasToken || (dead && !accountUsesStaticAPIKey(accType)) {
+		// Codex accounts can carry stale dead state from an earlier transient
+		// refresh failure. Let the provider usage endpoint revalidate them; all
+		// other OAuth providers retain the existing dead-account skip behavior.
+		if !hasToken || (dead && !accountUsesStaticAPIKey(accType) && accType != AccountTypeCodex) {
 			continue
 		}
 		if accType == AccountTypeCodex {
@@ -151,6 +154,11 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
+		// Adverserial exposes no quota endpoint; usage comes from response bodies.
+		if accType == AccountTypeAdverserial {
+			continue
+		}
+
 		if accType == AccountTypeGrok {
 			if !h.cfg.disableRefresh && h.needsRefresh(a) {
 				if err := h.refreshAccount(context.Background(), a); err != nil {
@@ -230,6 +238,7 @@ func (h *proxyHandler) fetchGrokUsage(now time.Time, a *Account) error {
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, snap)
 	a.mu.Unlock()
+	log.Printf("grok usage fetch %s: monthly=%.1f%% weekly=%.1f%%", a.ID, usagePrimaryUsed(snap)*100, usageSecondaryUsed(snap)*100)
 	restoreValidatedAccount(a, "Grok billing API")
 	return nil
 }
@@ -280,7 +289,7 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 				return nil
 			}
 			// If refresh token is permanently invalid, mark account as dead
-			if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+			if isPermanentRefreshTokenError(err) {
 				a.mu.Lock()
 				a.Dead = true
 				a.Penalty += 100.0
@@ -367,12 +376,11 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 				}
 			} else {
 				// Refresh failed - check if it's a permanent failure
-				errStr := err.Error()
 				if isRateLimitError(err) {
 					h.applyRateLimit(a, nil)
 					return nil
 				}
-				if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+				if isPermanentRefreshTokenError(err) {
 					a.mu.Lock()
 					a.Dead = true
 					a.Penalty += 100.0
@@ -430,6 +438,9 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, whamSnap)
 	a.mu.Unlock()
+	// A successful authenticated WHAM response is provider-authoritative
+	// evidence that stale dead state is wrong.
+	restoreValidatedAccount(a, "Codex WHAM usage")
 	return nil
 }
 

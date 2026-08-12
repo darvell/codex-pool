@@ -47,6 +47,10 @@ var poolModels = []poolModel{
 	{AccountType: AccountTypeZAI, ID: "glm-5.2", DisplayName: "GLM-5.2", ContextWindow: 1000000, MaxTokens: 65536, Reasoning: true, Input: []string{"text"}},
 
 	{AccountType: AccountTypeXiaomi, ID: "mimo-v2.5-pro", DisplayName: "MiMo-V2.5-Pro", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}, Aliases: []string{"mimo-v2.5-pro[1m]"}},
+
+	// Upstream advertises max_model_len 524288 and enforces it: a 600k-token
+	// prompt is rejected with "maximum context length is 524288 tokens".
+	{AccountType: AccountTypeAdverserial, ID: "lordx64/cyberkimi", DisplayName: "CyberKimi", Description: "Security-focused Kimi variant via adverserial.ai.", ContextWindow: 524288, MaxTokens: 32768, Reasoning: true, Input: []string{"text"}, Aliases: []string{"cyberkimi"}},
 }
 
 func modelsForProvider(accountType AccountType) []poolModel {

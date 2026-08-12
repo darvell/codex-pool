@@ -60,6 +60,8 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeZAI, ""}:                          {0, "Z.ai Coding Plan"},
 	{AccountTypeXiaomi, "xiaomi"}:                 {0, "Xiaomi MiMo Token Plan"},
 	{AccountTypeXiaomi, ""}:                       {0, "Xiaomi MiMo Token Plan"},
+	{AccountTypeAdverserial, "adverserial"}:       {0, "Adverserial Platform"},
+	{AccountTypeAdverserial, ""}:                  {0, "Adverserial Platform"},
 }
 
 // getSubscriptionCost returns monthly cost and label for an account.
@@ -254,12 +256,13 @@ func isAllDigits(s string) bool {
 // cache_creation * cache_write_price + (output + reasoning) * output_price.
 // defaultModelForProvider returns a fallback model name when the request didn't include one.
 var defaultModelForProvider = map[AccountType]string{
-	AccountTypeCodex:   "gpt-5.2-codex",
-	AccountTypeClaude:  "claude-sonnet-5",
-	AccountTypeKimi:    "moonshot.kimi-k2-thinking",
-	AccountTypeMinimax: "minimax.minimax-m2",
-	AccountTypeZAI:     "zai.glm-5.1",
-	AccountTypeXiaomi:  "mimo-v2.5-pro",
+	AccountTypeCodex:       "gpt-5.2-codex",
+	AccountTypeClaude:      "claude-sonnet-5",
+	AccountTypeKimi:        "moonshot.kimi-k2-thinking",
+	AccountTypeMinimax:     "minimax.minimax-m2",
+	AccountTypeZAI:         "zai.glm-5.1",
+	AccountTypeXiaomi:      "mimo-v2.5-pro",
+	AccountTypeAdverserial: "lordx64/cyberkimi",
 }
 
 func (pd *PricingData) calculateCost(ru RequestUsage) float64 {

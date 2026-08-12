@@ -109,6 +109,12 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				API:     "anthropic-messages",
 				Models:  piModelsForProvider(AccountTypeXiaomi),
 			},
+			"adverserial": {
+				BaseURL: baseURL,
+				APIKey:  anthropicAPIKey,
+				API:     "anthropic-messages",
+				Models:  piModelsForProvider(AccountTypeAdverserial),
+			},
 			"grok": {
 				BaseURL: baseURL,
 				APIKey:  codexAPIKey,
@@ -133,7 +139,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 			URL: baseURL,
 		},
 	}
-	for _, accountType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi} {
+	for _, accountType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial} {
 		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType)...)
 	}
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)

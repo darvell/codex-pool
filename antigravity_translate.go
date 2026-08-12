@@ -69,7 +69,7 @@ func shouldRouteAntigravityModel(model string) bool {
 	if strings.HasPrefix(model, "antigravity/") {
 		return true
 	}
-	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi} {
+	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial} {
 		if _, ok := modelForProvider(provider, model); ok {
 			return false
 		}

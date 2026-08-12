@@ -116,9 +116,11 @@ type usageStore struct {
 	nextPrune time.Time
 
 	// In-memory cache of last known rate limits per account for delta calculation
-	lastRateLimits   map[string]rateLimitSnapshot
-	lastRateLimitsMu sync.RWMutex
-	originBackfillMu sync.Mutex
+	lastRateLimits     map[string]rateLimitSnapshot
+	lastRateLimitsMu   sync.RWMutex
+	originBackfillMu   sync.Mutex
+	originMetadataCh   chan OriginMetadata
+	originMetadataDone chan struct{}
 }
 
 type rateLimitSnapshot struct {
@@ -177,11 +179,14 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		return nil, err
 	}
 	store := &usageStore{
-		db:             db,
-		retention:      time.Duration(retentionDays) * 24 * time.Hour,
-		nextPrune:      time.Now().Add(1 * time.Hour),
-		lastRateLimits: make(map[string]rateLimitSnapshot),
+		db:                 db,
+		retention:          time.Duration(retentionDays) * 24 * time.Hour,
+		nextPrune:          time.Now().Add(1 * time.Hour),
+		lastRateLimits:     make(map[string]rateLimitSnapshot),
+		originMetadataCh:   make(chan OriginMetadata, 4096),
+		originMetadataDone: make(chan struct{}),
 	}
+	go store.runOriginMetadataWriter()
 	if needsOriginBackfill {
 		go store.backfillOriginWeeklyUsage(startedAt)
 	}
@@ -191,6 +196,11 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 func (s *usageStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
+	}
+	if s.originMetadataCh != nil {
+		close(s.originMetadataCh)
+		<-s.originMetadataDone
+		s.originMetadataCh = nil
 	}
 	return s.db.Close()
 }
@@ -680,6 +690,77 @@ func startOfUTCWeek(value time.Time) time.Time {
 	value = value.UTC()
 	daysSinceMonday := (int(value.Weekday()) + 6) % 7
 	return time.Date(value.Year(), value.Month(), value.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC)
+}
+
+func (s *usageStore) enqueueOriginMetadata(originID, rawIP, userID, userAgent, path string, seenAt time.Time) {
+	if s == nil || s.originMetadataCh == nil || originID == "" || rawIP == "" {
+		return
+	}
+	meta := OriginMetadata{OriginID: originID, RawIP: rawIP, LastUserID: userID, LastUserAgent: userAgent, LastPath: path, LastSeen: seenAt}
+	select {
+	case s.originMetadataCh <- meta:
+	default:
+	}
+}
+
+func (s *usageStore) runOriginMetadataWriter() {
+	defer close(s.originMetadataDone)
+	pending := make(map[string]OriginMetadata)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		batch := pending
+		pending = make(map[string]OriginMetadata)
+		if err := s.db.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(bucketOriginMetadata))
+			for id, next := range batch {
+				var meta OriginMetadata
+				if raw := b.Get([]byte(id)); raw != nil {
+					_ = json.Unmarshal(raw, &meta)
+				}
+				if meta.FirstSeen.IsZero() {
+					meta.FirstSeen = next.LastSeen
+				}
+				meta.OriginID = id
+				meta.RawIP = next.RawIP
+				meta.LastUserID = next.LastUserID
+				meta.LastUserAgent = next.LastUserAgent
+				meta.LastPath = next.LastPath
+				meta.LastSeen = next.LastSeen
+				enc, err := json.Marshal(&meta)
+				if err != nil {
+					return err
+				}
+				if err = b.Put([]byte(id), enc); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			log.Printf("origin metadata batch write failed: %v", err)
+		}
+	}
+	for {
+		select {
+		case meta, ok := <-s.originMetadataCh:
+			if !ok {
+				flush()
+				return
+			}
+			if meta.LastSeen.IsZero() {
+				meta.LastSeen = time.Now()
+			}
+			pending[meta.OriginID] = meta
+			if len(pending) >= 256 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
 }
 
 func (s *usageStore) recordOriginMetadata(originID, rawIP, userID, userAgent, path string, seenAt time.Time) error {

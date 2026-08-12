@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -16,8 +17,17 @@ import (
 
 // AnalyticsStore persists request cost data in SQLite for analytics queries.
 type AnalyticsStore struct {
-	db *sql.DB
-	mu sync.Mutex // serialize writes
+	db          *sql.DB
+	mu          sync.Mutex // serialize maintenance transactions
+	writeCh     chan analyticsWrite
+	writeDone   chan struct{}
+	dropped     atomic.Uint64
+	asyncWrites atomic.Bool
+}
+
+type analyticsWrite struct {
+	ru      RequestUsage
+	costUSD float64
 }
 
 // DailyCostEntry represents one day of cost data for a provider.
@@ -81,7 +91,7 @@ func newAnalyticsStore(dbPath string) (*AnalyticsStore, error) {
 		return nil, fmt.Errorf("create analytics dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open analytics db: %w", err)
 	}
@@ -94,7 +104,8 @@ func newAnalyticsStore(dbPath string) (*AnalyticsStore, error) {
 		return nil, err
 	}
 
-	return &AnalyticsStore{db: db}, nil
+	store := &AnalyticsStore{db: db, writeCh: make(chan analyticsWrite, 8192), writeDone: make(chan struct{})}
+	return store, nil
 }
 
 func createAnalyticsTables(db *sql.DB) error {
@@ -113,8 +124,8 @@ func createAnalyticsTables(db *sql.DB) error {
 		cost_usd REAL DEFAULT 0
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_request_costs_account_ts ON request_costs(account_id, timestamp);
-	CREATE INDEX IF NOT EXISTS idx_request_costs_type_ts ON request_costs(account_type, timestamp);
+	DROP INDEX IF EXISTS idx_request_costs_account_ts;
+	DROP INDEX IF EXISTS idx_request_costs_type_ts;
 	CREATE INDEX IF NOT EXISTS idx_request_costs_ts ON request_costs(timestamp);
 
 	CREATE TABLE IF NOT EXISTS daily_costs (
@@ -135,27 +146,87 @@ func createAnalyticsTables(db *sql.DB) error {
 	return err
 }
 
-// recordRequest inserts a request cost record.
+// enableAsyncWrites removes SQLite from the response critical path. Tests and
+// one-off callers retain synchronous recordRequest semantics unless enabled.
+func (s *AnalyticsStore) enableAsyncWrites() {
+	if s != nil && s.asyncWrites.CompareAndSwap(false, true) {
+		go s.runWriter()
+	}
+}
+
 func (s *AnalyticsStore) recordRequest(ru RequestUsage, costUSD float64) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if s.asyncWrites.Load() {
+		select {
+		case s.writeCh <- analyticsWrite{ru: ru, costUSD: costUSD}:
+			return nil
+		default:
+			dropped := s.dropped.Add(1)
+			if dropped == 1 || dropped%1000 == 0 {
+				log.Printf("analytics: write queue full, dropped=%d", dropped)
+			}
+			return nil
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	_, err := s.db.Exec(`
-		INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model,
-			input_tokens, cached_tokens, output_tokens, reasoning_tokens, cost_usd)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ru.Timestamp.UTC().Format(time.RFC3339),
-		ru.AccountID,
-		string(ru.AccountType),
-		ru.UserID,
-		ru.Model,
-		ru.InputTokens,
-		ru.CachedInputTokens,
-		ru.OutputTokens,
-		ru.ReasoningTokens,
-		costUSD,
-	)
+	_, err := s.db.Exec(`INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ru.Timestamp.UTC().Format(time.RFC3339), ru.AccountID, string(ru.AccountType), ru.UserID, ru.Model, ru.InputTokens, ru.CachedInputTokens, ru.OutputTokens, ru.ReasoningTokens, costUSD)
 	return err
+}
+
+func (s *AnalyticsStore) runWriter() {
+	defer close(s.writeDone)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	batch := make([]analyticsWrite, 0, 256)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		s.mu.Lock()
+		tx, err := s.db.Begin()
+		if err == nil {
+			var stmt *sql.Stmt
+			stmt, err = tx.Prepare(`INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			if err == nil {
+				for _, item := range batch {
+					ru := item.ru
+					_, err = stmt.Exec(ru.Timestamp.UTC().Format(time.RFC3339), ru.AccountID, string(ru.AccountType), ru.UserID, ru.Model, ru.InputTokens, ru.CachedInputTokens, ru.OutputTokens, ru.ReasoningTokens, item.costUSD)
+					if err != nil {
+						break
+					}
+				}
+				_ = stmt.Close()
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+		}
+		s.mu.Unlock()
+		if err != nil {
+			log.Printf("analytics: batch write failed (rows=%d): %v", len(batch), err)
+		}
+		batch = batch[:0]
+	}
+	for {
+		select {
+		case item, ok := <-s.writeCh:
+			if !ok {
+				flush()
+				return
+			}
+			batch = append(batch, item)
+			if len(batch) >= 256 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
 }
 
 // getCostByAccount returns total cost per account for the last N days.
@@ -338,9 +409,9 @@ func (s *AnalyticsStore) getModelDailyUsage(days int) ([]ModelDailyUsageEntry, e
 // Callers filter to the current account set before calculating pool ROI.
 func (s *AnalyticsStore) getAllAccountDailyCosts() ([]AccountDailyCostEntry, error) {
 	rows, err := s.db.Query(`
-		SELECT date, account_id, account_type, SUM(cost_usd), SUM(request_count)
+		SELECT date, account_id, MAX(account_type), SUM(cost_usd), SUM(request_count)
 		FROM daily_costs
-		GROUP BY date, account_id, account_type
+		GROUP BY date, account_id
 		ORDER BY date, account_id`)
 	if err != nil {
 		return nil, err
@@ -629,5 +700,13 @@ func (s *AnalyticsStore) seedFromBoltDB(store *usageStore, pricing *PricingData)
 
 // Close closes the underlying database connection.
 func (s *AnalyticsStore) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if s.writeCh != nil && s.asyncWrites.Load() {
+		close(s.writeCh)
+		<-s.writeDone
+		s.writeCh = nil
+	}
 	return s.db.Close()
 }

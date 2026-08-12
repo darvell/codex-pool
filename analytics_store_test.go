@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
@@ -222,5 +223,34 @@ func TestDailyRollupIsIdempotent(t *testing.T) {
 	}
 	if requests != 1 || cost != 1.25 {
 		t.Fatalf("rollup duplicated data: requests=%d cost=%f", requests, cost)
+	}
+}
+
+func TestAsyncAnalyticsWritesDrainOnClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "analytics.db")
+	store, err := newAnalyticsStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.enableAsyncWrites()
+	for i := 0; i < 1000; i++ {
+		if err := store.recordRequest(RequestUsage{Timestamp: time.Now(), AccountID: "a", AccountType: AccountTypeCodex, Model: "m"}, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM request_costs").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1000 {
+		t.Fatalf("count=%d", count)
 	}
 }

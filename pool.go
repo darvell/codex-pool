@@ -26,6 +26,7 @@ const (
 	AccountTypeZAI         AccountType = "zai"
 	AccountTypeXiaomi      AccountType = "xiaomi"
 	AccountTypeGrok        AccountType = "grok"
+	AccountTypeAdverserial AccountType = "adverserial"
 
 	// For ordinary Codex traffic, cyber-approved accounts receive twice the
 	// routing weight of non-cyber accounts when their quota health is
@@ -61,6 +62,10 @@ type Account struct {
 	ImageGenerationRetryAt  int64
 	ExpiresAt               time.Time
 	LastRefresh             time.Time
+	// RefreshBlocked means a transient refresh failure was observed while the
+	// current access token was still usable. Do not keep refreshing proactively;
+	// clear it only after an auth failure or a successful refresh.
+	RefreshBlocked          bool
 	AddedAt                 time.Time
 	Usage                   UsageSnapshot
 	Penalty                 float64
@@ -351,6 +356,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		"zai":         AccountTypeZAI,
 		"xiaomi":      AccountTypeXiaomi,
 		"grok":        AccountTypeGrok,
+		"adverserial": AccountTypeAdverserial,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -1268,6 +1274,8 @@ func saveAccount(a *Account) error {
 	case AccountTypeZAI:
 		return saveAPIKeyAccount(a)
 	case AccountTypeXiaomi:
+		return saveAPIKeyAccount(a)
+	case AccountTypeAdverserial:
 		return saveAPIKeyAccount(a)
 	case AccountTypeGrok:
 		return saveGrokAccount(a)

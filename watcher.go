@@ -124,10 +124,10 @@ func (pw *poolWatcher) reloadPool() {
 		counts[a.Type]++
 	}
 	pw.handler.pool.mu.RUnlock()
-	log.Printf("hot-reload complete: codex=%d claude=%d gemini=%d antigravity=%d kimi=%d minimax=%d zai=%d xiaomi=%d grok=%d",
+	log.Printf("hot-reload complete: codex=%d claude=%d gemini=%d antigravity=%d kimi=%d minimax=%d zai=%d xiaomi=%d grok=%d adverserial=%d",
 		counts[AccountTypeCodex], counts[AccountTypeClaude], counts[AccountTypeGemini],
 		counts[AccountTypeAntigravity],
-		counts[AccountTypeKimi], counts[AccountTypeMinimax], counts[AccountTypeZAI], counts[AccountTypeXiaomi], counts[AccountTypeGrok])
+		counts[AccountTypeKimi], counts[AccountTypeMinimax], counts[AccountTypeZAI], counts[AccountTypeXiaomi], counts[AccountTypeGrok], counts[AccountTypeAdverserial])
 }
 
 func (pw *poolWatcher) reloadConfig() {

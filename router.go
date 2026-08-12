@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	httppprof "net/http/pprof"
 	"strings"
 )
 
@@ -275,6 +276,26 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID := randomID()
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] incoming %s %s", reqID, r.Method, r.URL.Path)
+	}
+
+	// Profiles may contain request data and runtime internals; require admin auth.
+	if strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		switch r.URL.Path {
+		case "/debug/pprof/profile":
+			httppprof.Profile(w, r)
+		case "/debug/pprof/trace":
+			httppprof.Trace(w, r)
+		case "/debug/pprof/cmdline":
+			httppprof.Cmdline(w, r)
+		case "/debug/pprof/symbol":
+			httppprof.Symbol(w, r)
+		default:
+			httppprof.Index(w, r)
+		}
+		return
 	}
 
 	// Fingerprinted signal-room assets are embedded by the Go binary.
@@ -653,6 +674,14 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveXiaomiAdmin(w, r)
+		return
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/admin/adverserial") {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		h.serveAdverserialAdmin(w, r)
 		return
 	}
 
