@@ -156,6 +156,30 @@ jwt_secret = "32-char-secret-for-jwt-tokens!!"
 
 Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly (no retries). Default is 16777216 (16 MiB).
 
+### Model capability discovery
+
+Authenticated clients can query `GET /api/pool/models` for the pool's model catalog, current account availability, and provider capabilities. The response includes a `schema_version`; clients should ignore fields they do not understand and treat an unknown schema version as unsupported.
+
+Models with provider-hosted web search advertise both `capabilities.web_search` and a declarative `native_tools.web_search` route:
+
+```json
+{
+  "id": "grok-4.5",
+  "provider": "grok",
+  "capabilities": { "web_search": true },
+  "native_tools": {
+    "web_search": {
+      "protocol": "openai-responses",
+      "endpoint": "/v1/responses",
+      "tool_type": "web_search"
+    }
+  },
+  "available_now": true
+}
+```
+
+Native-tool endpoints are same-origin relative paths. The `native_tools` map key is also the wire tool name for protocols that require one; `tool_type` is the provider-specific type value. Capability means the model and protocol support the tool, while `available_now` separately reports whether an account can currently be routed. The catalog never includes account credentials.
+
 ---
 
 ## Credential Formats

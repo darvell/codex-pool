@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,6 +43,85 @@ func TestPoolModelDescriptorsCoverEveryProvider(t *testing.T) {
 	}
 }
 
+func TestPoolModelDescriptorsAdvertiseVerifiedNativeWebSearchRoutes(t *testing.T) {
+	t.Parallel()
+
+	descriptors := poolModelDescriptors()
+	byID := make(map[string]poolModelDescriptor, len(descriptors))
+	for _, descriptor := range descriptors {
+		byID[descriptor.ID] = descriptor
+	}
+
+	tests := map[string]poolNativeToolDescriptor{
+		"gpt-5.6-sol": {
+			Protocol: "openai-responses",
+			Endpoint: "/v1/responses",
+			ToolType: "web_search",
+		},
+		"gpt-5.6-luna": {
+			Protocol: "openai-responses",
+			Endpoint: "/v1/responses",
+			ToolType: "web_search",
+		},
+		"grok-4.5": {
+			Protocol: "openai-responses",
+			Endpoint: "/v1/responses",
+			ToolType: "web_search",
+		},
+		"claude-sonnet-5": {
+			Protocol: "anthropic-messages",
+			Endpoint: "/v1/messages",
+			ToolType: "web_search_20250305",
+		},
+		"claude-sonnet-4-6": {
+			Protocol: "anthropic-messages",
+			Endpoint: "/v1/messages",
+			ToolType: "web_search_20250305",
+		},
+		"k3": {
+			Protocol: "anthropic-messages",
+			Endpoint: "/v1/messages",
+			ToolType: "web_search_20250305",
+		},
+	}
+
+	for id, want := range tests {
+		descriptor, ok := byID[id]
+		if !ok {
+			t.Fatalf("missing model %q", id)
+		}
+		if !descriptor.Capabilities["web_search"] {
+			t.Fatalf("model %q does not advertise web_search", id)
+		}
+		got, ok := descriptor.NativeTools["web_search"]
+		if !ok {
+			t.Fatalf("model %q has no native web_search route", id)
+		}
+		if got != want {
+			t.Fatalf("model %q web_search route = %#v, want %#v", id, got, want)
+		}
+	}
+
+	for _, id := range []string{"gpt-5.6-terra", "MiniMax-M3", "mimo-v2.5-pro"} {
+		descriptor := byID[id]
+		if descriptor.Capabilities["web_search"] || descriptor.NativeTools["web_search"].Endpoint != "" {
+			t.Fatalf("unverified model %q advertises native web search", id)
+		}
+	}
+}
+
+func TestPoolModelDescriptorsUseRelativeNativeToolEndpoints(t *testing.T) {
+	t.Parallel()
+
+	for _, descriptor := range poolModelDescriptors() {
+		for name, tool := range descriptor.NativeTools {
+			if !strings.HasPrefix(tool.Endpoint, "/") || strings.Contains(tool.Endpoint, "://") {
+				t.Fatalf("model %q native tool %q has non-relative endpoint %q", descriptor.ID, name, tool.Endpoint)
+			}
+		}
+	}
+}
+
 func TestServePoolModelsOmitsCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -52,10 +132,14 @@ func TestServePoolModelsOmitsCredentials(t *testing.T) {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
 	var response struct {
-		Models []map[string]any `json:"models"`
+		SchemaVersion int              `json:"schema_version"`
+		Models        []map[string]any `json:"models"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
+	}
+	if response.SchemaVersion != poolModelsSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", response.SchemaVersion, poolModelsSchemaVersion)
 	}
 	if len(response.Models) == 0 {
 		t.Fatal("models are empty")
@@ -157,7 +241,7 @@ func TestPoolModelDescriptorsUseOneCanonicalAntigravityRow(t *testing.T) {
 	antigravityModels.ReplaceAccount("antigravity-test", AntigravityAccountSnapshot{
 		FetchedAt: time.Now(),
 		Models: map[string]AntigravityModelInfo{
-			"gemini-test": {ID: "gemini-test", DisplayName: "Gemini Test", MaxTokens: 1000},
+			"gemini-test": {ID: "gemini-test", DisplayName: "Gemini Test", MaxTokens: 1000, WebSearch: true},
 		},
 	})
 
@@ -173,6 +257,17 @@ func TestPoolModelDescriptorsUseOneCanonicalAntigravityRow(t *testing.T) {
 		}
 		if len(descriptor.Aliases) != 1 || descriptor.Aliases[0] != "gemini-test" {
 			t.Fatalf("aliases = %#v", descriptor.Aliases)
+		}
+		if !descriptor.Capabilities["web_search"] {
+			t.Fatal("Antigravity model did not advertise web_search")
+		}
+		want := poolNativeToolDescriptor{
+			Protocol: "openai-completions",
+			Endpoint: "/v1/chat/completions",
+			ToolType: "web_search",
+		}
+		if got := descriptor.NativeTools["web_search"]; got != want {
+			t.Fatalf("Antigravity web_search route = %#v, want %#v", got, want)
 		}
 	}
 	if count != 1 {

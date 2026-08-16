@@ -401,6 +401,7 @@ type grokModelInfo struct {
 	ID            string
 	Name          string
 	Reasoning     bool
+	WebSearch     bool
 	ContextWindow int
 	MaxTokens     int
 	Aliases       []string
@@ -524,7 +525,7 @@ func grokSetupModels() []grokSetupModel {
 // still-routable legacy IDs verified against the same Responses API.
 var grokModelCatalog = []grokModelInfo{
 	// Verified against cli-chat-proxy /v1/models on 2026-07-31.
-	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
+	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
 }
 
 func grokModelByName(model string) (grokModelInfo, bool) {
