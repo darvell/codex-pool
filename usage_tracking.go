@@ -1275,7 +1275,7 @@ func (h *proxyHandler) seedZAIUsage(now time.Time, a *Account) error {
 	a.mu.Unlock()
 
 	seedURL := h.cfg.zaiBase.String() + "/v1/messages"
-	body := []byte(`{"model":"glm-5.2","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"glm-5.3","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 
 	req, _ := http.NewRequest(http.MethodPost, seedURL, bytes.NewReader(body))
 	req.Header.Set("X-Api-Key", access)

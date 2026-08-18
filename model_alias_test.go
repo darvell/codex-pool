@@ -26,6 +26,17 @@ func TestDefaultModelAliasGPT56ToSol(t *testing.T) {
 			t.Fatalf("resolve(%q) = (%q, %v), want passthrough", model, got, ok)
 		}
 	}
+
+	for model, want := range map[string]string{
+		"gpt-5.6-sol[1m]":   "gpt-5.6-sol",
+		"gpt-5.6-terra[1m]": "gpt-5.6-terra",
+		"gpt-5.6-luna[1m]":  "gpt-5.6-luna",
+	} {
+		got, ok = aliases.resolve(model)
+		if !ok || got != want {
+			t.Fatalf("resolve(%q) = (%q, %v), want (%q, true)", model, got, ok, want)
+		}
+	}
 }
 
 func TestModelAliasConfigOverridesDefault(t *testing.T) {

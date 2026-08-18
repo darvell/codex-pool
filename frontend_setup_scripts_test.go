@@ -464,7 +464,7 @@ func TestServeCuteCodeSettingsConfig(t *testing.T) {
 		`"id": "claude-opus-5"`,
 		`"id": "MiniMax-M3"`,
 		`"id": "MiniMax-M2.7"`,
-		`"id": "glm-5.2"`,
+		`"id": "glm-5.3"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected cute-code config to contain %q, got:\n%s", want, body)

@@ -260,7 +260,7 @@ var defaultModelForProvider = map[AccountType]string{
 	AccountTypeClaude:      "claude-sonnet-5",
 	AccountTypeKimi:        "moonshot.kimi-k2-thinking",
 	AccountTypeMinimax:     "minimax.minimax-m2",
-	AccountTypeZAI:         "zai.glm-5.1",
+	AccountTypeZAI:         "zai.glm-5.3",
 	AccountTypeXiaomi:      "mimo-v2.5-pro",
 	AccountTypeAdverserial: "lordx64/cyberkimi",
 }

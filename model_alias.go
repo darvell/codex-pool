@@ -11,6 +11,11 @@ import (
 var defaultModelAliases = map[string]string{
 	// GPT-5.6 series short name → Sol (default variant).
 	"gpt-5.6": "gpt-5.6-sol",
+	// The 1M choices are client-facing context profiles. Upstream uses the
+	// corresponding base model ID.
+	"gpt-5.6-sol[1m]":   "gpt-5.6-sol",
+	"gpt-5.6-terra[1m]": "gpt-5.6-terra",
+	"gpt-5.6-luna[1m]":  "gpt-5.6-luna",
 }
 
 // modelAliases manages model name aliases. Thread-safe for hot-reload.

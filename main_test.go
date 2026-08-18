@@ -932,6 +932,17 @@ func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
 			t.Fatalf("%s context_window = %d, want 372000", slug, got)
 		}
 	}
+	for _, slug := range []string{"gpt-5.6-sol[1m]", "gpt-5.6-terra[1m]", "gpt-5.6-luna[1m]"} {
+		if found[slug] == nil {
+			t.Fatalf("missing %s in injected catalog: %#v", slug, models)
+		}
+		if got := int(found[slug]["context_window"].(float64)); got != 1000000 {
+			t.Fatalf("%s context_window = %d, want 1000000", slug, got)
+		}
+		if got := int(found[slug]["max_context_window"].(float64)); got != 1000000 {
+			t.Fatalf("%s max_context_window = %d, want 1000000", slug, got)
+		}
+	}
 	if found["claude-sonnet-5"] == nil {
 		t.Fatalf("missing claude-sonnet-5 in injected catalog: %#v", models)
 	}

@@ -198,7 +198,7 @@ func TestAdverserialModelRouting(t *testing.T) {
 			t.Errorf("adverserialCanonicalModel(%q) = %q, want lordx64/cyberkimi", name, got)
 		}
 	}
-	for _, name := range []string{"kimi-for-coding", "glm-5.2", "gpt-5.6-sol", "mimo-v2.5-pro"} {
+	for _, name := range []string{"kimi-for-coding", "glm-5.3", "gpt-5.6-sol", "mimo-v2.5-pro"} {
 		if isAdverserialModel(name) {
 			t.Errorf("isAdverserialModel(%q) = true, want false", name)
 		}

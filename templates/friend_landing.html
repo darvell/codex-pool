@@ -1482,7 +1482,7 @@ brew install claude-code</pre>
                         <span class="model-pill other">kimi-for-coding</span>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
-                        <span class="model-pill red">glm-5.2</span>
+                        <span class="model-pill red">glm-5.3</span>
                     </div>
                 </div>
 
@@ -1620,7 +1620,7 @@ brew install claude-code</pre>
                         <span class="model-pill other">kimi-for-coding</span>
                         <span class="model-pill warn">MiniMax-M3</span>
                         <span class="model-pill warn">MiniMax-M2.7</span>
-                        <span class="model-pill red">glm-5.2</span>
+                        <span class="model-pill red">glm-5.3</span>
                         <span class="model-pill grok">grok-4.5</span>
                         <span class="model-pill grok">grok-4.5</span>
                     </div>
@@ -1682,8 +1682,8 @@ brew install claude-code</pre>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M3</span>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7</span>
                         <span style="background: rgba(245,158,11,0.1); color: #fbbf24; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">MiniMax-M2.7-highspeed</span>
-                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
-                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.2</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.3</span>
+                        <span style="background: rgba(239,68,68,0.1); color: #f87171; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">glm-5.3</span>
                         <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-4.5</span>
                         <span style="background: rgba(34,211,238,0.1); color: #22d3ee; padding: 3px 10px; border-radius: 10px; font-size: 0.75rem; font-family: monospace;">grok-4.5</span>
                     </div>
@@ -2275,7 +2275,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="claude-sonnet-5",  # or gpt-5.5, kimi-for-coding, MiniMax-M3, glm-5.2, mimo-v2.5-pro
+    model="claude-sonnet-5",  # or gpt-5.5, kimi-for-coding, MiniMax-M3, glm-5.3, mimo-v2.5-pro
     max_tokens=128,
     messages=[{"role": "user", "content": "Hello from the pool"}],
 )
@@ -2499,7 +2499,7 @@ Implementation requirements:
 1. Find every OpenAI client initialization, raw OpenAI HTTP call, Agents SDK setup, LiteLLM/OpenAI-compatible provider config, and environment example in this repo.
 2. Configure them to use base URL ${publicUrl}/v1 and bearer/API key ${key}. For raw HTTP, send Authorization: Bearer ${key} and Content-Type: application/json.
 3. Keep normal OpenAI SDK method calls intact where possible. The proxy supports Responses, Chat Completions, legacy Completions, Images generate/edit, tool/function calls, structured outputs, and OpenAI Agents SDK usage.
-4. Use gpt-5.6-luna as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-8, kimi-for-coding, MiniMax-M3, and glm-5.2.
+4. Use gpt-5.6-luna as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-8, kimi-for-coding, MiniMax-M3, and glm-5.3.
 5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.6-luna", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
 6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.6-luna") or new OpenAIChatCompletionsModel(client, "gpt-5.6-luna") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
 7. Update README, .env.example, deployment config, tests, and CI secrets documentation so future runs use the proxy settings instead of api.openai.com.

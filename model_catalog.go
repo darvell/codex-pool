@@ -18,8 +18,11 @@ type poolModel struct {
 
 var poolModels = []poolModel{
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Description: "Latest frontier agentic coding model.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, Aliases: []string{"gpt-5.6"}},
+	{AccountType: AccountTypeCodex, ID: "gpt-5.6-sol[1m]", DisplayName: "GPT-5.6-Sol (1M)", Description: "Latest frontier agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-terra", DisplayName: "GPT-5.6-Terra", Description: "Balanced agentic coding model for everyday work.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
+	{AccountType: AccountTypeCodex, ID: "gpt-5.6-terra[1m]", DisplayName: "GPT-5.6-Terra (1M)", Description: "Balanced agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-luna", DisplayName: "GPT-5.6-Luna", Description: "Fast and affordable agentic coding model.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
+	{AccountType: AccountTypeCodex, ID: "gpt-5.6-luna[1m]", DisplayName: "GPT-5.6-Luna (1M)", Description: "Fast and affordable agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.5", DisplayName: "GPT-5.5", Description: "Frontier model for complex coding, research, and real-world work.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.4", DisplayName: "GPT-5.4", Description: "Strong model for everyday coding.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.4-mini", DisplayName: "GPT-5.4-Mini", Description: "Small, fast, and cost-efficient model for simpler coding tasks.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
@@ -45,7 +48,9 @@ var poolModels = []poolModel{
 	{AccountType: AccountTypeMinimax, ID: "MiniMax-M2.7", DisplayName: "MiniMax-M2.7", ContextWindow: 204800, MaxTokens: 131072, Reasoning: true, Input: []string{"text", "image"}, Cost: &piModelCost{Input: 0.3, Output: 1.2, CacheRead: 0.06, CacheWrite: 0.375}},
 	{AccountType: AccountTypeMinimax, ID: "MiniMax-M2.7-highspeed", DisplayName: "MiniMax-M2.7-Highspeed", ContextWindow: 204800, MaxTokens: 131072, Reasoning: true, Input: []string{"text", "image"}, Cost: &piModelCost{Input: 0.6, Output: 2.4, CacheRead: 0.06, CacheWrite: 0.375}},
 
-	{AccountType: AccountTypeZAI, ID: "glm-5.2", DisplayName: "GLM-5.2", ContextWindow: 1000000, MaxTokens: 65536, Reasoning: true, Input: []string{"text"}},
+	// GLM-5.3 replaces GLM-5.2 for Coding Plan users. Keep the previous ID as
+	// an alias so existing installed configurations migrate at the proxy.
+	{AccountType: AccountTypeZAI, ID: "glm-5.3", DisplayName: "GLM-5.3", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}, Aliases: []string{"glm-5.2"}},
 
 	{AccountType: AccountTypeXiaomi, ID: "mimo-v2.5-pro", DisplayName: "MiMo-V2.5-Pro", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}, Aliases: []string{"mimo-v2.5-pro[1m]"}},
 

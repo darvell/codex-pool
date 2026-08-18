@@ -62,8 +62,11 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		maxTokens     int
 	}{
 		"gpt-5.6-sol":         {contextWindow: 372000, maxTokens: 128000},
+		"gpt-5.6-sol[1m]":     {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.6-terra":       {contextWindow: 372000, maxTokens: 128000},
+		"gpt-5.6-terra[1m]":   {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.6-luna":        {contextWindow: 372000, maxTokens: 128000},
+		"gpt-5.6-luna[1m]":    {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.5":             {contextWindow: 272000, maxTokens: 128000},
 		"gpt-5.4":             {contextWindow: 272000, maxTokens: 128000},
 		"gpt-5.4-mini":        {contextWindow: 272000, maxTokens: 128000},
@@ -85,7 +88,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 				)
 			}
 		}
-		if model.ID == "gpt-5.6" || model.ID == "gpt-5.6-sol" || model.ID == "gpt-5.6-terra" || model.ID == "gpt-5.6-luna" {
+		if model.ID == "gpt-5.6" || strings.HasPrefix(model.ID, "gpt-5.6-") {
 			if model.ThinkingLevelMap["xhigh"] != "xhigh" || model.ThinkingLevelMap["max"] != "max" {
 				t.Fatalf("codex model %q thinking levels = %#v, want xhigh+max", model.ID, model.ThinkingLevelMap)
 			}
@@ -206,7 +209,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		t.Fatalf("zai model count = %d", len(zai.Models))
 	}
 	wantZAIContexts := map[string]int{
-		"glm-5.2": 1000000,
+		"glm-5.3": 1000000,
 	}
 	for _, model := range zai.Models {
 		wantContext, ok := wantZAIContexts[model.ID]
@@ -215,6 +218,9 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		}
 		if model.ContextWindow != wantContext {
 			t.Fatalf("zai model %q context window = %d, want %d", model.ID, model.ContextWindow, wantContext)
+		}
+		if model.MaxTokens != 131072 {
+			t.Fatalf("zai model %q max tokens = %d, want 131072", model.ID, model.MaxTokens)
 		}
 		if len(model.Input) != 1 || model.Input[0] != "text" {
 			t.Fatalf("zai model %q inputs = %#v, want text", model.ID, model.Input)

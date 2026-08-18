@@ -2,19 +2,23 @@ package main
 
 import (
 	"net/url"
-	"strings"
 	"testing"
 )
 
 func TestIsZAIModelHandlesCodingPlanModels(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"glm-5.2", "GLM-5.2"} {
+	for model, wantCanonical := range map[string]string{
+		"glm-5.3": "glm-5.3",
+		"GLM-5.3": "glm-5.3",
+		"glm-5.2": "glm-5.3", // Upgrade existing installed configurations.
+		"GLM-5.2": "glm-5.3",
+	} {
 		if !isZAIModel(model) {
 			t.Fatalf("expected %q to route to zai", model)
 		}
-		if got := zaiCanonicalModel(model); got != strings.ToLower(model) {
-			t.Fatalf("unexpected canonical model for %q: %q", model, got)
+		if got := zaiCanonicalModel(model); got != wantCanonical {
+			t.Fatalf("canonical model for %q = %q, want %q", model, got, wantCanonical)
 		}
 	}
 
@@ -48,7 +52,7 @@ func TestModelRouteOverrideZAIModelUsesZAIBase(t *testing.T) {
 	if base == nil || base.String() != zaiBase.String() {
 		t.Fatalf("expected zai base %s, got %v", zaiBase, base)
 	}
-	if string(rewritten) != `{"model":"glm-5.2"}` {
+	if string(rewritten) != `{"model":"glm-5.3"}` {
 		t.Fatalf("unexpected rewritten body: %s", rewritten)
 	}
 }
