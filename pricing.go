@@ -18,10 +18,15 @@ const litellmPricingURL = "https://raw.githubusercontent.com/BerriAI/litellm/mai
 
 // ModelPricing holds per-token costs (in USD per token).
 type ModelPricing struct {
-	InputCostPerToken  float64 `json:"input_cost_per_token"`
-	OutputCostPerToken float64 `json:"output_cost_per_token"`
-	CacheReadCost      float64 `json:"cache_read_input_token_cost"`
-	CacheWriteCost     float64 `json:"cache_creation_input_token_cost"`
+	InputCostPerToken    float64 `json:"input_cost_per_token"`
+	OutputCostPerToken   float64 `json:"output_cost_per_token"`
+	CacheReadCost        float64 `json:"cache_read_input_token_cost"`
+	CacheWriteCost       float64 `json:"cache_creation_input_token_cost"`
+	LongContextThreshold int64   `json:"-"`
+	LongInputCost        float64 `json:"-"`
+	LongOutputCost       float64 `json:"-"`
+	LongCacheReadCost    float64 `json:"-"`
+	LongCacheWriteCost   float64 `json:"-"`
 }
 
 // PricingData holds the loaded pricing map and provides thread-safe lookup.
@@ -52,16 +57,19 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeCodex, "team"}:                    {25, "Codex Team"},
 	{AccountTypeGemini, "api"}:                    {0, "Gemini API"},
 	{AccountTypeAntigravity, "antigravity"}:       {0, "Google Antigravity"},
-	{AccountTypeKimi, "api"}:                      {49, "Kimi Coding"},
-	{AccountTypeKimi, ""}:                         {49, "Kimi Coding"},
-	{AccountTypeMinimax, "api"}:                   {5, "MiniMax API"},
-	{AccountTypeMinimax, ""}:                      {5, "MiniMax API"},
-	{AccountTypeZAI, "zai"}:                       {0, "Z.ai Coding Plan"},
-	{AccountTypeZAI, ""}:                          {0, "Z.ai Coding Plan"},
-	{AccountTypeXiaomi, "xiaomi"}:                 {0, "Xiaomi MiMo Token Plan"},
-	{AccountTypeXiaomi, ""}:                       {0, "Xiaomi MiMo Token Plan"},
-	{AccountTypeAdverserial, "adverserial"}:       {0, "Adverserial Platform"},
-	{AccountTypeAdverserial, ""}:                  {0, "Adverserial Platform"},
+	// The provider auth files identify Kimi and MiniMax token-plan credentials,
+	// but not their paid tier. Reporting a guessed $49 or $5 monthly spend made
+	// ROI look precise while being unrelated to the account's actual plan.
+	{AccountTypeKimi, "kimi"}:               {0, "Kimi Token Plan"},
+	{AccountTypeKimi, ""}:                   {0, "Kimi Token Plan"},
+	{AccountTypeMinimax, "minimax"}:         {0, "MiniMax Token Plan"},
+	{AccountTypeMinimax, ""}:                {0, "MiniMax Token Plan"},
+	{AccountTypeZAI, "zai"}:                 {0, "Z.ai Coding Plan"},
+	{AccountTypeZAI, ""}:                    {0, "Z.ai Coding Plan"},
+	{AccountTypeXiaomi, "xiaomi"}:           {0, "Xiaomi MiMo Token Plan"},
+	{AccountTypeXiaomi, ""}:                 {0, "Xiaomi MiMo Token Plan"},
+	{AccountTypeAdverserial, "adverserial"}: {0, "Adverserial Platform"},
+	{AccountTypeAdverserial, ""}:            {0, "Adverserial Platform"},
 }
 
 // getSubscriptionCost returns monthly cost and label for an account.
@@ -113,47 +121,51 @@ func (pd *PricingData) loadFromJSON(data []byte) {
 		if key == "sample_spec" {
 			continue
 		}
-		var entry struct {
-			InputCost      *float64 `json:"input_cost_per_token"`
-			OutputCost     *float64 `json:"output_cost_per_token"`
-			CacheCost      *float64 `json:"cache_read_input_token_cost"`
-			CacheWriteCost *float64 `json:"cache_creation_input_token_cost"`
-		}
+		var entry map[string]json.RawMessage
 		if err := json.Unmarshal(val, &entry); err != nil {
 			continue
 		}
-		if entry.InputCost == nil || entry.OutputCost == nil {
+		input, inputOK := pricingJSONFloat(entry, "input_cost_per_token")
+		output, outputOK := pricingJSONFloat(entry, "output_cost_per_token")
+		if !inputOK || !outputOK {
 			continue
 		}
+		cacheRead, _ := pricingJSONFloat(entry, "cache_read_input_token_cost")
+		cacheWrite, _ := pricingJSONFloat(entry, "cache_creation_input_token_cost")
 		mp := ModelPricing{
-			InputCostPerToken:  *entry.InputCost,
-			OutputCostPerToken: *entry.OutputCost,
+			InputCostPerToken:  input,
+			OutputCostPerToken: output,
+			CacheReadCost:      cacheRead,
+			CacheWriteCost:     cacheWrite,
 		}
-		if entry.CacheCost != nil {
-			mp.CacheReadCost = *entry.CacheCost
-		}
-		if entry.CacheWriteCost != nil {
-			mp.CacheWriteCost = *entry.CacheWriteCost
+		for _, threshold := range []struct {
+			tokens int64
+			suffix string
+		}{
+			{128000, "128k"},
+			{200000, "200k"},
+			{256000, "256k"},
+			{272000, "272k"},
+			{512000, "512k"},
+		} {
+			longInput, ok := pricingJSONFloat(entry, "input_cost_per_token_above_"+threshold.suffix+"_tokens")
+			if !ok {
+				continue
+			}
+			mp.LongContextThreshold = threshold.tokens
+			mp.LongInputCost = longInput
+			mp.LongOutputCost, _ = pricingJSONFloat(entry, "output_cost_per_token_above_"+threshold.suffix+"_tokens")
+			mp.LongCacheReadCost, _ = pricingJSONFloat(entry, "cache_read_input_token_cost_above_"+threshold.suffix+"_tokens")
+			mp.LongCacheWriteCost, _ = pricingJSONFloat(entry, "cache_creation_input_token_cost_above_"+threshold.suffix+"_tokens")
+			break
 		}
 		models[key] = mp
 	}
-	// Keep newly released Anthropic models priced while the embedded snapshot
-	// catches up or the live LiteLLM refresh is unavailable.
-	models["claude-opus-5"] = ModelPricing{
-		InputCostPerToken:  5e-6,
-		OutputCostPerToken: 25e-6,
-		CacheReadCost:      0.5e-6,
-	}
-	// LiteLLM has no glm-5.1 or newer entry under the "zai." prefix, so the
-	// prefix search falls back to "zai.glm-5" and prices GLM-5.3 traffic at the
-	// older, cheaper GLM-5 rates. Published GLM-5.3 rates per 1M tokens are
-	// $1.40 input, $0.26 cached input, $4.40 output.
-	// https://docs.z.ai/guides/overview/pricing
-	for _, id := range []string{"glm-5.3", "zai.glm-5.3", "glm-5.2", "zai.glm-5.2"} {
-		models[id] = ModelPricing{
-			InputCostPerToken:  1.4e-6,
-			OutputCostPerToken: 4.4e-6,
-			CacheReadCost:      0.26e-6,
+	// Fill IDs absent from LiteLLM and override the small set whose pool-facing
+	// name, promotion schedule, or provider rate cannot be represented there.
+	for id, pricing := range publishedModelPricing(time.Now()) {
+		if _, present := models[id]; !present || forcePublishedPricing[id] {
+			models[id] = pricing
 		}
 	}
 
@@ -161,6 +173,18 @@ func (pd *PricingData) loadFromJSON(data []byte) {
 	pd.models = models
 	pd.mu.Unlock()
 	log.Printf("pricing: loaded %d model prices", len(models))
+}
+
+func pricingJSONFloat(entry map[string]json.RawMessage, key string) (float64, bool) {
+	raw, ok := entry[key]
+	if !ok {
+		return 0, false
+	}
+	var value float64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 // fetchAndUpdate fetches the latest pricing from LiteLLM and updates the models map.
@@ -200,14 +224,51 @@ func (pd *PricingData) startPricingRefresh() {
 var pricingModelAliases = map[string]string{
 	"claude-opus-5 [1m]":   "claude-opus-5",
 	"claude-opus-5[1m]":    "claude-opus-5",
-	"claude-sonnet-5":      "claude-sonnet-4-6",
-	"claude-sonnet-5 [1m]": "claude-sonnet-4-6",
-	"claude-sonnet-5[1m]":  "claude-sonnet-4-6",
+	"claude-sonnet-5 [1m]": "claude-sonnet-5",
+	"claude-sonnet-5[1m]":  "claude-sonnet-5",
+	"gpt-5.6-sol[1m]":      "gpt-5.6-sol",
+	"gpt-5.6-terra[1m]":    "gpt-5.6-terra",
+	"gpt-5.6-luna[1m]":     "gpt-5.6-luna",
+	"glm-5.2":              "glm-5.3",
+	"zai.glm-5.2":          "glm-5.3",
+	"zai.glm-5.3":          "glm-5.3",
+	"grok-4.5-build":       "grok-4.5",
+	"grok-build-latest":    "grok-4.5",
+	"gemini-pro-agent":     "gemini-3.1-pro-preview",
+	"gemini-3-flash-agent": "gemini-3-flash-preview",
+	"gemini-3.1-pro":       "gemini-3.1-pro-preview",
+	"mimo-v2.5-pro[1m]":    "mimo-v2.5-pro",
+	"kimi":                 "kimi-for-coding",
+	"k2p5":                 "kimi-for-coding",
+	"kimi-k2-thinking":     "kimi-for-coding",
+	"minimax":              "MiniMax-M3",
+	"minimax-m3":           "MiniMax-M3",
+	"cyberkimi":            "lordx64/cyberkimi",
 }
 
-// lookupPricing finds pricing for a model. Tries exact match, then alias match,
-// then prefix match, then provider-type fallback.
+func canonicalPricingModel(model string) string {
+	model = strings.TrimSpace(model)
+	model = strings.TrimPrefix(model, "antigravity/")
+	if alias, ok := pricingModelAliases[model]; ok {
+		model = alias
+	}
+	for _, effort := range []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max"} {
+		if strings.HasSuffix(model, effort) {
+			model = strings.TrimSuffix(model, effort)
+			break
+		}
+	}
+	if alias, ok := pricingModelAliases[model]; ok {
+		model = alias
+	}
+	return model
+}
+
+// lookupPricing uses exact IDs and explicit aliases. It deliberately avoids
+// arbitrary prefix matching: "zai.glm-5.3" previously matched "zai.glm-5"
+// and silently used the wrong rate.
 func (pd *PricingData) lookupPricing(model string) (ModelPricing, bool) {
+	model = canonicalPricingModel(model)
 	if model == "" {
 		return ModelPricing{}, false
 	}
@@ -215,42 +276,19 @@ func (pd *PricingData) lookupPricing(model string) (ModelPricing, bool) {
 	pd.mu.RLock()
 	defer pd.mu.RUnlock()
 
-	// Exact match
 	if mp, ok := pd.models[model]; ok {
 		return mp, true
 	}
-	if alias, ok := pricingModelAliases[model]; ok {
-		if mp, ok := pd.models[alias]; ok {
-			return mp, true
-		}
-	}
 
-	// Try without date suffix (e.g., "claude-sonnet-4-5-20250929" -> "claude-sonnet-4-5")
-	// LiteLLM often has both versioned and unversioned entries
+	// Try without a dated suffix (e.g. claude-sonnet-4-5-20250929).
 	parts := strings.Split(model, "-")
 	for i := len(parts) - 1; i >= 1; i-- {
-		// Check if the last part looks like a date (8 digits)
 		if len(parts[i]) == 8 && isAllDigits(parts[i]) {
-			prefix := strings.Join(parts[:i], "-")
-			if mp, ok := pd.models[prefix]; ok {
+			if mp, ok := pd.models[strings.Join(parts[:i], "-")]; ok {
 				return mp, true
 			}
 		}
 	}
-
-	// Prefix match: find longest matching prefix
-	var bestMatch string
-	var bestPricing ModelPricing
-	for key, mp := range pd.models {
-		if strings.HasPrefix(model, key) && len(key) > len(bestMatch) {
-			bestMatch = key
-			bestPricing = mp
-		}
-	}
-	if bestMatch != "" {
-		return bestPricing, true
-	}
-
 	return ModelPricing{}, false
 }
 
@@ -268,12 +306,14 @@ func isAllDigits(s string) bool {
 // cache_creation * cache_write_price + (output + reasoning) * output_price.
 // defaultModelForProvider returns a fallback model name when the request didn't include one.
 var defaultModelForProvider = map[AccountType]string{
-	AccountTypeCodex:       "gpt-5.2-codex",
+	AccountTypeCodex:       "gpt-5.6-sol",
 	AccountTypeClaude:      "claude-sonnet-5",
-	AccountTypeKimi:        "moonshot.kimi-k2-thinking",
-	AccountTypeMinimax:     "minimax.minimax-m2",
-	AccountTypeZAI:         "zai.glm-5.3",
+	AccountTypeAntigravity: "gemini-3.6-flash",
+	AccountTypeKimi:        "k3",
+	AccountTypeMinimax:     "MiniMax-M3",
+	AccountTypeZAI:         "glm-5.3",
 	AccountTypeXiaomi:      "mimo-v2.5-pro",
+	AccountTypeGrok:        "grok-4.5",
 	AccountTypeAdverserial: "lordx64/cyberkimi",
 }
 
@@ -287,15 +327,54 @@ func (pd *PricingData) calculateCost(ru RequestUsage) float64 {
 		return 0
 	}
 
+	totalInput := ru.InputTokens
 	uncachedInput := ru.InputTokens - ru.CachedInputTokens - ru.CacheCreationTokens
+	if inputTokensExcludeCached(ru) {
+		uncachedInput = ru.InputTokens
+		totalInput += ru.CachedInputTokens + ru.CacheCreationTokens
+	}
 	if uncachedInput < 0 {
 		uncachedInput = 0
 	}
 
-	cost := float64(uncachedInput) * mp.InputCostPerToken
-	cost += float64(ru.CachedInputTokens) * mp.CacheReadCost
-	cost += float64(ru.CacheCreationTokens) * mp.CacheWriteCost
-	cost += float64(ru.OutputTokens+ru.ReasoningTokens) * mp.OutputCostPerToken
+	inputCost := mp.InputCostPerToken
+	outputCost := mp.OutputCostPerToken
+	cacheReadCost := mp.CacheReadCost
+	cacheWriteCost := mp.CacheWriteCost
+	if mp.LongContextThreshold > 0 && totalInput > mp.LongContextThreshold {
+		inputCost = nonzeroPrice(mp.LongInputCost, inputCost)
+		outputCost = nonzeroPrice(mp.LongOutputCost, outputCost)
+		cacheReadCost = nonzeroPrice(mp.LongCacheReadCost, cacheReadCost)
+		cacheWriteCost = nonzeroPrice(mp.LongCacheWriteCost, cacheWriteCost)
+	}
 
+	cost := float64(uncachedInput) * inputCost
+	cost += float64(ru.CachedInputTokens) * cacheReadCost
+	cost += float64(ru.CacheCreationTokens) * cacheWriteCost
+	cost += float64(ru.OutputTokens+ru.ReasoningTokens) * outputCost
 	return cost
+}
+
+func nonzeroPrice(candidate, fallback float64) float64 {
+	if candidate > 0 {
+		return candidate
+	}
+	return fallback
+}
+
+func inputTokensExcludeCached(ru RequestUsage) bool {
+	switch ru.InputTokenMode {
+	case "exclusive":
+		return true
+	case "inclusive":
+		return false
+	}
+	// Historical records predate InputTokenMode. These providers expose the
+	// Anthropic usage shape, where input_tokens is uncached input only.
+	switch ru.AccountType {
+	case AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial:
+		return true
+	default:
+		return false
+	}
 }

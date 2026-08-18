@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 type piModelsConfig struct {
@@ -155,7 +156,7 @@ func antigravityPiModels() []piModelConfig {
 		if model.SupportsImages {
 			input = append(input, "image")
 		}
-		result = append(result, piModelConfig{ID: "antigravity/" + model.ID, Name: model.DisplayName, Reasoning: boolPtr(model.SupportsThinking), Input: input, ContextWindow: model.MaxTokens, MaxTokens: model.MaxOutputTokens, Cost: &piModelCost{}})
+		result = append(result, piModelConfig{ID: "antigravity/" + model.ID, Name: model.DisplayName, Reasoning: boolPtr(model.SupportsThinking), Input: input, ContextWindow: model.MaxTokens, MaxTokens: model.MaxOutputTokens, Cost: advertisedModelCost(model.ID, time.Now())})
 	}
 	return result
 }
@@ -172,7 +173,9 @@ func antigravityCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 func grokPiModels() []piModelConfig {
 	models := make([]piModelConfig, 0, len(grokModelCatalog))
 	for _, model := range grokModelCatalog {
-		models = append(models, piTextModel(model.ID, model.Name, model.Reasoning, model.ContextWindow, model.MaxTokens))
+		config := piTextModel(model.ID, model.Name, model.Reasoning, model.ContextWindow, model.MaxTokens)
+		config.Cost = advertisedModelCost(model.ID, time.Now())
+		models = append(models, config)
 	}
 	return models
 }
@@ -291,7 +294,7 @@ func piModelsForProvider(accountType AccountType) []piModelConfig {
 			Input:         append([]string(nil), model.Input...),
 			ContextWindow: model.ContextWindow,
 			MaxTokens:     model.MaxTokens,
-			Cost:          cloneModelCost(model.Cost),
+			Cost:          advertisedModelCost(model.ID, time.Now()),
 		}
 		if accountType == AccountTypeCodex && strings.HasPrefix(model.ID, "gpt-5.6-") {
 			config.ThinkingLevelMap = map[string]string{"xhigh": "xhigh", "max": "max"}
@@ -307,12 +310,4 @@ func piModelsForProvider(accountType AccountType) []piModelConfig {
 		result = append(result, config)
 	}
 	return result
-}
-
-func cloneModelCost(cost *piModelCost) *piModelCost {
-	if cost == nil {
-		return &piModelCost{}
-	}
-	cloned := *cost
-	return &cloned
 }

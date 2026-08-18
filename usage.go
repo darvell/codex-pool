@@ -15,6 +15,17 @@ func clampNonNegative(n int64) int64 {
 	return n
 }
 
+// applyAnthropicInputUsage records Anthropic's token accounting explicitly.
+// Anthropic's input_tokens excludes cache reads and cache writes, while
+// OpenAI's input_tokens includes cached tokens.
+func applyAnthropicInputUsage(ru *RequestUsage, usageMap map[string]any) {
+	ru.InputTokens = readInt64(usageMap, "input_tokens")
+	ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
+	ru.CacheCreationTokens = readInt64(usageMap, "cache_creation_input_tokens")
+	ru.InputTokenMode = "exclusive"
+	ru.BillableTokens = ru.InputTokens
+}
+
 const (
 	codexFiveHourWindowMinutes = 5 * 60
 	codexWeeklyWindowMinutes   = 7 * 24 * 60
@@ -225,7 +236,7 @@ func parseTokenCountEvent(obj map[string]any) *RequestUsage {
 		return nil
 	}
 
-	ru := &RequestUsage{Timestamp: time.Now()}
+	ru := &RequestUsage{Timestamp: time.Now(), InputTokenMode: "inclusive"}
 	ru.InputTokens = readInt64(usageMap, "input_tokens")
 	ru.CachedInputTokens = readInt64(usageMap, "cached_input_tokens")
 	ru.OutputTokens = readInt64(usageMap, "output_tokens")
@@ -283,7 +294,7 @@ func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 
 	// Calculate and record cost
 	var costUSD float64
-	if h.pricing != nil && ru.Model != "" {
+	if h.pricing != nil {
 		costUSD = h.pricing.calculateCost(ru)
 		if costUSD > 0 {
 			a.mu.Lock()
@@ -307,7 +318,7 @@ func parseRequestUsage(obj map[string]any) *RequestUsage {
 	if !ok {
 		return nil
 	}
-	ru := &RequestUsage{Timestamp: time.Now()}
+	ru := &RequestUsage{Timestamp: time.Now(), InputTokenMode: "inclusive"}
 	ru.InputTokens = readInt64(usageMap, "input_tokens")
 	ru.CachedInputTokens = readInt64(usageMap, "cached_input_tokens")
 	if ru.CachedInputTokens == 0 {

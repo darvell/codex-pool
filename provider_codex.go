@@ -225,7 +225,7 @@ func (p *CodexProvider) parseResponseUsage(obj map[string]any) *RequestUsage {
 		}
 	}
 
-	ru := &RequestUsage{Timestamp: time.Now()}
+	ru := &RequestUsage{Timestamp: time.Now(), InputTokenMode: "inclusive"}
 	ru.InputTokens = readInt64(usageMap, "input_tokens")
 	ru.OutputTokens = readInt64(usageMap, "output_tokens")
 

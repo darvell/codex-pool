@@ -9,6 +9,52 @@ import (
 	"time"
 )
 
+func TestAnalyticsSchemaAddsCacheCreationColumnsToExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "analytics.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE request_costs (id INTEGER PRIMARY KEY, timestamp TEXT, account_id TEXT, account_type TEXT, cached_tokens INTEGER);
+		CREATE TABLE daily_costs (date TEXT, account_id TEXT, account_type TEXT, model TEXT, cached_tokens INTEGER, PRIMARY KEY(date, account_id, model));
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := newAnalyticsStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, table := range []string{"request_costs", "daily_costs"} {
+		var found int
+		rows, err := store.db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				t.Fatal(err)
+			}
+			if name == "cache_creation_tokens" {
+				found++
+			}
+		}
+		rows.Close()
+		if found != 1 {
+			t.Fatalf("%s cache_creation_tokens columns = %d, want 1", table, found)
+		}
+	}
+}
+
 func TestAllTimeAccountCostStatsIncludesMeasurementStart(t *testing.T) {
 	store, err := newAnalyticsStore(filepath.Join(t.TempDir(), "analytics.db"))
 	if err != nil {

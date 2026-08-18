@@ -176,8 +176,9 @@ type RequestUsage struct {
 	PromptCacheKey      string
 	RequestID           string
 	InputTokens         int64
-	CachedInputTokens   int64 // cache_read_input_tokens (cheap reads from cache)
-	CacheCreationTokens int64 // cache_creation_input_tokens (expensive writes to cache)
+	CachedInputTokens   int64  // cache_read_input_tokens (cheap reads from cache)
+	CacheCreationTokens int64  // cache_creation_input_tokens (expensive writes to cache)
+	InputTokenMode      string // "inclusive" when InputTokens contains cached tokens; "exclusive" when it does not
 	OutputTokens        int64
 	ReasoningTokens     int64
 	BillableTokens      int64

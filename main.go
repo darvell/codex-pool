@@ -419,7 +419,12 @@ func main() {
 	} else {
 		defer analyticsStore.Close()
 		analyticsStore.enableAsyncWrites()
-		analyticsStore.seedFromBoltDB(store, pricing)
+		go func() {
+			if err := analyticsStore.rebuildPricingFromBoltDB(store, pricing); err != nil {
+				log.Printf("warning: failed to rebuild analytics pricing: %v", err)
+				analyticsStore.seedFromBoltDB(store, pricing)
+			}
+		}()
 		analyticsStore.startDailyRollup()
 		log.Printf("analytics store initialized at %s", analyticsDBPath)
 	}

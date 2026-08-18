@@ -75,7 +75,7 @@ func TestXiaomiProviderAuthPathAndUsage(t *testing.T) {
 			"usage": map[string]any{"input_tokens": float64(20), "cache_read_input_tokens": float64(4)},
 		},
 	})
-	if start == nil || start.InputTokens != 20 || start.CachedInputTokens != 4 || start.BillableTokens != 16 || start.Model != "mimo-v2.5-pro[1m]" {
+	if start == nil || start.InputTokens != 20 || start.CachedInputTokens != 4 || start.BillableTokens != 20 || start.InputTokenMode != "exclusive" || start.Model != "mimo-v2.5-pro[1m]" {
 		t.Fatalf("unexpected message_start usage: %#v", start)
 	}
 

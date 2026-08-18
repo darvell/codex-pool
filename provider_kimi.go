@@ -65,7 +65,7 @@ func (p *KimiProvider) ParseUsage(obj map[string]any) *RequestUsage {
 
 	// OpenAI-style usage object
 	if usageMap, ok := obj["usage"].(map[string]any); ok {
-		ru := &RequestUsage{Timestamp: time.Now()}
+		ru := &RequestUsage{Timestamp: time.Now(), InputTokenMode: "inclusive"}
 		ru.InputTokens = readInt64(usageMap, "prompt_tokens")
 		if ru.InputTokens == 0 {
 			ru.InputTokens = readInt64(usageMap, "input_tokens")
@@ -110,15 +110,13 @@ func (p *KimiProvider) ParseUsage(obj map[string]any) *RequestUsage {
 			return nil
 		}
 		ru := &RequestUsage{Timestamp: time.Now()}
-		ru.InputTokens = readInt64(usageMap, "input_tokens")
-		ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
+		applyAnthropicInputUsage(ru, usageMap)
 		if ru.InputTokens == 0 {
 			return nil
 		}
 		if model, ok := msg["model"].(string); ok {
 			ru.Model = model
 		}
-		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens)
 		return ru
 	}
 

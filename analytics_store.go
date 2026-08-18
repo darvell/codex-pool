@@ -41,15 +41,16 @@ type DailyCostEntry struct {
 // ModelDailyUsageEntry is the public, aggregated model mix used by the signal
 // room. It intentionally contains no user or account identifiers.
 type ModelDailyUsageEntry struct {
-	Date            string  `json:"date"`
-	AccountType     string  `json:"account_type"`
-	Model           string  `json:"model"`
-	InputTokens     int64   `json:"input_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	RequestCount    int64   `json:"request_count"`
-	CostUSD         float64 `json:"cost_usd"`
+	Date                string  `json:"date"`
+	AccountType         string  `json:"account_type"`
+	Model               string  `json:"model"`
+	InputTokens         int64   `json:"input_tokens"`
+	CachedTokens        int64   `json:"cached_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	ReasoningTokens     int64   `json:"reasoning_tokens"`
+	RequestCount        int64   `json:"request_count"`
+	CostUSD             float64 `json:"cost_usd"`
 }
 
 // AccountDailyCostEntry keeps account attribution so cumulative value charts
@@ -119,6 +120,7 @@ func createAnalyticsTables(db *sql.DB) error {
 		model TEXT,
 		input_tokens INTEGER DEFAULT 0,
 		cached_tokens INTEGER DEFAULT 0,
+		cache_creation_tokens INTEGER DEFAULT 0,
 		output_tokens INTEGER DEFAULT 0,
 		reasoning_tokens INTEGER DEFAULT 0,
 		cost_usd REAL DEFAULT 0
@@ -128,6 +130,11 @@ func createAnalyticsTables(db *sql.DB) error {
 	DROP INDEX IF EXISTS idx_request_costs_type_ts;
 	CREATE INDEX IF NOT EXISTS idx_request_costs_ts ON request_costs(timestamp);
 
+	CREATE TABLE IF NOT EXISTS analytics_metadata (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+
 	CREATE TABLE IF NOT EXISTS daily_costs (
 		date TEXT NOT NULL,
 		account_id TEXT NOT NULL,
@@ -135,6 +142,7 @@ func createAnalyticsTables(db *sql.DB) error {
 		model TEXT NOT NULL DEFAULT '',
 		input_tokens INTEGER DEFAULT 0,
 		cached_tokens INTEGER DEFAULT 0,
+		cache_creation_tokens INTEGER DEFAULT 0,
 		output_tokens INTEGER DEFAULT 0,
 		reasoning_tokens INTEGER DEFAULT 0,
 		request_count INTEGER DEFAULT 0,
@@ -142,7 +150,39 @@ func createAnalyticsTables(db *sql.DB) error {
 		PRIMARY KEY (date, account_id, model)
 	);
 	`
-	_, err := db.Exec(schema)
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	for _, table := range []string{"request_costs", "daily_costs"} {
+		if err := ensureAnalyticsColumn(db, table, "cache_creation_tokens", "INTEGER DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureAnalyticsColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
 	return err
 }
 
@@ -172,7 +212,7 @@ func (s *AnalyticsStore) recordRequest(ru RequestUsage, costUSD float64) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ru.Timestamp.UTC().Format(time.RFC3339), ru.AccountID, string(ru.AccountType), ru.UserID, ru.Model, ru.InputTokens, ru.CachedInputTokens, ru.OutputTokens, ru.ReasoningTokens, costUSD)
+	_, err := s.db.Exec(`INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model, input_tokens, cached_tokens, cache_creation_tokens, output_tokens, reasoning_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, ru.Timestamp.UTC().Format(time.RFC3339), ru.AccountID, string(ru.AccountType), ru.UserID, ru.Model, ru.InputTokens, ru.CachedInputTokens, ru.CacheCreationTokens, ru.OutputTokens, ru.ReasoningTokens, costUSD)
 	return err
 }
 
@@ -189,11 +229,11 @@ func (s *AnalyticsStore) runWriter() {
 		tx, err := s.db.Begin()
 		if err == nil {
 			var stmt *sql.Stmt
-			stmt, err = tx.Prepare(`INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			stmt, err = tx.Prepare(`INSERT INTO request_costs (timestamp, account_id, account_type, user_id, model, input_tokens, cached_tokens, cache_creation_tokens, output_tokens, reasoning_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 			if err == nil {
 				for _, item := range batch {
 					ru := item.ru
-					_, err = stmt.Exec(ru.Timestamp.UTC().Format(time.RFC3339), ru.AccountID, string(ru.AccountType), ru.UserID, ru.Model, ru.InputTokens, ru.CachedInputTokens, ru.OutputTokens, ru.ReasoningTokens, item.costUSD)
+					_, err = stmt.Exec(ru.Timestamp.UTC().Format(time.RFC3339), ru.AccountID, string(ru.AccountType), ru.UserID, ru.Model, ru.InputTokens, ru.CachedInputTokens, ru.CacheCreationTokens, ru.OutputTokens, ru.ReasoningTokens, item.costUSD)
 					if err != nil {
 						break
 					}
@@ -355,7 +395,7 @@ func (s *AnalyticsStore) getModelDailyUsage(days int) ([]ModelDailyUsageEntry, e
 	since := time.Now().UTC().AddDate(0, 0, -days).Format("2006-01-02")
 	rows, err := s.db.Query(`
 		SELECT date, account_type, COALESCE(model, ''),
-			SUM(input_tokens), SUM(cached_tokens), SUM(output_tokens),
+			SUM(input_tokens), SUM(cached_tokens), SUM(cache_creation_tokens), SUM(output_tokens),
 			SUM(reasoning_tokens), SUM(request_count), SUM(cost_usd)
 		FROM daily_costs
 		WHERE date >= ? AND date < ?
@@ -369,7 +409,7 @@ func (s *AnalyticsStore) getModelDailyUsage(days int) ([]ModelDailyUsageEntry, e
 	for rows.Next() {
 		var entry ModelDailyUsageEntry
 		if err := rows.Scan(&entry.Date, &entry.AccountType, &entry.Model,
-			&entry.InputTokens, &entry.CachedTokens, &entry.OutputTokens,
+			&entry.InputTokens, &entry.CachedTokens, &entry.CacheCreationTokens, &entry.OutputTokens,
 			&entry.ReasoningTokens, &entry.RequestCount, &entry.CostUSD); err != nil {
 			continue
 		}
@@ -381,7 +421,7 @@ func (s *AnalyticsStore) getModelDailyUsage(days int) ([]ModelDailyUsageEntry, e
 
 	live, err := s.db.Query(`
 		SELECT account_type, COALESCE(model, ''),
-			SUM(input_tokens), SUM(cached_tokens), SUM(output_tokens),
+			SUM(input_tokens), SUM(cached_tokens), SUM(cache_creation_tokens), SUM(output_tokens),
 			SUM(reasoning_tokens), COUNT(*), SUM(cost_usd)
 		FROM request_costs
 		WHERE timestamp >= ?
@@ -394,7 +434,7 @@ func (s *AnalyticsStore) getModelDailyUsage(days int) ([]ModelDailyUsageEntry, e
 	for live.Next() {
 		entry := ModelDailyUsageEntry{Date: today}
 		if err := live.Scan(&entry.AccountType, &entry.Model,
-			&entry.InputTokens, &entry.CachedTokens, &entry.OutputTokens,
+			&entry.InputTokens, &entry.CachedTokens, &entry.CacheCreationTokens, &entry.OutputTokens,
 			&entry.ReasoningTokens, &entry.RequestCount, &entry.CostUSD); err == nil {
 			result = append(result, entry)
 		}
@@ -514,7 +554,7 @@ func (s *AnalyticsStore) runDailyRollup() {
 	// Roll up request_costs for yesterday into daily_costs
 	_, err := s.db.Exec(`
 		INSERT INTO daily_costs (date, account_id, account_type, model,
-			input_tokens, cached_tokens, output_tokens, reasoning_tokens, request_count, cost_usd)
+			input_tokens, cached_tokens, cache_creation_tokens, output_tokens, reasoning_tokens, request_count, cost_usd)
 		SELECT
 			? as date,
 			account_id,
@@ -522,6 +562,7 @@ func (s *AnalyticsStore) runDailyRollup() {
 			COALESCE(model, '') as model,
 			SUM(input_tokens),
 			SUM(cached_tokens),
+			SUM(cache_creation_tokens),
 			SUM(output_tokens),
 			SUM(reasoning_tokens),
 			COUNT(*),
@@ -533,6 +574,7 @@ func (s *AnalyticsStore) runDailyRollup() {
 			account_type = excluded.account_type,
 			input_tokens = excluded.input_tokens,
 			cached_tokens = excluded.cached_tokens,
+			cache_creation_tokens = excluded.cache_creation_tokens,
 			output_tokens = excluded.output_tokens,
 			reasoning_tokens = excluded.reasoning_tokens,
 			request_count = excluded.request_count,
@@ -594,8 +636,8 @@ func (s *AnalyticsStore) seedFromBoltDB(store *usageStore, pricing *PricingData)
 		date, accountID, accountType, model string
 	}
 	type aggVal struct {
-		input, cached, output, reasoning, count int64
-		cost                                    float64
+		input, cached, cacheCreation, output, reasoning, count int64
+		cost                                                   float64
 	}
 	agg := make(map[aggKey]*aggVal)
 	var totalRequests int64
@@ -625,18 +667,20 @@ func (s *AnalyticsStore) seedFromBoltDB(store *usageStore, pricing *PricingData)
 			if v, ok := agg[key]; ok {
 				v.input += ru.InputTokens
 				v.cached += ru.CachedInputTokens
+				v.cacheCreation += ru.CacheCreationTokens
 				v.output += ru.OutputTokens
 				v.reasoning += ru.ReasoningTokens
 				v.count++
 				v.cost += costUSD
 			} else {
 				agg[key] = &aggVal{
-					input:     ru.InputTokens,
-					cached:    ru.CachedInputTokens,
-					output:    ru.OutputTokens,
-					reasoning: ru.ReasoningTokens,
-					count:     1,
-					cost:      costUSD,
+					input:         ru.InputTokens,
+					cached:        ru.CachedInputTokens,
+					cacheCreation: ru.CacheCreationTokens,
+					output:        ru.OutputTokens,
+					reasoning:     ru.ReasoningTokens,
+					count:         1,
+					cost:          costUSD,
 				}
 			}
 			return nil
@@ -664,11 +708,12 @@ func (s *AnalyticsStore) seedFromBoltDB(store *usageStore, pricing *PricingData)
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO daily_costs (date, account_id, account_type, model,
-			input_tokens, cached_tokens, output_tokens, reasoning_tokens, request_count, cost_usd)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			input_tokens, cached_tokens, cache_creation_tokens, output_tokens, reasoning_tokens, request_count, cost_usd)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(date, account_id, model) DO UPDATE SET
 			input_tokens = input_tokens + excluded.input_tokens,
 			cached_tokens = cached_tokens + excluded.cached_tokens,
+			cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens,
 			output_tokens = output_tokens + excluded.output_tokens,
 			reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
 			request_count = request_count + excluded.request_count,
@@ -683,7 +728,7 @@ func (s *AnalyticsStore) seedFromBoltDB(store *usageStore, pricing *PricingData)
 	var totalCost float64
 	for key, val := range agg {
 		_, err := stmt.Exec(key.date, key.accountID, key.accountType, key.model,
-			val.input, val.cached, val.output, val.reasoning, val.count, val.cost)
+			val.input, val.cached, val.cacheCreation, val.output, val.reasoning, val.count, val.cost)
 		if err != nil {
 			log.Printf("analytics: seed insert failed for %s/%s: %v", key.date, key.accountID, err)
 		}

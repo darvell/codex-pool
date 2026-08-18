@@ -271,7 +271,7 @@ func (p *GrokProvider) ParseUsage(obj map[string]any) *RequestUsage {
 }
 
 func grokUsageFromMap(obj map[string]any, usageMap map[string]any) *RequestUsage {
-	ru := &RequestUsage{Timestamp: time.Now()}
+	ru := &RequestUsage{Timestamp: time.Now(), InputTokenMode: "inclusive"}
 	ru.InputTokens = readInt64(usageMap, "input_tokens")
 	if ru.InputTokens == 0 {
 		ru.InputTokens = readInt64(usageMap, "prompt_tokens")

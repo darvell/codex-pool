@@ -111,13 +111,12 @@ func (p *XiaomiProvider) ParseUsage(obj map[string]any) *RequestUsage {
 
 func xiaomiUsageFromMap(usageMap map[string]any) *RequestUsage {
 	ru := &RequestUsage{Timestamp: time.Now()}
-	ru.InputTokens = readInt64(usageMap, "input_tokens")
+	applyAnthropicInputUsage(ru, usageMap)
 	ru.OutputTokens = readInt64(usageMap, "output_tokens")
-	ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
 	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
 		return nil
 	}
-	ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens)
+	ru.BillableTokens += ru.OutputTokens
 	return ru
 }
 

@@ -292,7 +292,7 @@ func TestAdverserialProviderParseUsage(t *testing.T) {
 	if ru == nil {
 		t.Fatal("ParseUsage(message_start) = nil")
 	}
-	if ru.InputTokens != 100 || ru.CachedInputTokens != 20 || ru.Model != "lordx64/cyberkimi" {
+	if ru.InputTokens != 100 || ru.CachedInputTokens != 20 || ru.BillableTokens != 100 || ru.InputTokenMode != "exclusive" || ru.Model != "lordx64/cyberkimi" {
 		t.Errorf("unexpected usage: %+v", ru)
 	}
 

@@ -85,15 +85,13 @@ func (p *ZAIProvider) ParseUsage(obj map[string]any) *RequestUsage {
 			return nil
 		}
 		ru := &RequestUsage{Timestamp: time.Now()}
-		ru.InputTokens = readInt64(usageMap, "input_tokens")
-		ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
+		applyAnthropicInputUsage(ru, usageMap)
 		if ru.InputTokens == 0 {
 			return nil
 		}
 		if model, ok := msg["model"].(string); ok {
 			ru.Model = model
 		}
-		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens)
 		return ru
 	}
 
