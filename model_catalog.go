@@ -50,7 +50,7 @@ var poolModels = []poolModel{
 
 	// GLM-5.3 replaces GLM-5.2 for Coding Plan users. Keep the previous ID as
 	// an alias so existing installed configurations migrate at the proxy.
-	{AccountType: AccountTypeZAI, ID: "glm-5.3", DisplayName: "GLM-5.3", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}, Aliases: []string{"glm-5.2"}},
+	{AccountType: AccountTypeZAI, ID: "glm-5.3", DisplayName: "GLM-5.3", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}, Aliases: []string{"glm-5.2"}, Cost: &piModelCost{Input: 1.4, Output: 4.4, CacheRead: 0.26}},
 
 	{AccountType: AccountTypeXiaomi, ID: "mimo-v2.5-pro", DisplayName: "MiMo-V2.5-Pro", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}, Aliases: []string{"mimo-v2.5-pro[1m]"}},
 

@@ -93,3 +93,43 @@ func TestLookupPricingIncludesClaudeOpus5Fallback(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupPricingGLM53UsesPublishedRates(t *testing.T) {
+	t.Parallel()
+
+	pd := newPricingData()
+	want := ModelPricing{
+		InputCostPerToken:  1.4e-6,
+		OutputCostPerToken: 4.4e-6,
+		CacheReadCost:      0.26e-6,
+	}
+	// "zai.glm-5.3" must not fall through the prefix search to "zai.glm-5",
+	// which is priced at the cheaper GLM-5 rates.
+	for _, model := range []string{"glm-5.3", "zai.glm-5.3", "glm-5.2", "zai.glm-5.2"} {
+		got, ok := pd.lookupPricing(model)
+		if !ok {
+			t.Fatalf("missing pricing for %q", model)
+		}
+		if got != want {
+			t.Fatalf("lookupPricing(%q) = %#v, want %#v", model, got, want)
+		}
+	}
+}
+
+func TestCalculateCostZAIRequestIsNotFree(t *testing.T) {
+	t.Parallel()
+
+	pd := newPricingData()
+	cost := pd.calculateCost(RequestUsage{
+		AccountType:  AccountTypeZAI,
+		Model:        "glm-5.3",
+		InputTokens:  1_000_000,
+		OutputTokens: 1_000_000,
+	})
+	if cost <= 0 {
+		t.Fatalf("GLM-5.3 request cost = %v, want > 0", cost)
+	}
+	if want := 1.4 + 4.4; cost < want-1e-9 || cost > want+1e-9 {
+		t.Fatalf("GLM-5.3 request cost = %v, want %v", cost, want)
+	}
+}

@@ -144,6 +144,18 @@ func (pd *PricingData) loadFromJSON(data []byte) {
 		OutputCostPerToken: 25e-6,
 		CacheReadCost:      0.5e-6,
 	}
+	// LiteLLM has no glm-5.1 or newer entry under the "zai." prefix, so the
+	// prefix search falls back to "zai.glm-5" and prices GLM-5.3 traffic at the
+	// older, cheaper GLM-5 rates. Published GLM-5.3 rates per 1M tokens are
+	// $1.40 input, $0.26 cached input, $4.40 output.
+	// https://docs.z.ai/guides/overview/pricing
+	for _, id := range []string{"glm-5.3", "zai.glm-5.3", "glm-5.2", "zai.glm-5.2"} {
+		models[id] = ModelPricing{
+			InputCostPerToken:  1.4e-6,
+			OutputCostPerToken: 4.4e-6,
+			CacheReadCost:      0.26e-6,
+		}
+	}
 
 	pd.mu.Lock()
 	pd.models = models
