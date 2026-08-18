@@ -6,27 +6,67 @@ import (
 	"time"
 )
 
+const poolModelsSchemaVersion = 1
+
+type poolNativeToolDescriptor struct {
+	Protocol string `json:"protocol"`
+	Endpoint string `json:"endpoint"`
+	ToolType string `json:"tool_type"`
+}
+
 type poolModelDescriptor struct {
-	ID                 string          `json:"id"`
-	Name               string          `json:"name,omitempty"`
-	Protocol           string          `json:"protocol"`
-	ContextWindow      int             `json:"contextWindow,omitempty"`
-	Description        string          `json:"description,omitempty"`
-	Provider           string          `json:"provider,omitempty"`
-	UpstreamID         string          `json:"upstream_id,omitempty"`
-	MaxOutputTokens    int             `json:"max_output_tokens,omitempty"`
-	Protocols          []string        `json:"protocols,omitempty"`
-	Modalities         []string        `json:"modalities,omitempty"`
-	Capabilities       map[string]bool `json:"capabilities,omitempty"`
-	SupportedMimeTypes []string        `json:"supported_mime_types,omitempty"`
-	Recommended        bool            `json:"recommended,omitempty"`
-	QuotaRemaining     *float64        `json:"quota_remaining_fraction,omitempty"`
-	Aliases            []string        `json:"aliases,omitempty"`
-	SupportingAccounts int             `json:"supporting_accounts,omitempty"`
-	AvailableAccounts  int             `json:"available_accounts,omitempty"`
-	AvailableNow       bool            `json:"available_now"`
-	NextResetAt        *time.Time      `json:"next_reset_at,omitempty"`
-	Stale              bool            `json:"stale,omitempty"`
+	ID                 string                              `json:"id"`
+	Name               string                              `json:"name,omitempty"`
+	Protocol           string                              `json:"protocol"`
+	ContextWindow      int                                 `json:"contextWindow,omitempty"`
+	Description        string                              `json:"description,omitempty"`
+	Provider           string                              `json:"provider,omitempty"`
+	UpstreamID         string                              `json:"upstream_id,omitempty"`
+	MaxOutputTokens    int                                 `json:"max_output_tokens,omitempty"`
+	Protocols          []string                            `json:"protocols,omitempty"`
+	Modalities         []string                            `json:"modalities,omitempty"`
+	Capabilities       map[string]bool                     `json:"capabilities,omitempty"`
+	NativeTools        map[string]poolNativeToolDescriptor `json:"native_tools,omitempty"`
+	SupportedMimeTypes []string                            `json:"supported_mime_types,omitempty"`
+	Recommended        bool                                `json:"recommended,omitempty"`
+	QuotaRemaining     *float64                            `json:"quota_remaining_fraction,omitempty"`
+	Aliases            []string                            `json:"aliases,omitempty"`
+	SupportingAccounts int                                 `json:"supporting_accounts,omitempty"`
+	AvailableAccounts  int                                 `json:"available_accounts,omitempty"`
+	AvailableNow       bool                                `json:"available_now"`
+	NextResetAt        *time.Time                          `json:"next_reset_at,omitempty"`
+	Stale              bool                                `json:"stale,omitempty"`
+}
+
+func nativeWebSearchTools(accountType AccountType, enabled bool) map[string]poolNativeToolDescriptor {
+	if !enabled {
+		return nil
+	}
+
+	var descriptor poolNativeToolDescriptor
+	switch accountType {
+	case AccountTypeCodex, AccountTypeGrok:
+		descriptor = poolNativeToolDescriptor{
+			Protocol: "openai-responses",
+			Endpoint: "/v1/responses",
+			ToolType: "web_search",
+		}
+	case AccountTypeClaude, AccountTypeKimi, AccountTypeZAI:
+		descriptor = poolNativeToolDescriptor{
+			Protocol: "anthropic-messages",
+			Endpoint: "/v1/messages",
+			ToolType: "web_search_20250305",
+		}
+	case AccountTypeAntigravity:
+		descriptor = poolNativeToolDescriptor{
+			Protocol: "openai-completions",
+			Endpoint: "/v1/chat/completions",
+			ToolType: "web_search",
+		}
+	default:
+		return nil
+	}
+	return map[string]poolNativeToolDescriptor{"web_search": descriptor}
 }
 
 func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
@@ -41,6 +81,10 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 		if model.AccountType == AccountTypeCodex {
 			protocol = "openai"
 		}
+		capabilities := map[string]bool{"reasoning": model.Reasoning, "tools": true}
+		if model.WebSearch {
+			capabilities["web_search"] = true
+		}
 		models = append(models, poolModelDescriptor{
 			ID:                 model.ID,
 			Name:               model.DisplayName,
@@ -52,7 +96,8 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 			MaxOutputTokens:    model.MaxTokens,
 			Protocols:          []string{protocol},
 			Modalities:         append([]string(nil), model.Input...),
-			Capabilities:       map[string]bool{"reasoning": model.Reasoning, "tools": true},
+			Capabilities:       capabilities,
+			NativeTools:        nativeWebSearchTools(model.AccountType, model.WebSearch),
 			Aliases:            append([]string(nil), model.Aliases...),
 			SupportingAccounts: supportingAccounts,
 			AvailableAccounts:  availableAccounts,
@@ -61,6 +106,10 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 	}
 	for _, model := range grokModelCatalog {
 		supportingAccounts, availableAccounts, availableNow := poolModelAvailability(pool, AccountTypeGrok)
+		capabilities := map[string]bool{"reasoning": model.Reasoning, "tools": true}
+		if model.WebSearch {
+			capabilities["web_search"] = true
+		}
 		models = append(models, poolModelDescriptor{
 			ID:                 model.ID,
 			Name:               model.Name,
@@ -70,7 +119,8 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 			UpstreamID:         model.ID,
 			MaxOutputTokens:    model.MaxTokens,
 			Protocols:          []string{"openai"},
-			Capabilities:       map[string]bool{"reasoning": model.Reasoning, "tools": true},
+			Capabilities:       capabilities,
+			NativeTools:        nativeWebSearchTools(AccountTypeGrok, model.WebSearch),
 			Aliases:            grokPublicAliases(model),
 			SupportingAccounts: supportingAccounts,
 			AvailableAccounts:  availableAccounts,
@@ -89,6 +139,7 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 			ContextWindow: model.MaxTokens, Provider: string(AccountTypeAntigravity), UpstreamID: model.ID,
 			MaxOutputTokens: model.MaxOutputTokens, Protocols: []string{"gemini", "openai", "responses", "anthropic"},
 			Modalities: modalities, Capabilities: map[string]bool{"reasoning": model.SupportsThinking, "images": model.SupportsImages, "tools": true, "web_search": model.WebSearch},
+			NativeTools:        nativeWebSearchTools(AccountTypeAntigravity, model.WebSearch),
 			SupportedMimeTypes: append([]string(nil), model.SupportedMimeTypes...), Recommended: model.Recommended, QuotaRemaining: model.Quota.RemainingFraction,
 			Aliases: aliases, SupportingAccounts: model.SupportingAccounts, AvailableAccounts: model.AvailableAccounts,
 			AvailableNow: model.AvailableNow, NextResetAt: optionalModelReset(model.NextResetAt), Stale: model.Stale,
@@ -159,7 +210,10 @@ func poolModelIDExists(id string) bool {
 }
 
 func servePoolModels(w http.ResponseWriter, pools ...*poolState) {
-	respondJSON(w, map[string]any{"models": poolModelDescriptors(pools...)})
+	respondJSON(w, map[string]any{
+		"schema_version": poolModelsSchemaVersion,
+		"models":         poolModelDescriptors(pools...),
+	})
 }
 
 func serveUnifiedOpenAIModels(w http.ResponseWriter, pools ...*poolState) {
