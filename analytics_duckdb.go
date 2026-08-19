@@ -133,6 +133,10 @@ func newDuckAnalytics(path string, bolt *bbolt.DB) (*DuckAnalytics, error) {
 			return nil, fmt.Errorf("set duckdb memory limit: %w", err)
 		}
 	}
+	if os.Getenv("DUCKDB_LOW_MEMORY") != "" {
+		db.Exec("SET threads=1")
+		db.Exec("SET preserve_insertion_order=false")
+	}
 	schema := `
 CREATE TABLE IF NOT EXISTS usage_events (
  event_id VARCHAR PRIMARY KEY, proxy_request_id VARCHAR NOT NULL, usage_sequence INTEGER NOT NULL,
@@ -160,6 +164,15 @@ CREATE TABLE IF NOT EXISTS usage_events (
 
 func (a *DuckAnalytics) importLegacyBolt() error {
 	const markerKey = "legacy_bolt_import_v1"
+	if os.Getenv("DUCKDB_LOW_MEMORY") != "" {
+		// On memory-constrained hosts DuckDB's default allocation plus the
+		// legacy import exceeds the cgroup limit. The SQLite analytics.db
+		// already holds the historical data; skip the import and let the
+		// outbox accumulate new facts going forward.
+		return a.bolt.Update(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(bucketAnalyticsState)).Put([]byte(markerKey), []byte("skipped_low_memory"))
+		})
+	}
 	alreadyImported := false
 	if err := a.bolt.View(func(tx *bbolt.Tx) error {
 		alreadyImported = tx.Bucket([]byte(bucketAnalyticsState)).Get([]byte(markerKey)) != nil
