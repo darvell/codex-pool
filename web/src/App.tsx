@@ -1,4 +1,5 @@
 import { type CSSProperties, type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { browserSupportsWebAuthn, startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import {
   Area,
   AreaChart,
@@ -16,7 +17,6 @@ import {
   type DitherColor,
 } from "./components/dither-kit";
 import {
-  claim,
 	  antigravityOAuthStatus,
   clearFriendSession,
   contributeAPIKey,
@@ -24,17 +24,46 @@ import {
   exchangeAccountOAuth,
 	  exchangeAntigravityOAuth,
   loadAdminAccounts,
-	loadLiveCuteCodeSettings,
-	loadLivePiModels,
+  legacySignup,
 	loadModelCatalog,
   loadPoolStats,
   loadSignalAnalytics,
+  loadPassportMe,
+  exchangeLegacySession,
+  passportJoin,
+  passportLogin,
+  passportLogout,
+  beginPasskeyLogin,
+  finishPasskeyLogin,
+  beginPasskeyRegistration,
+  finishPasskeyRegistration,
+  loadPasskeys,
+  removePasskey,
+  redeemMemberRecovery,
+  createMemberLink,
+  updateMyProfile,
+  uploadMyAvatar,
+  loadMyClients,
+  createMyClient,
+  rotateMyClient,
+  revealMyClient,
+  revokeMyClient,
+  loadPasses,
+  createPass,
+  updatePass,
+  revokePass,
+  restorePass,
+  rotatePassLink,
+  loadMyUsage,
+  loadConsolePrincipals,
+  loadConsolePrincipalUsage,
+  loadConsoleAudit,
+  loadAnalyticsHealth,
+  setPrincipalStatus,
   lockOperator,
   mutateAccount,
   reloadAccounts,
   storedAdminToken,
-  storedFriendCode,
-  storedFriendEmail,
   storedFriendSession,
   startAccountOAuth,
 	  startAntigravityOAuth,
@@ -55,7 +84,13 @@ import {
 import type {
   AccountStats,
   AdminAccount,
-  FriendSession,
+  GuestPass,
+  PasskeyCredential,
+  PassportPrincipal,
+  ClientCredential,
+  ConsolePrincipal,
+  PassportAuditEntry,
+  PassportUsagePoint,
   HourlyUsage,
 	ModelDailyUsage,
 	ModelDescriptor,
@@ -68,7 +103,7 @@ import type {
   SignalAnalytics,
 } from "./types";
 
-type View = "pulse" | "insights" | "usage" | "accounts" | "models" | "setup";
+type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "setup";
 
 const PROVIDERS: Record<Provider, { label: string; color: string; dither: DitherColor; glyph: string }> = {
   codex: { label: "Codex", color: "#39e75f", dither: "green", glyph: "◎" },
@@ -206,9 +241,12 @@ function classNames(...values: Array<string | false | null | undefined>) {
 }
 
 export function App() {
-  const [session, setSession] = useState<FriendSession | null>(storedFriendSession());
-  const [booting, setBooting] = useState(Boolean(storedFriendCode() && storedFriendSession()));
+  const [passport, setPassport] = useState<PassportPrincipal | null>(null);
+  const [booting, setBooting] = useState(true);
   const [view, setView] = useState<View>("pulse");
+  const [pendingJoin, setPendingJoin] = useState<{ token: string; current: PassportPrincipal } | null>(null);
+  const [recoveryToken, setRecoveryToken] = useState("");
+  const [joinError, setJoinError] = useState("");
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [signal, setSignal] = useState<SignalAnalytics | null>(null);
 	const [models, setModels] = useState<ModelDescriptor[]>([]);
@@ -218,7 +256,6 @@ export function App() {
   const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([]);
 
   const refresh = useCallback(async () => {
-    if (!storedFriendCode()) return;
     setLoading(true);
     try {
 	  const [nextStats, nextSignal, nextCatalog] = await Promise.all([loadPoolStats(), loadSignalAnalytics(), loadModelCatalog()]);
@@ -234,29 +271,62 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const savedCode = storedFriendCode();
-    if (!savedCode || !session) {
-      setBooting(false);
-      return;
-    }
-    claim(savedCode, storedFriendEmail())
-      .then((fresh) => {
-        setSession(fresh);
-        return refresh();
-      })
-      .catch(() => {
-        clearFriendSession();
-        setSession(null);
-      })
-      .finally(() => setBooting(false));
+    const boot = async () => {
+      const memberToken = window.location.pathname === "/recover" ? decodeURIComponent(window.location.hash.replace(/^#/, "")) : "";
+      if (memberToken) {
+        window.history.replaceState(null, "", "/recover");
+        setRecoveryToken(memberToken);
+        return;
+      }
+      const joinToken = window.location.pathname === "/join" ? decodeURIComponent(window.location.hash.replace(/^#/, "")) : "";
+      if (joinToken) {
+        window.history.replaceState(null, "", "/");
+        try {
+          const result = await passportJoin(joinToken);
+          if (result.switch_required && result.current) {
+            setPendingJoin({ token: joinToken, current: result.current });
+            return;
+          }
+          if (result.principal) {
+            setPassport(result.principal);
+            setView("mine");
+            if (result.principal.kind !== "guest") await refresh();
+            return;
+          }
+        } catch (cause) {
+          setJoinError(cause instanceof Error ? cause.message : "This pass is unavailable");
+          return;
+        }
+      }
+      try {
+        const principal = await loadPassportMe();
+        setPassport(principal);
+        if (principal.kind === "guest") setView("mine");
+        else await refresh();
+      } catch {
+        const legacy = storedFriendSession();
+        if (legacy?.download_token) {
+          try {
+            const principal = await exchangeLegacySession(legacy.download_token);
+            clearFriendSession();
+            setPassport(principal);
+            setView("mine");
+            return;
+          } catch {
+            clearFriendSession();
+          }
+        }
+      }
+    };
+    boot().finally(() => setBooting(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!session) return;
+    if (!passport || passport.kind === "guest") return;
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => window.clearInterval(timer);
-  }, [session, refresh]);
+  }, [passport, refresh]);
 
   useEffect(() => {
     if (!operatorToken) return;
@@ -270,13 +340,30 @@ export function App() {
   }, [operatorToken]);
 
   if (booting) return <BootScreen />;
-  if (!session) {
-    return <AccessGate onAccess={(next) => { setSession(next); refresh(); }} />;
+  if (recoveryToken && !passport) return <MemberRecovery token={recoveryToken} onAccess={(next) => { setRecoveryToken(""); setPassport(next); setView("mine"); refresh(); }} />;
+  if (pendingJoin) {
+    return <JoinSwitch current={pendingJoin.current} onCancel={() => setPendingJoin(null)} onConfirm={async () => {
+      try {
+        const result = await passportJoin(pendingJoin.token, true);
+        if (result.principal) {
+          setPassport(result.principal);
+          setPendingJoin(null);
+          setView("mine");
+        }
+      } catch (cause) {
+        setPendingJoin(null);
+        setJoinError(cause instanceof Error ? cause.message : "This pass is unavailable");
+      }
+    }} />;
+  }
+  if (!passport) {
+    return joinError ? <JoinUnavailable /> : <AccessGate onAccess={(next) => { setPassport(next); setView(next.kind === "guest" ? "mine" : "pulse"); if (next.kind !== "guest") refresh(); }} />;
   }
 
-  const signOut = () => {
+  const signOut = async () => {
+    if (passport) await passportLogout().catch(() => undefined);
     clearFriendSession();
-    setSession(null);
+    setPassport(null);
     setStats(null);
     setSignal(null);
   };
@@ -288,16 +375,18 @@ export function App() {
         stats={stats}
         loading={loading}
         operator={Boolean(operatorToken)}
-        onRefresh={refresh}
+        onRefresh={passport?.kind === "guest" ? () => undefined : refresh}
         onLock={() => { lockOperator(); setOperatorToken(""); setAdminAccounts([]); }}
       />
       <div className="app-grid">
-        <Navigation view={view} onChange={setView} onSignOut={signOut} />
+        <Navigation view={view} principal={passport} onChange={setView} onSignOut={signOut} />
         <main className="signal-main" id="main-content">
           {error && <div className="signal-error" role="alert">SIGNAL INTERRUPTED // {error}</div>}
           {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
           {view === "insights" && <Insights stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
-          {view === "usage" && <Usage stats={stats} signal={signal} session={session} />}
+          {view === "mine" && <PassportMine principal={passport} onPrincipal={setPassport} />}
+          {view === "passes" && passport && passport.kind !== "guest" && <Passes />}
+          {view === "console" && passport && passport.kind !== "guest" && <PassportConsole principal={passport} />}
           {view === "accounts" && (
             <Accounts
               stats={stats}
@@ -315,7 +404,7 @@ export function App() {
             />
           )}
 		  {view === "models" && <Models models={models} />}
-          {view === "setup" && <Setup session={session} />}
+          {view === "setup" && <PassportSetup />}
         </main>
       </div>
     </div>
@@ -336,9 +425,36 @@ function BootScreen() {
   );
 }
 
-function AccessGate({ onAccess }: { onAccess: (session: FriendSession) => void }) {
-  const [code, setCode] = useState(storedFriendCode());
-  const [email, setEmail] = useState(storedFriendEmail());
+function JoinUnavailable() {
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><div className="access-calibration">J.00 / PASS UNAVAILABLE</div><img src="/hero.webp" alt="" className="access-mark" /><h1>This pass is unavailable.</h1><p>It may have expired or been revoked. Ask the person who sent it for a new link.</p><button className="gold-button" onClick={() => { window.history.replaceState(null, "", "/"); window.location.reload(); }}>MEMBER SIGN IN</button></div></div>;
+}
+
+function JoinSwitch({ current, onConfirm, onCancel }: { current: PassportPrincipal; onConfirm: () => void | Promise<void>; onCancel: () => void }) {
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><div className="access-calibration">J.10 / ACCOUNT SWITCH</div><img src="/hero.webp" alt="" className="access-mark" /><h1>Switch accounts?</h1><p>You are signed in as {current.display_name || current.email || current.id.slice(0, 8)}. Opening this pass replaces that browser session.</p><div className="join-actions"><button className="gold-button" onClick={onConfirm}>SWITCH TO PASS</button><button className="quiet-button" onClick={onCancel}>KEEP CURRENT</button></div></div></div>;
+}
+
+function MemberRecovery({ token, onAccess }: { token: string; onAccess: (principal: PassportPrincipal) => void }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (password !== confirmation) { setError("Passwords do not match."); return; }
+    setBusy(true); setError("");
+    try { onAccess(await redeemMemberRecovery(token, password)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "This recovery link is unavailable."); }
+    finally { setBusy(false); }
+  };
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><div className="access-calibration">R.00 / MEMBER ACCESS</div><img src="/hero.webp" alt="" className="access-mark" /><h1>Choose your password.</h1><p>This link works once and expires after 30 minutes. Using a recovery link signs every other browser out.</p><form className="access-form" onSubmit={submit}><label><span>New password</span><input type="password" minLength={12} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></label><label><span>Confirm password</span><input type="password" minLength={12} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <div className="access-error" role="alert">{error}</div>}<button className="gold-button" disabled={busy}>{busy ? "SETTING ACCESS…" : "SET PASSWORD AND SIGN IN"}</button></form></div></div>;
+}
+
+function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => void }) {
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -347,12 +463,29 @@ function AccessGate({ onAccess }: { onAccess: (session: FriendSession) => void }
     setBusy(true);
     setError("");
     try {
-      onAccess(await claim(code.trim(), email.trim()));
+      if (mode === "signup") {
+        const legacy = storedFriendSession();
+        const principal = await legacySignup(code, username, password, legacy?.download_token || "");
+        clearFriendSession();
+        onAccess(principal);
+      } else {
+        onAccess(await passportLogin(email.trim(), password));
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Access denied");
     } finally {
       setBusy(false);
     }
+  };
+  const passkey = async () => {
+    setBusy(true); setError("");
+    try {
+      const begin = await beginPasskeyLogin();
+      const credential = await startAuthentication({ optionsJSON: begin.options });
+      onAccess(await finishPasskeyLogin(begin.challenge_id, credential));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Passkey sign-in failed");
+    } finally { setBusy(false); }
   };
 
   return (
@@ -365,20 +498,250 @@ function AccessGate({ onAccess }: { onAccess: (session: FriendSession) => void }
         <h1>Full-Spectrum Signal Room</h1>
         <p>For the few who know. The charts are nosy.</p>
         <form onSubmit={submit} className="access-form">
+          {mode === "signup" ? <><label><span>Old pool code</span><input value={code} onChange={(event) => setCode(event.target.value)} type="password" required autoFocus autoComplete="off" /></label><label><span>Choose a username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label></> : <label><span>Username or email</span><input value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus autoComplete="username" /></label>}
           <label>
-            <span>Friend code</span>
-            <input value={code} onChange={(event) => setCode(event.target.value)} required autoFocus autoComplete="off" />
-          </label>
-          <label>
-            <span>Email <i>optional</i></span>
-            <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="email" />
+            <span>{mode === "signup" ? "Choose a password" : "Password"}</span>
+            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={mode === "signup" ? 12 : undefined} required autoComplete={mode === "signup" ? "new-password" : "current-password"} />
           </label>
           {error && <div className="access-error" role="alert">{error}</div>}
-          <button className="gold-button" disabled={busy}>{busy ? "TUNING…" : "ENTER POOL"}</button>
+          <button className="gold-button" disabled={busy}>{busy ? "TUNING…" : mode === "signup" ? "CREATE ACCOUNT" : "SIGN IN"}</button>
+          {mode === "login" && browserSupportsWebAuthn() && <button type="button" className="quiet-button" disabled={busy} onClick={passkey}>SIGN IN WITH A PASSKEY</button>}
+          <button type="button" className="quiet-button" disabled={busy} onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setPassword(""); }}>{mode === "login" ? "I HAVE THE OLD POOL CODE" : "BACK TO SIGN IN"}</button>
+          <small className="recovery-copy">{mode === "signup" ? "Your existing Cute Code setup is linked automatically when this browser has it." : "Locked out? Ask the operator for a recovery link."}</small>
         </form>
       </div>
     </div>
   );
+}
+
+function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal; onPrincipal: (principal: PassportPrincipal) => void }) {
+  const [clients, setClients] = useState<ClientCredential[]>([]);
+  const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
+  const [usage, setUsage] = useState<PassportUsagePoint[]>([]);
+  const [label, setLabel] = useState("");
+  const [nickname, setNickname] = useState(principal.display_name || "");
+  const [passkeyPassword, setPasskeyPassword] = useState("");
+  const [passkeyLabel, setPasskeyLabel] = useState("");
+  const [freshToken, setFreshToken] = useState("");
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const [nextClients, nextUsage, nextPasskeys] = await Promise.all([loadMyClients(), loadMyUsage(), principal.kind === "guest" ? Promise.resolve([]) : loadPasskeys()]);
+      setClients(nextClients); setUsage(nextUsage.hourly); setPasskeys(nextPasskeys); setError("");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load your signal"); }
+  }, [principal.kind]);
+  useEffect(() => { refresh(); }, [refresh]);
+  const total = usage.reduce((sum, row) => sum + row.billable_tokens, 0);
+  const cost = usage.reduce((sum, row) => sum + row.api_equivalent_cost_usd, 0);
+  const chartData = Array.from(usage.reduce((hours, row) => {
+    const key = row.hour;
+    const existing = hours.get(key) ?? { hour: key, tokens: 0 };
+    existing.tokens += row.billable_tokens;
+    hours.set(key, existing);
+    return hours;
+  }, new Map<string, { hour: string; tokens: number }>()).values()).sort((a, b) => a.hour.localeCompare(b.hour));
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    try { const result = await createMyClient(label); setFreshToken(result.setup_token); setLabel(""); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to mint client credential"); }
+  };
+  const saveProfile = async (event: FormEvent) => {
+    event.preventDefault();
+    try { onPrincipal(await updateMyProfile(nickname)); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to update profile"); }
+  };
+  const uploadAvatar = async (file?: File) => {
+    if (!file) return;
+    try { await uploadMyAvatar(file); onPrincipal(await loadPassportMe()); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to upload avatar"); }
+  };
+  const registerPasskey = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const begin = await beginPasskeyRegistration(passkeyPassword, passkeyLabel || "Passkey");
+      const credential = await startRegistration({ optionsJSON: begin.options });
+      await finishPasskeyRegistration(begin.challenge_id, credential);
+      setPasskeyPassword(""); setPasskeyLabel(""); setError(""); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to add passkey"); }
+  };
+  const deletePasskey = async (passkey: PasskeyCredential) => {
+    if (!window.confirm(`Remove ${passkey.label}? You will no longer be able to sign in with it.`)) return;
+    try { await removePasskey(passkey.id); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to remove passkey"); }
+  };
+  const rotate = async (client: ClientCredential) => {
+    try { const result = await rotateMyClient(client.id); setFreshToken(result.setup_token); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to rotate credential"); }
+  };
+  const revoke = async (client: ClientCredential) => {
+    if (!window.confirm(`Revoke ${client.label}? Existing credentials for it will stop working.`)) return;
+    try { await revokeMyClient(client.id); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to revoke credential"); }
+  };
+  return <section className="view-stack">
+    <h2 className="panel-title">M.10 // YOUR SIGNAL</h2>
+    {error && <div className="signal-error" role="alert">SIGNAL INTERRUPTED // {error}</div>}
+    <div className="identity-strip">
+      <div className="passport-avatar">{principal.avatar_url ? <img src={principal.avatar_url} alt="" /> : <span>{(principal.display_name || principal.email || "G").slice(0, 2).toUpperCase()}</span>}</div>
+      <div><strong>{principal.display_name || principal.email || `GUEST ${principal.id.slice(0, 8)}`}</strong><small>{principal.kind.toUpperCase()} // {principal.status.toUpperCase()}</small></div>
+    </div>
+    <div className="instrument-grid">
+      <Instrument label="7D BILLABLE" value={formatTokens(total)} accent />
+      <Instrument label="API-EQUIVALENT VALUE" value={`$${cost.toFixed(2)}`} />
+      <Instrument label="CLIENTS" value={String(clients.filter((client) => client.status === "active").length)} />
+      <Instrument label="PASSTHROUGH" value="EXCLUDED" />
+    </div>
+    <div className="mine-grid">
+      <SignalPanel code="M.11" title="HOURLY TOKEN BURN">
+        {chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Billable tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /><Legend /></BarChart></div> : <div className="empty-state">Nothing burned yet. Run something.</div>}
+      </SignalPanel>
+      <SignalPanel code="M.12" title="PROFILE">
+        <form className="access-form" onSubmit={saveProfile}><label><span>Nickname</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} maxLength={48} placeholder="How you appear in the pool" /></label><button className="gold-button">SAVE NAME</button></form>
+        <label className="avatar-upload"><span>AVATAR // PNG OR JPEG, 2 MB MAX</span><input type="file" accept="image/png,image/jpeg" onChange={(event) => uploadAvatar(event.target.files?.[0])} /></label>
+        {principal.kind !== "guest" && browserSupportsWebAuthn() && <><form className="passkey-form" onSubmit={registerPasskey}><strong>ADD A PASSKEY</strong><label><span>Passkey label</span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} placeholder="MacBook Touch ID" maxLength={80} required /></label><label><span>Confirm current password</span><input type="password" value={passkeyPassword} onChange={(event) => setPasskeyPassword(event.target.value)} autoComplete="current-password" required /></label><button className="quiet-button">REGISTER PASSKEY</button></form><div className="passkey-list" aria-label="Your passkeys">{passkeys.length === 0 ? <small>No passkeys enrolled.</small> : passkeys.map((passkey) => <div key={passkey.id}><span><strong>{passkey.label}</strong><small>{passkey.last_used_at ? `LAST USED ${new Date(passkey.last_used_at).toLocaleString()}` : `ADDED ${new Date(passkey.created_at).toLocaleDateString()}`}</small></span><button className="danger-action" onClick={() => deletePasskey(passkey)}>REMOVE</button></div>)}</div></>}
+      </SignalPanel>
+    </div>
+    <h2 className="panel-title">M.20 // CLIENT CREDENTIALS</h2>
+    <form className="access-form client-create" onSubmit={create}><label><span>Machine or context label</span><input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="MacBook" maxLength={80} required /></label><button className="gold-button">MINT CLIENT</button></form>
+    {freshToken && <div className="setup-secret" role="status"><span>NEW SETUP TOKEN</span><code>{freshToken}</code><button onClick={() => navigator.clipboard.writeText(freshToken)}>COPY</button><small>This token opens the setup files for this client. Rotate it if it was exposed.</small></div>}
+    <div className="account-table" role="table" aria-label="Client credentials">
+      {clients.map((client) => <div className="account-row client-row" role="row" key={client.id}><span role="cell"><strong>{client.label}</strong><small>{client.id}</small></span><span role="cell">{client.status.toUpperCase()}</span><span role="cell">{client.last_seen_at ? new Date(client.last_seen_at).toLocaleString() : "NEVER SEEN"}</span><span role="cell" className="row-actions"><button onClick={() => rotate(client)}>ROTATE</button>{client.status === "active" && <button className="danger-action" onClick={() => revoke(client)}>REVOKE</button>}</span></div>)}
+    </div>
+    <h2 className="panel-title">M.30 // USAGE LEDGER</h2>
+    <div className="account-table" role="table" aria-label="Usage by client">
+      {usage.length === 0 ? <div className="empty-state">Nothing burned yet. Run something.</div> : usage.slice(-100).reverse().map((row) => <div className="account-row" role="row" key={`${row.hour}-${row.account_type}-${row.client_credential_id}`}><span role="cell">{new Date(row.hour).toLocaleString()}</span><span role="cell">{row.account_type.toUpperCase()}</span><span role="cell">{clients.find((client) => client.id === row.client_credential_id)?.label || row.client_credential_id}</span><span role="cell">{formatTokens(row.billable_tokens)}</span></div>)}
+    </div>
+    <p className="section-note">Labels follow the token, not the hardware. API-equivalent value is provider list-price value, not marginal subscription spend. Pool totals exclude bring-your-own-key passthrough.</p>
+  </section>;
+}
+
+function PassportSetup() {
+  const [clients, setClients] = useState<ClientCredential[]>([]);
+  const [selectedID, setSelectedID] = useState("");
+  const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => { loadMyClients().then((items) => { const active = items.filter((item) => item.status === "active"); setClients(active); setSelectedID(active[0]?.id || ""); }).catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to load setup clients")); }, []);
+  const reveal = async () => { try { const result = await revealMyClient(selectedID); setToken(result.setup_token); setError(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal setup token"); } };
+  const base = window.location.origin;
+  const commands = token ? [
+    ["CODEX", `curl -sL "${base}/setup/codex/${token}" | bash`],
+    ["CLAUDE CODE", `source <(curl -sL "${base}/setup/claude/${token}")`],
+    ["GEMINI", `curl -sL "${base}/setup/gemini/${token}" | bash`],
+    ["GROK", `curl -sL "${base}/setup/grok/${token}" | bash`],
+    ["CUTE CODE", `curl -sL "${base}/setup/cute-code/${token}" | bash`],
+    ["PI", `curl -sL "${base}/setup/pi/${token}" | bash`],
+  ] : [];
+  return <section className="view-stack"><h2 className="panel-title">S.10 // CLIENT SETUP</h2>{error && <div className="signal-error" role="alert">SETUP INTERRUPTED // {error}</div>}<div className="setup-selector"><label><span>CLIENT CREDENTIAL</span><select value={selectedID} onChange={(event) => { setSelectedID(event.target.value); setToken(""); }}>{clients.map((client) => <option key={client.id} value={client.id}>{client.label}</option>)}</select></label><button className="gold-button" onClick={reveal} disabled={!selectedID}>REVEAL SETUP</button><p>The setup token grants access to this client credential. Reveal it only when installing a client; rotate the credential if the token is exposed.</p></div>{commands.length === 0 ? <div className="empty-state">Choose a labelled client credential to generate setup commands.</div> : <div className="passport-setup-list">{commands.map(([label, command]) => <div key={label}><strong>{label}</strong><code>{command}</code><button onClick={() => navigator.clipboard.writeText(command)}>COPY</button></div>)}</div>}</section>;
+}
+
+function Passes() {
+  const [passes, setPasses] = useState<GuestPass[]>([]);
+  const [note, setNote] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [expiry, setExpiry] = useState("");
+  const [editing, setEditing] = useState<GuestPass | null>(null);
+  const [fresh, setFresh] = useState<{ link: string; setupToken?: string } | null>(null);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => { try { setPasses(await loadPasses()); setError(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load passes"); } }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  const expiresAt = expiry ? new Date(expiry).toISOString() : null;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      if (editing) {
+        await updatePass(editing.id, note, displayName, expiresAt);
+      } else {
+        const result = await createPass(note, displayName, expiresAt);
+        setFresh({ link: result.link, setupToken: result.setup_token });
+      }
+      setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save pass"); }
+  };
+  const beginEdit = (pass: GuestPass) => { setEditing(pass); setNote(pass.note); setDisplayName(pass.display_name || ""); setExpiry(pass.expires_at ? new Date(pass.expires_at).toISOString().slice(0, 16) : ""); };
+  const act = async (action: () => Promise<unknown>) => { try { await action(); await refresh(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Pass action failed"); } };
+  return <section className="view-stack">
+    <h2 className="panel-title">P.10 // GUEST PASSES</h2>
+    {error && <div className="signal-error" role="alert">PASS CHANNEL INTERRUPTED // {error}</div>}
+    <div className="passes-layout">
+      <form className="pass-form" onSubmit={submit}>
+        <label><span>Private note // required</span><textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={300} placeholder="Dave from climbing" required /></label>
+        <label><span>Guest-facing name // optional</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={48} placeholder="Dave" /></label>
+        <label><span>Expiry // optional</span><input type="datetime-local" value={expiry} onChange={(event) => setExpiry(event.target.value)} /></label>
+        <div className="join-actions"><button className="gold-button">{editing ? "SAVE PASS" : "CREATE AND COPY"}</button>{editing && <button type="button" className="quiet-button" onClick={() => { setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); }}>CANCEL</button>}</div>
+        <p className="section-note">The note is visible only to members and the operator. No expiry means the link remains valid until revoked.</p>
+      </form>
+      {fresh && <div className="setup-secret"><span>PASS READY</span><code>{window.location.origin + fresh.link}</code><button onClick={() => navigator.clipboard.writeText(window.location.origin + fresh.link)}>COPY MAGIC LINK</button>{fresh.setupToken && <><code>{fresh.setupToken}</code><button onClick={() => navigator.clipboard.writeText(fresh.setupToken || "")}>COPY SETUP TOKEN</button></>}<small>The magic link is multi-use. Anyone holding it can enter until you revoke or rotate it.</small></div>}
+    </div>
+    <div className="pass-list" role="list" aria-label="Guest passes">
+      {passes.length === 0 ? <div className="empty-state">No guest passes yet. Write who it is for, then send the link.</div> : passes.map((pass) => <article className="pass-row" role="listitem" key={pass.id}>
+        <div className="passport-avatar small">{pass.avatar_url ? <img src={pass.avatar_url} alt="" /> : <span>{(pass.display_name || "G").slice(0, 2).toUpperCase()}</span>}</div>
+        <div className="pass-identity"><strong>{pass.note}</strong><span>{pass.display_name || `GUEST ${pass.id.slice(0, 8)}`}</span><small>{pass.expires_at ? `EXPIRES ${new Date(pass.expires_at).toLocaleString()}` : "NO EXPIRY"} // {pass.clients} CLIENT{pass.clients === 1 ? "" : "S"}</small></div>
+        <span className={classNames("pass-status", pass.status !== "active" && "inactive")}>{pass.status.toUpperCase()}</span>
+        <div className="row-actions"><button onClick={() => navigator.clipboard.writeText(window.location.origin + pass.link)}>COPY</button><button onClick={() => beginEdit(pass)}>EDIT</button><button onClick={() => act(async () => { const result = await rotatePassLink(pass.id); setFresh({ link: result.link }); })}>ROTATE LINK</button>{pass.status === "active" ? <button className="danger-action" onClick={() => window.confirm(`Revoke the pass for ${pass.note}?`) && act(() => revokePass(pass.id))}>REVOKE</button> : <button onClick={() => act(() => restorePass(pass.id))}>RESTORE</button>}</div>
+      </article>)}
+    </div>
+  </section>;
+}
+
+function PassportConsole({ principal }: { principal: PassportPrincipal }) {
+  const [principals, setPrincipals] = useState<ConsolePrincipal[]>([]);
+  const [audit, setAudit] = useState<PassportAuditEntry[]>([]);
+  const [selected, setSelected] = useState<ConsolePrincipal | null>(null);
+  const [usage, setUsage] = useState<PassportUsagePoint[]>([]);
+  const [health, setHealth] = useState<Awaited<ReturnType<typeof loadAnalyticsHealth>> | null>(null);
+  const [hours, setHours] = useState(168);
+  const [memberEmail, setMemberEmail] = useState("");
+  const [memberName, setMemberName] = useState("");
+  const [memberPurpose, setMemberPurpose] = useState<"onboard" | "recover">("onboard");
+  const [memberLink, setMemberLink] = useState("");
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const [ranking, entries, analyticsHealth] = await Promise.all([loadConsolePrincipals(hours), loadConsoleAudit(), loadAnalyticsHealth()]);
+      setPrincipals(ranking.principals); setAudit(entries); setHealth(analyticsHealth); setError("");
+      setSelected((current) => current ? ranking.principals.find((item) => item.id === current.id) || null : ranking.principals[0] || null);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load console"); }
+  }, [hours]);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!selected) { setUsage([]); return; }
+    loadConsolePrincipalUsage(selected.id).then((result) => setUsage(result.hourly)).catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to load principal usage"));
+  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const changeStatus = async (target: ConsolePrincipal) => {
+    const status = target.status === "active" ? "suspended" : "active";
+    if (!window.confirm(`${status === "suspended" ? "Suspend" : "Restore"} ${target.note || target.display_name || target.id}?`)) return;
+    try { await setPrincipalStatus(target.id, status); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Status change failed"); }
+  };
+  const issueMemberLink = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const result = await createMemberLink(memberEmail, memberName, memberPurpose);
+      setMemberLink(result.link); setMemberEmail(""); setMemberName(""); setError(""); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create member link"); }
+  };
+  const total = principals.reduce((sum, item) => sum + item.billable_tokens, 0);
+  const chartData = usage.map((row) => ({ hour: row.hour, tokens: row.billable_tokens, cost: row.api_equivalent_cost_usd }));
+  return <section className="view-stack">
+    <h2 className="panel-title">K.10 // PRINCIPAL ACCOUNTING</h2>
+    {error && <div className="signal-error" role="alert">CONSOLE INTERRUPTED // {error}</div>}
+    {principal.kind === "operator" && <div className="member-admin"><form className="access-form" onSubmit={issueMemberLink}><label><span>Member action</span><select value={memberPurpose} onChange={(event) => setMemberPurpose(event.target.value as "onboard" | "recover")}><option value="onboard">NEW MEMBER</option><option value="recover">RECOVER MEMBER</option></select></label><label><span>Member email</span><input type="email" value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} required /></label>{memberPurpose === "onboard" && <label><span>Display name</span><input value={memberName} onChange={(event) => setMemberName(event.target.value)} maxLength={48} /></label>}<button className="gold-button">CREATE 30-MINUTE LINK</button></form>{memberLink && <div className="setup-secret"><span>MEMBER LINK READY</span><code>{memberLink}</code><button onClick={() => navigator.clipboard.writeText(memberLink)}>COPY LINK</button><small>It works once. Send it out of band; no temporary password is created.</small></div>}</div>}
+    <div className="console-toolbar"><div><strong>{principals.length}</strong><span>PRINCIPALS</span></div><div><strong>{formatTokens(total)}</strong><span>ATTRIBUTED TOKENS</span></div><label><span>WINDOW</span><select value={hours} onChange={(event) => setHours(Number(event.target.value))}><option value={24}>24 HOURS</option><option value={168}>7 DAYS</option><option value={720}>30 DAYS</option><option value={8760}>1 YEAR</option></select></label><div className={classNames("analytics-health", health?.health.state.toLowerCase())}><strong>{health?.health.state || "CHECKING"}</strong><span>ANALYTICS // OUTBOX {health?.health.outbox_depth ?? "–"}</span></div><small>Bring-your-own-key passthrough is excluded.</small></div>
+    {health?.active_gap && <div className="accounting-gap" role="alert"><strong>ACCOUNTING GAP OPEN SINCE {new Date(health.active_gap.started_at).toLocaleString()}</strong><span>Traffic is still being served. Totals spanning this interval are incomplete.</span></div>}
+    {health?.health.state === "FAULTED" && <div className="accounting-gap" role="alert"><strong>ANALYTICS RECONCILIATION FAILED</strong><span>{health.health.fault || health.health.last_reconciliation?.detail}</span></div>}
+    <div className="console-layout">
+      <div className="principal-roster" role="table" aria-label="Principals ranked by token use">
+        {principals.map((item, index) => <button className={classNames("principal-row", selected?.id === item.id && "selected", item.status !== "active" && "inactive")} role="row" key={item.id} onClick={() => setSelected(item)}>
+          <span className="rank">{String(index + 1).padStart(2, "0")}</span><span className="passport-avatar small">{item.avatar_url ? <img src={item.avatar_url} alt="" /> : (item.display_name || item.email || "G").slice(0, 2).toUpperCase()}</span><span className="principal-copy"><strong>{item.note || item.display_name || item.email || item.id}</strong><small>{item.display_name || item.email || `${item.kind.toUpperCase()} ${item.id.slice(0, 8)}`}</small></span><span><strong>{formatTokens(item.billable_tokens)}</strong><small>{preciseMoney.format(item.api_equivalent_cost_usd)}</small></span><span className={classNames("pass-status", item.status !== "active" && "inactive")}>{item.status.toUpperCase()}</span>
+        </button>)}
+      </div>
+      <aside className="principal-detail">
+        {!selected ? <div className="empty-state">No principal selected.</div> : <><div className="detail-heading"><div><span>{selected.kind.toUpperCase()}</span><h3>{selected.note || selected.display_name || selected.id}</h3><p>{selected.display_name || selected.email || selected.id}</p></div>{principal.kind === "operator" && selected.kind !== "operator" && <button className={selected.status === "active" ? "danger-action" : "quiet-button"} onClick={() => changeStatus(selected)}>{selected.status === "active" ? "SUSPEND" : "RESTORE"}</button>}</div><div className="detail-facts"><span>LAST SEEN <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleString() : "NEVER"}</b></span><span>REQUESTS <b>{selected.request_count.toLocaleString()}</b></span><span>API-EQUIV <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span><span>EXPIRY <b>{selected.expires_at ? new Date(selected.expires_at).toLocaleString() : "NONE"}</b></span></div><SignalPanel code="K.20" title="30-DAY HOURLY SHAPE">{chartData.length ? <div className="chart-stage medium"><AreaChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Area dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(5, 13)} maxTicks={7} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></AreaChart></div> : <div className="empty-state">No attributed usage in this window.</div>}</SignalPanel></>}
+      </aside>
+    </div>
+    <h2 className="panel-title">K.30 // AUDIT LOG</h2>
+    <div className="audit-list" role="log" aria-label="Recent account actions">{audit.length === 0 ? <div className="empty-state">No account actions recorded.</div> : audit.map((entry) => <div key={entry.id}><time>{new Date(entry.at).toLocaleString()}</time><strong>{entry.action.replaceAll(".", " / ").toUpperCase()}</strong><span>{entry.actor_id.slice(0, 8)} → {entry.subject_id.slice(0, 8)}</span><small>{entry.detail}</small></div>)}</div>
+  </section>;
 }
 
 function Header({ stats, loading, operator, onRefresh, onLock }: {
@@ -410,15 +773,11 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
   );
 }
 
-function Navigation({ view, onChange, onSignOut }: { view: View; onChange: (view: View) => void; onSignOut: () => void }) {
-  const items: Array<[View, string, string]> = [
-    ["pulse", "PULSE", "⌁"],
-    ["insights", "INSIGHTS", "△"],
-    ["usage", "USAGE", "╱"],
-    ["accounts", "ACCOUNTS", "▦"],
-	["models", "MODELS", "◇"],
-    ["setup", "SETUP", "⌘"],
-  ];
+function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
+  const passportItems: Array<[View, string, string]> = principal?.kind === "guest"
+    ? [["mine", "MINE", "◑"], ["setup", "SETUP", "⌘"]]
+    : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MINE", "◑"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
+  const items: Array<[View, string, string]> = principal ? passportItems : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "USAGE", "╱"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
   return (
     <nav className="signal-nav" aria-label="Signal room">
       <div className="nav-index">A.01</div>
@@ -1216,35 +1575,6 @@ function InsightsOverview({ stats, signal, onAccounts }: { stats: PoolStats; sig
   );
 }
 
-function Usage({ stats, signal, session }: { stats: PoolStats | null; signal: SignalAnalytics | null; session: FriendSession }) {
-  if (!stats || !signal) return <SignalSkeleton />;
-  const burn = burnSummary(signal.hourly);
-  const cacheShare = stats.aggregate.total_input_tokens ? (stats.aggregate.total_cached_tokens / stats.aggregate.total_input_tokens) * 100 : 0;
-  const hottest = [...stats.accounts]
-    .filter((account) => account.secondary_window_available)
-    .sort((a, b) => b.secondary_window_used_pct - a.secondary_window_used_pct)[0];
-
-  return (
-    <div className="signal-view usage-view">
-      <div className="view-title"><span>U.00</span><h1>Burn analysis</h1><p>Where the compute went, who drank it, and how hard the subscriptions are working.</p></div>
-      <section className="inline-instruments usage-instruments" aria-label="Burn summary">
-        <Instrument label="BURN / 24H" value={formatTokens(burn.current24)} accent />
-        <Instrument label="LATEST HOUR" value={`${formatTokens(burn.latestHour)}/h`} />
-        <Instrument label="ACCELERATION" value={`${burn.delta >= 0 ? "+" : ""}${burn.delta.toFixed(1)}%`} danger={burn.delta > 25} />
-        <Instrument label="CACHE SHARE" value={`${cacheShare.toFixed(1)}%`} accent />
-        <Instrument label="YOUR HANDLE" value={originHandle(session.origin_id)} accent />
-        <Instrument label="HOTTEST WEEK" value={hottest ? `${hottest.secondary_window_used_pct.toFixed(0)}%` : "n/a"} danger={Boolean(hottest && hottest.secondary_window_used_pct >= 85)} />
-      </section>
-      <section className="usage-grid">
-        <SignalPanel code="U.10" title="BURN VELOCITY // 14D"><BurnChart hourly={signal.hourly} /></SignalPanel>
-        <SignalPanel code="U.11" title="TOKEN COMPOSITION // 14D"><TokenComposition hourly={signal.hourly} /></SignalPanel>
-        <SignalPanel code="U.20" title="PROVIDER CAPITAL // VALUE VS MATCHED SPEND"><ProviderCapitalChart accounts={stats.accounts} /></SignalPanel>
-        <SignalPanel code="U.21" title="HASHED-IP DRAIN // WEEK OVER WEEK"><OriginWeeklyChart rows={signal.origin_weekly} /></SignalPanel>
-      </section>
-    </div>
-  );
-}
-
 function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsChanged }: {
   stats: PoolStats | null;
   adminAccounts: AdminAccount[];
@@ -1622,77 +1952,6 @@ function Models({ models }: { models: ModelDescriptor[] }) {
 	);
 }
 
-function Setup({ session }: { session: FriendSession }) {
-  const [tool, setTool] = useState<"codex" | "claude" | "gemini" | "grok" | "cute" | "pi" | "realtime" | "api">("codex");
-	const [piModels, setPiModels] = useState(session.pi_models_json);
-	const [cuteCodeSettings, setCuteCodeSettings] = useState(session.cute_code_settings_json);
-	useEffect(() => {
-		let active = true;
-		Promise.all([loadLivePiModels(session.download_token), loadLiveCuteCodeSettings(session.download_token)])
-			.then(([nextPiModels, nextCuteCodeSettings]) => {
-				if (!active) return;
-				setPiModels(nextPiModels);
-				setCuteCodeSettings(nextCuteCodeSettings);
-			})
-			.catch(() => { /* The claim-time snapshot remains usable if regeneration fails. */ });
-		return () => { active = false; };
-	}, [session.download_token]);
-  const setup: Record<typeof tool, { title: string; note: string; commands: Array<[string, string]> }> = {
-    codex: { title: "Codex CLI", note: "Automatic installer first. Raw auth remains inspectable because trust issues are healthy.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/codex/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/codex/${session.download_token}?shell=powershell" | iex`], ["AUTH.JSON", session.auth_json]] },
-    claude: { title: "Claude Code", note: "Sets the pool endpoint, OAuth token, and skips the ceremony.", commands: [["MACOS / LINUX", `source <(curl -sL "${session.public_url}/setup/claude/${session.download_token}")`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/claude/${session.download_token}?shell=powershell" | iex`], ["ENV", `export ANTHROPIC_BASE_URL="${session.public_url}"\nexport CLAUDE_CODE_OAUTH_TOKEN="${session.claude_api_key}"`]] },
-    gemini: { title: "Gemini CLI", note: "API-key mode. No OAuth scavenger hunt required.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/gemini/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/gemini/${session.download_token}?shell=powershell" | iex`], ["API KEY", session.gemini_api_key]] },
-    grok: { title: "Grok Build CLI", note: "Runs Grok entirely through the pool, including the other pool models. Existing Grok OAuth is deactivated and backed up.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/grok/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/grok/${session.download_token}?shell=powershell" | iex`], ["VERIFY", `grok inspect\ngrok models`]] },
-	  cute: { title: "Cute Code", note: "Generated from the live catalog. Re-run this installer after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/cute-code/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/cute-code/${session.download_token}?shell=powershell" | iex`], ["SETTINGS.JSON", cuteCodeSettings]] },
-	  pi: { title: "Pi", note: "Generated from the live catalog. Re-run this installer, then open /model, after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/pi/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/pi/${session.download_token}?shell=powershell" | iex`], ["MODELS.JSON", piModels]] },
-    realtime: { title: "GPT Realtime 2.1", note: "One ready-to-run OpenAI SDK script. The pool override mints a short-lived key; the session’s WebRTC media is direct.", commands: [["OPENAI AGENTS SDK", `npm install openai @openai/agents
-
-import OpenAI from "openai";
-import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
-
-const pool = new OpenAI({
-  apiKey: "${session.claude_api_key}",
-  baseURL: "${session.public_url}/v1",
-  dangerouslyAllowBrowser: true,
-});
-
-const { value: apiKey } = await pool.realtime.clientSecrets.create({
-  session: { type: "realtime", model: "gpt-realtime-2.1", audio: { output: { voice: "marin" } } },
-});
-
-const agent = new RealtimeAgent({ name: "Voice assistant", instructions: "Be concise and helpful." });
-const session = new RealtimeSession(agent, { model: "gpt-realtime-2.1" });
-await session.connect({ apiKey });`]] },
-    api: { title: "Raw APIs", note: "Anthropic-compatible and OpenAI-compatible. Pick your poison.", commands: [["ANTHROPIC", `export ANTHROPIC_BASE_URL="${session.public_url}"\nexport ANTHROPIC_API_KEY="${session.claude_api_key}"`], ["OPENAI", `export OPENAI_BASE_URL="${session.public_url}/v1"\nexport OPENAI_API_KEY="${session.claude_api_key}"`], ["SMOKE TEST", `curl ${session.public_url}/v1/responses \\\n  -H "Authorization: Bearer ${session.claude_api_key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gpt-5.6-luna","input":"Reply with exactly: pool ok"}'`]] },
-  };
-  return (
-    <div className="signal-view setup-view">
-      <div className="view-title"><span>S.00</span><h1>Setup frequencies</h1><p>Pick the client. Copy the signal. Pretend this was difficult.</p></div>
-      <div className="setup-grid">
-        <div className="setup-tools">
-          {Object.entries({ codex: "Codex", claude: "Claude", gemini: "Gemini", grok: "Grok Build", cute: "Cute Code", pi: "Pi", realtime: "GPT Realtime", api: "Raw APIs" }).map(([id, label]) => <button key={id} className={tool === id ? "active" : ""} onClick={() => setTool(id as typeof tool)}>{label}</button>)}
-        </div>
-        <section className="setup-console">
-          <span>SIGNAL // {tool.toUpperCase()}</span><h2>{setup[tool].title}</h2><p>{setup[tool].note}</p>
-          {setup[tool].commands.map(([label, content]) => <CodeWell key={label} label={label} content={content} />)}
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function CodeWell({ label, content }: { label: string; content: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  };
-  return <div className="code-well"><header><span>{label}</span><button onClick={copy}>{copied ? "COPIED" : "COPY"}</button></header><pre>{content}</pre></div>;
-}
 
 function EmptyChart({ label }: { label: string }) {
   return <div className="empty-chart"><span>{label}</span><i aria-hidden="true" /></div>;

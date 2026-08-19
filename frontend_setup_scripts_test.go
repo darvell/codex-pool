@@ -267,26 +267,8 @@ func newTestPoolUserStoreWithUser(t *testing.T, token string) *PoolUserStore {
 	return store
 }
 
-func TestServeCuteCodeLanding(t *testing.T) {
-	h := &proxyHandler{}
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/cute-code", nil)
-	rr := httptest.NewRecorder()
-
-	h.serveCuteCodeLanding(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
-	}
-	body := rr.Body.String()
-	for _, want := range []string{"codex pool + cute-code", "Generate setup", "cute-code --model gpt-5.6-sol"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("expected cute-code landing to contain %q, got:\n%s", want, body)
-		}
-	}
-}
-
 func TestFriendLandingServesReactSignalRoom(t *testing.T) {
-	h := &proxyHandler{cfg: &config{friendCode: "peepee"}}
+	h := &proxyHandler{cfg: &config{legacyFriendCode: "peepee"}}
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	rr := httptest.NewRecorder()
 
@@ -315,7 +297,7 @@ func TestFriendLandingServesReactSignalRoom(t *testing.T) {
 
 func TestFriendCodeIsNotEmbeddedInPublicSignalRoom(t *testing.T) {
 	const secret = "friend-secret-that-must-never-ship"
-	h := &proxyHandler{cfg: &config{friendCode: secret}}
+	h := &proxyHandler{cfg: &config{legacyFriendCode: secret}}
 	page := httptest.NewRecorder()
 	h.serveFriendLanding(page, httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
 	if strings.Contains(page.Body.String(), secret) {
@@ -339,7 +321,7 @@ func TestFriendCodeIsNotEmbeddedInPublicSignalRoom(t *testing.T) {
 }
 
 func TestServeSignalRoomAsset(t *testing.T) {
-	h := &proxyHandler{cfg: &config{friendCode: "peepee"}}
+	h := &proxyHandler{cfg: &config{legacyFriendCode: "peepee"}}
 	page := httptest.NewRecorder()
 	h.serveFriendLanding(page, httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
 	body := page.Body.String()

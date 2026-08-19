@@ -77,7 +77,7 @@ func (h *proxyHandler) handleKimiAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, AccountTypeKimi, "kimi", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeKimi, "kimi", apiKey)
 }
 
 // handleAPIKeyList lists all accounts of the given type.
@@ -152,7 +152,7 @@ func (h *proxyHandler) handleAPIKeyRemove(w http.ResponseWriter, acctType Accoun
 }
 
 // saveAPIKeyAccountFile creates a new API key account file and reloads accounts.
-func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, acctType AccountType, subdir, apiKey string) {
+func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, r *http.Request, acctType AccountType, subdir, apiKey string) {
 	accountID := subdir + "_" + randomHex(4)
 
 	poolDir := filepath.Join(h.cfg.poolDir, subdir)
@@ -193,6 +193,7 @@ func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, acctType Acc
 	log.Printf("saved new %s account: %s -> %s", acctType, accountID, filePath)
 
 	h.reloadAccounts()
+	h.auditProviderContribution(r, string(acctType), accountID)
 
 	respondJSON(w, map[string]any{
 		"success":    true,

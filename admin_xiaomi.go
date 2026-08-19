@@ -81,5 +81,5 @@ func (h *proxyHandler) handleXiaomiAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, AccountTypeXiaomi, "xiaomi", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeXiaomi, "xiaomi", apiKey)
 }

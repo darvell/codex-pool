@@ -28,6 +28,7 @@ const (
 
 // CodexOAuthSession stores pending OAuth state
 type CodexOAuthSession struct {
+	ActorID   string
 	AccountID string
 	Verifier  string
 	Challenge string
@@ -146,6 +147,7 @@ func (h *proxyHandler) handleCodexAdd(w http.ResponseWriter, r *http.Request) {
 
 	// Store session
 	session := &CodexOAuthSession{
+		ActorID:   providerContributionActor(r),
 		Verifier:  verifier,
 		Challenge: challenge,
 		State:     state,
@@ -193,11 +195,15 @@ func (h *proxyHandler) handleCodexExchange(w http.ResponseWriter, r *http.Reques
 
 	// Look up session
 	codexOAuthSessions.RLock()
-	_, ok := codexOAuthSessions.sessions[verifier]
+	session, ok := codexOAuthSessions.sessions[verifier]
 	codexOAuthSessions.RUnlock()
 
 	if !ok {
 		respondJSONError(w, http.StatusBadRequest, "invalid or expired session")
+		return
+	}
+	if session.ActorID != "" && session.ActorID != providerContributionActor(r) {
+		respondJSONError(w, http.StatusForbidden, "OAuth session belongs to another principal")
 		return
 	}
 
@@ -226,6 +232,7 @@ func (h *proxyHandler) handleCodexExchange(w http.ResponseWriter, r *http.Reques
 
 	// Reload accounts
 	h.reloadAccounts()
+	h.auditProviderContribution(r, "codex", accountID)
 
 	respondJSON(w, map[string]any{
 		"success":    true,

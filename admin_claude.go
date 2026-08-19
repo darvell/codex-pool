@@ -328,6 +328,8 @@ func (h *proxyHandler) handleClaudeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	session.ActorID = providerContributionActor(r)
+
 	// Store session
 	claudeOAuthSessions.Lock()
 	claudeOAuthSessions.sessions[session.PKCE.Verifier] = session
@@ -388,6 +390,10 @@ func (h *proxyHandler) handleClaudeExchange(w http.ResponseWriter, r *http.Reque
 		respondJSONError(w, http.StatusBadRequest, "invalid or expired session")
 		return
 	}
+	if session.ActorID != "" && session.ActorID != providerContributionActor(r) {
+		respondJSONError(w, http.StatusForbidden, "OAuth session belongs to another principal")
+		return
+	}
 
 	// Exchange code for tokens
 	tokens, err := ClaudeExchange(code, verifier, session.State)
@@ -410,6 +416,7 @@ func (h *proxyHandler) handleClaudeExchange(w http.ResponseWriter, r *http.Reque
 
 	// Reload accounts
 	h.reloadAccounts()
+	h.auditProviderContribution(r, "claude", session.AccountID)
 
 	respondJSON(w, map[string]any{
 		"success":    true,

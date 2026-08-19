@@ -22,19 +22,14 @@ public_url = ""
 # from the friend admin page, or place pi-grok/simple auth JSON in that directory.
 grok_base = "https://cli-chat-proxy.grok.com/v1"
 
-# Friend Code Access
-# Enable a self-service landing page at / where users with this code
-# can generate their own credentials.
+# Transitional Passport enrollment code. It never authorizes ordinary requests;
+# existing holders may use it once to choose a username/password. Clear it after
+# migration. The first boot separately persists its value as the analytics salt.
 friend_code = ""
 
-# Pool Users (Multi-User Mode)
-# Enable this section to allow creating users who can share the pool
-# without access to real account credentials.
+# Legacy pool-user storage imported into Passport on first start.
 [pool_users]
-# Password for the admin UI at /admin/pool-users
-admin_password = ""
-
-# Secret key for signing pool user tokens (should be 32+ characters)
+# Secret key retained for validating existing signed client credentials.
 jwt_secret = ""
 
 # Where to store pool user data

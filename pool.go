@@ -175,6 +175,11 @@ type RequestUsage struct {
 	OriginID            string
 	PromptCacheKey      string
 	RequestID           string
+	ProxyRequestID      string
+	ClientCredentialID  string
+	UsageSequence       int
+	AttemptNumber       int
+	UsageCompleteness   string
 	InputTokens         int64
 	CachedInputTokens   int64  // cache_read_input_tokens (cheap reads from cache)
 	CacheCreationTokens int64  // cache_creation_input_tokens (expensive writes to cache)

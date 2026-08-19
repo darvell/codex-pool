@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,6 +37,7 @@ var antigravityOAuthScopes = []string{
 }
 
 type antigravityOAuthSession struct {
+	ActorID      string
 	ID           string
 	State        string
 	Verifier     string
@@ -95,6 +97,7 @@ func (h *proxyHandler) handleAntigravityAdd(w http.ResponseWriter, r *http.Reque
 		respondJSONError(w, http.StatusInternalServerError, "failed to create OAuth session")
 		return
 	}
+	session.ActorID = providerContributionActor(r)
 	session.RedirectURI = redirectURI
 	session.TargetOrigin = antigravityOAuthTargetOrigin(r, h)
 	challenge := sha256.Sum256([]byte(session.Verifier))
@@ -149,6 +152,10 @@ func (h *proxyHandler) handleAntigravityStatus(w http.ResponseWriter, r *http.Re
 		respondJSONError(w, http.StatusNotFound, "OAuth session expired")
 		return
 	}
+	if session.ActorID != "" && session.ActorID != providerContributionActor(r) {
+		respondJSONError(w, http.StatusForbidden, "OAuth session belongs to another principal")
+		return
+	}
 	respondJSON(w, map[string]any{"status": status, "account_id": accountID, "error": sessionError})
 }
 
@@ -168,6 +175,10 @@ func (h *proxyHandler) handleAntigravityExchange(w http.ResponseWriter, r *http.
 	antigravityOAuthSessions.Unlock()
 	if session == nil || time.Since(session.CreatedAt) > 30*time.Minute {
 		respondJSONError(w, http.StatusBadRequest, "invalid or expired OAuth session")
+		return
+	}
+	if session.ActorID != "" && session.ActorID != providerContributionActor(r) {
+		respondJSONError(w, http.StatusForbidden, "OAuth session belongs to another principal")
 		return
 	}
 	code := strings.TrimSpace(input.Code)
@@ -370,6 +381,11 @@ func (h *proxyHandler) completeAntigravityOAuth(ctx context.Context, session *an
 		return fail(fmt.Errorf("save Antigravity account: %w", err))
 	}
 	h.reloadAccounts()
+	if h.passport != nil {
+		if err := h.passport.recordAudit(session.ActorID, "provider.account_added", accountID, "antigravity"); err != nil {
+			log.Printf("record provider contribution audit: %v", err)
+		}
+	}
 	antigravityOAuthSessions.Lock()
 	session.Status, session.AccountID, session.Error = "complete", accountID, ""
 	antigravityOAuthSessions.Unlock()

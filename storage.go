@@ -121,6 +121,11 @@ type usageStore struct {
 	originBackfillMu   sync.Mutex
 	originMetadataCh   chan OriginMetadata
 	originMetadataDone chan struct{}
+
+	analyticsReliabilityMu sync.Mutex
+	analyticsReservePath   string
+	analyticsGapPath       string
+	analyticsGap           *AccountingGap
 }
 
 type rateLimitSnapshot struct {
@@ -154,7 +159,7 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 	startedAt := time.Now().UTC()
 	needsOriginBackfill := false
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketOriginUsage, bucketOriginMetadata, bucketOriginWeeklyUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketOriginUsage, bucketOriginMetadata, bucketOriginWeeklyUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage, bucketAnalyticsOutbox, bucketAnalyticsState} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
@@ -185,7 +190,9 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		lastRateLimits:     make(map[string]rateLimitSnapshot),
 		originMetadataCh:   make(chan OriginMetadata, 4096),
 		originMetadataDone: make(chan struct{}),
+		analyticsGapPath:   path + ".analytics-gap.json",
 	}
+	store.loadActiveAccountingGapSidecar()
 	go store.runOriginMetadataWriter()
 	if needsOriginBackfill {
 		go store.backfillOriginWeeklyUsage(startedAt)
@@ -206,6 +213,17 @@ func (s *usageStore) Close() error {
 }
 
 func (s *usageStore) record(u RequestUsage) error {
+	return s.recordWithCost(u, 0)
+}
+
+func (s *usageStore) recordWithCost(u RequestUsage, costUSD float64) error {
+	if u.UserID != "" {
+		principalID, clientID := splitClientIdentity(u.UserID)
+		u.UserID = principalID
+		if u.ClientCredentialID == "" {
+			u.ClientCredentialID = clientID
+		}
+	}
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -241,9 +259,14 @@ func (s *usageStore) record(u RequestUsage) error {
 	}
 
 	err = s.db.Update(func(tx *bbolt.Tx) error {
-		// Store raw request
+		// Store raw request and its canonical analytics handoff atomically.
 		if err := tx.Bucket([]byte(bucketUsageRequests)).Put([]byte(key), val); err != nil {
 			return err
+		}
+		if u.UserID != "" {
+			if err := putAnalyticsOutbox(tx, analyticsFactFromUsage(u, costUSD)); err != nil {
+				return fmt.Errorf("store analytics outbox: %w", err)
+			}
 		}
 
 		// Update account aggregates

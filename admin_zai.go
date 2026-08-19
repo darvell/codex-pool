@@ -80,5 +80,5 @@ func (h *proxyHandler) handleZAIAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, AccountTypeZAI, "zai", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeZAI, "zai", apiKey)
 }

@@ -1,5 +1,80 @@
 export type Provider = "codex" | "claude" | "gemini" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "adverserial";
 
+export interface PassportPrincipal {
+  id: string;
+  kind: "operator" | "member" | "guest";
+  status: "active" | "suspended" | "expired";
+  display_name?: string;
+  username?: string;
+  email?: string;
+  expires_at?: string | null;
+  avatar_url?: string;
+}
+
+export interface ConsolePrincipal {
+  id: string;
+  kind: "operator" | "member" | "guest";
+  status: "active" | "suspended" | "expired";
+  note: string;
+  display_name?: string;
+  username?: string;
+  email?: string;
+  avatar_url?: string;
+  expires_at?: string | null;
+  created_at: string;
+  last_seen_at?: string;
+  billable_tokens: number;
+  request_count: number;
+  api_equivalent_cost_usd: number;
+}
+
+export interface PassportAuditEntry {
+  id: string;
+  actor_id: string;
+  action: string;
+  subject_id: string;
+  at: string;
+  detail?: string;
+}
+
+export interface GuestPass {
+  id: string;
+  note: string;
+  display_name?: string;
+  avatar_url?: string;
+  status: "active" | "suspended" | "expired";
+  expires_at?: string | null;
+  created_at: string;
+  created_by: string;
+  link: string;
+  clients: number;
+}
+
+export interface PasskeyCredential {
+  id: string;
+  label: string;
+  created_at: string;
+  last_used_at?: string;
+}
+
+export interface ClientCredential {
+  id: string;
+  label: string;
+  status: string;
+  expires_at?: string | null;
+  created_at: string;
+  last_seen_at?: string;
+}
+
+export interface PassportUsagePoint {
+  hour: string;
+  account_type: string;
+  client_credential_id: string;
+  billable_tokens: number;
+  request_count: number;
+  api_equivalent_cost_usd: number;
+}
+
 export interface FriendSession {
   public_url: string;
   origin_id: string;

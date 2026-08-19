@@ -407,8 +407,8 @@ func (h *proxyHandler) serveTokenCapacity(w http.ResponseWriter) {
 }
 
 func (h *proxyHandler) serveFakeOAuthToken(w http.ResponseWriter, r *http.Request) {
-	// Check if this is a pool user refresh request
-	if r.Method == http.MethodPost && h.poolUsers != nil {
+	// Check if this is a pool credential refresh request.
+	if r.Method == http.MethodPost && (h.poolUsers != nil || h.passport != nil) {
 		body, _ := io.ReadAll(r.Body)
 		var req struct {
 			RefreshToken string `json:"refresh_token"`
@@ -433,27 +433,45 @@ func (h *proxyHandler) serveFakeOAuthToken(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *proxyHandler) handlePoolUserRefresh(w http.ResponseWriter, refreshToken string) {
-	// Extract user ID from refresh token: poolrt_<user_id>_<random>
-	parts := strings.Split(refreshToken, "_")
-	if len(parts) < 3 {
-		respondJSONError(w, http.StatusBadRequest, "invalid refresh token")
-		return
-	}
-	userID := parts[1]
-
-	user := h.poolUsers.Get(userID)
-	if user == nil {
-		respondJSONError(w, http.StatusNotFound, "user not found")
-		return
-	}
-	if user.Disabled {
-		respondJSONError(w, http.StatusForbidden, "user disabled")
-		return
-	}
-
 	secret := getPoolJWTSecret()
 	if secret == "" {
 		respondJSONError(w, http.StatusServiceUnavailable, "JWT secret not configured")
+		return
+	}
+	identity, issuedAt, signed, ok := parsePoolRefreshToken(secret, refreshToken)
+	if !ok {
+		respondJSONError(w, http.StatusBadRequest, "invalid refresh token")
+		return
+	}
+
+	var user *PoolUser
+	if h.passport != nil {
+		if signed {
+			_, _, ok = h.passport.authorizeIssuedCredential(identity, issuedAt)
+		} else {
+			_, _, ok = h.passport.authorizeLegacyRefresh(identity)
+		}
+		if ok {
+			pr, client, active := h.passport.credentialState(identity)
+			if active {
+				nextIssuedAt := time.Now().UTC()
+				if pr.CredentialsValidAfter.After(nextIssuedAt) {
+					nextIssuedAt = pr.CredentialsValidAfter
+				}
+				if client.ValidAfter.After(nextIssuedAt) {
+					nextIssuedAt = client.ValidAfter
+				}
+				user = &PoolUser{ID: identity, Email: pr.Email, PlanType: pr.PlanType, CreatedAt: client.CreatedAt, credentialIssuedAt: nextIssuedAt}
+			}
+		}
+	} else if h.poolUsers != nil {
+		user = h.poolUsers.Get(identity)
+		if user != nil && user.Disabled {
+			user = nil
+		}
+	}
+	if user == nil {
+		respondJSONError(w, http.StatusForbidden, "refresh token revoked, expired, or unknown")
 		return
 	}
 
@@ -469,7 +487,7 @@ func (h *proxyHandler) handlePoolUserRefresh(w http.ResponseWriter, refreshToken
 		"refresh_token": auth.Tokens.RefreshToken,
 		"id_token":      auth.Tokens.IDToken,
 		"token_type":    "Bearer",
-		"expires_in":    31536000, // 1 year
+		"expires_in":    31536000,
 	})
 }
 

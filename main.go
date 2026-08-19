@@ -65,8 +65,11 @@ type config struct {
 	maxAttempts                int
 	storePath                  string
 	retentionDays              int
-	friendCode                 string
+	legacyFriendCode           string
 	adminToken                 string
+	backupDir                  string
+	restoreManifest            string
+	duckPath                   string
 	requestTimeout             time.Duration // Timeout for non-streaming requests (0 = no timeout)
 	streamTimeout              time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
 	streamIdleTimeout          time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
@@ -198,7 +201,7 @@ func buildConfig() *config {
 	}
 	cfg.maxAttempts = getConfigInt("PROXY_MAX_ATTEMPTS", fileCfg.MaxAttempts, 3)
 	cfg.storePath = getConfigString("PROXY_DB_PATH", fileCfg.DBPath, "./data/proxy.db")
-	cfg.friendCode = getConfigString("FRIEND_CODE", fileCfg.FriendCode, "")
+	cfg.legacyFriendCode = getConfigString("FRIEND_CODE", fileCfg.LegacyFriendCode, "")
 	cfg.adminToken = getConfigString("ADMIN_TOKEN", fileCfg.AdminToken, "")
 	cfg.retentionDays = 30
 	if v := getenv("PROXY_USAGE_RETENTION_DAYS", ""); v != "" {
@@ -257,12 +260,34 @@ func buildConfig() *config {
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.50)
 
 	flag.StringVar(&cfg.listenAddr, "listen", cfg.listenAddr, "listen address")
+	flag.StringVar(&cfg.backupDir, "backup-dir", "", "create an offline paired Bolt/DuckDB backup in this directory, then exit")
+	flag.StringVar(&cfg.restoreManifest, "restore-manifest", "", "restore Bolt/DuckDB from a paired backup manifest, then exit")
 	flag.Parse()
 	return cfg
 }
 
 func main() {
 	cfg := buildConfig()
+	duckPath := getenv("DUCKDB_PATH", "./data/usage.duckdb")
+	cfg.duckPath = duckPath
+	if cfg.backupDir != "" && cfg.restoreManifest != "" {
+		log.Fatal("choose only one of -backup-dir or -restore-manifest")
+	}
+	if cfg.backupDir != "" {
+		manifest, err := createPairedBackup(cfg.storePath, duckPath, cfg.backupDir)
+		if err != nil {
+			log.Fatalf("create paired backup: %v", err)
+		}
+		log.Printf("paired backup created: %s", manifest)
+		return
+	}
+	if cfg.restoreManifest != "" {
+		if err := restorePairedBackup(cfg.restoreManifest, cfg.storePath, duckPath); err != nil {
+			log.Fatalf("restore paired backup: %v", err)
+		}
+		log.Printf("paired backup restored from %s", cfg.restoreManifest)
+		return
+	}
 	startCodexFingerprintUpdater()
 
 	// Create provider registry
@@ -304,6 +329,15 @@ func main() {
 		log.Fatalf("open usage store: %v", err)
 	}
 	defer store.Close()
+	reserveBytes := int64(64 << 20)
+	if value := os.Getenv("ANALYTICS_EMERGENCY_RESERVE_BYTES"); value != "" {
+		if parsed, parseErr := strconv.ParseInt(value, 10, 64); parseErr == nil && parsed > 0 {
+			reserveBytes = parsed
+		}
+	}
+	if err := store.configureAnalyticsReserve(cfg.storePath+".analytics-reserve", reserveBytes); err != nil {
+		log.Fatalf("allocate analytics emergency reserve: %v", err)
+	}
 
 	// Restore persisted usage totals from BoltDB
 	if persisted, err := store.loadAllAccountUsage(); err == nil && len(persisted) > 0 {
@@ -396,7 +430,7 @@ func main() {
 	// Initialize pool users store if configured
 	var poolUsers *PoolUserStore
 	// Pool users require a JWT secret. Admin token or friend code provides access control.
-	if (cfg.adminToken != "" || cfg.friendCode != "") && getPoolJWTSecret() != "" {
+	if getPoolJWTSecret() != "" {
 		poolUsersPath := getPoolUsersPath()
 		var err error
 		poolUsers, err = newPoolUserStore(poolUsersPath)
@@ -407,11 +441,26 @@ func main() {
 		}
 	}
 
+	passport, passportErr := newPassportStore(store.db, poolUsers, cfg.legacyFriendCode)
+	if passportErr != nil {
+		log.Fatalf("failed to initialize Pool Passport: %v", passportErr)
+	}
+	log.Printf("Pool Passport initialized (%d principals)", len(passport.principals))
+
 	// Initialize pricing data
 	pricing := newPricingData()
 	pricing.startPricingRefresh()
 
-	// Initialize analytics store (SQLite)
+	// Initialize canonical DuckDB analytics. SQLite remains during migration.
+	duckAnalytics, duckErr := newDuckAnalytics(duckPath, store.db)
+	if duckErr != nil {
+		log.Printf("warning: failed to open DuckDB analytics: %v (durable outbox will accumulate)", duckErr)
+	} else {
+		defer duckAnalytics.Close()
+		log.Printf("DuckDB analytics initialized")
+	}
+
+	// Initialize legacy analytics store (SQLite)
 	analyticsDBPath := "./data/analytics.db"
 	analyticsStore, err := newAnalyticsStore(analyticsDBPath)
 	if err != nil {
@@ -454,9 +503,11 @@ func main() {
 		refreshTransport:     refreshTransport,
 		pool:                 pool,
 		poolUsers:            poolUsers,
+		passport:             passport,
 		registry:             registry,
 		store:                store,
 		analyticsStore:       analyticsStore,
+		duckAnalytics:        duckAnalytics,
 		pricing:              pricing,
 		aliases:              newModelAliases(aliasesCfg),
 		bruteForce:           newBruteForceTracker(),
@@ -595,9 +646,11 @@ type proxyHandler struct {
 	refreshTransport     http.RoundTripper // Separate transport for refresh ops (may use proxy)
 	pool                 *poolState
 	poolUsers            *PoolUserStore
+	passport             *PassportStore
 	registry             *ProviderRegistry
 	store                *usageStore
 	analyticsStore       *AnalyticsStore
+	duckAnalytics        *DuckAnalytics
 	pricing              *PricingData
 	aliases              *modelAliases
 	bruteForce           *bruteForceTracker
@@ -1743,93 +1796,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	// Determine user ID - either from pool JWT, Claude pool token, or hashed IP
-	var userID string
-	secret := getPoolJWTSecret()
-
-	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*).
-	// Anthropic SDKs commonly send API-key credentials in x-api-key, so accept
-	// pool Claude tokens there as well as Authorization: Bearer.
-	claudePoolAuthHeader := authHeader
-	if claudePoolAuthHeader == "" {
-		if apiKey := strings.TrimSpace(r.Header.Get("X-Api-Key")); apiKey != "" {
-			claudePoolAuthHeader = "Bearer " + apiKey
-		}
+	// Every pool credential path shares one parser and one live authorization check.
+	userID, _, _, credentialKind, credentialAllowed := h.authorizePoolCredentialRequest(r)
+	if credentialKind != "" && !credentialAllowed {
+		http.Error(w, "pool credential revoked, expired, or unknown", http.StatusForbidden)
+		return
 	}
-	if secret != "" {
-		if isClaudePool, uid := isClaudePoolToken(secret, claudePoolAuthHeader); isClaudePool {
-			userID = uid
-			// Check if user is disabled
-			if h.poolUsers != nil {
-				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-					http.Error(w, "pool user disabled", http.StatusForbidden)
-					return
-				}
-			}
-			if h.cfg.debug.Load() {
-				log.Printf("[%s] claude pool user request: user_id=%s", reqID, userID)
-			}
-		}
-	}
-
-	// Check for Gemini API key pool tokens (AIzaSy-pool-*)
-	if userID == "" && secret != "" {
-		// Check x-goog-api-key header (Gemini API key mode)
-		geminiAPIKey := r.Header.Get("x-goog-api-key")
-		if geminiAPIKey == "" {
-			// Also check query parameter
-			geminiAPIKey = r.URL.Query().Get("key")
-		}
-		if geminiAPIKey != "" {
-			if isPoolKey, uid, _ := isPoolGeminiAPIKey(secret, geminiAPIKey); isPoolKey {
-				userID = uid
-				// Check if user is disabled
-				if h.poolUsers != nil {
-					if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-						http.Error(w, "pool user disabled", http.StatusForbidden)
-						return
-					}
-				}
-				if h.cfg.debug.Load() {
-					log.Printf("[%s] gemini api key pool user request: user_id=%s", reqID, userID)
-				}
-			}
-		}
-	}
-
-	// Check for JWT-based pool tokens (Codex, Gemini OAuth)
-	if userID == "" && secret != "" {
-		if isPoolUser, uid, _ := isPoolUserToken(secret, authHeader); isPoolUser {
-			userID = uid
-			// Check if user is disabled
-			if h.poolUsers != nil {
-				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-					http.Error(w, "pool user disabled", http.StatusForbidden)
-					return
-				}
-			}
-			if h.cfg.debug.Load() {
-				log.Printf("[%s] pool user request: user_id=%s", reqID, userID)
-			}
-		}
-	}
-
-	// Check for Gemini OAuth pool tokens (ya29.pool-*)
-	if userID == "" && secret != "" && strings.HasPrefix(authHeader, "Bearer ") {
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if isPoolToken, uid := isGeminiOAuthPoolToken(secret, token); isPoolToken {
-			userID = uid
-			// Check if user is disabled
-			if h.poolUsers != nil {
-				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-					http.Error(w, "pool user disabled", http.StatusForbidden)
-					return
-				}
-			}
-			if h.cfg.debug.Load() {
-				log.Printf("[%s] gemini oauth pool user request: user_id=%s", reqID, userID)
-			}
-		}
+	if userID != "" && h.cfg.debug.Load() {
+		log.Printf("[%s] %s pool user request: user_id=%s", reqID, credentialKind, userID)
 	}
 
 	// Check if this looks like a real provider credential that should be passed through
@@ -1861,7 +1835,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		serveUnifiedGeminiModels(w, h.pool)
 		return
 	}
-	originID := hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode))
+	originID := hashRequestOrigin(r, h.originHashSalt())
 	originIP := getClientIP(r)
 	if h.store != nil && originID != "" && originIP != "" {
 		h.store.enqueueOriginMetadata(originID, originIP, userID, r.UserAgent(), r.URL.Path, time.Now())
@@ -4456,6 +4430,7 @@ func isClaudePoolToken(secret, authHeader string) (bool, string) {
 // proxyPassthrough handles requests where the user provides their own credentials.
 // The request is proxied directly to the upstream without using pool accounts.
 func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, reqID string, providerType AccountType, start time.Time) {
+	h.metrics.incPassport("passthrough_requests", string(providerType))
 	provider := h.registry.ForType(providerType)
 	if provider == nil {
 		// Fallback: try to detect from path and headers
@@ -4607,7 +4582,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
 		if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
-			h.writeClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, bodyBytes, outReq, bodyBytes, nil, TranslateNone, nil, err.Error())
+			h.writeClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, h.originHashSalt()), nil, r, bodyBytes, outReq, bodyBytes, nil, TranslateNone, nil, err.Error())
 		}
 		h.recent.add(err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -4619,7 +4594,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 			sampleLimit = h.claudeTraceSampleLimit(h.cfg.bodyLogLimit)
 		}
-		h.attachClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, bodyBytes, outReq, bodyBytes, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
+		h.attachClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, h.originHashSalt()), nil, r, bodyBytes, outReq, bodyBytes, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
 	}
 
 	respContentType := resp.Header.Get("Content-Type")
@@ -4805,7 +4780,7 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 			if reqSample != nil {
 				reqBody = reqSample.Bytes()
 			}
-			h.writeClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, reqBody, outReq, reqBody, nil, TranslateNone, nil, err.Error())
+			h.writeClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, h.originHashSalt()), nil, r, reqBody, outReq, reqBody, nil, TranslateNone, nil, err.Error())
 		}
 		h.recent.add(err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -4821,7 +4796,7 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 			sampleLimit = h.claudeTraceSampleLimit(h.cfg.bodyLogLimit)
 		}
-		h.attachClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, poolHashSalt(h.cfg.friendCode)), nil, r, reqBody, outReq, reqBody, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
+		h.attachClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, h.originHashSalt()), nil, r, reqBody, outReq, reqBody, resp, TranslateNone, &bytes.Buffer{}, sampleLimit)
 	}
 
 	if h.cfg.logBodies && reqSample != nil && reqSample.Len() > 0 {
