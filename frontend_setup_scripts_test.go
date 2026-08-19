@@ -269,7 +269,7 @@ func newTestPoolUserStoreWithUser(t *testing.T, token string) *PoolUserStore {
 
 func TestFriendLandingServesOldTemplate(t *testing.T) {
 	h := &proxyHandler{cfg: &config{legacyFriendCode: "peepee"}}
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/friend", nil)
 	rr := httptest.NewRecorder()
 
 	h.serveFriendLanding(rr, req)

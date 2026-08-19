@@ -406,6 +406,7 @@ export function App() {
             />
           )}
 		  {view === "models" && <Models models={models} />}
+          {view === "setup" && <SetupPage />}
         </main>
       </div>
     </div>
@@ -678,6 +679,67 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
   </section>;
 }
 
+function SetupPage() {
+  const [clients, setClients] = useState<ClientCredential[]>([]);
+  const [selected, setSelected] = useState("");
+  const [setupToken, setSetupToken] = useState("");
+  const [platform, setPlatform] = useState("codex");
+  const [label, setLabel] = useState("");
+  const [showMint, setShowMint] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const items = await loadMyClients();
+      setClients(items);
+      if (!selected && items.length > 0) setSelected(items.find(c => c.status === "active")?.id || items[0].id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load clients"); }
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  const base = window.location.origin;
+  const platforms: Record<string, string> = {
+    codex: `curl -sL "${base}/setup/codex/${setupToken}" | bash`,
+    claude: `source <(curl -sL "${base}/setup/claude/${setupToken}")`,
+    gemini: `curl -sL "${base}/setup/gemini/${setupToken}" | bash`,
+    grok: `curl -sL "${base}/setup/grok/${setupToken}" | bash`,
+    "cute-code": `curl -sL "${base}/setup/cute-code/${setupToken}" | bash`,
+    pi: `curl -sL "${base}/setup/pi/${setupToken}" | bash`,
+  };
+  const reveal = async (id: string) => {
+    try { const result = await revealMyClient(id); setSelected(id); setSetupToken(result.setup_token); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal"); }
+  };
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    try { const result = await createMyClient(label); setLabel(""); setShowMint(false); await refresh(); reveal(result.id || clients[clients.length-1]?.id); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create"); }
+  };
+  return <section className="view-stack">
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    <h2 className="panel-title">SETUP</h2>
+    {clients.length === 0 && !showMint && <div className="empty-state" style={{padding:16}}><p style={{margin:"0 0 8px"}}>Create a client to get setup commands.</p><button className="gold-button" onClick={() => setShowMint(true)}>CREATE CLIENT</button></div>}
+    {clients.map((client) => <div key={client.id} className="client-card">
+      <div className="client-header">
+        <strong>{client.label}</strong>
+        <small>{client.status.toUpperCase()}</small>
+        <div className="row-actions" style={{marginLeft:"auto"}}>
+          <button className={selected === client.id && setupToken ? "active" : ""} onClick={() => selected === client.id && setupToken ? (setSelected(""), setSetupToken("")) : reveal(client.id)}>{selected === client.id && setupToken ? "HIDE" : "SETUP"}</button>
+        </div>
+      </div>
+      {selected === client.id && setupToken && <div className="setup-secret" role="status">
+        <div className="tabs" style={{display:"flex",gap:6,marginBottom:8}}>
+          {Object.keys(platforms).map(p => <button key={p} className={classNames("tab", platform===p && "active")} onClick={() => setPlatform(p)}>{p.toUpperCase()}</button>)}
+        </div>
+        <code>{platforms[platform]}</code>
+        <button onClick={() => navigator.clipboard.writeText(platforms[platform])}>COPY</button>
+      </div>}
+    </div>)}
+    {!showMint ? <button className="quiet-button" style={{marginTop:8}} onClick={() => setShowMint(true)}>+ ADD CLIENT</button> : <form className="access-form client-create" onSubmit={create} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
+      <label style={{flex:1}}><span>Label</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook" maxLength={80} required autoFocus /></label>
+      <button className="gold-button">CREATE</button>
+      <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>
+    </form>}
+  </section>;
+}
 
 function Passes() {
   const [passes, setPasses] = useState<GuestPass[]>([]);
@@ -832,10 +894,10 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
 
 function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
   const passportItems: Array<[View, string, string]> = principal?.kind === "guest"
-    ? [["mine", "STATS", "◑"]]
+    ? [["mine", "STATS", "◑"], ["setup", "SETUP", "⌘"]]
     : principal?.kind === "operator"
-    ? [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MY STATS", "◑"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"]]
-    : [["mine", "MY STATS", "◑"], ["passes", "PASSES", "⊞"]];
+    ? [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MY STATS", "◑"], ["setup", "SETUP", "⌘"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"]]
+    : [["mine", "MY STATS", "◑"], ["setup", "SETUP", "⌘"], ["passes", "PASSES", "⊞"]];
   const items: Array<[View, string, string]> = principal ? passportItems : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "USAGE", "╱"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
   return (
     <nav className="signal-nav" aria-label="Signal room">
