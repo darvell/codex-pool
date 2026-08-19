@@ -507,37 +507,34 @@ function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => 
     <div className="access-gate">
       <SignalNoise />
       <div className="access-frame">
-        <div className="access-calibration" aria-hidden="true">A.00 / PRIVATE FREQUENCY</div>
-        <img src="/hero.webp" alt="AI Pool heraldic mark" className="access-mark" />
-        <div className="access-name">Friends of PP</div>
+        <img src="/hero.webp" alt="" className="access-mark" />
         {mode === "bootstrap" ? (
           <>
             <h1>Set up this pool</h1>
-            <p>Create the operator account to get started. This is the admin account that manages passes, members, and provider accounts.</p>
+            <p>Create the operator account to get started.</p>
             <form onSubmit={submit} className="access-form">
               <label><span>Email</span><input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required autoFocus autoComplete="email" /></label>
               <label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label>
               <label><span>Display name</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={48} autoComplete="name" placeholder="Optional" /></label>
               <label><span>Password</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={12} required autoComplete="new-password" /></label>
               {error && <div className="access-error" role="alert">{error}</div>}
-              <button className="gold-button" disabled={busy}>{busy ? "CREATING…" : "CREATE OPERATOR ACCOUNT"}</button>
+              <button className="gold-button" disabled={busy}>{busy ? "CREATING…" : "CREATE OPERATOR"}</button>
             </form>
           </>
         ) : (
           <>
-            <h1>Full-Spectrum Signal Room</h1>
-            <p>For the few who know. The charts are nosy.</p>
+            <h1>Sign in</h1>
             <form onSubmit={submit} className="access-form">
-              {mode === "signup" ? <><label><span>Old pool code</span><input value={code} onChange={(event) => setCode(event.target.value)} type="password" required autoFocus autoComplete="off" /></label><label><span>Choose a username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label></> : <label><span>Username or email</span><input value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus autoComplete="username" /></label>}
+              {mode === "signup" ? <><label><span>Old pool code</span><input value={code} onChange={(event) => setCode(event.target.value)} type="password" required autoFocus autoComplete="off" /></label><label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label></> : <label><span>Username or email</span><input value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus autoComplete="username" /></label>}
               <label>
-                <span>{mode === "signup" ? "Choose a password" : "Password"}</span>
+                <span>Password</span>
                 <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={mode === "signup" ? 12 : undefined} required autoComplete={mode === "signup" ? "new-password" : "current-password"} />
               </label>
               {error && <div className="access-error" role="alert">{error}</div>}
-              <button className="gold-button" disabled={busy}>{busy ? "TUNING…" : mode === "signup" ? "CREATE ACCOUNT" : "SIGN IN"}</button>
-              {mode === "login" && browserSupportsWebAuthn() && <button type="button" className="quiet-button" disabled={busy} onClick={passkey}>SIGN IN WITH A PASSKEY</button>}
-              {showLegacy && <button type="button" className="quiet-button" disabled={busy} onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setPassword(""); }}>{mode === "login" ? "I HAVE THE OLD POOL CODE" : "BACK TO SIGN IN"}</button>}
-              <small className="recovery-copy">{mode === "signup" ? "Your existing Cute Code setup is linked automatically when this browser has it." : "Locked out? Ask the operator for a recovery link."}</small>
+              <button className="gold-button" disabled={busy}>{busy ? "SIGNING IN…" : mode === "signup" ? "CREATE ACCOUNT" : "SIGN IN"}</button>
+              {mode === "login" && browserSupportsWebAuthn() && <button type="button" className="quiet-button" disabled={busy} onClick={passkey}>PASSKEY</button>}
+              {showLegacy && <button type="button" className="quiet-button" disabled={busy} onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setPassword(""); }}>{mode === "login" ? "HAVE AN OLD POOL CODE?" : "BACK TO SIGN IN"}</button>}
+              <small className="recovery-copy">Locked out? Ask the operator for a recovery link.</small>
             </form>
           </>
         )}
@@ -835,7 +832,9 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
 function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
   const passportItems: Array<[View, string, string]> = principal?.kind === "guest"
     ? [["mine", "STATS", "◑"]]
-    : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MY STATS", "◑"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"]];
+    : principal?.kind === "operator"
+    ? [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MY STATS", "◑"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"]]
+    : [["mine", "MY STATS", "◑"], ["passes", "PASSES", "⊞"]];
   const items: Array<[View, string, string]> = principal ? passportItems : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "USAGE", "╱"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
   return (
     <nav className="signal-nav" aria-label="Signal room">
