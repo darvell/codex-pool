@@ -383,7 +383,7 @@ export function App() {
       <div className="app-grid">
         <Navigation view={view} principal={passport} onChange={setView} onSignOut={signOut} />
         <main className="signal-main" id="main-content">
-          {error && <div className="signal-error" role="alert">SIGNAL INTERRUPTED // {error}</div>}
+          {error && <div className="signal-error" role="alert"> {error}</div>}
           {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
           {view === "insights" && <Insights stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
           {view === "mine" && <PassportMine principal={passport} onPrincipal={setPassport} />}
@@ -427,11 +427,11 @@ function BootScreen() {
 }
 
 function JoinUnavailable() {
-  return <div className="access-gate"><SignalNoise /><div className="access-frame"><div className="access-calibration">J.00 / PASS UNAVAILABLE</div><img src="/hero.webp" alt="" className="access-mark" /><h1>This pass is unavailable.</h1><p>It may have expired or been revoked. Ask the person who sent it for a new link.</p><button className="gold-button" onClick={() => { window.history.replaceState(null, "", "/"); window.location.reload(); }}>MEMBER SIGN IN</button></div></div>;
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><img src="/hero.webp" alt="" className="access-mark" /><h1>Pass unavailable</h1><p>It may have expired or been revoked.</p><button className="gold-button" onClick={() => { window.history.replaceState(null, "", "/"); window.location.reload(); }}>SIGN IN</button></div></div>;
 }
 
 function JoinSwitch({ current, onConfirm, onCancel }: { current: PassportPrincipal; onConfirm: () => void | Promise<void>; onCancel: () => void }) {
-  return <div className="access-gate"><SignalNoise /><div className="access-frame"><div className="access-calibration">J.10 / ACCOUNT SWITCH</div><img src="/hero.webp" alt="" className="access-mark" /><h1>Switch accounts?</h1><p>You are signed in as {current.display_name || current.email || current.id.slice(0, 8)}. Opening this pass replaces that browser session.</p><div className="join-actions"><button className="gold-button" onClick={onConfirm}>SWITCH TO PASS</button><button className="quiet-button" onClick={onCancel}>KEEP CURRENT</button></div></div></div>;
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><img src="/hero.webp" alt="" className="access-mark" /><h1>Switch accounts?</h1><p>Signed in as {current.display_name || current.email || current.id.slice(0, 8)}. This replaces your current session.</p><div className="join-actions"><button className="gold-button" onClick={onConfirm}>SWITCH</button><button className="quiet-button" onClick={onCancel}>KEEP CURRENT</button></div></div></div>;
 }
 
 function MemberRecovery({ token, onAccess }: { token: string; onAccess: (principal: PassportPrincipal) => void }) {
@@ -447,7 +447,7 @@ function MemberRecovery({ token, onAccess }: { token: string; onAccess: (princip
     catch (cause) { setError(cause instanceof Error ? cause.message : "This recovery link is unavailable."); }
     finally { setBusy(false); }
   };
-  return <div className="access-gate"><SignalNoise /><div className="access-frame"><div className="access-calibration">R.00 / MEMBER ACCESS</div><img src="/hero.webp" alt="" className="access-mark" /><h1>Choose your password.</h1><p>This link works once and expires after 30 minutes. Using a recovery link signs every other browser out.</p><form className="access-form" onSubmit={submit}><label><span>New password</span><input type="password" minLength={12} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></label><label><span>Confirm password</span><input type="password" minLength={12} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <div className="access-error" role="alert">{error}</div>}<button className="gold-button" disabled={busy}>{busy ? "SETTING ACCESS…" : "SET PASSWORD AND SIGN IN"}</button></form></div></div>;
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><img src="/hero.webp" alt="" className="access-mark" /><h1>Set your password</h1><p>Link works once. Expires in30 minutes.</p><form className="access-form" onSubmit={submit}><label><span>New password</span><input type="password" minLength={12} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></label><label><span>Confirm</span><input type="password" minLength={12} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <div className="access-error" role="alert">{error}</div>}<button className="gold-button" disabled={busy}>{busy ? "SETTING…" : "SET PASSWORD"}</button></form></div></div>;
 }
 
 function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => void }) {
@@ -792,7 +792,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
         </button>)}
       </div>
       <aside className="principal-detail">
-        {!selected ? <div className="empty-state">No principal selected.</div> : <><div className="detail-heading"><div><span>{selected.kind.toUpperCase()}</span><h3>{selected.note || selected.display_name || selected.id}</h3><p>{selected.display_name || selected.email || selected.id}</p></div>{principal.kind === "operator" && selected.kind !== "operator" && <button className={selected.status === "active" ? "danger-action" : "quiet-button"} onClick={() => changeStatus(selected)}>{selected.status === "active" ? "SUSPEND" : "RESTORE"}</button>}</div><div className="detail-facts"><span>LAST SEEN <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleString() : "NEVER"}</b></span><span>REQUESTS <b>{selected.request_count.toLocaleString()}</b></span><span>API-EQUIV <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span><span>EXPIRY <b>{selected.expires_at ? new Date(selected.expires_at).toLocaleString() : "NONE"}</b></span></div><SignalPanel code="K.20" title="30-DAY HOURLY SHAPE">{chartData.length ? <div className="chart-stage medium"><AreaChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Area dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(5, 13)} maxTicks={7} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></AreaChart></div> : <div className="empty-state">No attributed usage in this window.</div>}</SignalPanel></>}
+        {!selected ? <div className="empty-state">No principal selected.</div> : <><div className="detail-heading"><div><span>{selected.kind.toUpperCase()}</span><h3>{selected.note || selected.display_name || selected.id}</h3><p>{selected.display_name || selected.email || selected.id}</p></div>{principal.kind === "operator" && selected.kind !== "operator" && <button className={selected.status === "active" ? "danger-action" : "quiet-button"} onClick={() => changeStatus(selected)}>{selected.status === "active" ? "SUSPEND" : "RESTORE"}</button>}</div><div className="detail-facts"><span>SEEN <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleDateString() : "NEVER"}</b></span><span>REQUESTS <b>{selected.request_count.toLocaleString()}</b></span><span>VALUE <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span>{selected.expires_at && <span>EXPIRES <b>{new Date(selected.expires_at).toLocaleDateString()}</b></span>}</div><SignalPanel code="" title="USAGE">{chartData.length ? <div className="chart-stage medium"><AreaChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Area dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(5, 13)} maxTicks={7} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></AreaChart></div> : <div className="empty-state">No attributed usage in this window.</div>}</SignalPanel></>}
       </aside>
     </div>
     <h2 className="panel-title">AUDIT LOG</h2>
@@ -838,7 +838,6 @@ function Navigation({ view, principal, onChange, onSignOut }: { view: View; prin
   const items: Array<[View, string, string]> = principal ? passportItems : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "USAGE", "╱"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
   return (
     <nav className="signal-nav" aria-label="Signal room">
-      <div className="nav-index">A.01</div>
       {items.map(([id, label, glyph]) => (
         <button key={id} className={classNames("nav-item", view === id && "active")} onClick={() => onChange(id)}>
           <span>{glyph}</span>{label}

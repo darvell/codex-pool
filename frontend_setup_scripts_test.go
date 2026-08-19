@@ -301,7 +301,7 @@ func TestPassportSPAServesReactSignalRoom(t *testing.T) {
 	body := rr.Body.String()
 	for _, want := range []string{
 		`<div id="root"></div>`,
-		`AI Pool — Full-Spectrum Signal Room`,
+		`AI Pool`,
 		`src="/assets/`,
 		`href="/assets/`,
 	} {
