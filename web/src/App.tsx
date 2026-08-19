@@ -683,61 +683,144 @@ function SetupPage() {
   const [clients, setClients] = useState<ClientCredential[]>([]);
   const [selected, setSelected] = useState("");
   const [setupToken, setSetupToken] = useState("");
-  const [platform, setPlatform] = useState("codex");
+  const [tool, setTool] = useState("codex");
   const [label, setLabel] = useState("");
   const [showMint, setShowMint] = useState(false);
+  const [copied, setCopied] = useState("");
   const [error, setError] = useState("");
+  const base = window.location.origin;
+
+  const reveal = useCallback(async (id: string) => {
+    try { const result = await revealMyClient(id); setSelected(id); setSetupToken(result.setup_token); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal"); }
+  }, []);
   const refresh = useCallback(async () => {
     try {
       const items = await loadMyClients();
       setClients(items);
-      if (!selected && items.length > 0) setSelected(items.find(c => c.status === "active")?.id || items[0].id);
+      const target = items.find(c => c.id === selected) || items.find(c => c.status === "active") || items[0];
+      if (target) await reveal(target.id);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load clients"); }
-  }, []);
-  useEffect(() => { refresh(); }, [refresh]);
-  const base = window.location.origin;
-  const platforms: Record<string, string> = {
-    codex: `curl -sL "${base}/setup/codex/${setupToken}" | bash`,
-    claude: `source <(curl -sL "${base}/setup/claude/${setupToken}")`,
-    gemini: `curl -sL "${base}/setup/gemini/${setupToken}" | bash`,
-    grok: `curl -sL "${base}/setup/grok/${setupToken}" | bash`,
-    "cute-code": `curl -sL "${base}/setup/cute-code/${setupToken}" | bash`,
-    pi: `curl -sL "${base}/setup/pi/${setupToken}" | bash`,
-  };
-  const reveal = async (id: string) => {
-    try { const result = await revealMyClient(id); setSelected(id); setSetupToken(result.setup_token); setError(""); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal"); }
-  };
+  }, [selected, reveal]);
+  useEffect(() => { refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const create = async (event: FormEvent) => {
     event.preventDefault();
-    try { const result = await createMyClient(label); setLabel(""); setShowMint(false); await refresh(); reveal(result.id || clients[clients.length-1]?.id); }
+    try { const result = await createMyClient(label); setLabel(""); setShowMint(false); await refresh(); if (result.id) await reveal(result.id); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create"); }
   };
+  const copy = (key: string, text: string) => { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(""), 1500); };
+
+  const token = setupToken || "…";
+  const cliTools: Record<string, { name: string; install: string; oneliner: string; powershell: string; manual: { file: string; url: string }[] }> = {
+    codex: {
+      name: "CODEX",
+      install: "npm install -g @openai/codex    # or: brew install codex",
+      oneliner: `curl -sL "${base}/setup/codex/${token}" | bash`,
+      powershell: `irm "${base}/setup/codex/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.codex/auth.json", url: `${base}/config/codex/${token}` }],
+    },
+    claude: {
+      name: "CLAUDE CODE",
+      install: "npm install -g @anthropic-ai/claude-code",
+      oneliner: `source <(curl -sL "${base}/setup/claude/${token}")`,
+      powershell: `irm "${base}/setup/claude/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.claude/settings.json", url: `${base}/config/claude/${token}` }],
+    },
+    gemini: {
+      name: "GEMINI",
+      install: "npm install -g @google/gemini-cli    # or: brew install gemini-cli",
+      oneliner: `curl -sL "${base}/setup/gemini/${token}" | bash`,
+      powershell: `irm "${base}/setup/gemini/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.gemini/oauth_creds.json", url: `${base}/config/gemini/${token}` }],
+    },
+    grok: {
+      name: "GROK",
+      install: "npm install -g @xai/grok-cli",
+      oneliner: `curl -sL "${base}/setup/grok/${token}" | bash`,
+      powershell: `irm "${base}/setup/grok/${token}?shell=powershell" | iex`,
+      manual: [{ file: "grok auth", url: `${base}/config/grok/${token}` }],
+    },
+    "cute-code": {
+      name: "CUTE CODE",
+      install: "curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash",
+      oneliner: `curl -sL "${base}/setup/cute-code/${token}" | bash`,
+      powershell: `irm "${base}/setup/cute-code/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.claude/settings.json", url: `${base}/config/cute-code/${token}` }],
+    },
+    pi: {
+      name: "PI",
+      install: "npm install -g pi-cli",
+      oneliner: `curl -sL "${base}/setup/pi/${token}" | bash`,
+      powershell: `irm "${base}/setup/pi/${token}?shell=powershell" | iex`,
+      manual: [{ file: "pi models.json", url: `${base}/config/pi/${token}` }],
+    },
+  };
+  const sdkTools: Record<string, { name: string; summary: string; examples: { label: string; code: string }[] }> = {
+    anthropic: {
+      name: "ANTHROPIC API",
+      summary: "Use the pool token as an Anthropic API key. Claude models route natively; GPT/Kimi/MiniMax/GLM/Xiaomi are translated through /v1/messages.",
+      examples: [
+        { label: "Python SDK", code: `pip install anthropic\n\nfrom anthropic import Anthropic\nclient = Anthropic(base_url="${base}", api_key="${token}")\nmsg = client.messages.create(model="claude-sonnet-5", max_tokens=1024, messages=[{"role": "user", "content": "hello"}])` },
+        { label: "Env + curl", code: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${token}"\n\ncurl "$ANTHROPIC_BASE_URL/v1/messages" \\\n  -H "x-api-key: $ANTHROPIC_API_KEY" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}'` },
+      ],
+    },
+    openai: {
+      name: "OPENAI SDK",
+      summary: "Works with the official OpenAI SDK, Cursor, Continue, Aider, LiteLLM, and any OpenAI-compatible client. Chat Completions and Responses both work; model names route automatically.",
+      examples: [
+        { label: "Python SDK", code: `pip install openai\n\nfrom openai import OpenAI\nclient = OpenAI(base_url="${base}/v1", api_key="${token}")\nresp = client.responses.create(model="gpt-5.6-sol", input="hello")` },
+        { label: "TypeScript SDK", code: `npm install openai\n\nimport OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${token}" });\nconst resp = await client.responses.create({ model: "gpt-5.6-sol", input: "hello" });` },
+        { label: "curl", code: `curl "${base}/v1/responses" \\\n  -H "Authorization: Bearer ${token}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"gpt-5.6-sol","input":"hello"}'` },
+      ],
+    },
+  };
+  const modelPills = ["claude-sonnet-5", "claude-opus-5", "gpt-5.6-sol", "gpt-5.4", "kimi-for-coding", "MiniMax-M3", "glm-5.3", "grok-4.5"];
+
+  const activeTool = cliTools[tool];
+  const activeSdk = sdkTools[tool];
+
   return <section className="view-stack">
     {error && <div className="signal-error" role="alert">{error}</div>}
     <h2 className="panel-title">SETUP</h2>
-    {clients.length === 0 && !showMint && <div className="empty-state" style={{padding:16}}><p style={{margin:"0 0 8px"}}>Create a client to get setup commands.</p><button className="gold-button" onClick={() => setShowMint(true)}>CREATE CLIENT</button></div>}
-    {clients.map((client) => <div key={client.id} className="client-card">
-      <div className="client-header">
-        <strong>{client.label}</strong>
-        <small>{client.status.toUpperCase()}</small>
-        <div className="row-actions" style={{marginLeft:"auto"}}>
-          <button className={selected === client.id && setupToken ? "active" : ""} onClick={() => selected === client.id && setupToken ? (setSelected(""), setSetupToken("")) : reveal(client.id)}>{selected === client.id && setupToken ? "HIDE" : "SETUP"}</button>
-        </div>
+    <div className="setup-clients">
+      {clients.map((client) => <button key={client.id} className={classNames("client-pill", selected === client.id && "active", client.status !== "active" && "inactive")} onClick={() => reveal(client.id)}>{client.label}</button>)}
+      {!showMint && clients.length > 0 && <button className="client-pill add" onClick={() => setShowMint(true)}>+ NEW</button>}
+      {showMint && <form className="access-form" onSubmit={create} style={{display:"flex",gap:8,alignItems:"center"}}>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. MacBook)" maxLength={80} required autoFocus style={{minHeight:34}} />
+        <button className="gold-button" style={{minHeight:34}}>ADD</button>
+        <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>
+      </form>}
+    </div>
+    {clients.length === 0 && !showMint && <div className="empty-state" style={{padding:16}}><p style={{margin:"0 0 8px"}}>Create a client to get setup commands.</p><button className="gold-button" onClick={() => setShowMint(true)}>CREATE FIRST CLIENT</button></div>}
+    {setupToken && <>
+      <div className="tool-tabs">
+        {Object.keys(cliTools).map((key) => <button key={key} className={classNames("tab", tool === key && "active")} onClick={() => setTool(key)}>{cliTools[key].name}</button>)}
+        {Object.keys(sdkTools).map((key) => <button key={key} className={classNames("tab", tool === key && "active")} onClick={() => setTool(key)}>{sdkTools[key].name}</button>)}
       </div>
-      {selected === client.id && setupToken && <div className="setup-secret" role="status">
-        <div className="tabs" style={{display:"flex",gap:6,marginBottom:8}}>
-          {Object.keys(platforms).map(p => <button key={p} className={classNames("tab", platform===p && "active")} onClick={() => setPlatform(p)}>{p.toUpperCase()}</button>)}
-        </div>
-        <code>{platforms[platform]}</code>
-        <button onClick={() => navigator.clipboard.writeText(platforms[platform])}>COPY</button>
+      {activeTool && <div className="tool-detail">
+        <div className="step-label">1 // INSTALL</div>
+        <div className="code-wrapper"><div className="code-block"><pre>{activeTool.install}</pre></div><button className="copy-btn" onClick={() => copy("install", activeTool.install)}>{copied === "install" ? "COPIED" : "COPY"}</button></div>
+        <div className="step-label">2 // CONFIGURE — AUTOMATIC</div>
+        <p className="step-note">macOS / Linux</p>
+        <div className="code-wrapper"><div className="code-block"><pre>{activeTool.oneliner}</pre></div><button className="copy-btn" onClick={() => copy("oneliner", activeTool.oneliner)}>{copied === "oneliner" ? "COPIED" : "COPY"}</button></div>
+        <p className="step-note">Windows (PowerShell)</p>
+        <div className="code-wrapper"><div className="code-block"><pre>{activeTool.powershell}</pre></div><button className="copy-btn" onClick={() => copy("ps", activeTool.powershell)}>{copied === "ps" ? "COPIED" : "COPY"}</button></div>
+        <div className="step-label">3 // MANUAL</div>
+        <p className="step-note">Fetch the config file directly and place it yourself.</p>
+        {activeTool.manual.map((item) => <div key={item.file} className="code-wrapper"><div className="code-block"><pre>{`curl -sL "${item.url}"\n# → ${item.file}`}</pre></div><button className="copy-btn" onClick={() => copy(item.file, `curl -sL "${item.url}"`)}>{copied === item.file ? "COPIED" : "COPY"}</button></div>)}
       </div>}
-    </div>)}
-    {!showMint ? <button className="quiet-button" style={{marginTop:8}} onClick={() => setShowMint(true)}>+ ADD CLIENT</button> : <form className="access-form client-create" onSubmit={create} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
-      <label style={{flex:1}}><span>Label</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook" maxLength={80} required autoFocus /></label>
-      <button className="gold-button">CREATE</button>
-      <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>
-    </form>}
+      {activeSdk && <div className="tool-detail">
+        <p className="sdk-summary">{activeSdk.summary}</p>
+        <div className="api-cards">
+          <div className="api-card"><div className="api-card-title">BASE URL</div><code>{tool === "openai" ? `${base}/v1` : base}</code></div>
+          <div className="api-card"><div className="api-card-title">AUTH</div><code>{tool === "openai" ? "Authorization: Bearer <token>" : "x-api-key: <token>"}</code></div>
+        </div>
+        {activeSdk.examples.map((ex) => <div key={ex.label}><div className="step-label">{ex.label.toUpperCase()}</div><div className="code-wrapper"><div className="code-block"><pre>{ex.code}</pre></div><button className="copy-btn" onClick={() => copy(ex.label, ex.code)}>{copied === ex.label ? "COPIED" : "COPY"}</button></div></div>)}
+        <div className="step-label">MODELS</div>
+        <div className="model-pills">{modelPills.map((m) => <span key={m} className="model-pill">{m}</span>)}</div>
+      </div>}
+    </>}
   </section>;
 }
 
