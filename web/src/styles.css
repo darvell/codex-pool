@@ -702,6 +702,11 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .row-actions .danger-action { color: #ff8b80; border-color: rgba(255,91,77,.45); }
 .client-row > span:first-child small { display: block; color: var(--faint); font: .5rem "IBM Plex Mono", monospace; }
+.client-card { border: 1px solid var(--rule); padding: 10px 12px; margin-bottom: 4px; }
+.client-header { display: flex; align-items: center; gap: 10px; font: .6rem "IBM Plex Mono", monospace; }
+.client-header strong { color: var(--ink); }
+.client-header small { color: var(--faint); }
+.client-card .setup-secret { margin: 8px 0 0; }
 .join-actions { display: flex; gap: 8px; }
 .join-actions > * { flex: 1; }
 .setup-selector { display: grid; grid-template-columns: minmax(240px,420px) max-content minmax(220px,1fr); gap: 12px; align-items: end; padding: 16px 0 20px; border-bottom: 1px solid var(--rule-hot); }

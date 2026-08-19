@@ -554,29 +554,24 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
   const [nickname, setNickname] = useState(principal.display_name || "");
   const [passkeyPassword, setPasskeyPassword] = useState("");
   const [passkeyLabel, setPasskeyLabel] = useState("");
-  const [selectedClient, setSelectedClient] = useState("");
+  const [setupFor, setSetupFor] = useState<string | null>(null);
   const [setupToken, setSetupToken] = useState("");
   const [setupPlatform, setSetupPlatform] = useState("codex");
-  const [error, setError] = useState("");
+  const [showMint, setShowMint] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [error, setError] = useState("");
   const refresh = useCallback(async () => {
     try {
       const [nextClients, nextUsage, nextPasskeys] = await Promise.all([loadMyClients(), loadMyUsage(), principal.kind === "guest" ? Promise.resolve([]) : loadPasskeys()]);
       setClients(nextClients); setUsage(nextUsage.hourly); setPasskeys(nextPasskeys); setError("");
-      if (!selectedClient && nextClients.length >0) setSelectedClient(nextClients.find(c => c.status === "active")?.id || nextClients[0].id);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load your signal"); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load your data"); }
   }, [principal.kind]);
   useEffect(() => { refresh(); }, [refresh]);
   const total = usage.reduce((sum, row) => sum + row.billable_tokens, 0);
   const cost = usage.reduce((sum, row) => sum + row.api_equivalent_cost_usd, 0);
   const chartData = Array.from(usage.reduce((hours, row) => {
-    const key = row.hour;
-    const existing = hours.get(key) ?? { hour: key, tokens: 0 };
-    existing.tokens += row.billable_tokens;
-    hours.set(key, existing);
-    return hours;
+    const key = row.hour; const existing = hours.get(key) ?? { hour: key, tokens: 0 }; existing.tokens += row.billable_tokens; hours.set(key, existing); return hours;
   }, new Map<string, { hour: string; tokens: number }>()).values()).sort((a, b) => a.hour.localeCompare(b.hour));
-  const active = clients.find(c => c.id === selectedClient);
   const base = window.location.origin;
   const platforms: Record<string, string> = {
     codex: `curl -sL "${base}/setup/codex/${setupToken}" | bash`,
@@ -586,34 +581,33 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
     "cute-code": `curl -sL "${base}/setup/cute-code/${setupToken}" | bash`,
     pi: `curl -sL "${base}/setup/pi/${setupToken}" | bash`,
   };
+  const reveal = async (clientId: string) => {
+    try { const result = await revealMyClient(clientId); setSetupFor(clientId); setSetupToken(result.setup_token); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal setup"); }
+  };
   const create = async (event: FormEvent) => {
     event.preventDefault();
-    try { const result = await createMyClient(label); setSetupToken(result.setup_token); setLabel(""); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to mint client credential"); }
-  };
-  const reveal = async () => {
-    if (!selectedClient) return;
-    try { const result = await revealMyClient(selectedClient); setSetupToken(result.setup_token); setError(""); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal setup token"); }
+    try { const result = await createMyClient(label); setSetupFor(result.id || clients[clients.length-1]?.id); setSetupToken(result.setup_token); setLabel(""); setShowMint(false); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create client"); }
   };
   const rotate = async (client: ClientCredential) => {
-    try { const result = await rotateMyClient(client.id); setSetupToken(result.setup_token); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to rotate credential"); }
+    try { const result = await rotateMyClient(client.id); setSetupFor(client.id); setSetupToken(result.setup_token); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to rotate"); }
   };
   const revoke = async (client: ClientCredential) => {
-    if (!window.confirm(`Revoke ${client.label}? Existing credentials for it will stop working.`)) return;
-    try { await revokeMyClient(client.id); setSetupToken(""); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to revoke credential"); }
+    if (!window.confirm(`Revoke ${client.label}?`)) return;
+    try { await revokeMyClient(client.id); if (setupFor === client.id) { setSetupFor(null); setSetupToken(""); } await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to revoke"); }
   };
   const saveProfile = async (event: FormEvent) => {
     event.preventDefault();
     try { onPrincipal(await updateMyProfile(nickname)); setError(""); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to update profile"); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save profile"); }
   };
   const uploadAvatar = async (file?: File) => {
     if (!file) return;
     try { await uploadMyAvatar(file); onPrincipal(await loadPassportMe()); setError(""); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to upload avatar"); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to upload"); }
   };
   const registerPasskey = async (event: FormEvent) => {
     event.preventDefault();
@@ -621,77 +615,69 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
       const begin = await beginPasskeyRegistration(passkeyPassword, passkeyLabel || "Passkey");
       const credential = await startRegistration({ optionsJSON: begin.options });
       await finishPasskeyRegistration(begin.challenge_id, credential);
-      setPasskeyPassword(""); setPasskeyLabel(""); setError(""); await refresh();
+      setPasskeyPassword(""); setPasskeyLabel(""); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to add passkey"); }
   };
-  const deletePasskey = async (passkey: PasskeyCredential) => {
-    if (!window.confirm(`Remove ${passkey.label}?`)) return;
-    try { await removePasskey(passkey.id); await refresh(); }
+  const deletePasskey = async (pk: PasskeyCredential) => {
+    if (!window.confirm(`Remove ${pk.label}?`)) return;
+    try { await removePasskey(pk.id); await refresh(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to remove passkey"); }
   };
+
   return <section className="view-stack">
     {error && <div className="signal-error" role="alert">{error}</div>}
     <div className="identity-strip">
       <div className="passport-avatar">{principal.avatar_url ? <img src={principal.avatar_url} alt="" /> : <span>{(principal.display_name || principal.email || "G").slice(0, 2).toUpperCase()}</span>}</div>
       <div><strong>{principal.display_name || principal.email || `GUEST ${principal.id.slice(0, 8)}`}</strong><small>{principal.kind.toUpperCase()}</small></div>
-      <button className="quiet-button" style={{marginLeft:"auto"}} onClick={() => setShowProfile(!showProfile)}>{showProfile ? "CLOSE" : "EDIT PROFILE"}</button>
+      <button className="quiet-button" style={{marginLeft:"auto"}} onClick={() => setShowProfile(!showProfile)}>{showProfile ? "CLOSE" : "PROFILE"}</button>
     </div>
-    {showProfile && <div className="mine-grid" style={{marginBottom:12}}>
-      <SignalPanel code="P.10" title="PROFILE">
-        <form className="access-form" onSubmit={saveProfile}><label><span>Nickname</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} maxLength={48} placeholder="How you appear in the pool" /></label><button className="gold-button">SAVE</button></form>
-        <label className="avatar-upload"><span>AVATAR // PNG OR JPEG, 2 MB MAX</span><input type="file" accept="image/png,image/jpeg" onChange={(event) => uploadAvatar(event.target.files?.[0])} /></label>
-        {principal.kind !== "guest" && browserSupportsWebAuthn() && <><form className="passkey-form" onSubmit={registerPasskey}><strong>ADD A PASSKEY</strong><label><span>Label</span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} placeholder="MacBook Touch ID" maxLength={80} required /></label><label><span>Password</span><input type="password" value={passkeyPassword} onChange={(event) => setPasskeyPassword(event.target.value)} autoComplete="current-password" required /></label><button className="quiet-button">REGISTER</button></form><div className="passkey-list">{passkeys.map((pk) => <div key={pk.id}><span><strong>{pk.label}</strong><small>{pk.last_used_at ? `USED ${new Date(pk.last_used_at).toLocaleDateString()}` : `ADDED ${new Date(pk.created_at).toLocaleDateString()}`}</small></span><button className="danger-action" onClick={() => deletePasskey(pk)}>REMOVE</button></div>)}</div></>}
-      </SignalPanel>
-    </div>}
+    {showProfile && <SignalPanel code="P" title="PROFILE">
+      <form className="access-form" onSubmit={saveProfile} style={{display:"flex",gap:8,alignItems:"end"}}>
+        <label style={{flex:1}}><span>Nickname</span><input value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={48} placeholder="How you appear" /></label>
+        <button className="gold-button">SAVE</button>
+      </form>
+      <label className="avatar-upload"><span>AVATAR</span><input type="file" accept="image/png,image/jpeg" onChange={(e) => uploadAvatar(e.target.files?.[0])} /></label>
+      {principal.kind !== "guest" && browserSupportsWebAuthn() && <div style={{marginTop:8}}>
+        {passkeys.length > 0 && <div className="passkey-list">{passkeys.map((pk) => <div key={pk.id}><span><strong>{pk.label}</strong><small>{pk.last_used_at ? `USED ${new Date(pk.last_used_at).toLocaleDateString()}` : `ADDED ${new Date(pk.created_at).toLocaleDateString()}`}</small></span><button className="danger-action" onClick={() => deletePasskey(pk)}>REMOVE</button></div>)}</div>}
+        <form className="passkey-form" onSubmit={registerPasskey} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
+          <label style={{flex:1}}><span>Passkey label</span><input value={passkeyLabel} onChange={(e) => setPasskeyLabel(e.target.value)} placeholder="MacBook Touch ID" maxLength={80} required /></label>
+          <label style={{flex:1}}><span>Password</span><input type="password" value={passkeyPassword} onChange={(e) => setPasskeyPassword(e.target.value)} autoComplete="current-password" required /></label>
+          <button className="quiet-button">ADD PASSKEY</button>
+        </form>
+      </div>}
+    </SignalPanel>}
     <div className="instrument-grid">
       <Instrument label="7D BILLABLE" value={formatTokens(total)} accent />
       <Instrument label="API VALUE" value={`$${cost.toFixed(2)}`} />
       <Instrument label="CLIENTS" value={String(clients.filter(c => c.status === "active").length)} />
     </div>
-    <div className="mine-grid">
-      <SignalPanel code="M.11" title="TOKEN BURN">
-        {chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(v) => String(v).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(v) => compact.format(Number(v))} /><Tooltip /><Legend /></BarChart></div> : <div className="empty-state">Nothing burned yet.</div>}
-      </SignalPanel>
-      <SignalPanel code="M.12" title="SETUP">
-        <div className="setup-selector">
-          <label><span>CLIENT</span>
-            <select value={selectedClient} onChange={(e) => { setSelectedClient(e.target.value); setSetupToken(""); }}>
-              {clients.map(c => <option key={c.id} value={c.id}>{c.label} ({c.status})</option>)}
-            </select>
-          </label>
-          <button className="gold-button" onClick={reveal} disabled={!selectedClient}>REVEAL</button>
-        </div>
-        {setupToken && <div className="setup-secret" role="status">
-          <div className="tabs" style={{display:"flex",gap:6,marginBottom:8}}>
-            {Object.keys(platforms).map(p => <button key={p} className={classNames("tab", setupPlatform===p && "active")} onClick={() => setSetupPlatform(p)}>{p.toUpperCase()}</button>)}
-          </div>
-          <code>{platforms[setupPlatform]}</code>
-          <button onClick={() => navigator.clipboard.writeText(platforms[setupPlatform])}>COPY</button>
-        </div>}
-        <form className="access-form client-create" onSubmit={create} style={{marginTop:12}}>
-          <label><span>NEW CLIENT</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. MacBook)" maxLength={80} required /></label>
-          <button className="gold-button">MINT</button>
-        </form>
-      </SignalPanel>
-    </div>
+    <SignalPanel code="M" title="TOKEN BURN">
+      {chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(v) => String(v).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(v) => compact.format(Number(v))} /><Tooltip /></BarChart></div> : <div className="empty-state">Nothing burned yet.</div>}
+    </SignalPanel>
     <h2 className="panel-title">CLIENTS</h2>
-    <div className="account-table" role="table" aria-label="Client credentials">
-      {clients.map((client) => <div className="account-row client-row" role="row" key={client.id}>
-        <span role="cell"><strong>{client.label}</strong><small>{client.id}</small></span>
-        <span role="cell">{client.status.toUpperCase()}</span>
-        <span role="cell">{client.last_seen_at ? new Date(client.last_seen_at).toLocaleDateString() : "NEVER"}</span>
-        <span role="cell" className="row-actions"><button onClick={() => rotate(client)}>ROTATE</button>{client.status === "active" && <button className="danger-action" onClick={() => revoke(client)}>REVOKE</button>}</span>
-      </div>)}
-    </div>
-    <h2 className="panel-title">USAGE</h2>
-    <div className="account-table" role="table" aria-label="Usage by client">
-      {usage.length === 0 ? <div className="empty-state">Nothing burned yet.</div> : usage.slice(-50).reverse().map((row) => <div className="account-row" role="row" key={`${row.hour}-${row.account_type}-${row.client_credential_id}`}>
-        <span role="cell">{new Date(row.hour).toLocaleString()}</span>
-        <span role="cell">{row.account_type.toUpperCase()}</span>
-        <span role="cell">{clients.find(c => c.id === row.client_credential_id)?.label || row.client_credential_id}</span>
-        <span role="cell">{formatTokens(row.billable_tokens)}</span>
-      </div>)}
-    </div>
+    {clients.map((client) => <div key={client.id} className="client-card">
+      <div className="client-header">
+        <strong>{client.label}</strong>
+        <small>{client.status.toUpperCase()}</small>
+        <div className="row-actions" style={{marginLeft:"auto"}}>
+          <button onClick={() => setupFor === client.id ? (setSetupFor(null), setSetupToken("")) : reveal(client.id)}>{setupFor === client.id ? "HIDE" : "SETUP"}</button>
+          <button onClick={() => rotate(client)}>ROTATE</button>
+          {client.status === "active" && <button className="danger-action" onClick={() => revoke(client)}>REVOKE</button>}
+        </div>
+      </div>
+      {setupFor === client.id && setupToken && <div className="setup-secret" role="status">
+        <div className="tabs" style={{display:"flex",gap:6,marginBottom:8}}>
+          {Object.keys(platforms).map(p => <button key={p} className={classNames("tab", setupPlatform===p && "active")} onClick={() => setSetupPlatform(p)}>{p.toUpperCase()}</button>)}
+        </div>
+        <code>{platforms[setupPlatform]}</code>
+        <button onClick={() => navigator.clipboard.writeText(platforms[setupPlatform])}>COPY</button>
+      </div>}
+    </div>)}
+    {!showMint ? <button className="quiet-button" style={{marginTop:8}} onClick={() => setShowMint(true)}>+ ADD CLIENT</button> : <form className="access-form client-create" onSubmit={create} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
+      <label style={{flex:1}}><span>Label</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook" maxLength={80} required autoFocus /></label>
+      <button className="gold-button">CREATE</button>
+      <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>
+    </form>}
   </section>;
 }
 
@@ -757,6 +743,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
   const [memberName, setMemberName] = useState("");
   const [memberPurpose, setMemberPurpose] = useState<"onboard" | "recover">("onboard");
   const [memberLink, setMemberLink] = useState("");
+  const [showMemberForm, setShowMemberForm] = useState(false);
   const [error, setError] = useState("");
   const refresh = useCallback(async () => {
     try {
@@ -786,10 +773,19 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
   const total = principals.reduce((sum, item) => sum + item.billable_tokens, 0);
   const chartData = usage.map((row) => ({ hour: row.hour, tokens: row.billable_tokens, cost: row.api_equivalent_cost_usd }));
   return <section className="view-stack">
-    <h2 className="panel-title">K.10 // PRINCIPAL ACCOUNTING</h2>
-    {error && <div className="signal-error" role="alert">CONSOLE INTERRUPTED // {error}</div>}
-    {principal.kind === "operator" && <div className="member-admin"><form className="access-form" onSubmit={issueMemberLink}><label><span>Member action</span><select value={memberPurpose} onChange={(event) => setMemberPurpose(event.target.value as "onboard" | "recover")}><option value="onboard">NEW MEMBER</option><option value="recover">RECOVER MEMBER</option></select></label><label><span>Member email</span><input type="email" value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} required /></label>{memberPurpose === "onboard" && <label><span>Display name</span><input value={memberName} onChange={(event) => setMemberName(event.target.value)} maxLength={48} /></label>}<button className="gold-button">CREATE 30-MINUTE LINK</button></form>{memberLink && <div className="setup-secret"><span>MEMBER LINK READY</span><code>{memberLink}</code><button onClick={() => navigator.clipboard.writeText(memberLink)}>COPY LINK</button><small>It works once. Send it out of band; no temporary password is created.</small></div>}</div>}
-    <div className="console-toolbar"><div><strong>{principals.length}</strong><span>PRINCIPALS</span></div><div><strong>{formatTokens(total)}</strong><span>ATTRIBUTED TOKENS</span></div><label><span>WINDOW</span><select value={hours} onChange={(event) => setHours(Number(event.target.value))}><option value={24}>24 HOURS</option><option value={168}>7 DAYS</option><option value={720}>30 DAYS</option><option value={8760}>1 YEAR</option></select></label><div className={classNames("analytics-health", health?.health.state.toLowerCase())}><strong>{health?.health.state || "CHECKING"}</strong><span>ANALYTICS // OUTBOX {health?.health.outbox_depth ?? "–"}</span></div><small>Bring-your-own-key passthrough is excluded.</small></div>
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+      <h2 className="panel-title" style={{margin:0}}>CONSOLE</h2>
+      {principal.kind === "operator" && !showMemberForm && <button className="quiet-button" onClick={() => setShowMemberForm(true)}>+ MEMBER</button>}
+    </div>
+    {showMemberForm && principal.kind === "operator" && <div className="member-admin" style={{marginBottom:12}}><form className="access-form" onSubmit={issueMemberLink} style={{display:"flex",gap:8,alignItems:"end",flexWrap:"wrap"}}>
+      <label><span>Action</span><select value={memberPurpose} onChange={(e) => setMemberPurpose(e.target.value as "onboard" | "recover")}><option value="onboard">NEW MEMBER</option><option value="recover">RECOVER</option></select></label>
+      <label style={{flex:1}}><span>Email</span><input type="email" value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} required /></label>
+      {memberPurpose === "onboard" && <label style={{flex:1}}><span>Name</span><input value={memberName} onChange={(e) => setMemberName(e.target.value)} maxLength={48} /></label>}
+      <button className="gold-button">CREATE LINK</button>
+      <button type="button" className="quiet-button" onClick={() => { setShowMemberForm(false); setMemberLink(""); }}>CANCEL</button>
+    </form>{memberLink && <div className="setup-secret"><span>LINK READY</span><code>{memberLink}</code><button onClick={() => navigator.clipboard.writeText(memberLink)}>COPY</button><small>Works once. Send out of band.</small></div>}</div>}
+    <div className="console-toolbar"><div><strong>{principals.length}</strong><span>PRINCIPALS</span></div><div><strong>{formatTokens(total)}</strong><span>TOKENS</span></div><label><span>WINDOW</span><select value={hours} onChange={(e) => setHours(Number(e.target.value))}><option value={24}>24H</option><option value={168}>7D</option><option value={720}>30D</option><option value={8760}>1Y</option></select></label><div className={classNames("analytics-health", health?.health.state.toLowerCase())}><strong>{health?.health.state || "…"}</strong><span>OUTBOX {health?.health.outbox_depth ?? "–"}</span></div></div>
     {health?.active_gap && <div className="accounting-gap" role="alert"><strong>ACCOUNTING GAP OPEN SINCE {new Date(health.active_gap.started_at).toLocaleString()}</strong><span>Traffic is still being served. Totals spanning this interval are incomplete.</span></div>}
     {health?.health.state === "FAULTED" && <div className="accounting-gap" role="alert"><strong>ANALYTICS RECONCILIATION FAILED</strong><span>{health.health.fault || health.health.last_reconciliation?.detail}</span></div>}
     <div className="console-layout">
@@ -802,8 +798,8 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
         {!selected ? <div className="empty-state">No principal selected.</div> : <><div className="detail-heading"><div><span>{selected.kind.toUpperCase()}</span><h3>{selected.note || selected.display_name || selected.id}</h3><p>{selected.display_name || selected.email || selected.id}</p></div>{principal.kind === "operator" && selected.kind !== "operator" && <button className={selected.status === "active" ? "danger-action" : "quiet-button"} onClick={() => changeStatus(selected)}>{selected.status === "active" ? "SUSPEND" : "RESTORE"}</button>}</div><div className="detail-facts"><span>LAST SEEN <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleString() : "NEVER"}</b></span><span>REQUESTS <b>{selected.request_count.toLocaleString()}</b></span><span>API-EQUIV <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span><span>EXPIRY <b>{selected.expires_at ? new Date(selected.expires_at).toLocaleString() : "NONE"}</b></span></div><SignalPanel code="K.20" title="30-DAY HOURLY SHAPE">{chartData.length ? <div className="chart-stage medium"><AreaChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Area dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(5, 13)} maxTicks={7} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></AreaChart></div> : <div className="empty-state">No attributed usage in this window.</div>}</SignalPanel></>}
       </aside>
     </div>
-    <h2 className="panel-title">K.30 // AUDIT LOG</h2>
-    <div className="audit-list" role="log" aria-label="Recent account actions">{audit.length === 0 ? <div className="empty-state">No account actions recorded.</div> : audit.map((entry) => <div key={entry.id}><time>{new Date(entry.at).toLocaleString()}</time><strong>{entry.action.replaceAll(".", " / ").toUpperCase()}</strong><span>{entry.actor_id.slice(0, 8)} → {entry.subject_id.slice(0, 8)}</span><small>{entry.detail}</small></div>)}</div>
+    <h2 className="panel-title">AUDIT LOG</h2>
+    <div className="audit-list" role="log" aria-label="Recent account actions">{audit.length === 0 ? <div className="empty-state">No actions recorded.</div> : audit.slice(0, 50).map((entry) => <div key={entry.id}><time>{new Date(entry.at).toLocaleString()}</time><strong>{entry.action.replaceAll(".", " / ").toUpperCase()}</strong><span>{entry.actor_id.slice(0, 8)} → {entry.subject_id.slice(0, 8)}</span><small>{entry.detail}</small></div>)}</div>
   </section>;
 }
 
