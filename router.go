@@ -343,6 +343,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/auth/login":
 		h.handlePassportLogin(w, r)
 		return
+	case "/api/auth/config":
+		h.handleAuthConfig(w, r)
+		return
 	case "/api/auth/signup":
 		h.handleLegacySignup(w, r)
 		return

@@ -94,6 +94,20 @@ func (h *proxyHandler) requirePoolCredential(w http.ResponseWriter, r *http.Requ
 	return false
 }
 
+func (h *proxyHandler) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	legacyAvailable := h.cfg != nil && strings.TrimSpace(h.cfg.legacyFriendCode) != ""
+	operatorExists := h.passport != nil && h.passport.hasOperator()
+	respondJSON(w, map[string]any{
+		"legacy_signup": legacyAvailable,
+		"operator_exists": operatorExists,
+	})
+}
+
 func (h *proxyHandler) handlePassportLegacyExchange(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if r.Method != http.MethodPost {
@@ -285,9 +299,21 @@ func (h *proxyHandler) handleOperatorBootstrap(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	if strings.TrimSpace(r.Header.Get("X-Admin-Token")) == "" || !h.checkAdminAuth(w, r) {
-		return
+	// Accept: (1) valid admin token, (2) existing operator session, or
+	// (3) no operator exists yet (fresh deployment — allow unauthenticated
+	// bootstrap so the first operator can be created from the UI).
+	hasAdminToken := strings.TrimSpace(r.Header.Get("X-Admin-Token")) != ""
+	hasOperator := h.passport != nil && h.passport.hasOperator()
+	if hasAdminToken {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+	} else if hasOperator {
+		if _, _, ok := h.requireOperator(w, r); !ok {
+			return
+		}
 	}
+	// else: no operator exists, no admin token — allow through for fresh bootstrap
 	if h.passport == nil {
 		respondJSONError(w, 503, "accounts unavailable")
 		return

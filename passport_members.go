@@ -298,7 +298,12 @@ func (p *PassportStore) claimLegacyAccount(username, password, downloadToken str
 		principal = &Principal{ID: id, Kind: PrincipalMember, Status: PrincipalActive, Note: "legacy-code signup", CreatedAt: time.Now().UTC()}
 	}
 	updated := *principal
-	updated.Kind = PrincipalMember
+	// First legacy signup becomes operator if none exists yet.
+	if !p.hasOperator() {
+		updated.Kind = PrincipalOperator
+	} else {
+		updated.Kind = PrincipalMember
+	}
 	updated.Username = username
 	if updated.DisplayName == "" {
 		updated.DisplayName = username

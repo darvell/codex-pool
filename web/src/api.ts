@@ -18,6 +18,16 @@ function csrfToken() {
   return document.cookie.split("; ").find((part) => part.startsWith("pool_csrf="))?.split("=").slice(1).join("=") ?? "";
 }
 
+export async function loadAuthConfig(): Promise<{ legacy_signup: boolean; operator_exists: boolean }> {
+  return decode(await fetch("/api/auth/config", { credentials: "same-origin" }));
+}
+export async function operatorBootstrap(username: string, email: string, password: string, displayName = ""): Promise<PassportPrincipal> {
+  const result = await decode<{ principal: PassportPrincipal }>(await fetch("/api/setup/operator", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": "ui-bootstrap" }, credentials: "same-origin",
+    body: JSON.stringify({ username, email, password, display_name: displayName }),
+  }));
+  return result.principal;
+}
 export async function passportLogin(email: string, password: string): Promise<PassportPrincipal> {
   const result = await decode<{ principal: PassportPrincipal }>(await fetch("/api/auth/login", {
     method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",

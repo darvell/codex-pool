@@ -68,6 +68,8 @@ import {
   startAccountOAuth,
 	  startAntigravityOAuth,
   unlockOperator,
+  loadAuthConfig,
+  operatorBootstrap,
 } from "./api";
 import {
   accountFlow,
@@ -450,20 +452,32 @@ function MemberRecovery({ token, onAccess }: { token: string; onAccess: (princip
 }
 
 function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => void }) {
-  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [mode, setMode] = useState<"login" | "signup" | "bootstrap">("login");
+  const [authConfig, setAuthConfig] = useState<{ legacy_signup: boolean; operator_exists: boolean } | null>(null);
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    loadAuthConfig().then((config) => {
+      setAuthConfig(config);
+      if (!config.operator_exists) setMode("bootstrap");
+    }).catch(() => {});
+  }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      if (mode === "signup") {
+      if (mode === "bootstrap") {
+        const principal = await operatorBootstrap(username, email, password, displayName);
+        onAccess(principal);
+      } else if (mode === "signup") {
         const legacy = storedFriendSession();
         const principal = await legacySignup(code, username, password, legacy?.download_token || "");
         clearFriendSession();
@@ -488,6 +502,8 @@ function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => 
     } finally { setBusy(false); }
   };
 
+  const showLegacy = authConfig?.legacy_signup && mode !== "bootstrap";
+
   return (
     <div className="access-gate">
       <SignalNoise />
@@ -495,20 +511,37 @@ function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => 
         <div className="access-calibration" aria-hidden="true">A.00 / PRIVATE FREQUENCY</div>
         <img src="/hero.webp" alt="AI Pool heraldic mark" className="access-mark" />
         <div className="access-name">Friends of PP</div>
-        <h1>Full-Spectrum Signal Room</h1>
-        <p>For the few who know. The charts are nosy.</p>
-        <form onSubmit={submit} className="access-form">
-          {mode === "signup" ? <><label><span>Old pool code</span><input value={code} onChange={(event) => setCode(event.target.value)} type="password" required autoFocus autoComplete="off" /></label><label><span>Choose a username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label></> : <label><span>Username or email</span><input value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus autoComplete="username" /></label>}
-          <label>
-            <span>{mode === "signup" ? "Choose a password" : "Password"}</span>
-            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={mode === "signup" ? 12 : undefined} required autoComplete={mode === "signup" ? "new-password" : "current-password"} />
-          </label>
-          {error && <div className="access-error" role="alert">{error}</div>}
-          <button className="gold-button" disabled={busy}>{busy ? "TUNING…" : mode === "signup" ? "CREATE ACCOUNT" : "SIGN IN"}</button>
-          {mode === "login" && browserSupportsWebAuthn() && <button type="button" className="quiet-button" disabled={busy} onClick={passkey}>SIGN IN WITH A PASSKEY</button>}
-          <button type="button" className="quiet-button" disabled={busy} onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setPassword(""); }}>{mode === "login" ? "I HAVE THE OLD POOL CODE" : "BACK TO SIGN IN"}</button>
-          <small className="recovery-copy">{mode === "signup" ? "Your existing Cute Code setup is linked automatically when this browser has it." : "Locked out? Ask the operator for a recovery link."}</small>
-        </form>
+        {mode === "bootstrap" ? (
+          <>
+            <h1>Set up this pool</h1>
+            <p>Create the operator account to get started. This is the admin account that manages passes, members, and provider accounts.</p>
+            <form onSubmit={submit} className="access-form">
+              <label><span>Email</span><input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required autoFocus autoComplete="email" /></label>
+              <label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label>
+              <label><span>Display name</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={48} autoComplete="name" placeholder="Optional" /></label>
+              <label><span>Password</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={12} required autoComplete="new-password" /></label>
+              {error && <div className="access-error" role="alert">{error}</div>}
+              <button className="gold-button" disabled={busy}>{busy ? "CREATING…" : "CREATE OPERATOR ACCOUNT"}</button>
+            </form>
+          </>
+        ) : (
+          <>
+            <h1>Full-Spectrum Signal Room</h1>
+            <p>For the few who know. The charts are nosy.</p>
+            <form onSubmit={submit} className="access-form">
+              {mode === "signup" ? <><label><span>Old pool code</span><input value={code} onChange={(event) => setCode(event.target.value)} type="password" required autoFocus autoComplete="off" /></label><label><span>Choose a username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label></> : <label><span>Username or email</span><input value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus autoComplete="username" /></label>}
+              <label>
+                <span>{mode === "signup" ? "Choose a password" : "Password"}</span>
+                <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={mode === "signup" ? 12 : undefined} required autoComplete={mode === "signup" ? "new-password" : "current-password"} />
+              </label>
+              {error && <div className="access-error" role="alert">{error}</div>}
+              <button className="gold-button" disabled={busy}>{busy ? "TUNING…" : mode === "signup" ? "CREATE ACCOUNT" : "SIGN IN"}</button>
+              {mode === "login" && browserSupportsWebAuthn() && <button type="button" className="quiet-button" disabled={busy} onClick={passkey}>SIGN IN WITH A PASSKEY</button>}
+              {showLegacy && <button type="button" className="quiet-button" disabled={busy} onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setPassword(""); }}>{mode === "login" ? "I HAVE THE OLD POOL CODE" : "BACK TO SIGN IN"}</button>}
+              <small className="recovery-copy">{mode === "signup" ? "Your existing Cute Code setup is linked automatically when this browser has it." : "Locked out? Ask the operator for a recovery link."}</small>
+            </form>
+          </>
+        )}
       </div>
     </div>
   );
