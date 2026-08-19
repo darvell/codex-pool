@@ -127,6 +127,12 @@ func newDuckAnalytics(path string, bolt *bbolt.DB) (*DuckAnalytics, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
+	if memLimit := os.Getenv("DUCKDB_MEMORY_LIMIT"); memLimit != "" {
+		if _, err := db.Exec("SET memory_limit='" + memLimit + "'"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("set duckdb memory limit: %w", err)
+		}
+	}
 	schema := `
 CREATE TABLE IF NOT EXISTS usage_events (
  event_id VARCHAR PRIMARY KEY, proxy_request_id VARCHAR NOT NULL, usage_sequence INTEGER NOT NULL,
