@@ -670,10 +670,10 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
         <button onClick={() => navigator.clipboard.writeText(platforms[setupPlatform])}>COPY</button>
       </div>}
     </div>)}
-    {!showMint ? <button className="quiet-button" style={{marginTop:8}} onClick={() => setShowMint(true)}>+ ADD CLIENT</button> : <form className="access-form client-create" onSubmit={create} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
+    {clients.length === 0 && !showMint ? <div className="empty-state" style={{padding:16}}><p style={{margin:"0 0 8px"}}>No clients yet. Create one to get setup commands.</p><button className="gold-button" onClick={() => setShowMint(true)}>CREATE FIRST CLIENT</button></div> : !showMint ? <button className="quiet-button" style={{marginTop:8}} onClick={() => setShowMint(true)}>+ ADD CLIENT</button> : <form className="access-form client-create" onSubmit={create} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
       <label style={{flex:1}}><span>Label</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook" maxLength={80} required autoFocus /></label>
       <button className="gold-button">CREATE</button>
-      <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>
+      {clients.length > 0 && <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>}
     </form>}
   </section>;
 }
@@ -687,6 +687,7 @@ function Passes() {
   const [editing, setEditing] = useState<GuestPass | null>(null);
   const [fresh, setFresh] = useState<{ link: string; setupToken?: string } | null>(null);
   const [showForm, setShowForm] = useState(false);
+  useEffect(() => { if (passes.length === 0) setShowForm(true); }, [passes.length]);
   const [error, setError] = useState("");
   const refresh = useCallback(async () => { try { setPasses(await loadPasses()); setError(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load passes"); } }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -707,7 +708,7 @@ function Passes() {
   const act = async (action: () => Promise<unknown>) => { try { await action(); await refresh(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Pass action failed"); } };
   return <section className="view-stack">
     {error && <div className="signal-error" role="alert">{error}</div>}
-    {fresh && <div className="setup-secret"><span>PASS READY</span><code>{window.location.origin + fresh.link}</code><button onClick={() => navigator.clipboard.writeText(window.location.origin + fresh.link)}>COPY LINK</button>{fresh.setupToken && <><code>{fresh.setupToken}</code><button onClick={() => navigator.clipboard.writeText(fresh.setupToken || "")}>COPY TOKEN</button></>}<small>Multi-use link. Revokable anytime.</small></div>}
+    {fresh && <div className="setup-secret"><code>{window.location.origin + fresh.link}</code><button onClick={() => navigator.clipboard.writeText(window.location.origin + fresh.link)}>COPY LINK</button>{fresh.setupToken && <><code>{fresh.setupToken}</code><button onClick={() => navigator.clipboard.writeText(fresh.setupToken || "")}>COPY TOKEN</button></>}</div>}
     <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
       <h2 className="panel-title" style={{margin:0}}>GUEST PASSES</h2>
       {!showForm && <button className="gold-button" onClick={() => { setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); setShowForm(true); }}>NEW PASS</button>}
