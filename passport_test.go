@@ -102,8 +102,20 @@ func TestLegacySignupClaimsExistingPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.ID != user.ID || principal.Kind != PrincipalMember || principal.Username != "nicole" {
+	// First legacy signup becomes operator when none exists.
+	if principal.ID != user.ID || principal.Kind != PrincipalOperator || principal.Username != "nicole" {
 		t.Fatalf("claimed principal=%+v", principal)
+	}
+	// Second signup should be a member since operator now exists.
+	user2 := &PoolUser{ID: "legacy-person-2", Token: "legacy-download-token-2", Email: "legacy2@pool.local", PlanType: "pro", CreatedAt: time.Now()}
+	legacy.users[user2.ID] = user2
+	legacy.byTok[user2.Token] = user2
+	principal2, _, _, err := passport.claimLegacyAccount("bob", "BobLong2803!!", user2.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal2.Kind != PrincipalMember {
+		t.Fatalf("second signup should be member, got %s", principal2.Kind)
 	}
 }
 

@@ -6,21 +6,51 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
+	"log"
 	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
 
-//go:embed templates/local_landing.html templates/og-image.png templates/og-image-transparent.webp
+//go:embed templates/local_landing.html templates/friend_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.webp
 var friendContent embed.FS
 
 //go:embed web/dist/index.html web/dist/assets/*
 var signalRoomContent embed.FS
 
 func (h *proxyHandler) serveFriendLanding(w http.ResponseWriter, r *http.Request) {
+	data, err := friendContent.ReadFile("templates/friend_landing.html")
+	if err != nil {
+		http.Error(w, "internal error: template missing", http.StatusInternalServerError)
+		return
+	}
+	noStore(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl, err := template.New("friend").Parse(string(data))
+	if err != nil {
+		http.Error(w, "internal error: template parse failed", http.StatusInternalServerError)
+		return
+	}
+	friendName := "PP"
+	tagline := "For those who are friends, unlimited pooled AI resources await."
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
+	_ = tmpl.Execute(w, map[string]string{
+		"FriendName": friendName,
+		"PublicURL":  h.getEffectivePublicURL(r),
+		"Tagline":    tagline,
+	})
+}
+
+func (h *proxyHandler) servePassportSPA(w http.ResponseWriter, r *http.Request) {
 	data, err := signalRoomContent.ReadFile("web/dist/index.html")
 	if err != nil {
 		http.Error(w, "internal error: signal room missing", http.StatusInternalServerError)
@@ -94,6 +124,154 @@ func wantsPowerShell(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+func (h *proxyHandler) serveCuteCodeLanding(w http.ResponseWriter, r *http.Request) {
+	data, err := friendContent.ReadFile("templates/cute_code_landing.html")
+	if err != nil {
+		http.Error(w, "internal error: template missing", http.StatusInternalServerError)
+		return
+	}
+	tmpl, err := template.New("cute-code").Parse(string(data))
+	if err != nil {
+		http.Error(w, "internal error: template parse failed", http.StatusInternalServerError)
+		return
+	}
+	publicURL := h.getEffectivePublicURL(r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	_ = tmpl.Execute(w, map[string]string{"PublicURL": publicURL})
+}
+
+func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.cfg == nil || h.cfg.legacyFriendCode == "" {
+		http.Error(w, "feature disabled", http.StatusForbidden)
+		return
+	}
+
+	ip := getClientIP(r)
+	if h.bruteForce != nil && h.bruteForce.isBanned(ip) {
+		http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
+
+	var req struct {
+		FriendCode string `json:"friend_code"`
+		Email      string `json:"user_email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if req.FriendCode != h.cfg.legacyFriendCode {
+		if h.bruteForce != nil {
+			h.bruteForce.recordFailure(ip)
+		}
+		respondJSONError(w, http.StatusForbidden, "Invalid Friend Code")
+		return
+	}
+
+	if h.bruteForce != nil {
+		h.bruteForce.recordSuccess(ip)
+	}
+
+	if h.poolUsers == nil {
+		if getPoolJWTSecret() == "" {
+			respondJSONError(w, http.StatusServiceUnavailable, "System error: Pool user system not configured (missing JWT secret).")
+			return
+		}
+		respondJSONError(w, http.StatusServiceUnavailable, "System error: User storage not initialized.")
+		return
+	}
+
+	email := req.Email
+	if email == "" {
+		guestDomain := "pool.local"
+		if pubURL := getPublicURL(); pubURL != "" {
+			if u, err := url.Parse(pubURL); err == nil && u.Host != "" {
+				host := u.Hostname()
+				if net.ParseIP(host) == nil {
+					guestDomain = host
+				}
+			}
+		}
+		email = "guest@" + guestDomain
+	}
+
+	var newUser *PoolUser
+	if existing := h.poolUsers.GetByEmail(email); existing != nil {
+		newUser = existing
+	} else {
+		newUser = &PoolUser{
+			ID:        randomHex(8),
+			Token:     randomHex(16),
+			Email:     email,
+			PlanType:  "pro",
+			CreatedAt: time.Now(),
+		}
+		if err := h.poolUsers.Create(newUser); err != nil {
+			log.Printf("failed to create friend user: %v", err)
+			respondJSONError(w, http.StatusInternalServerError, "Failed to create user account.")
+			return
+		}
+	}
+
+	secret := getPoolJWTSecret()
+	authData, err := generateCodexAuth(secret, newUser)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate credentials.")
+		return
+	}
+	authJSONBytes, _ := json.MarshalIndent(authData, "", "  ")
+
+	geminiAuthData, err := generateGeminiAuth(secret, newUser)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate gemini credentials.")
+		return
+	}
+	geminiJSONBytes, _ := json.MarshalIndent(geminiAuthData, "", "  ")
+
+	claudeAuthData, err := generateClaudeAuth(secret, newUser)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate claude credentials.")
+		return
+	}
+
+	codexAccessToken := ""
+	if authData.Tokens != nil {
+		codexAccessToken = authData.Tokens.AccessToken
+	}
+	piModelsJSON, err := generatePiModelsJSON(h.getEffectivePublicURL(r), codexAccessToken, claudeAuthData.AccessToken)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate pi models config.")
+		return
+	}
+	cuteCodeSettingsJSON, err := generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuthData.AccessToken)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "Failed to generate cute-code config.")
+		return
+	}
+
+	geminiAPIKey := generateGeminiAPIKey(secret, newUser)
+	publicURL := h.getEffectivePublicURL(r)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"public_url":              publicURL,
+		"origin_id":               hashRequestOrigin(r, poolHashSalt(h.cfg.legacyFriendCode)),
+		"download_token":          newUser.Token,
+		"auth_json":               string(authJSONBytes),
+		"gemini_auth_json":        string(geminiJSONBytes),
+		"gemini_api_key":          geminiAPIKey,
+		"claude_api_key":          claudeAuthData.AccessToken,
+		"pi_models_json":          string(piModelsJSON),
+		"cute_code_settings_json": string(cuteCodeSettingsJSON),
+	})
 }
 
 func (h *proxyHandler) generateCuteCodeSettingsForToken(token string, r *http.Request) ([]byte, error) {

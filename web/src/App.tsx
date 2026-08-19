@@ -406,7 +406,6 @@ export function App() {
             />
           )}
 		  {view === "models" && <Models models={models} />}
-          {view === "setup" && <PassportSetup />}
         </main>
       </div>
     </div>
@@ -555,12 +554,16 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
   const [nickname, setNickname] = useState(principal.display_name || "");
   const [passkeyPassword, setPasskeyPassword] = useState("");
   const [passkeyLabel, setPasskeyLabel] = useState("");
-  const [freshToken, setFreshToken] = useState("");
+  const [selectedClient, setSelectedClient] = useState("");
+  const [setupToken, setSetupToken] = useState("");
+  const [setupPlatform, setSetupPlatform] = useState("codex");
   const [error, setError] = useState("");
+  const [showProfile, setShowProfile] = useState(false);
   const refresh = useCallback(async () => {
     try {
       const [nextClients, nextUsage, nextPasskeys] = await Promise.all([loadMyClients(), loadMyUsage(), principal.kind === "guest" ? Promise.resolve([]) : loadPasskeys()]);
       setClients(nextClients); setUsage(nextUsage.hourly); setPasskeys(nextPasskeys); setError("");
+      if (!selectedClient && nextClients.length >0) setSelectedClient(nextClients.find(c => c.status === "active")?.id || nextClients[0].id);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load your signal"); }
   }, [principal.kind]);
   useEffect(() => { refresh(); }, [refresh]);
@@ -573,10 +576,34 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
     hours.set(key, existing);
     return hours;
   }, new Map<string, { hour: string; tokens: number }>()).values()).sort((a, b) => a.hour.localeCompare(b.hour));
+  const active = clients.find(c => c.id === selectedClient);
+  const base = window.location.origin;
+  const platforms: Record<string, string> = {
+    codex: `curl -sL "${base}/setup/codex/${setupToken}" | bash`,
+    claude: `source <(curl -sL "${base}/setup/claude/${setupToken}")`,
+    gemini: `curl -sL "${base}/setup/gemini/${setupToken}" | bash`,
+    grok: `curl -sL "${base}/setup/grok/${setupToken}" | bash`,
+    "cute-code": `curl -sL "${base}/setup/cute-code/${setupToken}" | bash`,
+    pi: `curl -sL "${base}/setup/pi/${setupToken}" | bash`,
+  };
   const create = async (event: FormEvent) => {
     event.preventDefault();
-    try { const result = await createMyClient(label); setFreshToken(result.setup_token); setLabel(""); await refresh(); }
+    try { const result = await createMyClient(label); setSetupToken(result.setup_token); setLabel(""); await refresh(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to mint client credential"); }
+  };
+  const reveal = async () => {
+    if (!selectedClient) return;
+    try { const result = await revealMyClient(selectedClient); setSetupToken(result.setup_token); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal setup token"); }
+  };
+  const rotate = async (client: ClientCredential) => {
+    try { const result = await rotateMyClient(client.id); setSetupToken(result.setup_token); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to rotate credential"); }
+  };
+  const revoke = async (client: ClientCredential) => {
+    if (!window.confirm(`Revoke ${client.label}? Existing credentials for it will stop working.`)) return;
+    try { await revokeMyClient(client.id); setSetupToken(""); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to revoke credential"); }
   };
   const saveProfile = async (event: FormEvent) => {
     event.preventDefault();
@@ -598,74 +625,76 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to add passkey"); }
   };
   const deletePasskey = async (passkey: PasskeyCredential) => {
-    if (!window.confirm(`Remove ${passkey.label}? You will no longer be able to sign in with it.`)) return;
+    if (!window.confirm(`Remove ${passkey.label}?`)) return;
     try { await removePasskey(passkey.id); await refresh(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to remove passkey"); }
   };
-  const rotate = async (client: ClientCredential) => {
-    try { const result = await rotateMyClient(client.id); setFreshToken(result.setup_token); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to rotate credential"); }
-  };
-  const revoke = async (client: ClientCredential) => {
-    if (!window.confirm(`Revoke ${client.label}? Existing credentials for it will stop working.`)) return;
-    try { await revokeMyClient(client.id); await refresh(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to revoke credential"); }
-  };
   return <section className="view-stack">
-    <h2 className="panel-title">M.10 // YOUR SIGNAL</h2>
-    {error && <div className="signal-error" role="alert">SIGNAL INTERRUPTED // {error}</div>}
+    {error && <div className="signal-error" role="alert">{error}</div>}
     <div className="identity-strip">
       <div className="passport-avatar">{principal.avatar_url ? <img src={principal.avatar_url} alt="" /> : <span>{(principal.display_name || principal.email || "G").slice(0, 2).toUpperCase()}</span>}</div>
-      <div><strong>{principal.display_name || principal.email || `GUEST ${principal.id.slice(0, 8)}`}</strong><small>{principal.kind.toUpperCase()} // {principal.status.toUpperCase()}</small></div>
+      <div><strong>{principal.display_name || principal.email || `GUEST ${principal.id.slice(0, 8)}`}</strong><small>{principal.kind.toUpperCase()}</small></div>
+      <button className="quiet-button" style={{marginLeft:"auto"}} onClick={() => setShowProfile(!showProfile)}>{showProfile ? "CLOSE" : "EDIT PROFILE"}</button>
     </div>
+    {showProfile && <div className="mine-grid" style={{marginBottom:12}}>
+      <SignalPanel code="P.10" title="PROFILE">
+        <form className="access-form" onSubmit={saveProfile}><label><span>Nickname</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} maxLength={48} placeholder="How you appear in the pool" /></label><button className="gold-button">SAVE</button></form>
+        <label className="avatar-upload"><span>AVATAR // PNG OR JPEG, 2 MB MAX</span><input type="file" accept="image/png,image/jpeg" onChange={(event) => uploadAvatar(event.target.files?.[0])} /></label>
+        {principal.kind !== "guest" && browserSupportsWebAuthn() && <><form className="passkey-form" onSubmit={registerPasskey}><strong>ADD A PASSKEY</strong><label><span>Label</span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} placeholder="MacBook Touch ID" maxLength={80} required /></label><label><span>Password</span><input type="password" value={passkeyPassword} onChange={(event) => setPasskeyPassword(event.target.value)} autoComplete="current-password" required /></label><button className="quiet-button">REGISTER</button></form><div className="passkey-list">{passkeys.map((pk) => <div key={pk.id}><span><strong>{pk.label}</strong><small>{pk.last_used_at ? `USED ${new Date(pk.last_used_at).toLocaleDateString()}` : `ADDED ${new Date(pk.created_at).toLocaleDateString()}`}</small></span><button className="danger-action" onClick={() => deletePasskey(pk)}>REMOVE</button></div>)}</div></>}
+      </SignalPanel>
+    </div>}
     <div className="instrument-grid">
       <Instrument label="7D BILLABLE" value={formatTokens(total)} accent />
-      <Instrument label="API-EQUIVALENT VALUE" value={`$${cost.toFixed(2)}`} />
-      <Instrument label="CLIENTS" value={String(clients.filter((client) => client.status === "active").length)} />
-      <Instrument label="PASSTHROUGH" value="EXCLUDED" />
+      <Instrument label="API VALUE" value={`$${cost.toFixed(2)}`} />
+      <Instrument label="CLIENTS" value={String(clients.filter(c => c.status === "active").length)} />
     </div>
     <div className="mine-grid">
-      <SignalPanel code="M.11" title="HOURLY TOKEN BURN">
-        {chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Billable tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /><Legend /></BarChart></div> : <div className="empty-state">Nothing burned yet. Run something.</div>}
+      <SignalPanel code="M.11" title="TOKEN BURN">
+        {chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(v) => String(v).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(v) => compact.format(Number(v))} /><Tooltip /><Legend /></BarChart></div> : <div className="empty-state">Nothing burned yet.</div>}
       </SignalPanel>
-      <SignalPanel code="M.12" title="PROFILE">
-        <form className="access-form" onSubmit={saveProfile}><label><span>Nickname</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} maxLength={48} placeholder="How you appear in the pool" /></label><button className="gold-button">SAVE NAME</button></form>
-        <label className="avatar-upload"><span>AVATAR // PNG OR JPEG, 2 MB MAX</span><input type="file" accept="image/png,image/jpeg" onChange={(event) => uploadAvatar(event.target.files?.[0])} /></label>
-        {principal.kind !== "guest" && browserSupportsWebAuthn() && <><form className="passkey-form" onSubmit={registerPasskey}><strong>ADD A PASSKEY</strong><label><span>Passkey label</span><input value={passkeyLabel} onChange={(event) => setPasskeyLabel(event.target.value)} placeholder="MacBook Touch ID" maxLength={80} required /></label><label><span>Confirm current password</span><input type="password" value={passkeyPassword} onChange={(event) => setPasskeyPassword(event.target.value)} autoComplete="current-password" required /></label><button className="quiet-button">REGISTER PASSKEY</button></form><div className="passkey-list" aria-label="Your passkeys">{passkeys.length === 0 ? <small>No passkeys enrolled.</small> : passkeys.map((passkey) => <div key={passkey.id}><span><strong>{passkey.label}</strong><small>{passkey.last_used_at ? `LAST USED ${new Date(passkey.last_used_at).toLocaleString()}` : `ADDED ${new Date(passkey.created_at).toLocaleDateString()}`}</small></span><button className="danger-action" onClick={() => deletePasskey(passkey)}>REMOVE</button></div>)}</div></>}
+      <SignalPanel code="M.12" title="SETUP">
+        <div className="setup-selector">
+          <label><span>CLIENT</span>
+            <select value={selectedClient} onChange={(e) => { setSelectedClient(e.target.value); setSetupToken(""); }}>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.label} ({c.status})</option>)}
+            </select>
+          </label>
+          <button className="gold-button" onClick={reveal} disabled={!selectedClient}>REVEAL</button>
+        </div>
+        {setupToken && <div className="setup-secret" role="status">
+          <div className="tabs" style={{display:"flex",gap:6,marginBottom:8}}>
+            {Object.keys(platforms).map(p => <button key={p} className={classNames("tab", setupPlatform===p && "active")} onClick={() => setSetupPlatform(p)}>{p.toUpperCase()}</button>)}
+          </div>
+          <code>{platforms[setupPlatform]}</code>
+          <button onClick={() => navigator.clipboard.writeText(platforms[setupPlatform])}>COPY</button>
+        </div>}
+        <form className="access-form client-create" onSubmit={create} style={{marginTop:12}}>
+          <label><span>NEW CLIENT</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. MacBook)" maxLength={80} required /></label>
+          <button className="gold-button">MINT</button>
+        </form>
       </SignalPanel>
     </div>
-    <h2 className="panel-title">M.20 // CLIENT CREDENTIALS</h2>
-    <form className="access-form client-create" onSubmit={create}><label><span>Machine or context label</span><input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="MacBook" maxLength={80} required /></label><button className="gold-button">MINT CLIENT</button></form>
-    {freshToken && <div className="setup-secret" role="status"><span>NEW SETUP TOKEN</span><code>{freshToken}</code><button onClick={() => navigator.clipboard.writeText(freshToken)}>COPY</button><small>This token opens the setup files for this client. Rotate it if it was exposed.</small></div>}
+    <h2 className="panel-title">CLIENTS</h2>
     <div className="account-table" role="table" aria-label="Client credentials">
-      {clients.map((client) => <div className="account-row client-row" role="row" key={client.id}><span role="cell"><strong>{client.label}</strong><small>{client.id}</small></span><span role="cell">{client.status.toUpperCase()}</span><span role="cell">{client.last_seen_at ? new Date(client.last_seen_at).toLocaleString() : "NEVER SEEN"}</span><span role="cell" className="row-actions"><button onClick={() => rotate(client)}>ROTATE</button>{client.status === "active" && <button className="danger-action" onClick={() => revoke(client)}>REVOKE</button>}</span></div>)}
+      {clients.map((client) => <div className="account-row client-row" role="row" key={client.id}>
+        <span role="cell"><strong>{client.label}</strong><small>{client.id}</small></span>
+        <span role="cell">{client.status.toUpperCase()}</span>
+        <span role="cell">{client.last_seen_at ? new Date(client.last_seen_at).toLocaleDateString() : "NEVER"}</span>
+        <span role="cell" className="row-actions"><button onClick={() => rotate(client)}>ROTATE</button>{client.status === "active" && <button className="danger-action" onClick={() => revoke(client)}>REVOKE</button>}</span>
+      </div>)}
     </div>
-    <h2 className="panel-title">M.30 // USAGE LEDGER</h2>
+    <h2 className="panel-title">USAGE</h2>
     <div className="account-table" role="table" aria-label="Usage by client">
-      {usage.length === 0 ? <div className="empty-state">Nothing burned yet. Run something.</div> : usage.slice(-100).reverse().map((row) => <div className="account-row" role="row" key={`${row.hour}-${row.account_type}-${row.client_credential_id}`}><span role="cell">{new Date(row.hour).toLocaleString()}</span><span role="cell">{row.account_type.toUpperCase()}</span><span role="cell">{clients.find((client) => client.id === row.client_credential_id)?.label || row.client_credential_id}</span><span role="cell">{formatTokens(row.billable_tokens)}</span></div>)}
+      {usage.length === 0 ? <div className="empty-state">Nothing burned yet.</div> : usage.slice(-50).reverse().map((row) => <div className="account-row" role="row" key={`${row.hour}-${row.account_type}-${row.client_credential_id}`}>
+        <span role="cell">{new Date(row.hour).toLocaleString()}</span>
+        <span role="cell">{row.account_type.toUpperCase()}</span>
+        <span role="cell">{clients.find(c => c.id === row.client_credential_id)?.label || row.client_credential_id}</span>
+        <span role="cell">{formatTokens(row.billable_tokens)}</span>
+      </div>)}
     </div>
-    <p className="section-note">Labels follow the token, not the hardware. API-equivalent value is provider list-price value, not marginal subscription spend. Pool totals exclude bring-your-own-key passthrough.</p>
   </section>;
 }
 
-function PassportSetup() {
-  const [clients, setClients] = useState<ClientCredential[]>([]);
-  const [selectedID, setSelectedID] = useState("");
-  const [token, setToken] = useState("");
-  const [error, setError] = useState("");
-  useEffect(() => { loadMyClients().then((items) => { const active = items.filter((item) => item.status === "active"); setClients(active); setSelectedID(active[0]?.id || ""); }).catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to load setup clients")); }, []);
-  const reveal = async () => { try { const result = await revealMyClient(selectedID); setToken(result.setup_token); setError(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal setup token"); } };
-  const base = window.location.origin;
-  const commands = token ? [
-    ["CODEX", `curl -sL "${base}/setup/codex/${token}" | bash`],
-    ["CLAUDE CODE", `source <(curl -sL "${base}/setup/claude/${token}")`],
-    ["GEMINI", `curl -sL "${base}/setup/gemini/${token}" | bash`],
-    ["GROK", `curl -sL "${base}/setup/grok/${token}" | bash`],
-    ["CUTE CODE", `curl -sL "${base}/setup/cute-code/${token}" | bash`],
-    ["PI", `curl -sL "${base}/setup/pi/${token}" | bash`],
-  ] : [];
-  return <section className="view-stack"><h2 className="panel-title">S.10 // CLIENT SETUP</h2>{error && <div className="signal-error" role="alert">SETUP INTERRUPTED // {error}</div>}<div className="setup-selector"><label><span>CLIENT CREDENTIAL</span><select value={selectedID} onChange={(event) => { setSelectedID(event.target.value); setToken(""); }}>{clients.map((client) => <option key={client.id} value={client.id}>{client.label}</option>)}</select></label><button className="gold-button" onClick={reveal} disabled={!selectedID}>REVEAL SETUP</button><p>The setup token grants access to this client credential. Reveal it only when installing a client; rotate the credential if the token is exposed.</p></div>{commands.length === 0 ? <div className="empty-state">Choose a labelled client credential to generate setup commands.</div> : <div className="passport-setup-list">{commands.map(([label, command]) => <div key={label}><strong>{label}</strong><code>{command}</code><button onClick={() => navigator.clipboard.writeText(command)}>COPY</button></div>)}</div>}</section>;
-}
 
 function Passes() {
   const [passes, setPasses] = useState<GuestPass[]>([]);
@@ -674,6 +703,7 @@ function Passes() {
   const [expiry, setExpiry] = useState("");
   const [editing, setEditing] = useState<GuestPass | null>(null);
   const [fresh, setFresh] = useState<{ link: string; setupToken?: string } | null>(null);
+  const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState("");
   const refresh = useCallback(async () => { try { setPasses(await loadPasses()); setError(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load passes"); } }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -687,30 +717,30 @@ function Passes() {
         const result = await createPass(note, displayName, expiresAt);
         setFresh({ link: result.link, setupToken: result.setup_token });
       }
-      setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); await refresh();
+      setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); setShowForm(false); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save pass"); }
   };
-  const beginEdit = (pass: GuestPass) => { setEditing(pass); setNote(pass.note); setDisplayName(pass.display_name || ""); setExpiry(pass.expires_at ? new Date(pass.expires_at).toISOString().slice(0, 16) : ""); };
+  const beginEdit = (pass: GuestPass) => { setEditing(pass); setNote(pass.note); setDisplayName(pass.display_name || ""); setExpiry(pass.expires_at ? new Date(pass.expires_at).toISOString().slice(0, 16) : ""); setShowForm(true); };
   const act = async (action: () => Promise<unknown>) => { try { await action(); await refresh(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Pass action failed"); } };
   return <section className="view-stack">
-    <h2 className="panel-title">P.10 // GUEST PASSES</h2>
-    {error && <div className="signal-error" role="alert">PASS CHANNEL INTERRUPTED // {error}</div>}
-    <div className="passes-layout">
-      <form className="pass-form" onSubmit={submit}>
-        <label><span>Private note // required</span><textarea value={note} onChange={(event) => setNote(event.target.value)} maxLength={300} placeholder="Dave from climbing" required /></label>
-        <label><span>Guest-facing name // optional</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={48} placeholder="Dave" /></label>
-        <label><span>Expiry // optional</span><input type="datetime-local" value={expiry} onChange={(event) => setExpiry(event.target.value)} /></label>
-        <div className="join-actions"><button className="gold-button">{editing ? "SAVE PASS" : "CREATE AND COPY"}</button>{editing && <button type="button" className="quiet-button" onClick={() => { setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); }}>CANCEL</button>}</div>
-        <p className="section-note">The note is visible only to members and the operator. No expiry means the link remains valid until revoked.</p>
-      </form>
-      {fresh && <div className="setup-secret"><span>PASS READY</span><code>{window.location.origin + fresh.link}</code><button onClick={() => navigator.clipboard.writeText(window.location.origin + fresh.link)}>COPY MAGIC LINK</button>{fresh.setupToken && <><code>{fresh.setupToken}</code><button onClick={() => navigator.clipboard.writeText(fresh.setupToken || "")}>COPY SETUP TOKEN</button></>}<small>The magic link is multi-use. Anyone holding it can enter until you revoke or rotate it.</small></div>}
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    {fresh && <div className="setup-secret"><span>PASS READY</span><code>{window.location.origin + fresh.link}</code><button onClick={() => navigator.clipboard.writeText(window.location.origin + fresh.link)}>COPY LINK</button>{fresh.setupToken && <><code>{fresh.setupToken}</code><button onClick={() => navigator.clipboard.writeText(fresh.setupToken || "")}>COPY TOKEN</button></>}<small>Multi-use link. Revokable anytime.</small></div>}
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+      <h2 className="panel-title" style={{margin:0}}>GUEST PASSES</h2>
+      {!showForm && <button className="gold-button" onClick={() => { setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); setShowForm(true); }}>NEW PASS</button>}
     </div>
+    {showForm && <form className="pass-form" onSubmit={submit} style={{marginBottom:12}}>
+      <label><span>Who is this for?</span><textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} placeholder="Dave from climbing" required /></label>
+      <label><span>Name (optional)</span><input value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={48} placeholder="Dave" /></label>
+      <label><span>Expiry (optional)</span><input type="datetime-local" value={expiry} onChange={(e) => setExpiry(e.target.value)} /></label>
+      <div className="join-actions"><button className="gold-button">{editing ? "SAVE" : "CREATE"}</button><button type="button" className="quiet-button" onClick={() => { setShowForm(false); setEditing(null); }}>CANCEL</button></div>
+    </form>}
     <div className="pass-list" role="list" aria-label="Guest passes">
-      {passes.length === 0 ? <div className="empty-state">No guest passes yet. Write who it is for, then send the link.</div> : passes.map((pass) => <article className="pass-row" role="listitem" key={pass.id}>
+      {passes.length === 0 ? <div className="empty-state">No passes yet.</div> : passes.map((pass) => <article className="pass-row" role="listitem" key={pass.id}>
         <div className="passport-avatar small">{pass.avatar_url ? <img src={pass.avatar_url} alt="" /> : <span>{(pass.display_name || "G").slice(0, 2).toUpperCase()}</span>}</div>
-        <div className="pass-identity"><strong>{pass.note}</strong><span>{pass.display_name || `GUEST ${pass.id.slice(0, 8)}`}</span><small>{pass.expires_at ? `EXPIRES ${new Date(pass.expires_at).toLocaleString()}` : "NO EXPIRY"} // {pass.clients} CLIENT{pass.clients === 1 ? "" : "S"}</small></div>
+        <div className="pass-identity"><strong>{pass.note}</strong><span>{pass.display_name || pass.id.slice(0, 8)}</span><small>{pass.expires_at ? `EXPIRES ${new Date(pass.expires_at).toLocaleDateString()}` : "NO EXPIRY"} // {pass.clients} CLIENT{pass.clients === 1 ? "" : "S"}</small></div>
         <span className={classNames("pass-status", pass.status !== "active" && "inactive")}>{pass.status.toUpperCase()}</span>
-        <div className="row-actions"><button onClick={() => navigator.clipboard.writeText(window.location.origin + pass.link)}>COPY</button><button onClick={() => beginEdit(pass)}>EDIT</button><button onClick={() => act(async () => { const result = await rotatePassLink(pass.id); setFresh({ link: result.link }); })}>ROTATE LINK</button>{pass.status === "active" ? <button className="danger-action" onClick={() => window.confirm(`Revoke the pass for ${pass.note}?`) && act(() => revokePass(pass.id))}>REVOKE</button> : <button onClick={() => act(() => restorePass(pass.id))}>RESTORE</button>}</div>
+        <div className="row-actions"><button onClick={() => navigator.clipboard.writeText(window.location.origin + pass.link)}>COPY</button><button onClick={() => beginEdit(pass)}>EDIT</button><button onClick={() => act(async () => { const result = await rotatePassLink(pass.id); setFresh({ link: result.link }); })}>ROTATE</button>{pass.status === "active" ? <button className="danger-action" onClick={() => window.confirm(`Revoke ${pass.note}?`) && act(() => revokePass(pass.id))}>REVOKE</button> : <button onClick={() => act(() => restorePass(pass.id))}>RESTORE</button>}</div>
       </article>)}
     </div>
   </section>;
@@ -808,8 +838,8 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
 
 function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
   const passportItems: Array<[View, string, string]> = principal?.kind === "guest"
-    ? [["mine", "MINE", "◑"], ["setup", "SETUP", "⌘"]]
-    : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MINE", "◑"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
+    ? [["mine", "STATS", "◑"]]
+    : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MY STATS", "◑"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"]];
   const items: Array<[View, string, string]> = principal ? passportItems : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "USAGE", "╱"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
   return (
     <nav className="signal-nav" aria-label="Signal room">

@@ -325,11 +325,20 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Static routes
 	switch r.URL.Path {
-	case "/", "/join", "/recover":
+	case "/":
 		h.serveFriendLanding(w, r)
 		return
+	case "/app":
+		h.servePassportSPA(w, r)
+		return
+	case "/join", "/recover":
+		h.servePassportSPA(w, r)
+		return
 	case "/cute-code":
-		h.serveFriendLanding(w, r)
+		h.serveCuteCodeLanding(w, r)
+		return
+	case "/api/friend/claim":
+		h.handleFriendClaim(w, r)
 		return
 	case "/status":
 		h.serveStatusPage(w, r)
