@@ -623,6 +623,8 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 
 	resp := map[string]any{
 		"plan_type": "pool", // Indicate this is a pool, not a single account
+		// Keep this response compatible with the upstream WHAM schema. Codex
+		// app-server decodes the reset-credit summary as a structured value.
 		"rate_limit_reset_credits": map[string]any{
 			"available_count": 0,
 		},
@@ -631,22 +633,6 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 			"limit_reached":    codexWeeklyUsed > 0.9,
 			"primary_window":   codexUsageWindowResponse(codexSlots.Primary, now),
 			"secondary_window": codexUsageWindowResponse(codexSlots.Secondary, now),
-		},
-		// Pool-specific stats
-		"pool": map[string]any{
-			"total_accounts":    poolStats.TotalCount,
-			"healthy_accounts":  poolStats.HealthyCount,
-			"dead_accounts":     poolStats.DeadCount,
-			"codex_accounts":    poolStats.CodexCount,
-			"gemini_accounts":   poolStats.GeminiCount,
-			"claude_accounts":   poolStats.ClaudeCount,
-			"zai_accounts":      poolStats.ZAICount,
-			"avg_primary_pct":   int(poolStats.AvgPrimaryUsed * 100),
-			"avg_secondary_pct": int(poolStats.AvgSecondaryUsed * 100),
-			"min_secondary_pct": int(poolStats.MinSecondaryUsed * 100),
-			"max_secondary_pct": int(poolStats.MaxSecondaryUsed * 100),
-			"accounts":          poolStats.Accounts,
-			"providers":         poolStats.Providers,
 		},
 	}
 	if h.cfg.debug.Load() {
