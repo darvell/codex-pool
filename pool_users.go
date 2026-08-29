@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,12 +17,21 @@ import (
 
 // PoolUser represents a generated pool user who can use the proxy.
 type PoolUser struct {
-	ID        string    `json:"id"`
-	Token     string    `json:"token"` // Download token for /config/codex/<token>
-	Email     string    `json:"email"`
-	PlanType  string    `json:"plan_type"` // pro, team, plus
-	CreatedAt time.Time `json:"created_at"`
-	Disabled  bool      `json:"disabled"`
+	ID                 string    `json:"id"`
+	Token              string    `json:"token"` // Download token for /config/codex/<token>
+	Email              string    `json:"email"`
+	PlanType           string    `json:"plan_type"` // pro, team, plus
+	CreatedAt          time.Time `json:"created_at"`
+	Disabled           bool      `json:"disabled"`
+	credentialIssuedAt time.Time
+}
+
+func poolCredentialIssuedAt(user *PoolUser) time.Time {
+	now := time.Now().UTC()
+	if user != nil && user.credentialIssuedAt.After(now) {
+		return user.credentialIssuedAt.UTC()
+	}
+	return now
 }
 
 // PoolUserStore manages pool user persistence.
@@ -158,6 +168,37 @@ func hmacSign(secret string, data []byte) []byte {
 	return h.Sum(nil)
 }
 
+func generatePoolRefreshToken(secret, identity string, issuedAt time.Time) string {
+	nonce := randomHex(16)
+	issuedUnix := issuedAt.Unix()
+	payload := fmt.Sprintf("%s|%d|%s", identity, issuedUnix, nonce)
+	signature := hex.EncodeToString(hmacSign(secret, []byte(payload)))
+	return fmt.Sprintf("poolrt_%s_%d_%s_%s", identity, issuedUnix, nonce, signature)
+}
+
+func parsePoolRefreshToken(secret, token string) (identity string, issuedAt time.Time, signed, ok bool) {
+	if secret == "" || !strings.HasPrefix(token, "poolrt_") {
+		return "", time.Time{}, false, false
+	}
+	parts := strings.Split(strings.TrimPrefix(token, "poolrt_"), "_")
+	if len(parts) == 2 {
+		return parts[0], time.Time{}, false, parts[0] != "" && parts[1] != ""
+	}
+	if len(parts) != 4 || parts[0] == "" || parts[2] == "" || parts[3] == "" {
+		return "", time.Time{}, false, false
+	}
+	issuedUnix, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || issuedUnix <= 0 {
+		return "", time.Time{}, false, false
+	}
+	payload := fmt.Sprintf("%s|%d|%s", parts[0], issuedUnix, parts[2])
+	provided, err := hex.DecodeString(parts[3])
+	if err != nil || !hmac.Equal(hmacSign(secret, []byte(payload)), provided) {
+		return "", time.Time{}, false, false
+	}
+	return parts[0], time.Unix(issuedUnix, 0).UTC(), true, true
+}
+
 // validatePoolUserJWT checks if a JWT was signed with our secret and returns the claims.
 func validatePoolUserJWT(secret, token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
@@ -194,45 +235,36 @@ func validatePoolUserJWT(secret, token string) (map[string]any, error) {
 	return claims, nil
 }
 
-// isPoolUserToken checks if the Authorization header contains a pool user JWT.
-// Returns (isPoolUser, userID, error).
-func isPoolUserToken(secret, authHeader string) (bool, string, error) {
-	if secret == "" {
-		return false, "", nil
+// parsePoolUserToken checks if the Authorization header contains a pool user JWT
+// and returns its composite principal/client identity and signed issue time.
+func parsePoolUserToken(secret, authHeader string) (string, time.Time, bool) {
+	if secret == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", time.Time{}, false
 	}
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return false, "", nil
-	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-
-	claims, err := validatePoolUserJWT(secret, token)
+	claims, err := validatePoolUserJWT(secret, strings.TrimPrefix(authHeader, "Bearer "))
 	if err != nil {
-		return false, "", nil // Not a valid pool user token
+		return "", time.Time{}, false
 	}
-
-	// Check issuer - accept OpenAI (Codex), Google (Gemini), and Anthropic (Claude)
-	if iss, ok := claims["iss"].(string); ok {
-		validIssuers := map[string]bool{
-			"https://auth.openai.com":     true, // Codex
-			"https://accounts.google.com": true, // Gemini
-			"https://auth.anthropic.com":  true, // Claude
-		}
-		if !validIssuers[iss] {
-			return false, "", nil
-		}
-	} else {
-		return false, "", nil
+	iss, ok := claims["iss"].(string)
+	if !ok || (iss != "https://auth.openai.com" && iss != "https://accounts.google.com" && iss != "https://auth.anthropic.com") {
+		return "", time.Time{}, false
 	}
-
-	// Extract user ID from sub claim (pool|<user_id>)
-	if sub, ok := claims["sub"].(string); ok {
-		if strings.HasPrefix(sub, "pool|") {
-			userID := strings.TrimPrefix(sub, "pool|")
-			return true, userID, nil
-		}
+	sub, ok := claims["sub"].(string)
+	if !ok || !strings.HasPrefix(sub, "pool|") {
+		return "", time.Time{}, false
 	}
+	iat, _ := claims["iat"].(float64)
+	issuedAt := time.Time{}
+	if iat > 0 {
+		issuedAt = time.Unix(int64(iat), 0).UTC()
+	}
+	return strings.TrimPrefix(sub, "pool|"), issuedAt, true
+}
 
-	return false, "", nil
+// isPoolUserToken preserves the legacy parser contract for existing callers.
+func isPoolUserToken(secret, authHeader string) (bool, string, error) {
+	identity, _, ok := parsePoolUserToken(secret, authHeader)
+	return ok, identity, nil
 }
 
 // hashUserIP creates a non-reversible ID from an IP address using SHA256.
@@ -256,7 +288,7 @@ type PoolUserGeminiAuth struct {
 
 // generateCodexAuth creates the auth.json content for a pool user.
 func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
-	now := time.Now()
+	now := poolCredentialIssuedAt(user)
 	exp := now.Add(10 * 365 * 24 * time.Hour).Unix() // 10 years
 
 	// Generate a UUID-like account ID to match OpenAI's format
@@ -344,7 +376,7 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 		return nil, err
 	}
 
-	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
+	refreshToken := generatePoolRefreshToken(secret, user.ID, now)
 
 	return &CodexAuthJSON{
 		// Codex Desktop resolves auth.json files with OPENAI_API_KEY as API-key
@@ -365,7 +397,7 @@ func generateCodexAuth(secret string, user *PoolUser) (*CodexAuthJSON, error) {
 // Note: We use Google-like token formats (ya29.* and 1//*) so the Gemini CLI
 // doesn't reject them during local validation. The pool validates these tokens.
 func generateGeminiAuth(secret string, user *PoolUser) (*PoolUserGeminiAuth, error) {
-	now := time.Now()
+	now := poolCredentialIssuedAt(user)
 	exp := now.Add(365 * 24 * time.Hour).Unix() // 1 year
 	expiryDateMs := now.Add(365 * 24 * time.Hour).UnixMilli()
 
@@ -411,110 +443,84 @@ func generateGeminiAuth(secret string, user *PoolUser) (*PoolUserGeminiAuth, err
 // Format: AIzaSy-pool-<user_id>.<timestamp>.<signature>
 // This bypasses OAuth completely and lets Gemini CLI work with our proxy.
 func generateGeminiAPIKey(secret string, user *PoolUser) string {
-	timestamp := time.Now().Unix()
+	timestamp := poolCredentialIssuedAt(user).Unix()
 	payload := fmt.Sprintf("%s.%d", user.ID, timestamp)
 	sig := hmacSign(secret, []byte(payload))
 	return fmt.Sprintf("AIzaSy-pool-%s.%d.%s", user.ID, timestamp, base64.RawURLEncoding.EncodeToString(sig)[:16])
 }
 
-// isGeminiOAuthPoolToken checks if a Bearer token is a pool-generated Gemini OAuth token.
-// Returns (isPoolToken, userID).
-// Pool tokens have format: ya29.pool-<base64 payload>_<base64 signature>
-func isGeminiOAuthPoolToken(secret, token string) (bool, string) {
+// parseGeminiOAuthPoolToken checks a pool-generated Gemini OAuth token and
+// returns its composite principal/client identity and signed issue time.
+func parseGeminiOAuthPoolToken(secret, token string) (string, time.Time, bool) {
 	if secret == "" || !strings.HasPrefix(token, "ya29.pool-") {
-		return false, ""
+		return "", time.Time{}, false
 	}
-
-	// Extract rest: ya29.pool-<payload>_<signature>
-	//
-	// Note: payload and signature are base64url strings, and base64url *can contain* "_".
-	// We therefore cannot safely split on "_" and expect exactly 2 parts.
 	rest := strings.TrimPrefix(token, "ya29.pool-")
 	if rest == "" {
-		return false, ""
+		return "", time.Time{}, false
 	}
-
-	tryParse := func(payloadB64, sigB64 string) (bool, string) {
-		// Decode payload
+	tryParse := func(payloadB64, sigB64 string) (string, time.Time, bool) {
 		payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
 		if err != nil {
-			return false, ""
+			return "", time.Time{}, false
 		}
-
-		// Decode signature
 		providedSig, err := base64.RawURLEncoding.DecodeString(sigB64)
-		if err != nil {
-			return false, ""
+		if err != nil || !hmac.Equal(hmacSign(secret, payloadBytes), providedSig) {
+			return "", time.Time{}, false
 		}
-
-		// Verify signature
-		expectedSig := hmacSign(secret, payloadBytes)
-		if !hmac.Equal(expectedSig, providedSig) {
-			return false, ""
-		}
-
-		// Extract user_id from payload
 		var payload struct {
 			UserID string `json:"user_id"`
 			Exp    int64  `json:"exp"`
+			IAT    int64  `json:"iat"`
 		}
-		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-			return false, ""
+		if json.Unmarshal(payloadBytes, &payload) != nil || payload.UserID == "" || payload.IAT <= 0 {
+			return "", time.Time{}, false
 		}
-
-		// Check expiry
 		if payload.Exp > 0 && payload.Exp < time.Now().Unix() {
-			return false, "" // Expired
+			return "", time.Time{}, false
 		}
-
-		return true, payload.UserID
+		return payload.UserID, time.Unix(payload.IAT, 0).UTC(), true
 	}
-
-	// Try every possible split position. Only the correct one will pass HMAC validation.
+	// Base64url may contain underscores, so only HMAC verification identifies the split.
 	for i := 0; i < len(rest); i++ {
 		if rest[i] != '_' {
 			continue
 		}
-		payloadB64 := rest[:i]
-		sigB64 := rest[i+1:]
-		if payloadB64 == "" || sigB64 == "" {
-			continue
-		}
-		if ok, uid := tryParse(payloadB64, sigB64); ok {
-			return true, uid
+		if identity, issuedAt, ok := tryParse(rest[:i], rest[i+1:]); ok {
+			return identity, issuedAt, true
 		}
 	}
-
-	return false, ""
+	return "", time.Time{}, false
 }
 
-// isPoolGeminiAPIKey checks if an API key is a pool-generated Gemini key.
-// Returns (isPoolKey, userID, error).
-func isPoolGeminiAPIKey(secret, apiKey string) (bool, string, error) {
+func isGeminiOAuthPoolToken(secret, token string) (bool, string) {
+	identity, _, ok := parseGeminiOAuthPoolToken(secret, token)
+	return ok, identity
+}
+
+func parsePoolGeminiAPIKey(secret, apiKey string) (string, time.Time, bool) {
 	if secret == "" || !strings.HasPrefix(apiKey, "AIzaSy-pool-") {
-		return false, "", nil
+		return "", time.Time{}, false
 	}
-
-	// Extract parts: AIzaSy-pool-<user_id>.<timestamp>.<signature>
-	rest := strings.TrimPrefix(apiKey, "AIzaSy-pool-")
-	parts := strings.Split(rest, ".")
-	if len(parts) != 3 {
-		return false, "", nil
+	parts := strings.Split(strings.TrimPrefix(apiKey, "AIzaSy-pool-"), ".")
+	if len(parts) != 3 || parts[0] == "" {
+		return "", time.Time{}, false
 	}
-
-	userID := parts[0]
-	timestampStr := parts[1]
-	providedSig := parts[2]
-
-	// Verify signature
-	payload := fmt.Sprintf("%s.%s", userID, timestampStr)
-	expectedSig := base64.RawURLEncoding.EncodeToString(hmacSign(secret, []byte(payload)))[:16]
-
-	if providedSig != expectedSig {
-		return false, "", nil
+	expectedSig := base64.RawURLEncoding.EncodeToString(hmacSign(secret, []byte(parts[0]+"."+parts[1])))[:16]
+	if !hmac.Equal([]byte(parts[2]), []byte(expectedSig)) {
+		return "", time.Time{}, false
 	}
+	issuedUnix, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || issuedUnix <= 0 {
+		return "", time.Time{}, false
+	}
+	return parts[0], time.Unix(issuedUnix, 0).UTC(), true
+}
 
-	return true, userID, nil
+// isPoolGeminiAPIKey preserves the legacy parser contract for existing callers.
+func isPoolGeminiAPIKey(secret, apiKey string) (bool, string, error) {
+	identity, _, ok := parsePoolGeminiAPIKey(secret, apiKey)
+	return ok, identity, nil
 }
 
 // getPoolJWTSecret returns the JWT signing secret from config or env.
@@ -564,11 +570,12 @@ type PoolUserClaudeAuth struct {
 // (CLAUDE_CODE_OAUTH_TOKEN) but contains an embedded user ID and signature for pool
 // authentication.
 func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, error) {
+	issuedAt := poolCredentialIssuedAt(user)
 	// Generate a fake sk-ant-oat01 token with embedded pool user info.
 	// Format: sk-ant-oat01-pool-<base64url(userID.timestamp.signature)>
-	accessToken := generateClaudePoolToken(secret, user.ID)
+	accessToken := generateClaudePoolTokenAt(secret, user.ID, issuedAt)
 
-	refreshToken := fmt.Sprintf("poolrt_%s_%s", user.ID, randomHex(16))
+	refreshToken := generatePoolRefreshToken(secret, user.ID, issuedAt)
 
 	return &PoolUserClaudeAuth{
 		AccessToken:  accessToken,
@@ -590,7 +597,11 @@ const ClaudePoolTokenLegacyPrefix = "sk-ant-api-pool-"
 // generateClaudePoolToken creates a fake Claude OAuth token with embedded pool user info.
 // Format: sk-ant-oat01-pool-<base64url(userID.timestamp.signature)>
 func generateClaudePoolToken(secret, userID string) string {
-	now := time.Now().Unix()
+	return generateClaudePoolTokenAt(secret, userID, time.Now().UTC())
+}
+
+func generateClaudePoolTokenAt(secret, userID string, issuedAt time.Time) string {
+	now := issuedAt.Unix()
 	// Create payload: userID.timestamp
 	payload := fmt.Sprintf("%s.%d", userID, now)
 	// Sign it
@@ -603,11 +614,9 @@ func generateClaudePoolToken(secret, userID string) string {
 	return ClaudePoolTokenPrefix + encoded
 }
 
-// parseClaudePoolToken extracts the user ID from a pool-generated Claude token.
-// Returns (userID, isValid).
-func parseClaudePoolToken(secret, token string) (string, bool) {
+func parseClaudePoolCredential(secret, token string) (string, time.Time, bool) {
 	if secret == "" {
-		return "", false
+		return "", time.Time{}, false
 	}
 	var encoded string
 	switch {
@@ -616,27 +625,30 @@ func parseClaudePoolToken(secret, token string) (string, bool) {
 	case strings.HasPrefix(token, ClaudePoolTokenLegacyPrefix):
 		encoded = strings.TrimPrefix(token, ClaudePoolTokenLegacyPrefix)
 	default:
-		return "", false
+		return "", time.Time{}, false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
-	// Parse: userID.timestamp.signature
 	parts := strings.Split(string(data), ".")
-	if len(parts) != 3 {
-		return "", false
+	if len(parts) != 3 || parts[0] == "" {
+		return "", time.Time{}, false
 	}
-	userID := parts[0]
-	timestamp := parts[1]
-	providedSig := parts[2]
-	// Verify signature
-	payload := fmt.Sprintf("%s.%s", userID, timestamp)
-	h := hmac.New(sha256.New, []byte(secret))
-	h.Write([]byte(payload))
-	expectedSig := hex.EncodeToString(h.Sum(nil))[:16]
-	if !hmac.Equal([]byte(expectedSig), []byte(providedSig)) {
-		return "", false
+	payload := parts[0] + "." + parts[1]
+	expectedSig := hex.EncodeToString(hmacSign(secret, []byte(payload)))[:16]
+	if !hmac.Equal([]byte(expectedSig), []byte(parts[2])) {
+		return "", time.Time{}, false
 	}
-	return userID, true
+	issuedUnix, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || issuedUnix <= 0 {
+		return "", time.Time{}, false
+	}
+	return parts[0], time.Unix(issuedUnix, 0).UTC(), true
+}
+
+// parseClaudePoolToken preserves the legacy parser contract for existing callers.
+func parseClaudePoolToken(secret, token string) (string, bool) {
+	identity, _, ok := parseClaudePoolCredential(secret, token)
+	return identity, ok
 }

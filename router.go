@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -193,6 +194,11 @@ func serveNoopCodexAppsMCP(w http.ResponseWriter, r *http.Request) {
 // checkAdminAuth verifies the admin token from its request header.
 // Returns true if authorized, false if not (and sends 401 response).
 func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if h.passport != nil {
+		if principal, _ := h.passport.authenticate(r); principal != nil && principal.Kind == PrincipalOperator {
+			return true
+		}
+	}
 	ip := getClientIP(r)
 	if h.bruteForce != nil && h.bruteForce.isBanned(ip) {
 		http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
@@ -226,49 +232,62 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 	return true
 }
 
-// checkAdminOrFriendAuth verifies either the admin token or the friend code.
-// This is used for "pool stats" endpoints that are intended to be accessible in friend mode
-// (with the friend code) while still allowing admin access when configured.
-func (h *proxyHandler) checkAdminOrFriendAuth(w http.ResponseWriter, r *http.Request) bool {
+// checkMemberOrAdminAuth permits a live member/operator session or the
+// break-glass admin token. The retired friend code is never an authority input.
+func (h *proxyHandler) checkMemberOrAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if h.passport != nil {
+		if principal, _ := h.passport.authenticate(r); principal != nil {
+			if principal.Kind == PrincipalMember || principal.Kind == PrincipalOperator {
+				return true
+			}
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return false
+		}
+	}
 	ip := getClientIP(r)
 	if h.bruteForce != nil && h.bruteForce.isBanned(ip) {
 		http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
 		return false
 	}
-
-	// If nothing is configured, treat as an open/local deployment.
-	if h.cfg.adminToken == "" && h.cfg.friendCode == "" {
+	if h.cfg.adminToken != "" && r.Header.Get("X-Admin-Token") == h.cfg.adminToken {
+		if h.bruteForce != nil {
+			h.bruteForce.recordSuccess(ip)
+		}
 		return true
 	}
-
-	// Admin credentials are header-only for the same reason as friend codes.
-	if h.cfg.adminToken != "" {
-		headerToken := r.Header.Get("X-Admin-Token")
-		if headerToken == h.cfg.adminToken {
-			if h.bruteForce != nil {
-				h.bruteForce.recordSuccess(ip)
-			}
-			return true
-		}
-	}
-
-	// Friend credentials are accepted only in a header. Query-string secrets
-	// leak into browser history, reverse-proxy logs, analytics, and referrers.
-	if h.cfg.friendCode != "" {
-		headerCode := r.Header.Get("X-Friend-Code")
-		if headerCode == h.cfg.friendCode {
-			if h.bruteForce != nil {
-				h.bruteForce.recordSuccess(ip)
-			}
-			return true
-		}
-	}
-
 	if h.bruteForce != nil {
 		h.bruteForce.recordFailure(ip)
 	}
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false
+}
+
+type providerContributionActorKey struct{}
+
+func (h *proxyHandler) checkProviderContributionAuth(w http.ResponseWriter, r *http.Request) bool {
+	if h.passport != nil {
+		if principal, session := h.passport.authenticate(r); principal != nil && (principal.Kind == PrincipalMember || principal.Kind == PrincipalOperator) {
+			if !h.passportCSRF(r, session) {
+				respondJSONError(w, http.StatusForbidden, "invalid CSRF token")
+				return false
+			}
+			*r = *r.WithContext(context.WithValue(r.Context(), providerContributionActorKey{}, principal.ID))
+			return true
+		}
+	}
+	if !h.checkMemberOrAdminAuth(w, r) {
+		return false
+	}
+	*r = *r.WithContext(context.WithValue(r.Context(), providerContributionActorKey{}, "break-glass"))
+	return true
+}
+
+func providerContributionActor(r *http.Request) string {
+	actor, _ := r.Context().Value(providerContributionActorKey{}).(string)
+	if actor == "" {
+		return "unknown"
+	}
+	return actor
 }
 
 // ServeHTTP routes incoming requests to the appropriate handler.
@@ -307,10 +326,19 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Static routes
 	switch r.URL.Path {
 	case "/":
+		h.servePassportSPA(w, r)
+		return
+	case "/friend":
 		h.serveFriendLanding(w, r)
+		return
+	case "/join", "/recover":
+		h.servePassportSPA(w, r)
 		return
 	case "/cute-code":
 		h.serveCuteCodeLanding(w, r)
+		return
+	case "/api/friend/claim":
+		h.handleFriendClaim(w, r)
 		return
 	case "/status":
 		h.serveStatusPage(w, r)
@@ -321,11 +349,77 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/hero.png", "/hero.webp":
 		h.serveHeroImage(w, r)
 		return
-	case "/api/friend/claim":
-		h.handleFriendClaim(w, r)
+	case "/api/auth/login":
+		h.handlePassportLogin(w, r)
+		return
+	case "/api/auth/config":
+		h.handleAuthConfig(w, r)
+		return
+	case "/api/auth/signup":
+		h.handleLegacySignup(w, r)
+		return
+	case "/api/auth/legacy":
+		h.handlePassportLegacyExchange(w, r)
+		return
+	case "/api/auth/join":
+		h.handleJoin(w, r)
+		return
+	case "/api/auth/recover":
+		h.handleMemberRecovery(w, r)
+		return
+	case "/api/auth/me":
+		h.handlePassportMe(w, r)
+		return
+	case "/api/auth/logout":
+		h.handlePassportLogout(w, r)
+		return
+	case "/api/auth/passkey/begin":
+		h.handleWebAuthnLoginBegin(w, r)
+		return
+	case "/api/auth/passkey/finish":
+		h.handleWebAuthnLoginFinish(w, r)
+		return
+	case "/api/me/passkeys":
+		h.handlePasskeys(w, r)
+		return
+	case "/api/me/passkeys/register/begin":
+		h.handleWebAuthnRegisterBegin(w, r)
+		return
+	case "/api/me/passkeys/register/finish":
+		h.handleWebAuthnRegisterFinish(w, r)
+		return
+	case "/api/me/profile":
+		h.handlePassportProfile(w, r)
+		return
+	case "/api/me/avatar":
+		h.handlePassportAvatarUpload(w, r)
+		return
+	case "/api/passes":
+		h.handlePasses(w, r)
+		return
+	case "/api/me/clients":
+		h.handlePassportClients(w, r)
+		return
+	case "/api/me/usage":
+		h.handlePassportUsage(w, r)
+		return
+	case "/api/console/principals":
+		h.handleConsolePrincipals(w, r)
+		return
+	case "/api/console/members":
+		h.handleConsoleMembers(w, r)
+		return
+	case "/api/console/audit":
+		h.handleConsoleAudit(w, r)
+		return
+	case "/api/console/analytics-health":
+		h.handleConsoleAnalyticsHealth(w, r)
+		return
+	case "/api/setup/operator":
+		h.handleOperatorBootstrap(w, r)
 		return
 	case "/api/pool/stats":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handlePoolStats(w, r)
@@ -334,37 +428,37 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleWhoami(w, r)
 		return
 	case "/api/pool/users":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handlePoolUsers(w, r)
 		return
 	case "/api/pool/origins":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handlePoolOrigins(w, r)
 		return
 	case "/api/pool/daily-breakdown":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handleDailyBreakdown(w, r)
 		return
 	case "/api/pool/hourly":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handleGlobalHourly(w, r)
 		return
 	case "/api/pool/signal":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handleSignalAnalytics(w, r)
 		return
 	case "/api/pool/catalog":
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		if r.Method != http.MethodGet {
@@ -383,7 +477,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.checkAdminAuth(w, r) {
 			return
 		}
-		h.metrics.serve(w, r)
+		h.serveOperationalMetrics(w, r)
 		return
 	case "/admin/reload":
 		if !h.checkAdminAuth(w, r) {
@@ -505,7 +599,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// User daily usage: /api/pool/users/:id/daily
 	if strings.HasPrefix(r.URL.Path, "/api/pool/users/") && strings.HasSuffix(r.URL.Path, "/daily") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handleUserDaily(w, r)
@@ -514,7 +608,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// User hourly usage: /api/pool/users/:id/hourly
 	if strings.HasPrefix(r.URL.Path, "/api/pool/users/") && strings.HasSuffix(r.URL.Path, "/hourly") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkMemberOrAdminAuth(w, r) {
 			return
 		}
 		h.handleUserHourly(w, r)
@@ -554,7 +648,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Friends may contribute new provider credentials, but cannot inspect raw
 	// account identities, remove accounts, or mutate existing provider state.
 	if strings.HasPrefix(r.URL.Path, "/api/pool/accounts/") {
-		if !h.checkAdminOrFriendAuth(w, r) {
+		if !h.checkProviderContributionAuth(w, r) {
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -693,6 +787,31 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasPrefix(r.URL.Path, "/api/avatars/") {
+		h.handlePassportAvatar(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/me/passkeys/") {
+		h.handlePasskeys(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/me/clients/") {
+		h.handlePassportClientItem(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/passes/") {
+		h.handlePassItem(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/principals/") {
+		h.handlePrincipalItem(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/console/principals/") && strings.HasSuffix(r.URL.Path, "/usage") {
+		h.handleConsolePrincipalUsage(w, r)
+		return
+	}
+
 	// Config download routes (no auth - token is the auth)
 	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") || strings.HasPrefix(r.URL.Path, "/config/pi/") || strings.HasPrefix(r.URL.Path, "/config/grok/") {
 		h.serveConfigDownload(w, r)
@@ -712,19 +831,27 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Special case: aggregate usage for client; do not hit upstream.
+	// CLI-local responses use the same live principal/client authorization as proxy traffic.
 	if isUsageRequest(r) {
+		if !h.requirePoolCredential(w, r) {
+			return
+		}
 		h.pollUpstreamUsage()
 		h.handleAggregatedUsage(w, reqID)
 		return
 	}
 
-	// Claude-specific endpoints - return pool info instead of individual account info
 	if isClaudeProfileRequest(r) {
+		if !h.requirePoolCredential(w, r) {
+			return
+		}
 		h.handleClaudeProfile(w, r)
 		return
 	}
 	if isClaudeUsageRequest(r) {
+		if !h.requirePoolCredential(w, r) {
+			return
+		}
 		h.handleClaudeUsage(w, r)
 		return
 	}

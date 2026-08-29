@@ -124,17 +124,11 @@ The sign-in flow uses Antigravity's shipped Google OAuth client and its fixed `h
 
 ---
 
-## Friends Mode
+## Pool Passport
 
-Pool accounts with friends. Set a code, share the URL:
+Members sign in with a username or email and may add a passkey. Members and operators can create revocable guest passes whose magic links open the pool directly. Each principal can keep separately labelled client credentials and inspect token usage over time; operators can manage principals, provider accounts, passes, audit events, and analytics health from the Signal Room.
 
-```toml
-# config.toml
-friend_code = "secret-code"
-friend_name = "YourName"
-```
-
-They log in, get setup instructions, start using the pool. You see everyone's usage in analytics.
+Existing pool-user IDs and credentials migrate into guest principals. During the migration window, the former `friend_code` lets an existing holder choose a username and password; when the browser still has its old setup token, Passport claims the same principal ID and preserves its history. The code never authorizes ordinary API or provider requests. Clear it after migration to disable further account claims while the independently persisted analytics salt keeps historical origin hashes stable.
 
 ---
 
@@ -143,16 +137,18 @@ They log in, get setup instructions, start using the pool. You see everyone's us
 ```toml
 listen_addr = "127.0.0.1:8989"
 pool_dir = "pool"
+db_path = "./data/proxy.db"
+public_url = "https://pool.example.com"
 
-# Friends mode
-friend_code = "your-secret"
-friend_name = "YourName"
+# Migration-only salt seed. Remove only after Passport has persisted analytics_salt.
+friend_code = "former-secret"
 
-# Multi-user tracking
 [pool_users]
-admin_password = "admin"
-jwt_secret = "32-char-secret-for-jwt-tokens!!"
+jwt_secret = "32-char-secret-for-existing-tokens"
+storage_path = "./data/pool_users.json"
 ```
+
+Set `POOL_AUTH_ENCRYPTION_KEY` to a stable 32-byte secret (hex or base64) before starting Passport. `ADMIN_TOKEN` remains the break-glass operator credential.
 
 Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly (no retries). Default is 16777216 (16 MiB).
 

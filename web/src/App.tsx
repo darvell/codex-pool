@@ -1,4 +1,5 @@
 import { type CSSProperties, type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { browserSupportsWebAuthn, startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import {
   Area,
   AreaChart,
@@ -16,7 +17,6 @@ import {
   type DitherColor,
 } from "./components/dither-kit";
 import {
-  claim,
 	  antigravityOAuthStatus,
   clearFriendSession,
   contributeAPIKey,
@@ -24,21 +24,52 @@ import {
   exchangeAccountOAuth,
 	  exchangeAntigravityOAuth,
   loadAdminAccounts,
-	loadLiveCuteCodeSettings,
-	loadLivePiModels,
+  legacySignup,
 	loadModelCatalog,
   loadPoolStats,
   loadSignalAnalytics,
+  loadPassportMe,
+  exchangeLegacySession,
+  passportJoin,
+  passportLogin,
+  passportLogout,
+  beginPasskeyLogin,
+  finishPasskeyLogin,
+  beginPasskeyRegistration,
+  finishPasskeyRegistration,
+  loadPasskeys,
+  removePasskey,
+  redeemMemberRecovery,
+  createMemberLink,
+  updateMyProfile,
+  uploadMyAvatar,
+  loadMyClients,
+  createMyClient,
+  rotateMyClient,
+  revealMyClient,
+  revokeMyClient,
+  loadPasses,
+  createPass,
+  updatePass,
+  revokePass,
+  restorePass,
+  rotatePassLink,
+  loadMyUsage,
+  loadConsolePrincipals,
+  loadConsolePrincipalUsage,
+  loadConsoleAudit,
+  loadAnalyticsHealth,
+  setPrincipalStatus,
   lockOperator,
   mutateAccount,
   reloadAccounts,
   storedAdminToken,
-  storedFriendCode,
-  storedFriendEmail,
   storedFriendSession,
   startAccountOAuth,
 	  startAntigravityOAuth,
   unlockOperator,
+  loadAuthConfig,
+  operatorBootstrap,
 } from "./api";
 import {
   accountFlow,
@@ -55,7 +86,13 @@ import {
 import type {
   AccountStats,
   AdminAccount,
-  FriendSession,
+  GuestPass,
+  PasskeyCredential,
+  PassportPrincipal,
+  ClientCredential,
+  ConsolePrincipal,
+  PassportAuditEntry,
+  PassportUsagePoint,
   HourlyUsage,
 	ModelDailyUsage,
 	ModelDescriptor,
@@ -68,7 +105,7 @@ import type {
   SignalAnalytics,
 } from "./types";
 
-type View = "pulse" | "insights" | "usage" | "accounts" | "models" | "setup";
+type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "setup";
 
 const PROVIDERS: Record<Provider, { label: string; color: string; dither: DitherColor; glyph: string }> = {
   codex: { label: "Codex", color: "#39e75f", dither: "green", glyph: "◎" },
@@ -206,9 +243,12 @@ function classNames(...values: Array<string | false | null | undefined>) {
 }
 
 export function App() {
-  const [session, setSession] = useState<FriendSession | null>(storedFriendSession());
-  const [booting, setBooting] = useState(Boolean(storedFriendCode() && storedFriendSession()));
+  const [passport, setPassport] = useState<PassportPrincipal | null>(null);
+  const [booting, setBooting] = useState(true);
   const [view, setView] = useState<View>("pulse");
+  const [pendingJoin, setPendingJoin] = useState<{ token: string; current: PassportPrincipal } | null>(null);
+  const [recoveryToken, setRecoveryToken] = useState("");
+  const [joinError, setJoinError] = useState("");
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [signal, setSignal] = useState<SignalAnalytics | null>(null);
 	const [models, setModels] = useState<ModelDescriptor[]>([]);
@@ -218,7 +258,6 @@ export function App() {
   const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([]);
 
   const refresh = useCallback(async () => {
-    if (!storedFriendCode()) return;
     setLoading(true);
     try {
 	  const [nextStats, nextSignal, nextCatalog] = await Promise.all([loadPoolStats(), loadSignalAnalytics(), loadModelCatalog()]);
@@ -234,29 +273,62 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const savedCode = storedFriendCode();
-    if (!savedCode || !session) {
-      setBooting(false);
-      return;
-    }
-    claim(savedCode, storedFriendEmail())
-      .then((fresh) => {
-        setSession(fresh);
-        return refresh();
-      })
-      .catch(() => {
-        clearFriendSession();
-        setSession(null);
-      })
-      .finally(() => setBooting(false));
+    const boot = async () => {
+      const memberToken = window.location.pathname === "/recover" ? decodeURIComponent(window.location.hash.replace(/^#/, "")) : "";
+      if (memberToken) {
+        window.history.replaceState(null, "", "/recover");
+        setRecoveryToken(memberToken);
+        return;
+      }
+      const joinToken = window.location.pathname === "/join" ? decodeURIComponent(window.location.hash.replace(/^#/, "")) : "";
+      if (joinToken) {
+        window.history.replaceState(null, "", "/");
+        try {
+          const result = await passportJoin(joinToken);
+          if (result.switch_required && result.current) {
+            setPendingJoin({ token: joinToken, current: result.current });
+            return;
+          }
+          if (result.principal) {
+            setPassport(result.principal);
+            setView("mine");
+            if (result.principal.kind !== "guest") await refresh();
+            return;
+          }
+        } catch (cause) {
+          setJoinError(cause instanceof Error ? cause.message : "This pass is unavailable");
+          return;
+        }
+      }
+      try {
+        const principal = await loadPassportMe();
+        setPassport(principal);
+        if (principal.kind === "guest") setView("mine");
+        else await refresh();
+      } catch {
+        const legacy = storedFriendSession();
+        if (legacy?.download_token) {
+          try {
+            const principal = await exchangeLegacySession(legacy.download_token);
+            clearFriendSession();
+            setPassport(principal);
+            setView("mine");
+            return;
+          } catch {
+            clearFriendSession();
+          }
+        }
+      }
+    };
+    boot().finally(() => setBooting(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!session) return;
+    if (!passport || passport.kind === "guest") return;
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => window.clearInterval(timer);
-  }, [session, refresh]);
+  }, [passport, refresh]);
 
   useEffect(() => {
     if (!operatorToken) return;
@@ -270,13 +342,30 @@ export function App() {
   }, [operatorToken]);
 
   if (booting) return <BootScreen />;
-  if (!session) {
-    return <AccessGate onAccess={(next) => { setSession(next); refresh(); }} />;
+  if (recoveryToken && !passport) return <MemberRecovery token={recoveryToken} onAccess={(next) => { setRecoveryToken(""); setPassport(next); setView("mine"); refresh(); }} />;
+  if (pendingJoin) {
+    return <JoinSwitch current={pendingJoin.current} onCancel={() => setPendingJoin(null)} onConfirm={async () => {
+      try {
+        const result = await passportJoin(pendingJoin.token, true);
+        if (result.principal) {
+          setPassport(result.principal);
+          setPendingJoin(null);
+          setView("mine");
+        }
+      } catch (cause) {
+        setPendingJoin(null);
+        setJoinError(cause instanceof Error ? cause.message : "This pass is unavailable");
+      }
+    }} />;
+  }
+  if (!passport) {
+    return joinError ? <JoinUnavailable /> : <AccessGate onAccess={(next) => { setPassport(next); setView(next.kind === "guest" ? "mine" : "pulse"); if (next.kind !== "guest") refresh(); }} />;
   }
 
-  const signOut = () => {
+  const signOut = async () => {
+    if (passport) await passportLogout().catch(() => undefined);
     clearFriendSession();
-    setSession(null);
+    setPassport(null);
     setStats(null);
     setSignal(null);
   };
@@ -288,16 +377,18 @@ export function App() {
         stats={stats}
         loading={loading}
         operator={Boolean(operatorToken)}
-        onRefresh={refresh}
+        onRefresh={passport?.kind === "guest" ? () => undefined : refresh}
         onLock={() => { lockOperator(); setOperatorToken(""); setAdminAccounts([]); }}
       />
       <div className="app-grid">
-        <Navigation view={view} onChange={setView} onSignOut={signOut} />
+        <Navigation view={view} principal={passport} onChange={setView} onSignOut={signOut} />
         <main className="signal-main" id="main-content">
-          {error && <div className="signal-error" role="alert">SIGNAL INTERRUPTED // {error}</div>}
+          {error && <div className="signal-error" role="alert"> {error}</div>}
           {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
           {view === "insights" && <Insights stats={stats} signal={signal} onAccounts={() => setView("accounts")} />}
-          {view === "usage" && <Usage stats={stats} signal={signal} session={session} />}
+          {view === "mine" && <PassportMine principal={passport} onPrincipal={setPassport} />}
+          {view === "passes" && passport && passport.kind !== "guest" && <Passes />}
+          {view === "console" && passport && passport.kind !== "guest" && <PassportConsole principal={passport} />}
           {view === "accounts" && (
             <Accounts
               stats={stats}
@@ -315,7 +406,7 @@ export function App() {
             />
           )}
 		  {view === "models" && <Models models={models} />}
-          {view === "setup" && <Setup session={session} />}
+          {view === "setup" && <SetupPage />}
         </main>
       </div>
     </div>
@@ -336,49 +427,523 @@ function BootScreen() {
   );
 }
 
-function AccessGate({ onAccess }: { onAccess: (session: FriendSession) => void }) {
-  const [code, setCode] = useState(storedFriendCode());
-  const [email, setEmail] = useState(storedFriendEmail());
+function JoinUnavailable() {
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><img src="/hero.webp" alt="" className="access-mark" /><h1>Pass unavailable</h1><p>It may have expired or been revoked.</p><button className="gold-button" onClick={() => { window.history.replaceState(null, "", "/"); window.location.reload(); }}>SIGN IN</button></div></div>;
+}
+
+function JoinSwitch({ current, onConfirm, onCancel }: { current: PassportPrincipal; onConfirm: () => void | Promise<void>; onCancel: () => void }) {
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><img src="/hero.webp" alt="" className="access-mark" /><h1>Switch accounts?</h1><p>Signed in as {current.display_name || current.email || current.id.slice(0, 8)}. This replaces your current session.</p><div className="join-actions"><button className="gold-button" onClick={onConfirm}>SWITCH</button><button className="quiet-button" onClick={onCancel}>KEEP CURRENT</button></div></div></div>;
+}
+
+function MemberRecovery({ token, onAccess }: { token: string; onAccess: (principal: PassportPrincipal) => void }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (password !== confirmation) { setError("Passwords do not match."); return; }
+    setBusy(true); setError("");
+    try { onAccess(await redeemMemberRecovery(token, password)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "This recovery link is unavailable."); }
+    finally { setBusy(false); }
+  };
+  return <div className="access-gate"><SignalNoise /><div className="access-frame"><img src="/hero.webp" alt="" className="access-mark" /><h1>Set your password</h1><p>Link works once. Expires in30 minutes.</p><form className="access-form" onSubmit={submit}><label><span>New password</span><input type="password" minLength={12} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required autoFocus /></label><label><span>Confirm</span><input type="password" minLength={12} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label>{error && <div className="access-error" role="alert">{error}</div>}<button className="gold-button" disabled={busy}>{busy ? "SETTING…" : "SET PASSWORD"}</button></form></div></div>;
+}
+
+function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => void }) {
+  const [mode, setMode] = useState<"login" | "signup" | "bootstrap">("login");
+  const [authConfig, setAuthConfig] = useState<{ legacy_signup: boolean; operator_exists: boolean } | null>(null);
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    loadAuthConfig().then((config) => {
+      setAuthConfig(config);
+      if (!config.operator_exists) setMode("bootstrap");
+    }).catch(() => {});
+  }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      onAccess(await claim(code.trim(), email.trim()));
+      if (mode === "bootstrap") {
+        const principal = await operatorBootstrap(username, email, password, displayName);
+        onAccess(principal);
+      } else if (mode === "signup") {
+        const legacy = storedFriendSession();
+        const principal = await legacySignup(code, username, password, legacy?.download_token || "");
+        clearFriendSession();
+        onAccess(principal);
+      } else {
+        onAccess(await passportLogin(email.trim(), password));
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Access denied");
     } finally {
       setBusy(false);
     }
   };
+  const passkey = async () => {
+    setBusy(true); setError("");
+    try {
+      const begin = await beginPasskeyLogin();
+      const credential = await startAuthentication({ optionsJSON: begin.options });
+      onAccess(await finishPasskeyLogin(begin.challenge_id, credential));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Passkey sign-in failed");
+    } finally { setBusy(false); }
+  };
+
+  const showLegacy = authConfig?.legacy_signup && mode !== "bootstrap";
 
   return (
     <div className="access-gate">
       <SignalNoise />
       <div className="access-frame">
-        <div className="access-calibration" aria-hidden="true">A.00 / PRIVATE FREQUENCY</div>
-        <img src="/hero.webp" alt="AI Pool heraldic mark" className="access-mark" />
-        <div className="access-name">Friends of PP</div>
-        <h1>Full-Spectrum Signal Room</h1>
-        <p>For the few who know. The charts are nosy.</p>
-        <form onSubmit={submit} className="access-form">
-          <label>
-            <span>Friend code</span>
-            <input value={code} onChange={(event) => setCode(event.target.value)} required autoFocus autoComplete="off" />
-          </label>
-          <label>
-            <span>Email <i>optional</i></span>
-            <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="email" />
-          </label>
-          {error && <div className="access-error" role="alert">{error}</div>}
-          <button className="gold-button" disabled={busy}>{busy ? "TUNING…" : "ENTER POOL"}</button>
-        </form>
+        <img src="/hero.webp" alt="" className="access-mark" />
+        {mode === "bootstrap" ? (
+          <>
+            <h1>Set up this pool</h1>
+            <p>Create the operator account to get started.</p>
+            <form onSubmit={submit} className="access-form">
+              <label><span>Email</span><input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required autoFocus autoComplete="email" /></label>
+              <label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label>
+              <label><span>Display name</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={48} autoComplete="name" placeholder="Optional" /></label>
+              <label><span>Password</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={12} required autoComplete="new-password" /></label>
+              {error && <div className="access-error" role="alert">{error}</div>}
+              <button className="gold-button" disabled={busy}>{busy ? "CREATING…" : "CREATE OPERATOR"}</button>
+            </form>
+          </>
+        ) : (
+          <>
+            <h1>Sign in</h1>
+            <form onSubmit={submit} className="access-form">
+              {mode === "signup" ? <><label><span>Old pool code</span><input value={code} onChange={(event) => setCode(event.target.value)} type="password" required autoFocus autoComplete="off" /></label><label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} minLength={3} maxLength={32} pattern="[A-Za-z0-9._-]+" required autoComplete="username" /></label></> : <label><span>Username or email</span><input value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus autoComplete="username" /></label>}
+              <label>
+                <span>Password</span>
+                <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={mode === "signup" ? 12 : undefined} required autoComplete={mode === "signup" ? "new-password" : "current-password"} />
+              </label>
+              {error && <div className="access-error" role="alert">{error}</div>}
+              <button className="gold-button" disabled={busy}>{busy ? "SIGNING IN…" : mode === "signup" ? "CREATE ACCOUNT" : "SIGN IN"}</button>
+              {mode === "login" && browserSupportsWebAuthn() && <button type="button" className="quiet-button" disabled={busy} onClick={passkey}>PASSKEY</button>}
+              {showLegacy && <button type="button" className="quiet-button" disabled={busy} onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setPassword(""); }}>{mode === "login" ? "HAVE AN OLD POOL CODE?" : "BACK TO SIGN IN"}</button>}
+              <small className="recovery-copy">Locked out? Ask the operator for a recovery link.</small>
+            </form>
+          </>
+        )}
       </div>
     </div>
   );
+}
+
+function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal; onPrincipal: (principal: PassportPrincipal) => void }) {
+  const [clients, setClients] = useState<ClientCredential[]>([]);
+  const [passkeys, setPasskeys] = useState<PasskeyCredential[]>([]);
+  const [usage, setUsage] = useState<PassportUsagePoint[]>([]);
+  const [label, setLabel] = useState("");
+  const [nickname, setNickname] = useState(principal.display_name || "");
+  const [passkeyPassword, setPasskeyPassword] = useState("");
+  const [passkeyLabel, setPasskeyLabel] = useState("");
+  const [setupFor, setSetupFor] = useState<string | null>(null);
+  const [setupToken, setSetupToken] = useState("");
+  const [setupPlatform, setSetupPlatform] = useState("codex");
+  const [showMint, setShowMint] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const [nextClients, nextUsage, nextPasskeys] = await Promise.all([loadMyClients(), loadMyUsage(), principal.kind === "guest" ? Promise.resolve([]) : loadPasskeys()]);
+      setClients(nextClients); setUsage(nextUsage.hourly); setPasskeys(nextPasskeys); setError("");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load your data"); }
+  }, [principal.kind]);
+  useEffect(() => { refresh(); }, [refresh]);
+  const total = usage.reduce((sum, row) => sum + row.billable_tokens, 0);
+  const cost = usage.reduce((sum, row) => sum + row.api_equivalent_cost_usd, 0);
+  const chartData = Array.from(usage.reduce((hours, row) => {
+    const key = row.hour; const existing = hours.get(key) ?? { hour: key, tokens: 0 }; existing.tokens += row.billable_tokens; hours.set(key, existing); return hours;
+  }, new Map<string, { hour: string; tokens: number }>()).values()).sort((a, b) => a.hour.localeCompare(b.hour));
+  const base = window.location.origin;
+  const platforms: Record<string, string> = {
+    codex: `curl -sL "${base}/setup/codex/${setupToken}" | bash`,
+    claude: `source <(curl -sL "${base}/setup/claude/${setupToken}")`,
+    gemini: `curl -sL "${base}/setup/gemini/${setupToken}" | bash`,
+    grok: `curl -sL "${base}/setup/grok/${setupToken}" | bash`,
+    "cute-code": `curl -sL "${base}/setup/cute-code/${setupToken}" | bash`,
+    pi: `curl -sL "${base}/setup/pi/${setupToken}" | bash`,
+  };
+  const reveal = async (clientId: string) => {
+    try { const result = await revealMyClient(clientId); setSetupFor(clientId); setSetupToken(result.setup_token); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal setup"); }
+  };
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    try { const result = await createMyClient(label); setSetupFor(result.id || clients[clients.length-1]?.id); setSetupToken(result.setup_token); setLabel(""); setShowMint(false); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create client"); }
+  };
+  const rotate = async (client: ClientCredential) => {
+    try { const result = await rotateMyClient(client.id); setSetupFor(client.id); setSetupToken(result.setup_token); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to rotate"); }
+  };
+  const revoke = async (client: ClientCredential) => {
+    if (!window.confirm(`Revoke ${client.label}?`)) return;
+    try { await revokeMyClient(client.id); if (setupFor === client.id) { setSetupFor(null); setSetupToken(""); } await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to revoke"); }
+  };
+  const saveProfile = async (event: FormEvent) => {
+    event.preventDefault();
+    try { onPrincipal(await updateMyProfile(nickname)); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save profile"); }
+  };
+  const uploadAvatar = async (file?: File) => {
+    if (!file) return;
+    try { await uploadMyAvatar(file); onPrincipal(await loadPassportMe()); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to upload"); }
+  };
+  const registerPasskey = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const begin = await beginPasskeyRegistration(passkeyPassword, passkeyLabel || "Passkey");
+      const credential = await startRegistration({ optionsJSON: begin.options });
+      await finishPasskeyRegistration(begin.challenge_id, credential);
+      setPasskeyPassword(""); setPasskeyLabel(""); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to add passkey"); }
+  };
+  const deletePasskey = async (pk: PasskeyCredential) => {
+    if (!window.confirm(`Remove ${pk.label}?`)) return;
+    try { await removePasskey(pk.id); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to remove passkey"); }
+  };
+
+  return <section className="view-stack">
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    <div className="identity-strip">
+      <div className="passport-avatar">{principal.avatar_url ? <img src={principal.avatar_url} alt="" /> : <span>{(principal.display_name || principal.email || "G").slice(0, 2).toUpperCase()}</span>}</div>
+      <div><strong>{principal.display_name || principal.email || `GUEST ${principal.id.slice(0, 8)}`}</strong><small>{principal.kind.toUpperCase()}</small></div>
+      <button className="quiet-button" style={{marginLeft:"auto"}} onClick={() => setShowProfile(!showProfile)}>{showProfile ? "CLOSE" : "PROFILE"}</button>
+    </div>
+    {showProfile && <SignalPanel code="P" title="PROFILE">
+      <form className="access-form" onSubmit={saveProfile} style={{display:"flex",gap:8,alignItems:"end"}}>
+        <label style={{flex:1}}><span>Nickname</span><input value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={48} placeholder="How you appear" /></label>
+        <button className="gold-button">SAVE</button>
+      </form>
+      <label className="avatar-upload"><span>AVATAR</span><input type="file" accept="image/png,image/jpeg" onChange={(e) => uploadAvatar(e.target.files?.[0])} /></label>
+      {principal.kind !== "guest" && browserSupportsWebAuthn() && <div style={{marginTop:8}}>
+        {passkeys.length > 0 && <div className="passkey-list">{passkeys.map((pk) => <div key={pk.id}><span><strong>{pk.label}</strong><small>{pk.last_used_at ? `USED ${new Date(pk.last_used_at).toLocaleDateString()}` : `ADDED ${new Date(pk.created_at).toLocaleDateString()}`}</small></span><button className="danger-action" onClick={() => deletePasskey(pk)}>REMOVE</button></div>)}</div>}
+        <form className="passkey-form" onSubmit={registerPasskey} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
+          <label style={{flex:1}}><span>Passkey label</span><input value={passkeyLabel} onChange={(e) => setPasskeyLabel(e.target.value)} placeholder="MacBook Touch ID" maxLength={80} required /></label>
+          <label style={{flex:1}}><span>Password</span><input type="password" value={passkeyPassword} onChange={(e) => setPasskeyPassword(e.target.value)} autoComplete="current-password" required /></label>
+          <button className="quiet-button">ADD PASSKEY</button>
+        </form>
+      </div>}
+    </SignalPanel>}
+    <div className="instrument-grid">
+      <Instrument label="7D BILLABLE" value={formatTokens(total)} accent />
+      <Instrument label="API VALUE" value={`$${cost.toFixed(2)}`} />
+      <Instrument label="CLIENTS" value={String(clients.filter(c => c.status === "active").length)} />
+    </div>
+    <SignalPanel code="M" title="TOKEN BURN">
+      {chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(v) => String(v).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(v) => compact.format(Number(v))} /><Tooltip /></BarChart></div> : <div className="empty-state">Nothing burned yet.</div>}
+    </SignalPanel>
+    <h2 className="panel-title">CLIENTS</h2>
+    {clients.map((client) => <div key={client.id} className="client-card">
+      <div className="client-header">
+        <strong>{client.label}</strong>
+        <small>{client.status.toUpperCase()}</small>
+        <div className="row-actions" style={{marginLeft:"auto"}}>
+          <button onClick={() => setupFor === client.id ? (setSetupFor(null), setSetupToken("")) : reveal(client.id)}>{setupFor === client.id ? "HIDE" : "SETUP"}</button>
+          <button onClick={() => rotate(client)}>ROTATE</button>
+          {client.status === "active" && <button className="danger-action" onClick={() => revoke(client)}>REVOKE</button>}
+        </div>
+      </div>
+      {setupFor === client.id && setupToken && <div className="setup-secret" role="status">
+        <div className="tabs" style={{display:"flex",gap:6,marginBottom:8}}>
+          {Object.keys(platforms).map(p => <button key={p} className={classNames("tab", setupPlatform===p && "active")} onClick={() => setSetupPlatform(p)}>{p.toUpperCase()}</button>)}
+        </div>
+        <code>{platforms[setupPlatform]}</code>
+        <button onClick={() => navigator.clipboard.writeText(platforms[setupPlatform])}>COPY</button>
+      </div>}
+    </div>)}
+    {clients.length === 0 && !showMint ? <div className="empty-state" style={{padding:16}}><p style={{margin:"0 0 8px"}}>No clients yet. Create one to get setup commands.</p><button className="gold-button" onClick={() => setShowMint(true)}>CREATE FIRST CLIENT</button></div> : !showMint ? <button className="quiet-button" style={{marginTop:8}} onClick={() => setShowMint(true)}>+ ADD CLIENT</button> : <form className="access-form client-create" onSubmit={create} style={{display:"flex",gap:8,alignItems:"end",marginTop:8}}>
+      <label style={{flex:1}}><span>Label</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="MacBook" maxLength={80} required autoFocus /></label>
+      <button className="gold-button">CREATE</button>
+      {clients.length > 0 && <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>}
+    </form>}
+  </section>;
+}
+
+function SetupPage() {
+  const [clients, setClients] = useState<ClientCredential[]>([]);
+  const [selected, setSelected] = useState("");
+  const [setupToken, setSetupToken] = useState("");
+  const [tool, setTool] = useState("codex");
+  const [label, setLabel] = useState("");
+  const [showMint, setShowMint] = useState(false);
+  const [copied, setCopied] = useState("");
+  const [error, setError] = useState("");
+  const base = window.location.origin;
+
+  const reveal = useCallback(async (id: string) => {
+    try { const result = await revealMyClient(id); setSelected(id); setSetupToken(result.setup_token); setError(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to reveal"); }
+  }, []);
+  const refresh = useCallback(async () => {
+    try {
+      const items = await loadMyClients();
+      setClients(items);
+      const target = items.find(c => c.id === selected) || items.find(c => c.status === "active") || items[0];
+      if (target) await reveal(target.id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load clients"); }
+  }, [selected, reveal]);
+  useEffect(() => { refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    try { const result = await createMyClient(label); setLabel(""); setShowMint(false); await refresh(); if (result.id) await reveal(result.id); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create"); }
+  };
+  const copy = (key: string, text: string) => { navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(""), 1500); };
+
+  const token = setupToken || "…";
+  const cliTools: Record<string, { name: string; install: string; oneliner: string; powershell: string; manual: { file: string; url: string }[] }> = {
+    codex: {
+      name: "CODEX",
+      install: "npm install -g @openai/codex    # or: brew install codex",
+      oneliner: `curl -sL "${base}/setup/codex/${token}" | bash`,
+      powershell: `irm "${base}/setup/codex/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.codex/auth.json", url: `${base}/config/codex/${token}` }],
+    },
+    claude: {
+      name: "CLAUDE CODE",
+      install: "npm install -g @anthropic-ai/claude-code",
+      oneliner: `source <(curl -sL "${base}/setup/claude/${token}")`,
+      powershell: `irm "${base}/setup/claude/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.claude/settings.json", url: `${base}/config/claude/${token}` }],
+    },
+    gemini: {
+      name: "GEMINI",
+      install: "npm install -g @google/gemini-cli    # or: brew install gemini-cli",
+      oneliner: `curl -sL "${base}/setup/gemini/${token}" | bash`,
+      powershell: `irm "${base}/setup/gemini/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.gemini/oauth_creds.json", url: `${base}/config/gemini/${token}` }],
+    },
+    grok: {
+      name: "GROK",
+      install: "npm install -g @xai/grok-cli",
+      oneliner: `curl -sL "${base}/setup/grok/${token}" | bash`,
+      powershell: `irm "${base}/setup/grok/${token}?shell=powershell" | iex`,
+      manual: [{ file: "grok auth", url: `${base}/config/grok/${token}` }],
+    },
+    "cute-code": {
+      name: "CUTE CODE",
+      install: "curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash",
+      oneliner: `curl -sL "${base}/setup/cute-code/${token}" | bash`,
+      powershell: `irm "${base}/setup/cute-code/${token}?shell=powershell" | iex`,
+      manual: [{ file: "~/.claude/settings.json", url: `${base}/config/cute-code/${token}` }],
+    },
+    pi: {
+      name: "PI",
+      install: "npm install -g pi-cli",
+      oneliner: `curl -sL "${base}/setup/pi/${token}" | bash`,
+      powershell: `irm "${base}/setup/pi/${token}?shell=powershell" | iex`,
+      manual: [{ file: "pi models.json", url: `${base}/config/pi/${token}` }],
+    },
+  };
+  const sdkTools: Record<string, { name: string; summary: string; examples: { label: string; code: string }[] }> = {
+    anthropic: {
+      name: "ANTHROPIC API",
+      summary: "Use the pool token as an Anthropic API key. Claude models route natively; GPT/Kimi/MiniMax/GLM/Xiaomi are translated through /v1/messages.",
+      examples: [
+        { label: "Python SDK", code: `pip install anthropic\n\nfrom anthropic import Anthropic\nclient = Anthropic(base_url="${base}", api_key="${token}")\nmsg = client.messages.create(model="claude-sonnet-5", max_tokens=1024, messages=[{"role": "user", "content": "hello"}])` },
+        { label: "Env + curl", code: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${token}"\n\ncurl "$ANTHROPIC_BASE_URL/v1/messages" \\\n  -H "x-api-key: $ANTHROPIC_API_KEY" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}'` },
+      ],
+    },
+    openai: {
+      name: "OPENAI SDK",
+      summary: "Works with the official OpenAI SDK, Cursor, Continue, Aider, LiteLLM, and any OpenAI-compatible client. Chat Completions and Responses both work; model names route automatically.",
+      examples: [
+        { label: "Python SDK", code: `pip install openai\n\nfrom openai import OpenAI\nclient = OpenAI(base_url="${base}/v1", api_key="${token}")\nresp = client.responses.create(model="gpt-5.6-sol", input="hello")` },
+        { label: "TypeScript SDK", code: `npm install openai\n\nimport OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${token}" });\nconst resp = await client.responses.create({ model: "gpt-5.6-sol", input: "hello" });` },
+        { label: "curl", code: `curl "${base}/v1/responses" \\\n  -H "Authorization: Bearer ${token}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"gpt-5.6-sol","input":"hello"}'` },
+      ],
+    },
+  };
+  const modelPills = ["claude-sonnet-5", "claude-opus-5", "gpt-5.6-sol", "gpt-5.4", "kimi-for-coding", "MiniMax-M3", "glm-5.3", "grok-4.5"];
+
+  const activeTool = cliTools[tool];
+  const activeSdk = sdkTools[tool];
+
+  return <section className="view-stack">
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    <h2 className="panel-title">SETUP</h2>
+    <div className="setup-clients">
+      {clients.map((client) => <button key={client.id} className={classNames("client-pill", selected === client.id && "active", client.status !== "active" && "inactive")} onClick={() => reveal(client.id)}>{client.label}</button>)}
+      {!showMint && clients.length > 0 && <button className="client-pill add" onClick={() => setShowMint(true)}>+ NEW</button>}
+      {showMint && <form className="access-form" onSubmit={create} style={{display:"flex",gap:8,alignItems:"center"}}>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (e.g. MacBook)" maxLength={80} required autoFocus style={{minHeight:34}} />
+        <button className="gold-button" style={{minHeight:34}}>ADD</button>
+        <button type="button" className="quiet-button" onClick={() => setShowMint(false)}>CANCEL</button>
+      </form>}
+    </div>
+    {clients.length === 0 && !showMint && <div className="empty-state" style={{padding:16}}><p style={{margin:"0 0 8px"}}>Create a client to get setup commands.</p><button className="gold-button" onClick={() => setShowMint(true)}>CREATE FIRST CLIENT</button></div>}
+    {setupToken && <>
+      <div className="tool-tabs">
+        {Object.keys(cliTools).map((key) => <button key={key} className={classNames("tab", tool === key && "active")} onClick={() => setTool(key)}>{cliTools[key].name}</button>)}
+        {Object.keys(sdkTools).map((key) => <button key={key} className={classNames("tab", tool === key && "active")} onClick={() => setTool(key)}>{sdkTools[key].name}</button>)}
+      </div>
+      {activeTool && <div className="tool-detail">
+        <div className="step-label">1 // INSTALL</div>
+        <div className="code-wrapper"><div className="code-block"><pre>{activeTool.install}</pre></div><button className="copy-btn" onClick={() => copy("install", activeTool.install)}>{copied === "install" ? "COPIED" : "COPY"}</button></div>
+        <div className="step-label">2 // CONFIGURE — AUTOMATIC</div>
+        <p className="step-note">macOS / Linux</p>
+        <div className="code-wrapper"><div className="code-block"><pre>{activeTool.oneliner}</pre></div><button className="copy-btn" onClick={() => copy("oneliner", activeTool.oneliner)}>{copied === "oneliner" ? "COPIED" : "COPY"}</button></div>
+        <p className="step-note">Windows (PowerShell)</p>
+        <div className="code-wrapper"><div className="code-block"><pre>{activeTool.powershell}</pre></div><button className="copy-btn" onClick={() => copy("ps", activeTool.powershell)}>{copied === "ps" ? "COPIED" : "COPY"}</button></div>
+        <div className="step-label">3 // MANUAL</div>
+        <p className="step-note">Fetch the config file directly and place it yourself.</p>
+        {activeTool.manual.map((item) => <div key={item.file} className="code-wrapper"><div className="code-block"><pre>{`curl -sL "${item.url}"\n# → ${item.file}`}</pre></div><button className="copy-btn" onClick={() => copy(item.file, `curl -sL "${item.url}"`)}>{copied === item.file ? "COPIED" : "COPY"}</button></div>)}
+      </div>}
+      {activeSdk && <div className="tool-detail">
+        <p className="sdk-summary">{activeSdk.summary}</p>
+        <div className="api-cards">
+          <div className="api-card"><div className="api-card-title">BASE URL</div><code>{tool === "openai" ? `${base}/v1` : base}</code></div>
+          <div className="api-card"><div className="api-card-title">AUTH</div><code>{tool === "openai" ? "Authorization: Bearer <token>" : "x-api-key: <token>"}</code></div>
+        </div>
+        {activeSdk.examples.map((ex) => <div key={ex.label}><div className="step-label">{ex.label.toUpperCase()}</div><div className="code-wrapper"><div className="code-block"><pre>{ex.code}</pre></div><button className="copy-btn" onClick={() => copy(ex.label, ex.code)}>{copied === ex.label ? "COPIED" : "COPY"}</button></div></div>)}
+        <div className="step-label">MODELS</div>
+        <div className="model-pills">{modelPills.map((m) => <span key={m} className="model-pill">{m}</span>)}</div>
+      </div>}
+    </>}
+  </section>;
+}
+
+function Passes() {
+  const [passes, setPasses] = useState<GuestPass[]>([]);
+  const [note, setNote] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [expiry, setExpiry] = useState("");
+  const [editing, setEditing] = useState<GuestPass | null>(null);
+  const [fresh, setFresh] = useState<{ link: string; setupToken?: string } | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  useEffect(() => { if (passes.length === 0) setShowForm(true); }, [passes.length]);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => { try { setPasses(await loadPasses()); setError(""); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load passes"); } }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  const expiresAt = expiry ? new Date(expiry).toISOString() : null;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      if (editing) {
+        await updatePass(editing.id, note, displayName, expiresAt);
+      } else {
+        const result = await createPass(note, displayName, expiresAt);
+        setFresh({ link: result.link, setupToken: result.setup_token });
+      }
+      setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); setShowForm(false); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to save pass"); }
+  };
+  const beginEdit = (pass: GuestPass) => { setEditing(pass); setNote(pass.note); setDisplayName(pass.display_name || ""); setExpiry(pass.expires_at ? new Date(pass.expires_at).toISOString().slice(0, 16) : ""); setShowForm(true); };
+  const act = async (action: () => Promise<unknown>) => { try { await action(); await refresh(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Pass action failed"); } };
+  return <section className="view-stack">
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    {fresh && <div className="setup-secret"><code>{window.location.origin + fresh.link}</code><button onClick={() => navigator.clipboard.writeText(window.location.origin + fresh.link)}>COPY LINK</button>{fresh.setupToken && <><code>{fresh.setupToken}</code><button onClick={() => navigator.clipboard.writeText(fresh.setupToken || "")}>COPY TOKEN</button></>}</div>}
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+      <h2 className="panel-title" style={{margin:0}}>GUEST PASSES</h2>
+      {!showForm && <button className="gold-button" onClick={() => { setEditing(null); setNote(""); setDisplayName(""); setExpiry(""); setShowForm(true); }}>NEW PASS</button>}
+    </div>
+    {showForm && <form className="pass-form" onSubmit={submit} style={{marginBottom:12}}>
+      <label><span>Who is this for?</span><textarea value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} placeholder="Dave from climbing" required /></label>
+      <label><span>Name (optional)</span><input value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={48} placeholder="Dave" /></label>
+      <label><span>Expiry (optional)</span><input type="datetime-local" value={expiry} onChange={(e) => setExpiry(e.target.value)} /></label>
+      <div className="join-actions"><button className="gold-button">{editing ? "SAVE" : "CREATE"}</button><button type="button" className="quiet-button" onClick={() => { setShowForm(false); setEditing(null); }}>CANCEL</button></div>
+    </form>}
+    <div className="pass-list" role="list" aria-label="Guest passes">
+      {passes.length === 0 ? <div className="empty-state">No passes yet.</div> : passes.map((pass) => <article className="pass-row" role="listitem" key={pass.id}>
+        <div className="passport-avatar small">{pass.avatar_url ? <img src={pass.avatar_url} alt="" /> : <span>{(pass.display_name || "G").slice(0, 2).toUpperCase()}</span>}</div>
+        <div className="pass-identity"><strong>{pass.note}</strong><span>{pass.display_name || pass.id.slice(0, 8)}</span><small>{pass.expires_at ? `EXPIRES ${new Date(pass.expires_at).toLocaleDateString()}` : "NO EXPIRY"} // {pass.clients} CLIENT{pass.clients === 1 ? "" : "S"}</small></div>
+        <span className={classNames("pass-status", pass.status !== "active" && "inactive")}>{pass.status.toUpperCase()}</span>
+        <div className="row-actions"><button onClick={() => navigator.clipboard.writeText(window.location.origin + pass.link)}>COPY</button><button onClick={() => beginEdit(pass)}>EDIT</button><button onClick={() => act(async () => { const result = await rotatePassLink(pass.id); setFresh({ link: result.link }); })}>ROTATE</button>{pass.status === "active" ? <button className="danger-action" onClick={() => window.confirm(`Revoke ${pass.note}?`) && act(() => revokePass(pass.id))}>REVOKE</button> : <button onClick={() => act(() => restorePass(pass.id))}>RESTORE</button>}</div>
+      </article>)}
+    </div>
+  </section>;
+}
+
+function PassportConsole({ principal }: { principal: PassportPrincipal }) {
+  const [principals, setPrincipals] = useState<ConsolePrincipal[]>([]);
+  const [audit, setAudit] = useState<PassportAuditEntry[]>([]);
+  const [selected, setSelected] = useState<ConsolePrincipal | null>(null);
+  const [usage, setUsage] = useState<PassportUsagePoint[]>([]);
+  const [health, setHealth] = useState<Awaited<ReturnType<typeof loadAnalyticsHealth>> | null>(null);
+  const [hours, setHours] = useState(168);
+  const [memberEmail, setMemberEmail] = useState("");
+  const [memberName, setMemberName] = useState("");
+  const [memberPurpose, setMemberPurpose] = useState<"onboard" | "recover">("onboard");
+  const [memberLink, setMemberLink] = useState("");
+  const [showMemberForm, setShowMemberForm] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const [ranking, entries, analyticsHealth] = await Promise.all([loadConsolePrincipals(hours), loadConsoleAudit(), loadAnalyticsHealth()]);
+      setPrincipals(ranking.principals); setAudit(entries); setHealth(analyticsHealth); setError("");
+      setSelected((current) => current ? ranking.principals.find((item) => item.id === current.id) || null : ranking.principals[0] || null);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load console"); }
+  }, [hours]);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!selected) { setUsage([]); return; }
+    loadConsolePrincipalUsage(selected.id).then((result) => setUsage(result.hourly)).catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to load principal usage"));
+  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const changeStatus = async (target: ConsolePrincipal) => {
+    const status = target.status === "active" ? "suspended" : "active";
+    if (!window.confirm(`${status === "suspended" ? "Suspend" : "Restore"} ${target.note || target.display_name || target.id}?`)) return;
+    try { await setPrincipalStatus(target.id, status); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Status change failed"); }
+  };
+  const issueMemberLink = async (event: FormEvent) => {
+    event.preventDefault();
+    try {
+      const result = await createMemberLink(memberEmail, memberName, memberPurpose);
+      setMemberLink(result.link); setMemberEmail(""); setMemberName(""); setError(""); await refresh();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create member link"); }
+  };
+  const total = principals.reduce((sum, item) => sum + item.billable_tokens, 0);
+  const chartData = usage.map((row) => ({ hour: row.hour, tokens: row.billable_tokens, cost: row.api_equivalent_cost_usd }));
+  return <section className="view-stack">
+    {error && <div className="signal-error" role="alert">{error}</div>}
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+      <h2 className="panel-title" style={{margin:0}}>CONSOLE</h2>
+      {principal.kind === "operator" && !showMemberForm && <button className="quiet-button" onClick={() => setShowMemberForm(true)}>+ MEMBER</button>}
+    </div>
+    {showMemberForm && principal.kind === "operator" && <div className="member-admin" style={{marginBottom:12}}><form className="access-form" onSubmit={issueMemberLink} style={{display:"flex",gap:8,alignItems:"end",flexWrap:"wrap"}}>
+      <label><span>Action</span><select value={memberPurpose} onChange={(e) => setMemberPurpose(e.target.value as "onboard" | "recover")}><option value="onboard">NEW MEMBER</option><option value="recover">RECOVER</option></select></label>
+      <label style={{flex:1}}><span>Email</span><input type="email" value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} required /></label>
+      {memberPurpose === "onboard" && <label style={{flex:1}}><span>Name</span><input value={memberName} onChange={(e) => setMemberName(e.target.value)} maxLength={48} /></label>}
+      <button className="gold-button">CREATE LINK</button>
+      <button type="button" className="quiet-button" onClick={() => { setShowMemberForm(false); setMemberLink(""); }}>CANCEL</button>
+    </form>{memberLink && <div className="setup-secret"><span>LINK READY</span><code>{memberLink}</code><button onClick={() => navigator.clipboard.writeText(memberLink)}>COPY</button><small>Works once. Send out of band.</small></div>}</div>}
+    <div className="console-toolbar"><div><strong>{principals.length}</strong><span>PRINCIPALS</span></div><div><strong>{formatTokens(total)}</strong><span>TOKENS</span></div><label><span>WINDOW</span><select value={hours} onChange={(e) => setHours(Number(e.target.value))}><option value={24}>24H</option><option value={168}>7D</option><option value={720}>30D</option><option value={8760}>1Y</option></select></label><div className={classNames("analytics-health", health?.health.state.toLowerCase())}><strong>{health?.health.state || "…"}</strong><span>OUTBOX {health?.health.outbox_depth ?? "–"}</span></div></div>
+    {health?.active_gap && <div className="accounting-gap" role="alert"><strong>ACCOUNTING GAP OPEN SINCE {new Date(health.active_gap.started_at).toLocaleString()}</strong><span>Traffic is still being served. Totals spanning this interval are incomplete.</span></div>}
+    {health?.health.state === "FAULTED" && <div className="accounting-gap" role="alert"><strong>ANALYTICS RECONCILIATION FAILED</strong><span>{health.health.fault || health.health.last_reconciliation?.detail}</span></div>}
+    <div className="console-layout">
+      <div className="principal-roster" role="table" aria-label="Principals ranked by token use">
+        {principals.map((item, index) => <button className={classNames("principal-row", selected?.id === item.id && "selected", item.status !== "active" && "inactive")} role="row" key={item.id} onClick={() => setSelected(item)}>
+          <span className="rank">{String(index + 1).padStart(2, "0")}</span><span className="passport-avatar small">{item.avatar_url ? <img src={item.avatar_url} alt="" /> : (item.display_name || item.email || "G").slice(0, 2).toUpperCase()}</span><span className="principal-copy"><strong>{item.note || item.display_name || item.email || item.id}</strong><small>{item.display_name || item.email || `${item.kind.toUpperCase()} ${item.id.slice(0, 8)}`}</small></span><span><strong>{formatTokens(item.billable_tokens)}</strong><small>{preciseMoney.format(item.api_equivalent_cost_usd)}</small></span><span className={classNames("pass-status", item.status !== "active" && "inactive")}>{item.status.toUpperCase()}</span>
+        </button>)}
+      </div>
+      <aside className="principal-detail">
+        {!selected ? <div className="empty-state">No principal selected.</div> : <><div className="detail-heading"><div><span>{selected.kind.toUpperCase()}</span><h3>{selected.note || selected.display_name || selected.id}</h3><p>{selected.display_name || selected.email || selected.id}</p></div>{principal.kind === "operator" && selected.kind !== "operator" && <button className={selected.status === "active" ? "danger-action" : "quiet-button"} onClick={() => changeStatus(selected)}>{selected.status === "active" ? "SUSPEND" : "RESTORE"}</button>}</div><div className="detail-facts"><span>SEEN <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleDateString() : "NEVER"}</b></span><span>REQUESTS <b>{selected.request_count.toLocaleString()}</b></span><span>VALUE <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span>{selected.expires_at && <span>EXPIRES <b>{new Date(selected.expires_at).toLocaleDateString()}</b></span>}</div><SignalPanel code="" title="USAGE">{chartData.length ? <div className="chart-stage medium"><AreaChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Area dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(5, 13)} maxTicks={7} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></AreaChart></div> : <div className="empty-state">No attributed usage in this window.</div>}</SignalPanel></>}
+      </aside>
+    </div>
+    <h2 className="panel-title">AUDIT LOG</h2>
+    <div className="audit-list" role="log" aria-label="Recent account actions">{audit.length === 0 ? <div className="empty-state">No actions recorded.</div> : audit.slice(0, 50).map((entry) => <div key={entry.id}><time>{new Date(entry.at).toLocaleString()}</time><strong>{entry.action.replaceAll(".", " / ").toUpperCase()}</strong><span>{entry.actor_id.slice(0, 8)} → {entry.subject_id.slice(0, 8)}</span><small>{entry.detail}</small></div>)}</div>
+  </section>;
 }
 
 function Header({ stats, loading, operator, onRefresh, onLock }: {
@@ -410,18 +975,15 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
   );
 }
 
-function Navigation({ view, onChange, onSignOut }: { view: View; onChange: (view: View) => void; onSignOut: () => void }) {
-  const items: Array<[View, string, string]> = [
-    ["pulse", "PULSE", "⌁"],
-    ["insights", "INSIGHTS", "△"],
-    ["usage", "USAGE", "╱"],
-    ["accounts", "ACCOUNTS", "▦"],
-	["models", "MODELS", "◇"],
-    ["setup", "SETUP", "⌘"],
-  ];
+function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
+  const passportItems: Array<[View, string, string]> = principal?.kind === "guest"
+    ? [["mine", "STATS", "◑"], ["setup", "SETUP", "⌘"]]
+    : principal?.kind === "operator"
+    ? [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "MY STATS", "◑"], ["setup", "SETUP", "⌘"], ["passes", "PASSES", "⊞"], ["console", "CONSOLE", "⌸"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"]]
+    : [["mine", "MY STATS", "◑"], ["setup", "SETUP", "⌘"], ["passes", "PASSES", "⊞"]];
+  const items: Array<[View, string, string]> = principal ? passportItems : [["pulse", "PULSE", "⌁"], ["insights", "INSIGHTS", "△"], ["mine", "USAGE", "╱"], ["accounts", "ACCOUNTS", "▦"], ["models", "MODELS", "◇"], ["setup", "SETUP", "⌘"]];
   return (
     <nav className="signal-nav" aria-label="Signal room">
-      <div className="nav-index">A.01</div>
       {items.map(([id, label, glyph]) => (
         <button key={id} className={classNames("nav-item", view === id && "active")} onClick={() => onChange(id)}>
           <span>{glyph}</span>{label}
@@ -1216,35 +1778,6 @@ function InsightsOverview({ stats, signal, onAccounts }: { stats: PoolStats; sig
   );
 }
 
-function Usage({ stats, signal, session }: { stats: PoolStats | null; signal: SignalAnalytics | null; session: FriendSession }) {
-  if (!stats || !signal) return <SignalSkeleton />;
-  const burn = burnSummary(signal.hourly);
-  const cacheShare = stats.aggregate.total_input_tokens ? (stats.aggregate.total_cached_tokens / stats.aggregate.total_input_tokens) * 100 : 0;
-  const hottest = [...stats.accounts]
-    .filter((account) => account.secondary_window_available)
-    .sort((a, b) => b.secondary_window_used_pct - a.secondary_window_used_pct)[0];
-
-  return (
-    <div className="signal-view usage-view">
-      <div className="view-title"><span>U.00</span><h1>Burn analysis</h1><p>Where the compute went, who drank it, and how hard the subscriptions are working.</p></div>
-      <section className="inline-instruments usage-instruments" aria-label="Burn summary">
-        <Instrument label="BURN / 24H" value={formatTokens(burn.current24)} accent />
-        <Instrument label="LATEST HOUR" value={`${formatTokens(burn.latestHour)}/h`} />
-        <Instrument label="ACCELERATION" value={`${burn.delta >= 0 ? "+" : ""}${burn.delta.toFixed(1)}%`} danger={burn.delta > 25} />
-        <Instrument label="CACHE SHARE" value={`${cacheShare.toFixed(1)}%`} accent />
-        <Instrument label="YOUR HANDLE" value={originHandle(session.origin_id)} accent />
-        <Instrument label="HOTTEST WEEK" value={hottest ? `${hottest.secondary_window_used_pct.toFixed(0)}%` : "n/a"} danger={Boolean(hottest && hottest.secondary_window_used_pct >= 85)} />
-      </section>
-      <section className="usage-grid">
-        <SignalPanel code="U.10" title="BURN VELOCITY // 14D"><BurnChart hourly={signal.hourly} /></SignalPanel>
-        <SignalPanel code="U.11" title="TOKEN COMPOSITION // 14D"><TokenComposition hourly={signal.hourly} /></SignalPanel>
-        <SignalPanel code="U.20" title="PROVIDER CAPITAL // VALUE VS MATCHED SPEND"><ProviderCapitalChart accounts={stats.accounts} /></SignalPanel>
-        <SignalPanel code="U.21" title="HASHED-IP DRAIN // WEEK OVER WEEK"><OriginWeeklyChart rows={signal.origin_weekly} /></SignalPanel>
-      </section>
-    </div>
-  );
-}
-
 function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsChanged }: {
   stats: PoolStats | null;
   adminAccounts: AdminAccount[];
@@ -1622,77 +2155,6 @@ function Models({ models }: { models: ModelDescriptor[] }) {
 	);
 }
 
-function Setup({ session }: { session: FriendSession }) {
-  const [tool, setTool] = useState<"codex" | "claude" | "gemini" | "grok" | "cute" | "pi" | "realtime" | "api">("codex");
-	const [piModels, setPiModels] = useState(session.pi_models_json);
-	const [cuteCodeSettings, setCuteCodeSettings] = useState(session.cute_code_settings_json);
-	useEffect(() => {
-		let active = true;
-		Promise.all([loadLivePiModels(session.download_token), loadLiveCuteCodeSettings(session.download_token)])
-			.then(([nextPiModels, nextCuteCodeSettings]) => {
-				if (!active) return;
-				setPiModels(nextPiModels);
-				setCuteCodeSettings(nextCuteCodeSettings);
-			})
-			.catch(() => { /* The claim-time snapshot remains usable if regeneration fails. */ });
-		return () => { active = false; };
-	}, [session.download_token]);
-  const setup: Record<typeof tool, { title: string; note: string; commands: Array<[string, string]> }> = {
-    codex: { title: "Codex CLI", note: "Automatic installer first. Raw auth remains inspectable because trust issues are healthy.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/codex/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/codex/${session.download_token}?shell=powershell" | iex`], ["AUTH.JSON", session.auth_json]] },
-    claude: { title: "Claude Code", note: "Sets the pool endpoint, OAuth token, and skips the ceremony.", commands: [["MACOS / LINUX", `source <(curl -sL "${session.public_url}/setup/claude/${session.download_token}")`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/claude/${session.download_token}?shell=powershell" | iex`], ["ENV", `export ANTHROPIC_BASE_URL="${session.public_url}"\nexport CLAUDE_CODE_OAUTH_TOKEN="${session.claude_api_key}"`]] },
-    gemini: { title: "Gemini CLI", note: "API-key mode. No OAuth scavenger hunt required.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/gemini/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/gemini/${session.download_token}?shell=powershell" | iex`], ["API KEY", session.gemini_api_key]] },
-    grok: { title: "Grok Build CLI", note: "Runs Grok entirely through the pool, including the other pool models. Existing Grok OAuth is deactivated and backed up.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/grok/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/grok/${session.download_token}?shell=powershell" | iex`], ["VERIFY", `grok inspect\ngrok models`]] },
-	  cute: { title: "Cute Code", note: "Generated from the live catalog. Re-run this installer after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/cute-code/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/cute-code/${session.download_token}?shell=powershell" | iex`], ["SETTINGS.JSON", cuteCodeSettings]] },
-	  pi: { title: "Pi", note: "Generated from the live catalog. Re-run this installer, then open /model, after pool models change.", commands: [["MACOS / LINUX", `curl -sL "${session.public_url}/setup/pi/${session.download_token}" | bash`], ["WINDOWS / POWERSHELL", `irm "${session.public_url}/setup/pi/${session.download_token}?shell=powershell" | iex`], ["MODELS.JSON", piModels]] },
-    realtime: { title: "GPT Realtime 2.1", note: "One ready-to-run OpenAI SDK script. The pool override mints a short-lived key; the session’s WebRTC media is direct.", commands: [["OPENAI AGENTS SDK", `npm install openai @openai/agents
-
-import OpenAI from "openai";
-import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
-
-const pool = new OpenAI({
-  apiKey: "${session.claude_api_key}",
-  baseURL: "${session.public_url}/v1",
-  dangerouslyAllowBrowser: true,
-});
-
-const { value: apiKey } = await pool.realtime.clientSecrets.create({
-  session: { type: "realtime", model: "gpt-realtime-2.1", audio: { output: { voice: "marin" } } },
-});
-
-const agent = new RealtimeAgent({ name: "Voice assistant", instructions: "Be concise and helpful." });
-const session = new RealtimeSession(agent, { model: "gpt-realtime-2.1" });
-await session.connect({ apiKey });`]] },
-    api: { title: "Raw APIs", note: "Anthropic-compatible and OpenAI-compatible. Pick your poison.", commands: [["ANTHROPIC", `export ANTHROPIC_BASE_URL="${session.public_url}"\nexport ANTHROPIC_API_KEY="${session.claude_api_key}"`], ["OPENAI", `export OPENAI_BASE_URL="${session.public_url}/v1"\nexport OPENAI_API_KEY="${session.claude_api_key}"`], ["SMOKE TEST", `curl ${session.public_url}/v1/responses \\\n  -H "Authorization: Bearer ${session.claude_api_key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"gpt-5.6-luna","input":"Reply with exactly: pool ok"}'`]] },
-  };
-  return (
-    <div className="signal-view setup-view">
-      <div className="view-title"><span>S.00</span><h1>Setup frequencies</h1><p>Pick the client. Copy the signal. Pretend this was difficult.</p></div>
-      <div className="setup-grid">
-        <div className="setup-tools">
-          {Object.entries({ codex: "Codex", claude: "Claude", gemini: "Gemini", grok: "Grok Build", cute: "Cute Code", pi: "Pi", realtime: "GPT Realtime", api: "Raw APIs" }).map(([id, label]) => <button key={id} className={tool === id ? "active" : ""} onClick={() => setTool(id as typeof tool)}>{label}</button>)}
-        </div>
-        <section className="setup-console">
-          <span>SIGNAL // {tool.toUpperCase()}</span><h2>{setup[tool].title}</h2><p>{setup[tool].note}</p>
-          {setup[tool].commands.map(([label, content]) => <CodeWell key={label} label={label} content={content} />)}
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function CodeWell({ label, content }: { label: string; content: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  };
-  return <div className="code-well"><header><span>{label}</span><button onClick={copy}>{copied ? "COPIED" : "COPY"}</button></header><pre>{content}</pre></div>;
-}
 
 function EmptyChart({ label }: { label: string }) {
   return <div className="empty-chart"><span>{label}</span><i aria-hidden="true" /></div>;

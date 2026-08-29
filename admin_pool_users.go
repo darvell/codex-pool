@@ -148,8 +148,8 @@ func (h *proxyHandler) handlePoolUserDelete(w http.ResponseWriter, r *http.Reque
 // Config download endpoints (no auth - token IS the auth)
 
 func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Request) {
-	if h.poolUsers == nil {
-		respondJSONError(w, http.StatusServiceUnavailable, "pool users not configured")
+	if h.poolUsers == nil && h.passport == nil {
+		respondJSONError(w, http.StatusServiceUnavailable, "pool identities not configured")
 		return
 	}
 
@@ -184,9 +184,27 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	user := h.poolUsers.GetByToken(token)
+	var user *PoolUser
+	if h.passport != nil {
+		if client := h.passport.clientByDownloadToken(token); client != nil {
+			if principalID, clientID, ok := h.passport.authorizeCredential(client.PrincipalID + "-c-" + client.ID); ok {
+				pr := h.passport.principal(principalID)
+				issuedAt := time.Now().UTC()
+				if pr.CredentialsValidAfter.After(issuedAt) {
+					issuedAt = pr.CredentialsValidAfter
+				}
+				if client.ValidAfter.After(issuedAt) {
+					issuedAt = client.ValidAfter
+				}
+				user = &PoolUser{ID: principalID + "-c-" + clientID, Token: client.DownloadToken, Email: pr.Email, PlanType: pr.PlanType, CreatedAt: client.CreatedAt, credentialIssuedAt: issuedAt}
+			}
+		}
+	}
+	if user == nil && h.poolUsers != nil {
+		user = h.poolUsers.GetByToken(token)
+	}
 	if user == nil {
-		respondJSONError(w, http.StatusNotFound, "invalid token")
+		respondJSONError(w, http.StatusNotFound, "invalid or revoked token")
 		return
 	}
 	if user.Disabled {

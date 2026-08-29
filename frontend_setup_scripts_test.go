@@ -267,27 +267,9 @@ func newTestPoolUserStoreWithUser(t *testing.T, token string) *PoolUserStore {
 	return store
 }
 
-func TestServeCuteCodeLanding(t *testing.T) {
-	h := &proxyHandler{}
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/cute-code", nil)
-	rr := httptest.NewRecorder()
-
-	h.serveCuteCodeLanding(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
-	}
-	body := rr.Body.String()
-	for _, want := range []string{"codex pool + cute-code", "Generate setup", "cute-code --model gpt-5.6-sol"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("expected cute-code landing to contain %q, got:\n%s", want, body)
-		}
-	}
-}
-
-func TestFriendLandingServesReactSignalRoom(t *testing.T) {
-	h := &proxyHandler{cfg: &config{friendCode: "peepee"}}
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+func TestFriendLandingServesOldTemplate(t *testing.T) {
+	h := &proxyHandler{cfg: &config{legacyFriendCode: "peepee"}}
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/friend", nil)
 	rr := httptest.NewRecorder()
 
 	h.serveFriendLanding(rr, req)
@@ -297,25 +279,41 @@ func TestFriendLandingServesReactSignalRoom(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, want := range []string{
+		`Friends of`,
+		`friend_code`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected friend landing to contain %q", want)
+		}
+	}
+}
+
+func TestPassportSPAServesReactSignalRoom(t *testing.T) {
+	h := &proxyHandler{cfg: &config{legacyFriendCode: "peepee"}}
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/app", nil)
+	rr := httptest.NewRecorder()
+
+	h.servePassportSPA(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
 		`<div id="root"></div>`,
-		`AI Pool — Full-Spectrum Signal Room`,
+		`AI Pool`,
 		`src="/assets/`,
 		`href="/assets/`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("expected React signal room to contain %q", want)
-		}
-	}
-	for _, unwanted := range []string{`id="access-form"`, `onclick="switchSubTab`, `id="codex-add-section"`} {
-		if strings.Contains(body, unwanted) {
-			t.Fatalf("React shell still contains legacy friend markup %q", unwanted)
+			t.Fatalf("expected Passport SPA to contain %q", want)
 		}
 	}
 }
 
 func TestFriendCodeIsNotEmbeddedInPublicSignalRoom(t *testing.T) {
 	const secret = "friend-secret-that-must-never-ship"
-	h := &proxyHandler{cfg: &config{friendCode: secret}}
+	h := &proxyHandler{cfg: &config{legacyFriendCode: secret}}
 	page := httptest.NewRecorder()
 	h.serveFriendLanding(page, httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
 	if strings.Contains(page.Body.String(), secret) {
@@ -339,9 +337,9 @@ func TestFriendCodeIsNotEmbeddedInPublicSignalRoom(t *testing.T) {
 }
 
 func TestServeSignalRoomAsset(t *testing.T) {
-	h := &proxyHandler{cfg: &config{friendCode: "peepee"}}
+	h := &proxyHandler{cfg: &config{legacyFriendCode: "peepee"}}
 	page := httptest.NewRecorder()
-	h.serveFriendLanding(page, httptest.NewRequest(http.MethodGet, "http://example.com/", nil))
+	h.servePassportSPA(page, httptest.NewRequest(http.MethodGet, "http://example.com/app", nil))
 	body := page.Body.String()
 	start := strings.Index(body, `src="/assets/`)
 	if start < 0 {

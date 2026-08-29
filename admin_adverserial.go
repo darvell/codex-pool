@@ -81,5 +81,5 @@ func (h *proxyHandler) handleAdverserialAdd(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, AccountTypeAdverserial, "adverserial", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeAdverserial, "adverserial", apiKey)
 }

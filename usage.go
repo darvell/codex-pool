@@ -288,11 +288,9 @@ func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 	}
 	a.mu.Unlock()
 	a.applyRequestUsage(ru)
-	if h.store != nil {
-		_ = h.store.record(ru)
-	}
 
-	// Calculate and record cost
+	// Calculate cost before the durable usage transaction so the immutable
+	// analytics fact and raw request commit together.
 	var costUSD float64
 	if h.pricing != nil {
 		costUSD = h.pricing.calculateCost(ru)
@@ -302,6 +300,14 @@ func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 			a.mu.Unlock()
 		}
 	}
+	if h.store != nil {
+		if err := h.store.recordReliably(ru, costUSD); err != nil {
+			log.Printf("analytics: durable usage write failed: %v", err)
+		} else if h.duckAnalytics != nil {
+			h.duckAnalytics.Notify()
+		}
+	}
+	// Keep the legacy SQLite store during migration only; DuckDB is canonical.
 	if h.analyticsStore != nil {
 		_ = h.analyticsStore.recordRequest(ru, costUSD)
 	}

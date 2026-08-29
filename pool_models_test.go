@@ -192,8 +192,8 @@ func TestPoolModelsEndpointRequiresPoolToken(t *testing.T) {
 	}
 }
 
-func TestPoolCatalogEndpointAcceptsFriendAuthentication(t *testing.T) {
-	handler := &proxyHandler{cfg: &config{friendCode: "friend-secret"}, pool: newPoolState(nil, false)}
+func TestPoolCatalogEndpointAcceptsBreakGlassAdminAuthentication(t *testing.T) {
+	handler := &proxyHandler{cfg: &config{adminToken: "admin-secret"}, pool: newPoolState(nil, false)}
 	request := httptest.NewRequest(http.MethodGet, "http://pool.example/api/pool/catalog", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -201,11 +201,11 @@ func TestPoolCatalogEndpointAcceptsFriendAuthentication(t *testing.T) {
 		t.Fatalf("unauthenticated status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 	request = httptest.NewRequest(http.MethodGet, "http://pool.example/api/pool/catalog", nil)
-	request.Header.Set("X-Friend-Code", "friend-secret")
+	request.Header.Set("X-Admin-Token", "admin-secret")
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("friend-authenticated status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+		t.Fatalf("admin-authenticated status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 }
 

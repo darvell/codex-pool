@@ -1153,6 +1153,13 @@ func TestHandleAggregatedUsageMatchesWeeklyOnlyUpstreamShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	rateLimit := payload["rate_limit"].(map[string]any)
+	resetCredits := payload["rate_limit_reset_credits"].(map[string]any)
+	if got := int(resetCredits["available_count"].(float64)); got != 0 {
+		t.Fatalf("rate limit reset credits = %d, want 0", got)
+	}
+	if _, ok := payload["pool"]; ok {
+		t.Fatal("upstream WHAM response must not include pool-specific fields")
+	}
 	primary := rateLimit["primary_window"].(map[string]any)
 	if got := int(primary["limit_window_seconds"].(float64)); got != 604800 {
 		t.Fatalf("primary window seconds = %d", got)

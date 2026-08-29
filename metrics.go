@@ -21,6 +21,12 @@ type metrics struct {
 	//   swap_no_candidate        — saw cyber_policy but no cyber candidate
 	//   retry_buffered           — buffered translation retried on cyber
 	cyberPolicy map[cyberPolicyKey]int64
+	passport    map[passportMetricKey]int64
+}
+
+type passportMetricKey struct {
+	name  string
+	label string
 }
 
 type webSocketTerminationKey struct {
@@ -40,6 +46,7 @@ func newMetrics() *metrics {
 		requests:              make(map[string]int64),
 		accStatus:             make(map[string]map[string]int64),
 		cyberPolicy:           make(map[cyberPolicyKey]int64),
+		passport:              make(map[passportMetricKey]int64),
 		webSocketTerminations: make(map[webSocketTerminationKey]int64),
 	}
 }
@@ -60,6 +67,15 @@ func (m *metrics) webSocketTerminationCount(account, side string, code int, outc
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.webSocketTerminations[webSocketTerminationKey{account: account, side: side, code: code, outcome: outcome}]
+}
+
+func (m *metrics) incPassport(name, label string) {
+	if m == nil || name == "" || label == "" {
+		return
+	}
+	m.mu.Lock()
+	m.passport[passportMetricKey{name: name, label: label}]++
+	m.mu.Unlock()
 }
 
 func (m *metrics) inc(status string, account string) {
@@ -165,5 +181,19 @@ func (m *metrics) serve(w http.ResponseWriter, r *http.Request) {
 	})
 	for _, k := range cyberKeys {
 		fmt.Fprintf(w, "codexpool_cyber_policy_actions_total{account=\"%s\",action=\"%s\"} %d\n", k.account, k.action, m.cyberPolicy[k])
+	}
+
+	passportKeys := make([]passportMetricKey, 0, len(m.passport))
+	for key := range m.passport {
+		passportKeys = append(passportKeys, key)
+	}
+	sort.Slice(passportKeys, func(i, j int) bool {
+		if passportKeys[i].name != passportKeys[j].name {
+			return passportKeys[i].name < passportKeys[j].name
+		}
+		return passportKeys[i].label < passportKeys[j].label
+	})
+	for _, key := range passportKeys {
+		fmt.Fprintf(w, "codexpool_%s_total{result=\"%s\"} %d\n", key.name, key.label, m.passport[key])
 	}
 }

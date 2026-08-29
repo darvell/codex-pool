@@ -128,8 +128,9 @@ func (h *proxyHandler) handleGrokImport(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.reloadAccounts()
+	h.auditProviderContribution(r, "grok", accountID)
 	respondJSON(w, map[string]any{
 		"success":    true,
-		"account_id": acc.ID,
+		"account_id": accountID,
 	})
 }

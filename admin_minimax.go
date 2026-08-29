@@ -87,5 +87,5 @@ func (h *proxyHandler) handleMinimaxAdd(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, AccountTypeMinimax, "minimax", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeMinimax, "minimax", apiKey)
 }
