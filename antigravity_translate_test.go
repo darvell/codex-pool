@@ -71,6 +71,44 @@ func TestBuildAntigravityOpenAIRequest(t *testing.T) {
 	}
 }
 
+func TestPrepareAntigravityUnwrapsCodeAssistEnvelope(t *testing.T) {
+	body := []byte(`{
+		"model":"gemini-3.7-flash",
+		"userAgent":"cute-code",
+		"requestId":"cute-code-1",
+		"request":{
+			"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+			"generationConfig":{"temperature":0.2}
+		}
+	}`)
+	request, err := prepareAntigravityRequest("/v1internal:streamGenerateContent", body, "gemini-3.7-flash", "project-1", "conv-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !request.ClientStream {
+		t.Fatal("Code Assist streamGenerateContent must be treated as streaming")
+	}
+	envelope := decodeMap(t, request.Body)
+	inner := envelope["request"].(map[string]any)
+	if _, nested := inner["request"]; nested {
+		t.Fatalf("Code Assist envelope was nested: %#v", inner)
+	}
+	if _, leaked := inner["userAgent"]; leaked {
+		t.Fatalf("client userAgent leaked into Gemini request: %#v", inner)
+	}
+	contents := inner["contents"].([]any)
+	parts := contents[0].(map[string]any)["parts"].([]any)
+	if parts[0].(map[string]any)["text"] != "hi" {
+		t.Fatalf("contents lost: %#v", contents)
+	}
+	if inner["sessionId"] != "conv-1" {
+		t.Fatalf("sessionId = %v", inner["sessionId"])
+	}
+	if envelope["project"] != "project-1" {
+		t.Fatalf("project = %v", envelope["project"])
+	}
+}
+
 func TestBuildAntigravityResponsesAndClaudeRequests(t *testing.T) {
 	responses := []byte(`{"model":"gemini-3-flash","instructions":"system","input":[{"type":"reasoning","encrypted_content":"signed","content":[{"type":"output_text","text":"thought"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{\"q\":1}"},{"type":"function_call_output","call_id":"c1","output":"done"}],"tools":[{"type":"web_search_preview"}]}`)
 	var inner map[string]any

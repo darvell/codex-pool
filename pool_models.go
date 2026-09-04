@@ -51,7 +51,7 @@ func nativeWebSearchTools(accountType AccountType, enabled bool) map[string]pool
 			Endpoint: "/v1/responses",
 			ToolType: "web_search",
 		}
-	case AccountTypeClaude, AccountTypeKimi, AccountTypeZAI:
+	case AccountTypeClaude, AccountTypeKimi, AccountTypeZAI, AccountTypeXiaomi:
 		descriptor = poolNativeToolDescriptor{
 			Protocol: "anthropic-messages",
 			Endpoint: "/v1/messages",
@@ -76,10 +76,15 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 	}
 	models := make([]poolModelDescriptor, 0, len(poolModels)+len(grokModelCatalog))
 	for _, model := range poolModels {
-		supportingAccounts, availableAccounts, availableNow := poolModelAvailability(pool, model.AccountType)
+		supportingAccounts, availableAccounts, availableNow := poolModelAvailability(pool, model.AccountType, model.ID)
 		protocol := "anthropic"
-		if model.AccountType == AccountTypeCodex {
+		switch model.AccountType {
+		case AccountTypeCodex:
 			protocol = "openai"
+		case AccountTypeGemini:
+			protocol = "gemini"
+		case AccountTypeOpencodeGo:
+			protocol = opencodeGoClientProtocol(model.ID)
 		}
 		capabilities := map[string]bool{"reasoning": model.Reasoning, "tools": true}
 		if model.WebSearch {
@@ -134,18 +139,27 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 		}
 		canonicalID := "antigravity/" + model.ID
 		aliases := antigravityDescriptorAliases(canonicalID, model.ID, model.Aliases)
+		protocol := antigravityClientProtocol(model.ID)
 		models = append(models, poolModelDescriptor{
-			ID: canonicalID, Name: model.DisplayName, Protocol: "openai",
+			ID: canonicalID, Name: model.DisplayName, Protocol: protocol,
 			ContextWindow: model.MaxTokens, Provider: string(AccountTypeAntigravity), UpstreamID: model.ID,
 			MaxOutputTokens: model.MaxOutputTokens, Protocols: []string{"gemini", "openai", "responses", "anthropic"},
-			Modalities: modalities, Capabilities: map[string]bool{"reasoning": model.SupportsThinking, "images": model.SupportsImages, "tools": true, "web_search": model.WebSearch},
+			Modalities: modalities, Capabilities: map[string]bool{"reasoning": model.SupportsThinking, "images": model.SupportsImages, "tools": model.SupportsTools, "web_search": model.WebSearch},
 			NativeTools:        nativeWebSearchTools(AccountTypeAntigravity, model.WebSearch),
 			SupportedMimeTypes: append([]string(nil), model.SupportedMimeTypes...), Recommended: model.Recommended, QuotaRemaining: model.Quota.RemainingFraction,
 			Aliases: aliases, SupportingAccounts: model.SupportingAccounts, AvailableAccounts: model.AvailableAccounts,
 			AvailableNow: model.AvailableNow, NextResetAt: optionalModelReset(model.NextResetAt), Stale: model.Stale,
 		})
 	}
+	models = append(models, discoveredModelsForPool(pool)...)
 	return models
+}
+
+func antigravityClientProtocol(modelID string) string {
+	if strings.Contains(strings.ToLower(modelID), "gemini") {
+		return "gemini"
+	}
+	return "openai"
 }
 
 func antigravityDescriptorAliases(canonicalID, upstreamID string, aliases []string) []string {
@@ -174,9 +188,13 @@ func optionalModelReset(reset time.Time) *time.Time {
 	return &reset
 }
 
-func poolModelAvailability(pool *poolState, accountType AccountType) (int, int, bool) {
+func poolModelAvailability(pool *poolState, accountType AccountType, modelIDs ...string) (int, int, bool) {
 	if pool == nil {
 		return 0, 0, true
+	}
+	var model poolModel
+	if len(modelIDs) > 0 {
+		model, _ = modelForProvider(accountType, modelIDs[0])
 	}
 	now := time.Now()
 	supportingAccounts := 0
@@ -185,8 +203,14 @@ func poolModelAvailability(pool *poolState, accountType AccountType) (int, int, 
 		if account.Type != accountType {
 			continue
 		}
-		supportingAccounts++
 		account.mu.Lock()
+		if model.RequiresDiscovery {
+			if _, ok := accountDiscoveredModel(account, model.ID); !ok {
+				account.mu.Unlock()
+				continue
+			}
+		}
+		supportingAccounts++
 		if accountAvailableForRoutingLocked(account, now) && !account.NeedsVerification {
 			availableAccounts++
 		}
@@ -209,10 +233,16 @@ func poolModelIDExists(id string) bool {
 	return false
 }
 
+func poolModelsForClients(pools ...*poolState) []poolModelDescriptor {
+	// Native Gemini CLI rows use protocol "gemini". Cute Code drives those
+	// through /v1internal:streamGenerateContent.
+	return poolModelDescriptors(pools...)
+}
+
 func servePoolModels(w http.ResponseWriter, pools ...*poolState) {
 	respondJSON(w, map[string]any{
 		"schema_version": poolModelsSchemaVersion,
-		"models":         poolModelDescriptors(pools...),
+		"models":         poolModelsForClients(pools...),
 	})
 }
 
@@ -221,7 +251,7 @@ func serveUnifiedOpenAIModels(w http.ResponseWriter, pools ...*poolState) {
 	data := make([]map[string]any, 0, len(descriptors))
 	seen := make(map[string]bool)
 	for _, model := range descriptors {
-		if seen[model.ID] {
+		if model.Protocol == "gemini" || seen[model.ID] {
 			continue
 		}
 		seen[model.ID] = true
@@ -232,6 +262,13 @@ func serveUnifiedOpenAIModels(w http.ResponseWriter, pools ...*poolState) {
 
 func serveUnifiedGeminiModels(w http.ResponseWriter, pool *poolState) {
 	models := make([]map[string]any, 0)
+	for _, model := range modelsForProvider(AccountTypeGemini) {
+		models = append(models, map[string]any{
+			"name": "models/" + model.ID, "displayName": model.DisplayName,
+			"inputTokenLimit": model.ContextWindow, "outputTokenLimit": model.MaxTokens,
+			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"},
+		})
+	}
 	for _, model := range antigravityModels.Models(pool) {
 		methods := []string{"generateContent", "streamGenerateContent", "countTokens"}
 		models = append(models, map[string]any{

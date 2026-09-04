@@ -258,6 +258,76 @@ func TestAutoRedeemCodexResetCreditWaitsUntilThreshold(t *testing.T) {
 	}
 }
 
+func TestAutoRedeemCodexResetCreditWhenExhausted(t *testing.T) {
+	base, _ := url.Parse("https://chatgpt.com/backend-api")
+	now := time.Date(2026, time.September, 4, 1, 30, 0, 0, time.UTC)
+	var requests int
+	h := &proxyHandler{
+		cfg: &config{whamBase: base},
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			switch requests {
+			case 1:
+				if req.Method != http.MethodPost {
+					t.Fatalf("method = %s", req.Method)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Body:       io.NopCloser(strings.NewReader(`{"code":"reset","windows_reset":1}`)),
+					Header:     make(http.Header),
+				}, nil
+			case 2:
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Body:       io.NopCloser(strings.NewReader(`{"available_count":0,"credits":[]}`)),
+					Header:     make(http.Header),
+				}, nil
+			case 3:
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Body: io.NopCloser(strings.NewReader(`{
+						"rate_limit": {
+							"primary_window": {"used_percent": 0, "reset_at": 1788748328, "limit_window_seconds": 604800}
+						}
+					}`)),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				t.Fatalf("unexpected request %d", requests)
+				return nil, nil
+			}
+		}),
+	}
+	account := &Account{
+		ID:          "lean",
+		AccessToken: "access-token",
+		AccountID:   "account-id",
+		RateLimitResetCredits: []RateLimitResetCredit{
+			{ID: "credit-full", ExpiresAt: now.Add(17 * 24 * time.Hour)},
+		},
+		ResetCreditsAvailable: 1,
+		Usage: UsageSnapshot{
+			SecondaryUsedPercent:   1,
+			SecondaryUsed:          1,
+			SecondaryWindowMinutes: 10080,
+			RetrievedAt:            now.Add(-time.Minute),
+		},
+	}
+
+	if err := h.autoRedeemExpiringCodexResetCredit(now, account); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d", requests)
+	}
+	if got := usageSecondaryUsed(account.Usage); got != 0 {
+		t.Fatalf("weekly usage = %.2f, want 0 after reset", got)
+	}
+}
+
 func TestAutoRedeemCodexResetCreditWindowIsFifteenMinutes(t *testing.T) {
 	if resetCreditAutoRedeemWindow != 15*time.Minute {
 		t.Fatalf("auto-redeem window = %s, want 15m", resetCreditAutoRedeemWindow)
@@ -339,6 +409,263 @@ func TestModelRouteOverrideRoutesGrokCodeModels(t *testing.T) {
 	}
 	if !bytes.Contains(rewritten, []byte(`"model":"grok-4.5"`)) {
 		t.Fatalf("rewritten body = %s", rewritten)
+	}
+}
+
+func TestIsCodexResponsesPathIncludesBackendAPI(t *testing.T) {
+	for _, path := range []string{
+		"/responses",
+		"/v1/responses",
+		"/responses/compact",
+		"/v1/responses/compact",
+		"/backend-api/codex/responses",
+		"/backend-api/codex/responses/compact",
+		"/api/codex/responses",
+		"/api/codex/responses/foo",
+	} {
+		if !isCodexResponsesPath(path) {
+			t.Fatalf("isCodexResponsesPath(%q) = false, want true", path)
+		}
+	}
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/backend-api/codex/models"} {
+		if isCodexResponsesPath(path) {
+			t.Fatalf("isCodexResponsesPath(%q) = true, want false", path)
+		}
+	}
+}
+
+func TestResolveStreamedModelRouteCoversExternalProviders(t *testing.T) {
+	base, _ := url.Parse("https://example.test")
+	handler := &proxyHandler{
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, base),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+			NewKimiProvider(base),
+			NewMinimaxProvider(base),
+			NewZAIProvider(base),
+			NewXiaomiProvider(base),
+			NewGrokProvider(base),
+			NewAdverserialProvider(base),
+		),
+	}
+	cases := []struct {
+		model string
+		want  AccountType
+	}{
+		{"grok-4.5", AccountTypeGrok},
+		{"grok-4.5-build", AccountTypeGrok},
+		{"kimi-for-coding", AccountTypeKimi},
+		{"MiniMax-M2.7", AccountTypeMinimax},
+		{"glm-5.2", AccountTypeZAI},
+		{"mimo-v2.5-pro", AccountTypeXiaomi},
+		{"lordx64/cyberkimi", AccountTypeAdverserial},
+	}
+	for _, path := range []string{"/responses", "/backend-api/codex/responses", "/v1/responses"} {
+		for _, tc := range cases {
+			provider, _, canonical := handler.resolveStreamedModelRoute(path, tc.model)
+			if provider == nil || provider.Type() != tc.want {
+				t.Fatalf("resolveStreamedModelRoute(%q, %q) provider=%v, want %s", path, tc.model, provider, tc.want)
+			}
+			if canonical == "" {
+				t.Fatalf("resolveStreamedModelRoute(%q, %q) returned empty canonical", path, tc.model)
+			}
+		}
+	}
+}
+
+func TestOversizedCodexBackendAPIResponsesStillHitsCodexPath(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	gotPath := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath <- r.URL.Path
+		if r.URL.Path != "/backend-api/codex/responses" && r.URL.Path != "/codex/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"Not Found"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	baseURL, _ := url.Parse(upstream.URL)
+	// Match production: responses base ends with /codex, wham base is /backend-api.
+	responsesBase, _ := url.Parse(upstream.URL + "/backend-api/codex")
+	whamBase, _ := url.Parse(upstream.URL + "/backend-api")
+	registry := NewProviderRegistry(
+		NewCodexProvider(responsesBase, whamBase, nil),
+		NewClaudeProvider(baseURL),
+		NewGeminiProvider(baseURL, baseURL),
+		NewGrokProvider(baseURL),
+	)
+	pool := newPoolState([]*Account{
+		{Type: AccountTypeCodex, ID: "codex", AccessToken: "codex-token", PlanType: "pro", AccountID: "acct"},
+	}, false)
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 1024,
+			maxSpoolBodyBytes:    16 << 20,
+			maxAttempts:          1,
+			disableRefresh:       true,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+		aliases:   newModelAliases(nil),
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	payload := fmt.Sprintf(`{"model":"gpt-5.6-sol","stream":true,"input":[{"type":"message","role":"user","content":%q}]}`, strings.Repeat("x", 2048))
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/backend-api/codex/responses", bytes.NewReader([]byte(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "codex-user"))
+	req.ContentLength = -1
+	req.Header.Del("Content-Length")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	select {
+	case path := <-gotPath:
+		if path != "/backend-api/codex/responses" && path != "/codex/responses" {
+			t.Fatalf("upstream path=%q", path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream")
+	}
+}
+
+func TestOversizedResponsesModelRoutesAwayFromChatGPT(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	type hit struct {
+		path string
+		auth string
+		body []byte
+	}
+	hits := make(chan hit, 2)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		auth := r.Header.Get("Authorization")
+		hits <- hit{path: r.URL.Path, auth: auth, body: append([]byte(nil), body...)}
+		if strings.Contains(auth, "grok-token") || strings.Contains(auth, "kimi-token") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":"The 'grok-4.5' model is not supported when using Codex with a ChatGPT account."}`))
+	}))
+	defer upstream.Close()
+
+	baseURL, _ := url.Parse(upstream.URL)
+	registry := NewProviderRegistry(
+		NewCodexProvider(baseURL, baseURL, baseURL),
+		NewClaudeProvider(baseURL),
+		NewGeminiProvider(baseURL, baseURL),
+		NewGrokProvider(baseURL),
+		NewKimiProvider(baseURL),
+	)
+	pool := newPoolState([]*Account{
+		{Type: AccountTypeCodex, ID: "codex", AccessToken: "codex-token", PlanType: "pro", AccountID: "acct"},
+		{Type: AccountTypeGrok, ID: "grok", AccessToken: "grok-token", PlanType: "grok"},
+		{Type: AccountTypeKimi, ID: "kimi", AccessToken: "kimi-token", PlanType: "kimi"},
+	}, false)
+
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 1024,
+			maxSpoolBodyBytes:    16 << 20,
+			maxAttempts:          1,
+			disableRefresh:       true,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+		aliases:   newModelAliases(nil),
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	cases := []struct {
+		name      string
+		path      string
+		model     string
+		wantAuth  string
+		wantPath  string
+		wantModel string
+	}{
+		{name: "grok backend-api", path: "/backend-api/codex/responses", model: "grok-4.5", wantAuth: "grok-token", wantPath: "/responses", wantModel: "grok-4.5"},
+		{name: "grok public responses", path: "/responses", model: "grok-4.5-build", wantAuth: "grok-token", wantPath: "/responses", wantModel: "grok-4.5"},
+		{name: "kimi backend-api", path: "/backend-api/codex/responses", model: "kimi-for-coding", wantAuth: "kimi-token", wantPath: "/backend-api/codex/responses", wantModel: "kimi-for-coding"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"model":%q,"stream":true,"input":[{"type":"message","role":"user","content":%q}]}`, tc.model, strings.Repeat("x", 2048))
+			req, err := http.NewRequest(http.MethodPost, proxy.URL+tc.path, bytes.NewReader([]byte(payload)))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "oversized-user"))
+			// Force the oversized/chunked Responses path even if the client stack
+			// would otherwise populate Content-Length from bytes.Reader.
+			req.ContentLength = -1
+			req.Header.Del("Content-Length")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("proxy request: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+			}
+			if bytes.Contains(body, []byte("not supported when using Codex")) {
+				t.Fatalf("ChatGPT Codex rejection leaked to client: %s", body)
+			}
+
+			select {
+			case got := <-hits:
+				if !strings.Contains(got.auth, tc.wantAuth) {
+					t.Fatalf("upstream auth=%q, want token containing %q", got.auth, tc.wantAuth)
+				}
+				if got.path != tc.wantPath {
+					t.Fatalf("upstream path=%q, want %q", got.path, tc.wantPath)
+				}
+				if !bytes.Contains(got.body, []byte(`"model":"`+tc.wantModel+`"`)) {
+					t.Fatalf("upstream body missing model %q: %s", tc.wantModel, got.body)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for upstream hit")
+			}
+		})
 	}
 }
 
@@ -439,8 +766,8 @@ func TestModelRouteOverrideRewritesClaudeFableAlias(t *testing.T) {
 	if provider == nil || provider.Type() != AccountTypeClaude || overrideBase == nil {
 		t.Fatalf("modelRouteOverride(/v1/messages, fable) = provider=%v base=%v, want Claude override", provider, overrideBase)
 	}
-	if !bytes.Contains(rewritten, []byte(`"model":"claude-fable-5"`)) {
-		t.Fatalf("rewritten body = %s, want claude-fable-5", rewritten)
+	if !bytes.Contains(rewritten, []byte(`"model":"claude-fable-5-1"`)) {
+		t.Fatalf("rewritten body = %s, want claude-fable-5-1", rewritten)
 	}
 }
 

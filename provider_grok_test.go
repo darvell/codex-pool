@@ -45,12 +45,19 @@ func TestServeGrokModelsReturnsGrokClientCatalog(t *testing.T) {
 }
 
 func TestGrokPublicAliasesDoNotAdvertiseInternalResponseModel(t *testing.T) {
-	model, ok := grokModelByName("grok-4.5")
-	if !ok {
-		t.Fatal("grok-4.5 missing from catalog")
+	for _, id := range []string{"grok-4.6", "grok-4.5"} {
+		model, ok := grokModelByName(id)
+		if !ok {
+			t.Fatalf("%s missing from catalog", id)
+		}
+		for _, alias := range grokPublicAliases(model) {
+			if strings.HasSuffix(alias, "-build") {
+				t.Fatalf("internal model alias leaked into discovery: %#v", model.Aliases)
+			}
+		}
 	}
-	if aliases := grokPublicAliases(model); slices.Contains(aliases, "grok-4.5-build") {
-		t.Fatalf("internal model alias leaked into discovery: %#v", aliases)
+	if got := grokCanonicalModel("grok-4.6-build"); got != "grok-4.6" {
+		t.Fatalf("grok-4.6-build canonical model = %q", got)
 	}
 }
 
@@ -467,6 +474,98 @@ func TestFetchGrokUsageFromBillingEndpoints(t *testing.T) {
 	}
 }
 
+func TestParseGrokBillingUsageOmittedWeeklyPercentIsZero(t *testing.T) {
+	now := time.Date(2026, 9, 3, 16, 0, 0, 0, time.UTC)
+	weekly := []byte(`{"config":{"currentPeriod":{"start":"2026-09-03T09:46:16Z","end":"2026-09-10T09:46:16Z"}}}`)
+
+	snap, ok := parseGrokBillingUsage(nil, weekly, now)
+	if !ok {
+		t.Fatal("expected weekly config without percent to still count as a billing snapshot")
+	}
+	if !snap.secondarySet || snap.SecondaryUsedPercent != 0 {
+		t.Fatalf("omitted weekly percent = %+v, want 0 with secondarySet", snap)
+	}
+}
+
+func TestFetchGrokUsageClearsStaleWeeklyAfterReset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("format") == "credits" {
+			_, _ = io.WriteString(w, `{"config":{"currentPeriod":{"start":"2026-09-03T09:46:16Z","end":"2026-09-10T09:46:16Z"}}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"config":{"monthlyLimit":{"val":10000},"used":{"val":0},"billingPeriodStart":"2026-09-01T00:00:00Z","billingPeriodEnd":"2026-10-01T00:00:00Z"}}`)
+	}))
+	defer server.Close()
+
+	now := time.Date(2026, 9, 3, 16, 0, 0, 0, time.UTC)
+	account := &Account{
+		Type:        AccountTypeGrok,
+		AccessToken: "access-token",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0,
+			SecondaryUsedPercent: 0.99,
+			primarySet:           true,
+			secondarySet:         true,
+			Source:               "grok_billing",
+			RetrievedAt:          now.Add(-time.Hour),
+		},
+	}
+	handler := &proxyHandler{
+		cfg:       &config{grokBase: mustParse(server.URL + "/v1")},
+		transport: http.DefaultTransport,
+	}
+	if err := handler.fetchGrokUsage(now, account); err != nil {
+		t.Fatalf("fetchGrokUsage: %v", err)
+	}
+	if account.Usage.SecondaryUsedPercent != 0 {
+		t.Fatalf("stale weekly usage survived reset: %+v", account.Usage)
+	}
+	if accountUsageExhaustedLocked(account) {
+		t.Fatal("account still hard-excluded after weekly credits reset")
+	}
+}
+
+func TestPollUpstreamUsageFetchesGrokWhileCoolingDown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("format") == "credits" {
+			_, _ = io.WriteString(w, `{"config":{"creditUsagePercent":0}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"config":{"monthlyLimit":{"val":10000},"used":{"val":0},"billingPeriodStart":"2026-09-01T00:00:00Z","billingPeriodEnd":"2026-10-01T00:00:00Z"}}`)
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	account := &Account{
+		Type:           AccountTypeGrok,
+		ID:             "pp-grok",
+		AccessToken:    "access-token",
+		RateLimitUntil: now.Add(2 * time.Hour),
+		Usage: UsageSnapshot{
+			SecondaryUsedPercent: 0.99,
+			secondarySet:         true,
+			Source:               "grok_billing",
+			RetrievedAt:          now.Add(-time.Hour),
+		},
+	}
+	handler := &proxyHandler{
+		cfg: &config{
+			grokBase:      mustParse(server.URL + "/v1"),
+			usageRefresh:  time.Minute,
+			disableRefresh: true,
+		},
+		pool:      newPoolState([]*Account{account}, false),
+		transport: http.DefaultTransport,
+	}
+	handler.pollUpstreamUsage()
+
+	if account.Usage.SecondaryUsedPercent != 0 {
+		t.Fatalf("cooldown skipped grok billing poll, usage=%+v", account.Usage)
+	}
+}
+
 func TestGrokUsageParsesResponsesUsage(t *testing.T) {
 	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
 	ru := provider.ParseUsage(map[string]any{
@@ -484,6 +583,34 @@ func TestGrokUsageParsesResponsesUsage(t *testing.T) {
 	}
 	if ru.Model != "grok-4.5" || ru.InputTokens != 100 || ru.OutputTokens != 25 || ru.CachedInputTokens != 40 || ru.BillableTokens != 85 {
 		t.Fatalf("usage = %+v", ru)
+	}
+}
+
+func TestSanitizeSpooledGrokRequestStripsExternalWebAccess(t *testing.T) {
+	body := []byte(`{"model":"grok-4.6","stream":true,"tools":[{"type":"web_search","external_web_access":true}]}`)
+	file, err := os.CreateTemp(t.TempDir(), "grok-spool-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	spooled := &streamedResponsesRequest{File: file, Size: int64(len(body)), Model: "grok-4.6"}
+	if err := sanitizeSpooledGrokRequest(spooled); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(spooled.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "external_web_access") {
+		t.Fatalf("spooled grok body still has external_web_access: %s", got)
+	}
+	if !strings.Contains(string(got), `"type":"web_search"`) {
+		t.Fatalf("spooled grok body dropped web_search: %s", got)
+	}
+	if spooled.Size != int64(len(got)) {
+		t.Fatalf("spooled size = %d, want %d", spooled.Size, len(got))
 	}
 }
 

@@ -122,6 +122,12 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				API:     "openai-responses",
 				Models:  grokPiModels(),
 			},
+			"opencode-go": {
+				BaseURL: baseURL,
+				APIKey:  codexAPIKey,
+				API:     "openai-completions",
+				Models:  opencodeGoPiModels(),
+			},
 		},
 	}
 
@@ -131,7 +137,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
 	settings := cuteCodeSettings{
-		Model:            "gpt-5.6-sol",
+		Model:            defaultCodexModel,
 		OpenAIBaseURL:    baseURL,
 		OpenAIAPIKey:     apiKey,
 		AnthropicBaseURL: baseURL,
@@ -143,6 +149,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 	for _, accountType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial} {
 		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType)...)
 	}
+	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey)...)
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
 	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey)...)
 	return json.MarshalIndent(settings, "", "  ")
@@ -296,7 +303,7 @@ func piModelsForProvider(accountType AccountType) []piModelConfig {
 			MaxTokens:     model.MaxTokens,
 			Cost:          advertisedModelCost(model.ID, time.Now()),
 		}
-		if accountType == AccountTypeCodex && strings.HasPrefix(model.ID, "gpt-5.6-") {
+		if accountType == AccountTypeCodex && (model.ID == defaultCodexModel || strings.HasPrefix(model.ID, "gpt-5.6-")) {
 			config.ThinkingLevelMap = map[string]string{"xhigh": "xhigh", "max": "max"}
 		}
 		if accountType == AccountTypeClaude && ccModelSupportsEffort(model.ID) {
@@ -308,6 +315,56 @@ func piModelsForProvider(accountType AccountType) []piModelConfig {
 			}
 		}
 		result = append(result, config)
+	}
+	return result
+}
+
+// opencodeGoChatModels returns the Go catalog models served via the chat
+// completions endpoint. Pi and Cute Code provider entries are
+// single-protocol, so messages/responses-family Go models stay available
+// through /api/pool/models and native opencode clients only.
+func opencodeGoChatModels() []poolModel {
+	models := modelsForProvider(AccountTypeOpencodeGo)
+	result := make([]poolModel, 0, len(models))
+	for _, model := range models {
+		if opencodeGoEndpointForModel(opencodeGoUpstreamModel(model.ID)) != opencodeGoEndpointChat {
+			continue
+		}
+		result = append(result, model)
+	}
+	return result
+}
+
+func opencodeGoPiModels() []piModelConfig {
+	models := opencodeGoChatModels()
+	result := make([]piModelConfig, 0, len(models))
+	for _, model := range models {
+		result = append(result, piModelConfig{
+			ID:            model.ID,
+			Name:          model.DisplayName,
+			Reasoning:     boolPtr(model.Reasoning),
+			Input:         append([]string(nil), model.Input...),
+			ContextWindow: model.ContextWindow,
+			MaxTokens:     model.MaxTokens,
+			Cost:          advertisedModelCost(model.ID, time.Now()),
+		})
+	}
+	return result
+}
+
+func opencodeGoCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
+	models := opencodeGoChatModels()
+	result := make([]cuteCodeModelConfig, 0, len(models))
+	for _, model := range models {
+		result = append(result, cuteCodeModelConfig{
+			ID:            model.ID,
+			Name:          model.DisplayName,
+			Protocol:      "openai",
+			BaseURL:       baseURL,
+			APIKey:        apiKey,
+			ContextWindow: model.ContextWindow,
+			Description:   model.Description,
+		})
 	}
 	return result
 }

@@ -91,7 +91,42 @@ func (h *proxyHandler) pollUpstreamUsage() {
 				}
 			}
 		}
+
+		// Grok billing is a separate endpoint from inference 429s. Poll it even
+		// while RateLimitUntil is set, otherwise weekly credit resets never
+		// clear the 99% hard-exclude until process restart.
+		if accType == AccountTypeGrok {
+			if !h.cfg.disableRefresh && h.needsRefresh(a) {
+				if err := h.refreshAccount(context.Background(), a); err != nil {
+					if isRateLimitError(err) {
+						h.applyRateLimit(a, nil)
+					}
+					if h.cfg.debug.Load() {
+						log.Printf("grok refresh %s failed: %v", a.ID, err)
+					}
+				}
+			}
+			if retrievedAt.IsZero() || now.Sub(retrievedAt) >= h.cfg.usageRefresh {
+				if err := h.fetchGrokUsage(now, a); err != nil && h.cfg.debug.Load() {
+					log.Printf("grok usage fetch %s failed: %v", a.ID, err)
+				}
+			}
+			continue
+		}
+
 		if !rateLimitUntil.IsZero() && rateLimitUntil.After(now) {
+			continue
+		}
+
+		// OpenCode Go exposes rolling/weekly/monthly quota via /usage.
+		// Poll on its own 15-minute cadence, even while cooling down, so
+		// window resets clear hard excludes without waiting for restart.
+		if accType == AccountTypeOpencodeGo {
+			if retrievedAt.IsZero() || now.Sub(retrievedAt) >= opencodeGoUsagePollInterval {
+				if err := h.fetchOpencodeGoUsage(now, a); err != nil && h.cfg.debug.Load() {
+					log.Printf("opencode-go usage fetch %s failed: %v", a.ID, err)
+				}
+			}
 			continue
 		}
 
@@ -156,26 +191,6 @@ func (h *proxyHandler) pollUpstreamUsage() {
 
 		// Adverserial exposes no quota endpoint; usage comes from response bodies.
 		if accType == AccountTypeAdverserial {
-			continue
-		}
-
-		if accType == AccountTypeGrok {
-			if !h.cfg.disableRefresh && h.needsRefresh(a) {
-				if err := h.refreshAccount(context.Background(), a); err != nil {
-					if isRateLimitError(err) {
-						h.applyRateLimit(a, nil)
-					}
-					if h.cfg.debug.Load() {
-						log.Printf("grok refresh %s failed: %v", a.ID, err)
-					}
-					continue
-				}
-			}
-			if retrievedAt.IsZero() || now.Sub(retrievedAt) >= h.cfg.usageRefresh {
-				if err := h.fetchGrokUsage(now, a); err != nil && h.cfg.debug.Load() {
-					log.Printf("grok usage fetch %s failed: %v", a.ID, err)
-				}
-			}
 			continue
 		}
 
@@ -276,8 +291,8 @@ func (h *proxyHandler) fetchGrokBillingPart(a *Account, weekly bool) ([]byte, er
 }
 
 func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
-	// Proactively refresh expired tokens before making the request.
-	// This ensures tokens stay fresh even if access tokens outlive ID token expiry.
+	// Refresh only when the access token is expired. Codex ID tokens die in
+	// about an hour; the access token is still valid for days.
 	if !h.cfg.disableRefresh && h.needsRefresh(a) {
 		if err := h.refreshAccount(context.Background(), a); err != nil {
 			errStr := err.Error()
@@ -288,17 +303,22 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 				h.applyRateLimit(a, nil)
 				return nil
 			}
-			// If refresh token is permanently invalid, mark account as dead
 			if isPermanentRefreshTokenError(err) {
-				a.mu.Lock()
-				a.Dead = true
-				a.Penalty += 100.0
-				a.mu.Unlock()
-				log.Printf("marking account %s as dead: refresh token revoked/invalid", a.ID)
-				if err := saveAccount(a); err != nil {
-					log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
+				if retireAfterRefreshFail(a, err, now) {
+					a.mu.Lock()
+					a.Dead = true
+					a.Penalty += 100.0
+					a.mu.Unlock()
+					log.Printf("marking account %s as dead: refresh token revoked/invalid", a.ID)
+					if err := saveAccount(a); err != nil {
+						log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
+					}
+					return fmt.Errorf("refresh token invalid: %w", err)
 				}
-				return fmt.Errorf("refresh token invalid: %w", err)
+				a.mu.Lock()
+				a.RefreshBlocked = true
+				a.mu.Unlock()
+				log.Printf("codex refresh token invalid for %s; continuing with live access token", a.ID)
 			}
 			// If refresh was rate limited, skip this usage fetch cycle entirely.
 			if strings.Contains(errStr, "rate limited") {
@@ -418,8 +438,7 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return err
 	}
-	rateLimit, _ := payload["rate_limit"].(map[string]any)
-	whamSnap, ok := parseCodexRateLimitMap(rateLimit, now, "wham")
+	whamSnap, ok := parseWhamUsage(payload, now)
 	if !ok {
 		return fmt.Errorf("usage response missing rate limit windows")
 	}
@@ -541,10 +560,14 @@ func (h *proxyHandler) autoRedeemExpiringCodexResetCredit(now time.Time, a *Acco
 		a.mu.Unlock()
 		return nil
 	}
+	exhausted := accountUsageExhaustedLocked(a)
 	var due *RateLimitResetCredit
 	for _, credit := range a.RateLimitResetCredits {
 		untilExpiry := credit.ExpiresAt.Sub(now)
-		if credit.ID != "" && untilExpiry > 0 && untilExpiry <= resetCreditAutoRedeemWindow {
+		if credit.ID == "" || untilExpiry <= 0 {
+			continue
+		}
+		if untilExpiry <= resetCreditAutoRedeemWindow || exhausted {
 			copy := credit
 			due = &copy
 			break

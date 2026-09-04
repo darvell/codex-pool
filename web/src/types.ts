@@ -1,4 +1,4 @@
-export type Provider = "codex" | "claude" | "gemini" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "adverserial";
+export type Provider = "codex" | "claude" | "gemini" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "adverserial" | "opencode_go";
 
 export interface PassportPrincipal {
   id: string;

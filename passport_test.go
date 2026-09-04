@@ -321,3 +321,14 @@ func TestDuckAnalyticsOutboxDrain(t *testing.T) {
 	}
 	t.Fatal("fact not drained")
 }
+
+func TestConsoleUsageHoursFollowsQuery(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "/api/console/principals/member/usage?hours=24", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := consoleUsageHours(request); got != 24 {
+		t.Fatalf("hours = %d, want 24", got)
+	}
+}

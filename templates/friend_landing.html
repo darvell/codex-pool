@@ -1477,6 +1477,7 @@ brew install claude-code</pre>
                     <div class="model-pills">
                         <span class="model-pill claude">claude-sonnet-5</span>
                         <span class="model-pill claude">claude-opus-4-8</span>
+                        <span class="model-pill openai">gpt-6-astra</span>
                         <span class="model-pill openai">gpt-5.6-sol</span>
                         <span class="model-pill openai">gpt-5.4</span>
                         <span class="model-pill other">kimi-for-coding</span>
@@ -1612,6 +1613,7 @@ brew install claude-code</pre>
                     <div class="step-label">Model Names</div>
                     <p style="color: var(--text-disabled); font-size: 0.8rem; margin-bottom: 10px;">Use any model name. Requests are auto-routed to the right provider and translated if needed.</p>
                     <div class="model-pills">
+                        <span class="model-pill openai">gpt-6-astra</span>
                         <span class="model-pill openai">gpt-5.6-sol</span>
                         <span class="model-pill openai">gpt-5.4</span>
                         <span class="model-pill openai">gpt-5.6-luna</span>
@@ -1741,7 +1743,7 @@ brew install claude-code</pre>
                         </div>
                     </div>
                     <p style="color: #888; font-size: 0.75rem; font-style: italic;">
-                        After setup, run <code>cute-code --model gpt-5.6-sol</code> or pick any configured model in the model selector.
+                        After setup, run <code>cute-code --model gpt-6-astra</code> or pick any configured model in the model selector.
                     </p>
                 </div>
 
@@ -2322,7 +2324,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.6-luna",  # or gpt-5.5, claude-sonnet-5, kimi-for-coding, MiniMax-M3
+    model="gpt-6-astra",  # or gpt-5.5, claude-sonnet-5, kimi-for-coding, MiniMax-M3
     messages=[{"role": "user", "content": "Hello from the pool"}],
     tools=[{
         "type": "function",
@@ -2349,7 +2351,7 @@ client = OpenAI(
 )
 
 completion = client.completions.create(
-    model="gpt-5.6-luna",
+    model="gpt-6-astra",
     prompt="Write a short release-note bullet for: agent routing now supports tool calls.",
     max_tokens=80,
     temperature=0,
@@ -2364,7 +2366,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-5.6-luna",
+    model="gpt-6-astra",
     input="Return JSON with marker pool-responses-ok and score 7.",
     text={
         "format": {
@@ -2431,7 +2433,7 @@ def lookup_order(order_id: str) -> str:
 agent = Agent(
     name="Pool Agent",
     instructions="Use tools when useful. Keep final answers short.",
-    model=OpenAIResponsesModel(model="gpt-5.6-luna", openai_client=client),
+    model=OpenAIResponsesModel(model="gpt-6-astra", openai_client=client),
     tools=[lookup_order],
 )
 
@@ -2465,7 +2467,7 @@ const lookupOrder = tool({
 const responsesAgent = new Agent({
   name: "Pool Responses Agent",
   instructions: "Use tools when useful. Keep final answers short.",
-  model: new OpenAIResponsesModel(client, "gpt-5.6-luna"),
+  model: new OpenAIResponsesModel(client, "gpt-6-astra"),
   tools: [lookupOrder],
 });
 
@@ -2479,7 +2481,7 @@ console.log(responsesResult.finalOutput);
 const chatAgent = new Agent({
   name: "Pool Chat Agent",
   instructions: "Use tools when useful. Keep final answers short.",
-  model: new OpenAIChatCompletionsModel(client, "gpt-5.6-luna"),
+  model: new OpenAIChatCompletionsModel(client, "gpt-6-astra"),
   tools: [lookupOrder],
 });
 
@@ -2499,11 +2501,11 @@ Implementation requirements:
 1. Find every OpenAI client initialization, raw OpenAI HTTP call, Agents SDK setup, LiteLLM/OpenAI-compatible provider config, and environment example in this repo.
 2. Configure them to use base URL ${publicUrl}/v1 and bearer/API key ${key}. For raw HTTP, send Authorization: Bearer ${key} and Content-Type: application/json.
 3. Keep normal OpenAI SDK method calls intact where possible. The proxy supports Responses, Chat Completions, legacy Completions, Images generate/edit, tool/function calls, structured outputs, and OpenAI Agents SDK usage.
-4. Use gpt-5.6-luna as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-8, kimi-for-coding, MiniMax-M3, and glm-5.3.
-5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-5.6-luna", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
-6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-5.6-luna") or new OpenAIChatCompletionsModel(client, "gpt-5.6-luna") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
+4. Use gpt-6-astra as the first smoke-test model unless this project already requires a specific model. Other usable model names include gpt-5.5, gpt-5.4, claude-sonnet-5, claude-opus-4-8, kimi-for-coding, MiniMax-M3, and glm-5.3.
+5. If this project uses the OpenAI Agents SDK for Python, create the client as AsyncOpenAI(base_url=os.environ["OPENAI_BASE_URL"], api_key=os.environ["OPENAI_API_KEY"]) and pass it to OpenAIResponsesModel(model="gpt-6-astra", openai_client=client) unless the existing code intentionally uses Chat Completions. Point tracing at os.environ["OPENAI_BASE_URL"] + "/traces/ingest" or disable tracing; do not let it post pool tokens to api.openai.com.
+6. If this project uses the OpenAI Agents SDK for TypeScript, create the client as new OpenAI({ baseURL: process.env.OPENAI_BASE_URL, apiKey: process.env.OPENAI_API_KEY }) and use new OpenAIResponsesModel(client, "gpt-6-astra") or new OpenAIChatCompletionsModel(client, "gpt-6-astra") depending on the existing agent path. Point OpenAITracingExporter at process.env.OPENAI_BASE_URL + "/traces/ingest" or disable tracing.
 7. Update README, .env.example, deployment config, tests, and CI secrets documentation so future runs use the proxy settings instead of api.openai.com.
-8. Run the project's most direct smoke test against the proxy. At minimum, verify one request returns a real model response using gpt-5.6-luna. If the project has agent/tool-call behavior, verify one tool-call path too. If it uses Images, verify images.generate or images.edit against the proxy rather than mocking it.
+8. Run the project's most direct smoke test against the proxy. At minimum, verify one request returns a real model response using gpt-6-astra. If the project has agent/tool-call behavior, verify one tool-call path too. If it uses Images, verify images.generate or images.edit against the proxy rather than mocking it.
 
 Reference snippets:
 Python OpenAI SDK:
@@ -2516,14 +2518,14 @@ Raw HTTP smoke test:
 curl ${publicUrl}/v1/responses \\
   -H "Authorization: Bearer ${key}" \\
   -H "Content-Type: application/json" \\
-  -d '{"model":"gpt-5.6-luna","input":"Reply with exactly: pool ok"}'
+  -d '{"model":"gpt-6-astra","input":"Reply with exactly: pool ok"}'
 
 Before you finish, report exactly which files changed and paste the smoke-test output. Do not claim this is complete unless the test actually hit ${publicUrl}/v1.`);
             setText('openai-curl-example', `curl ${publicUrl}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
   -d '{
-    "model": "gpt-5.5",
+    "model": "gpt-6-astra",
     "messages": [{"role": "user", "content": "Hello from the pool"}]
   }'`);
         }

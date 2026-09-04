@@ -27,7 +27,7 @@ import (
 
 const (
 	// ccVersion is the internal Claude Code version embedded in User-Agent.
-	ccVersion = "2.1.161"
+	ccVersion = "2.1.258"
 
 	// ccSDKVersion is the @anthropic-ai/sdk package version for X-Stainless-Package-Version.
 	ccSDKVersion = "0.94.0"

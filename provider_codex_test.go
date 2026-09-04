@@ -2,9 +2,38 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"testing"
+	"time"
 )
+
+func TestCodexLoadAccountUsesAccessTokenExpiry(t *testing.T) {
+	now := time.Now().UTC()
+	accessExp := now.Add(10 * 24 * time.Hour).Unix()
+	idExp := now.Add(time.Hour).Unix()
+	data, err := json.Marshal(map[string]any{
+		"tokens": map[string]any{
+			"access_token":  jwtWithExp(accessExp),
+			"id_token":      jwtWithExp(idExp),
+			"refresh_token": "refresh",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	account, err := NewCodexProvider(nil, nil, nil).LoadAccount("lean.json", "lean.json", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account == nil {
+		t.Fatal("expected account")
+	}
+	if got := account.ExpiresAt.Unix(); got != accessExp {
+		t.Fatalf("ExpiresAt = %d, want access token exp %d (id token exp %d)", got, accessExp, idExp)
+	}
+}
 
 func TestParseCodexClaimsNormalizesProLitePlan(t *testing.T) {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_plan_type":"PROLITE"}}`))
@@ -25,11 +54,32 @@ func TestCodexProviderNormalizeResponsesPaths(t *testing.T) {
 		"/v1/responses/resp_123":             "/responses/resp_123",
 		"/v1/responses/resp_123/cancel":      "/responses/resp_123/cancel",
 		"/v1/responses/resp_123/input_items": "/responses/resp_123/input_items",
+		"/backend-api/codex/responses":       "/codex/responses",
+		"/backend-api/codex/responses/compact": "/codex/responses/compact",
 	}
 	for in, want := range cases {
 		if got := provider.NormalizePath(in); got != want {
 			t.Fatalf("NormalizePath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCodexBackendAPIResponsesKeepsCodexJoinPath(t *testing.T) {
+	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
+	provider := NewCodexProvider(responsesBase, whamBase, nil)
+
+	path := "/backend-api/codex/responses"
+	if !isCodexResponsesPath(path) {
+		t.Fatal("backend-api responses path should be treated as Responses for spool/model-route")
+	}
+	upstream := provider.UpstreamURL(path)
+	if upstream.String() != whamBase.String() {
+		t.Fatalf("UpstreamURL = %s, want %s", upstream, whamBase)
+	}
+	joined := singleJoin(upstream.Path, provider.NormalizePath(path))
+	if joined != "/backend-api/codex/responses" {
+		t.Fatalf("joined upstream path = %q, want /backend-api/codex/responses", joined)
 	}
 }
 

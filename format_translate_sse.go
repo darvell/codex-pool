@@ -12,6 +12,8 @@ import (
 // target format, and writes the translated events to the client. It also
 // forwards original event data to a usage callback for usage tracking.
 type sseTranslateWriter struct {
+	framer    sseFramer
+	err       error
 	w         io.Writer          // underlying writer (flushWriter)
 	direction TranslateDirection // which way to translate
 	state     streamTranslationState
@@ -39,30 +41,25 @@ type streamTranslationState struct {
 }
 
 func (sw *sseTranslateWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
+	if sw.err != nil {
+		return 0, sw.err
+	}
 	sw.buf = append(sw.buf, p...)
 	sw.scanAndTranslate()
-	return origLen, nil
+	return len(p), sw.err
 }
 
 func (sw *sseTranslateWriter) scanAndTranslate() {
 	for {
-		// Find end of SSE event
-		idx := bytes.Index(sw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(sw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				if len(sw.buf) > 1024*1024 {
-					sw.buf = sw.buf[len(sw.buf)-512*1024:]
-				}
-				return
-			}
+		if sw.err != nil {
+			sw.buf = nil
+			return
 		}
-
-		event := sw.buf[:idx]
-		sw.buf = sw.buf[idx+advance:]
+		event, advance, ok := sw.framer.next(sw.buf)
+		if !ok {
+			return
+		}
+		sw.buf = sw.buf[advance:]
 		sw.processEvent(event)
 	}
 }
@@ -261,11 +258,7 @@ func (sw *sseTranslateWriter) emitClaudeMessageDelta() {
 
 func (sw *sseTranslateWriter) emitClaudeEvent(eventType, data string) {
 	out := fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, data)
-	if _, err := sw.w.Write([]byte(out)); err != nil {
-		if sw.debug {
-			log.Printf("[%s] translate write error: %v", sw.reqID, err)
-		}
-	}
+	sw.writeOAI(out)
 }
 
 // --- Claude Stream -> OpenAI Stream ---
@@ -455,10 +448,9 @@ func (sw *sseTranslateWriter) emitOAIChunkWithFinish(delta map[string]any, finis
 }
 
 func (sw *sseTranslateWriter) writeOAI(s string) {
-	if _, err := sw.w.Write([]byte(s)); err != nil {
-		if sw.debug {
-			log.Printf("[%s] translate write error: %v", sw.reqID, err)
-		}
+	writeSSE(sw.w, []byte(s), &sw.err)
+	if sw.err != nil && sw.debug {
+		log.Printf("[%s] translate write error: %v", sw.reqID, sw.err)
 	}
 }
 

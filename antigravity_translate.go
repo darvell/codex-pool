@@ -93,6 +93,19 @@ func antigravityModelFromGeminiPath(path string) string {
 	return strings.TrimSpace(model)
 }
 
+// unwrapGeminiClientRequest accepts both a raw generateContent body and the
+// Gemini CLI / Code Assist envelope {model, request:{contents...}}. Nesting
+// the envelope again would send request.request to Google.
+func unwrapGeminiClientRequest(root map[string]any) map[string]any {
+	request := mapValue(root["request"])
+	if request != nil {
+		if _, ok := request["contents"]; ok {
+			return cloneAnyMap(request)
+		}
+	}
+	return cloneAnyMap(root)
+}
+
 func prepareAntigravityRequest(path string, body []byte, requestedModel, projectID, conversationID string) (antigravityPreparedRequest, error) {
 	publicModel := strings.TrimSpace(requestedModel)
 	if publicModel == "" {
@@ -128,9 +141,11 @@ func prepareAntigravityRequest(path string, body []byte, requestedModel, project
 	var err error
 	switch format {
 	case antigravityFormatGemini:
-		gemini = cloneAnyMap(root)
+		// Gemini CLI / Code Assist sends {model, request:{contents...}}.
+		// A v1beta body already has contents at the top level.
+		gemini = unwrapGeminiClientRequest(root)
 		delete(gemini, "model")
-		clientStream = strings.Contains(path, "streamGenerateContent") || clientStream
+		clientStream = strings.Contains(path, "streamGenerateContent") || strings.HasPrefix(path, "/v1internal:") || clientStream
 	case antigravityFormatChat:
 		gemini, err = antigravityChatToGemini(root)
 	case antigravityFormatAnthropic:

@@ -9,10 +9,12 @@ func TestIsZAIModelHandlesCodingPlanModels(t *testing.T) {
 	t.Parallel()
 
 	for model, wantCanonical := range map[string]string{
-		"glm-5.3": "glm-5.3",
-		"GLM-5.3": "glm-5.3",
-		"glm-5.2": "glm-5.3", // Upgrade existing installed configurations.
-		"GLM-5.2": "glm-5.3",
+		"glm-5.3":       "glm-5.3",
+		"GLM-5.3":       "glm-5.3",
+		"glm-5.3-flash": "glm-5.3-flash",
+		"GLM-5.3-Flash": "glm-5.3-flash",
+		"glm-5.2":       "glm-5.3", // Upgrade existing installed configurations.
+		"GLM-5.2":       "glm-5.3",
 	} {
 		if !isZAIModel(model) {
 			t.Fatalf("expected %q to route to zai", model)

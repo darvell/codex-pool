@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"sync"
@@ -14,20 +15,28 @@ const heartbeatInterval = 15 * time.Second
 // This prevents intermediate proxies from timing out during slow upstream
 // streaming responses.
 type heartbeatWriter struct {
-	w       io.Writer
-	flusher http.Flusher
+	w     io.Writer
+	flush func() error
 
 	mu      sync.Mutex
 	timer   *time.Timer
 	stopped bool
+	err     error
+	tail    [4]byte
+	tailLen int
 }
 
 func newHeartbeatWriter(w io.Writer, flusher http.Flusher) *heartbeatWriter {
-	hw := &heartbeatWriter{
-		w:       w,
-		flusher: flusher,
+	hw := &heartbeatWriter{w: w}
+	// A buffered writer owns flushing; bypassing it would race its timer.
+	if f, ok := w.(interface{ flush() error }); ok {
+		hw.flush = f.flush
+	} else {
+		hw.flush = func() error { return flushHTTP(flusher) }
 	}
+	hw.mu.Lock()
 	hw.timer = time.AfterFunc(heartbeatInterval, hw.sendHeartbeat)
+	hw.mu.Unlock()
 	return hw
 }
 
@@ -41,35 +50,77 @@ func (hw *heartbeatWriter) resetTimerLocked() {
 func (hw *heartbeatWriter) sendHeartbeat() {
 	hw.mu.Lock()
 	defer hw.mu.Unlock()
-	if hw.stopped {
+	if hw.stopped || hw.err != nil {
 		return
 	}
 
-	// SSE comment line — ignored by all SSE parsers. Hold the same mutex as
-	// Write so heartbeat bytes cannot interleave with upstream event bytes.
-	if _, err := hw.w.Write([]byte(": heartbeat\n\n")); err != nil {
+	// A mutex protects writes, but an upstream event can span several writes.
+	if !hw.atEventBoundary() {
+		hw.resetTimerLocked()
 		return
 	}
-	if hw.flusher != nil {
-		hw.flusher.Flush()
+
+	// Hold the Write mutex so heartbeat bytes cannot interleave with events.
+	frame := []byte(": heartbeat\n\n")
+	n, err := hw.w.Write(frame)
+	if err == nil && n != len(frame) {
+		err = io.ErrShortWrite
 	}
-	hw.resetTimerLocked()
+	if err == nil {
+		err = hw.flush()
+	}
+	hw.err = err
+	if err == nil {
+		hw.resetTimerLocked()
+	}
 }
 
 func (hw *heartbeatWriter) Write(p []byte) (int, error) {
 	hw.mu.Lock()
 	defer hw.mu.Unlock()
-	// Reset heartbeat timer on each real write.
+	if hw.err != nil {
+		return 0, hw.err
+	}
+	if hw.stopped {
+		return 0, io.ErrClosedPipe
+	}
+
+	n, err := hw.w.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	hw.err = err
+	if err != nil {
+		hw.timer.Stop()
+		return n, err
+	}
+	hw.trackEventTail(p[:n])
 	hw.resetTimerLocked()
-	return hw.w.Write(p)
+	return n, nil
 }
 
-// Stop cancels the heartbeat timer. Safe to call multiple times.
-func (hw *heartbeatWriter) Stop() {
+func (hw *heartbeatWriter) atEventBoundary() bool {
+	tail := hw.tail[:hw.tailLen]
+	return len(tail) == 0 || bytes.HasSuffix(tail, []byte("\n\n")) || bytes.HasSuffix(tail, []byte("\r\n\r\n"))
+}
+
+func (hw *heartbeatWriter) trackEventTail(p []byte) {
+	if len(p) >= len(hw.tail) {
+		hw.tailLen = copy(hw.tail[:], p[len(p)-len(hw.tail):])
+		return
+	}
+	kept := min(hw.tailLen, len(hw.tail)-len(p))
+	copy(hw.tail[:], hw.tail[hw.tailLen-kept:hw.tailLen])
+	hw.tailLen = kept + copy(hw.tail[kept:], p)
+}
+
+// Stop cancels heartbeats and waits for any active write. Safe to repeat.
+func (hw *heartbeatWriter) Stop() error {
 	hw.mu.Lock()
 	defer hw.mu.Unlock()
 	hw.stopped = true
 	if hw.timer != nil {
 		hw.timer.Stop()
 	}
+	return hw.err
 }

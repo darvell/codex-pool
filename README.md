@@ -60,7 +60,7 @@ Share your pool with others using a friend code.
 ### 1. Add your accounts
 
 ```bash
-mkdir -p pool/codex pool/claude pool/gemini pool/antigravity
+mkdir -p pool/codex pool/claude pool/gemini pool/antigravity pool/opencode_go
 
 # Codex accounts
 cp ~/.codex/auth.json pool/codex/work.json
@@ -71,6 +71,12 @@ cp ~/.claude/credentials.json pool/claude/main.json
 
 # Gemini accounts
 cp ~/.gemini/oauth_creds.json pool/gemini/main.json
+
+# OpenCode Go subscription (API key from https://opencode.ai/auth)
+cat > pool/opencode_go/main.json <<'EOF'
+{"api_key": "sk-..."}
+EOF
+chmod 600 pool/opencode_go/main.json
 ```
 
 Structure:
@@ -199,6 +205,13 @@ Native-tool endpoints are same-origin relative paths. The `native_tools` map key
 ```json
 {"type":"antigravity","access_token":"ya29...","refresh_token":"1//...","email":"person@example.com","project_id":"project-id","expiry_date":1234567890000}
 ```
+
+**OpenCode Go** - `pool/opencode_go/*.json`
+```json
+{"api_key": "sk-..."}
+```
+
+OpenCode Go models are namespaced as `opencode-go/<model-id>` (e.g. `opencode-go/longcat-2.0`), matching OpenCode's own config convention. Bare IDs also route to Go unless another provider already claims them (`kimi-k3` is Go-only; bare `mimo-v2.5-pro` stays on Xiaomi, bare `grok-4.6` stays on Grok). Go quota (rolling/weekly/monthly from `GET /zen/go/v1/usage`) is polled every 15 minutes; the weekly window drives routing score. Configure a different endpoint with `UPSTREAM_OPENCODE_GO_BASE`.
 
 Antigravity model names come from Google's live `fetchAvailableModels` response. Use `antigravity/<model-id>` to force this provider. `/api/pool/models`, `/v1/models`, `/v1beta/models`, Pi, Cute Code, and the Codex catalog consume the same registry. Temporary quota exhaustion changes `available_now` without removing a supported model from the catalog.
 

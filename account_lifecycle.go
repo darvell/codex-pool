@@ -3,21 +3,46 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 )
 
-// applyProxyAuthFailure updates account state for 401/403 responses that came
-// from proxied user requests. Codex requests can fail for request-scoped
-// reasons, so they only get a small retry penalty here instead of being treated
-// like a bad account.
+func codexAccessLive(a *Account, now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	access := a.AccessToken
+	a.mu.Unlock()
+	if access == "" {
+		return false
+	}
+	exp := parseCodexClaims(access).ExpiresAt
+	return exp.IsZero() || exp.After(now)
+}
+
+func retireAfterRefreshFail(a *Account, err error, now time.Time) bool {
+	if !isPermanentRefreshTokenError(err) {
+		return false
+	}
+	if a != nil && a.Type == AccountTypeCodex && codexAccessLive(a, now) {
+		return false
+	}
+	return true
+}
+
 func accountUsesStaticAPIKey(accountType AccountType) bool {
 	switch accountType {
-	case AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial:
+	case AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial, AccountTypeOpencodeGo:
 		return true
 	default:
 		return false
 	}
 }
 
+// applyProxyAuthFailure updates account state for 401/403 responses that came
+// from proxied user requests. Codex requests can fail for request-scoped
+// reasons, so they only get a small retry penalty here instead of being treated
+// like a bad account.
 func applyProxyAuthFailure(a *Account, refreshFailed bool) (markedDead bool, penaltyNow float64) {
 	if a == nil {
 		return false, 0

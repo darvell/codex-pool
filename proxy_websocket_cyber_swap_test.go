@@ -646,6 +646,28 @@ func TestStripPreviousResponseIDNoOp(t *testing.T) {
 	}
 }
 
+func TestExtractCodexWebSocketRequestedModel(t *testing.T) {
+	t.Parallel()
+	flat := []byte(`{"type":"response.create","model":"grok-4.5","input":"hi"}`)
+	if got := extractCodexWebSocketRequestedModel(flat); got != "grok-4.5" {
+		t.Fatalf("flat model = %q", got)
+	}
+	nested := []byte(`{"type":"response.create","response":{"model":"grok-4.5","input":"hi"}}`)
+	if got := extractCodexWebSocketRequestedModel(nested); got != "grok-4.5" {
+		t.Fatalf("nested model = %q", got)
+	}
+}
+
+func TestModelRequiresHTTPProviderRoute(t *testing.T) {
+	t.Parallel()
+	if !modelRequiresHTTPProviderRoute("grok-4.5") {
+		t.Fatal("expected grok-4.5 to require HTTP model routing")
+	}
+	if modelRequiresHTTPProviderRoute("gpt-5.6-sol") {
+		t.Fatal("Codex models must remain websocket-eligible")
+	}
+}
+
 // readUntilCyberPolicyOrClose reads frames until a cyber_policy frame
 // is seen, the connection closes, or the timeout elapses. Used by the
 // passthrough tests that assert the upstream's real cyber_policy frame

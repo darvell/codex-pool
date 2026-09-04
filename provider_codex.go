@@ -79,7 +79,10 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		acc.AccountID = acc.IDTokenChatGPTAccountID
 	}
 	acc.PlanType = claims.PlanType
-	acc.ExpiresAt = claims.ExpiresAt
+	acc.ExpiresAt = parseCodexClaims(aj.Tokens.AccessToken).ExpiresAt
+	if acc.ExpiresAt.IsZero() {
+		acc.ExpiresAt = claims.ExpiresAt
+	}
 	if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
 		acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
 	}
@@ -174,10 +177,13 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 	if payload.RefreshToken != "" {
 		acc.RefreshToken = payload.RefreshToken
 	}
+	if accessExp := parseCodexClaims(payload.AccessToken).ExpiresAt; !accessExp.IsZero() {
+		acc.ExpiresAt = accessExp
+	}
 	if payload.IDToken != "" {
 		acc.IDToken = payload.IDToken
 		claims := parseCodexClaims(payload.IDToken)
-		if !claims.ExpiresAt.IsZero() {
+		if acc.ExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
 			acc.ExpiresAt = claims.ExpiresAt
 		}
 		if claims.ChatGPTAccountID != "" {
@@ -231,6 +237,7 @@ func (p *CodexProvider) parseResponseUsage(obj map[string]any) *RequestUsage {
 
 	if details, ok := usageMap["input_tokens_details"].(map[string]any); ok {
 		ru.CachedInputTokens = readInt64(details, "cached_tokens")
+		ru.CacheCreationTokens = readInt64(details, "cache_write_tokens")
 	}
 	if ru.CachedInputTokens == 0 {
 		ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")

@@ -1255,7 +1255,7 @@ func claudeCanonicalModel(model string) string {
 		case "opus":
 			canonical = "claude-opus-5"
 		case "fable":
-			canonical = "claude-fable-5"
+			canonical = "claude-fable-5-1"
 		case "sonnet":
 			canonical = "claude-sonnet-5"
 		case "haiku":

@@ -70,6 +70,8 @@ var subscriptionCosts = map[subscriptionKey]struct {
 	{AccountTypeXiaomi, ""}:                 {0, "Xiaomi MiMo Token Plan"},
 	{AccountTypeAdverserial, "adverserial"}: {0, "Adverserial Platform"},
 	{AccountTypeAdverserial, ""}:            {0, "Adverserial Platform"},
+	{AccountTypeOpencodeGo, "opencode_go"}:  {10, "OpenCode Go"},
+	{AccountTypeOpencodeGo, ""}:             {10, "OpenCode Go"},
 }
 
 // getSubscriptionCost returns monthly cost and label for an account.
@@ -222,28 +224,38 @@ func (pd *PricingData) startPricingRefresh() {
 }
 
 var pricingModelAliases = map[string]string{
-	"claude-opus-5 [1m]":   "claude-opus-5",
-	"claude-opus-5[1m]":    "claude-opus-5",
-	"claude-sonnet-5 [1m]": "claude-sonnet-5",
-	"claude-sonnet-5[1m]":  "claude-sonnet-5",
-	"gpt-5.6-sol[1m]":      "gpt-5.6-sol",
-	"gpt-5.6-terra[1m]":    "gpt-5.6-terra",
-	"gpt-5.6-luna[1m]":     "gpt-5.6-luna",
-	"glm-5.2":              "glm-5.3",
-	"zai.glm-5.2":          "glm-5.3",
-	"zai.glm-5.3":          "glm-5.3",
-	"grok-4.5-build":       "grok-4.5",
-	"grok-build-latest":    "grok-4.5",
-	"gemini-pro-agent":     "gemini-3.1-pro-preview",
-	"gemini-3-flash-agent": "gemini-3-flash-preview",
-	"gemini-3.1-pro":       "gemini-3.1-pro-preview",
-	"mimo-v2.5-pro[1m]":    "mimo-v2.5-pro",
-	"kimi":                 "kimi-for-coding",
-	"k2p5":                 "kimi-for-coding",
-	"kimi-k2-thinking":     "kimi-for-coding",
-	"minimax":              "MiniMax-M3",
-	"minimax-m3":           "MiniMax-M3",
-	"cyberkimi":            "lordx64/cyberkimi",
+	"gpt-6-astra[1m]":            "gpt-6-astra",
+	"gpt-6-astra [1m]":           "gpt-6-astra",
+	"gpt-6-astra-none":           "gpt-6-astra",
+	"claude-opus-5 [1m]":         "claude-opus-5",
+	"claude-opus-5[1m]":          "claude-opus-5",
+	"claude-sonnet-5 [1m]":       "claude-sonnet-5",
+	"claude-sonnet-5[1m]":        "claude-sonnet-5",
+	"gpt-5.6-sol[1m]":            "gpt-5.6-sol",
+	"gpt-5.6-terra[1m]":          "gpt-5.6-terra",
+	"gpt-5.6-luna[1m]":           "gpt-5.6-luna",
+	"gpt-daybreak-blue-latest":   "gpt-5.6-sol",
+	"glm-5.2":                    "glm-5.3",
+	"zai.glm-5.2":                "glm-5.3",
+	"zai.glm-5.3":                "glm-5.3",
+	"zai.glm-5.3-flash":          "glm-5.3-flash",
+	"grok-4.6-build":             "grok-4.6",
+	"grok-4.5-build":             "grok-4.5",
+	"grok-build-latest":          "grok-4.6",
+	"gemini-pro-agent":           "gemini-3.1-pro-preview",
+	"gemini-3-flash-agent":       "gemini-3.5-flash",
+	"gemini-3.1-pro":             "gemini-3.1-pro-preview",
+	"gemini-3.5-flash-extra-low": "gemini-3.5-flash",
+	"gemini-3.6-flash-tiered":    "gemini-3.6-flash",
+	"gemini-3.7-flash-tiered":    "gemini-3.7-flash",
+	"gemini-3.8-flash-tiered":    "gemini-3.8-flash",
+	"mimo-v2.5-pro[1m]":          "mimo-v2.5-pro",
+	"kimi":                       "kimi-for-coding",
+	"k2p5":                       "kimi-for-coding",
+	"kimi-k2-thinking":           "kimi-for-coding",
+	"minimax":                    "MiniMax-M3",
+	"minimax-m3":                 "MiniMax-M3",
+	"cyberkimi":                  "lordx64/cyberkimi",
 }
 
 func canonicalPricingModel(model string) string {
@@ -301,20 +313,18 @@ func isAllDigits(s string) bool {
 	return len(s) > 0
 }
 
-// calculateCost computes the estimated API cost for a request.
-// Formula: uncached_input * input_price + cache_read * cache_read_price plus
-// cache_creation * cache_write_price + (output + reasoning) * output_price.
 // defaultModelForProvider returns a fallback model name when the request didn't include one.
 var defaultModelForProvider = map[AccountType]string{
-	AccountTypeCodex:       "gpt-5.6-sol",
+	AccountTypeCodex:       defaultCodexModel,
 	AccountTypeClaude:      "claude-sonnet-5",
 	AccountTypeAntigravity: "gemini-3.6-flash",
 	AccountTypeKimi:        "k3",
 	AccountTypeMinimax:     "MiniMax-M3",
 	AccountTypeZAI:         "glm-5.3",
 	AccountTypeXiaomi:      "mimo-v2.5-pro",
-	AccountTypeGrok:        "grok-4.5",
+	AccountTypeGrok:        "grok-4.6",
 	AccountTypeAdverserial: "lordx64/cyberkimi",
+	AccountTypeOpencodeGo:  "opencode-go/longcat-2.0",
 }
 
 func (pd *PricingData) calculateCost(ru RequestUsage) float64 {
@@ -351,7 +361,12 @@ func (pd *PricingData) calculateCost(ru RequestUsage) float64 {
 	cost := float64(uncachedInput) * inputCost
 	cost += float64(ru.CachedInputTokens) * cacheReadCost
 	cost += float64(ru.CacheCreationTokens) * cacheWriteCost
-	cost += float64(ru.OutputTokens+ru.ReasoningTokens) * outputCost
+	outputTokens := ru.OutputTokens
+	// Codex reports reasoning inside output_tokens; Gemini reports it separately.
+	if ru.AccountType != AccountTypeCodex {
+		outputTokens += ru.ReasoningTokens
+	}
+	cost += float64(outputTokens) * outputCost
 	return cost
 }
 
@@ -372,7 +387,7 @@ func inputTokensExcludeCached(ru RequestUsage) bool {
 	// Historical records predate InputTokenMode. These providers expose the
 	// Anthropic usage shape, where input_tokens is uncached input only.
 	switch ru.AccountType {
-	case AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial:
+	case AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial, AccountTypeOpencodeGo:
 		return true
 	default:
 		return false

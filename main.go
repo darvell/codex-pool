@@ -47,6 +47,7 @@ type config struct {
 	xiaomiBase             *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
 	grokBase               *url.URL // Grok Code OpenAI-compatible endpoint
 	adverserialBase        *url.URL // platform.adverserial.ai Anthropic-compatible endpoint
+	opencodeGoBase         *url.URL // OpenCode Go subscription endpoint (zen/go/v1)
 	poolDir                string
 
 	disableRefresh  bool
@@ -153,6 +154,7 @@ func buildConfig() *config {
 	cfg.xiaomiBase = mustParse(getenv("UPSTREAM_XIAOMI_BASE", "https://token-plan-sgp.xiaomimimo.com/anthropic"))
 	cfg.grokBase = mustParse(getConfigString("UPSTREAM_GROK_BASE", fileCfg.GrokBase, "https://cli-chat-proxy.grok.com/v1"))
 	cfg.adverserialBase = mustParse(getenv("UPSTREAM_ADVERSERIAL_BASE", "https://platform.adverserial.ai/api"))
+	cfg.opencodeGoBase = mustParse(getenv("UPSTREAM_OPENCODE_GO_BASE", "https://opencode.ai/zen/go/v1"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -301,7 +303,8 @@ func main() {
 	xiaomiProvider := NewXiaomiProvider(cfg.xiaomiBase)
 	grokProvider := NewGrokProvider(cfg.grokBase)
 	adverserialProvider := NewAdverserialProvider(cfg.adverserialBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider)
+	opencodeGoProvider := NewOpencodeGoProvider(cfg.opencodeGoBase)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider, opencodeGoProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -320,6 +323,7 @@ func main() {
 	xiaomiCount := pool.countByType(AccountTypeXiaomi)
 	grokCount := pool.countByType(AccountTypeGrok)
 	adverserialCount := pool.countByType(AccountTypeAdverserial)
+	opencodeGoCount := pool.countByType(AccountTypeOpencodeGo)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
@@ -525,6 +529,7 @@ func main() {
 	}
 	startAntigravityVersionUpdater(context.Background())
 	h.startAntigravityModelPoller()
+	h.startProviderModelPoller()
 
 	// Probe account UUIDs for Claude OAuth accounts that don't have one yet.
 	go h.probeClaudeAccountUUIDs()
@@ -575,8 +580,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, opencode_go=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, opencodeGoCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -686,12 +691,19 @@ const largeReplayBodyThreshold = 8 * 1024 * 1024
 // acquireLargeReplayBody serializes requests whose JSON rewrite retains large
 // raw, decoded, and re-marshaled copies simultaneously. Small requests remain
 // fully concurrent. A missing channel keeps lightweight test handlers working.
-func (h *proxyHandler) acquireLargeReplayBody(contentLength int64) func() {
-	if h == nil || h.largeReplayBodies == nil || contentLength >= 0 && contentLength <= largeReplayBodyThreshold {
-		return func() {}
+func (h *proxyHandler) acquireLargeReplayBody(ctx context.Context, contentLength int64) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	h.largeReplayBodies <- struct{}{}
-	return func() { <-h.largeReplayBodies }
+	if h == nil || h.largeReplayBodies == nil || contentLength >= 0 && contentLength <= largeReplayBodyThreshold {
+		return func() {}, nil
+	}
+	select {
+	case h.largeReplayBodies <- struct{}{}:
+		return sync.OnceFunc(func() { <-h.largeReplayBodies }), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (h *proxyHandler) pickUpstream(path string, headers http.Header) (Provider, *url.URL) {
@@ -849,6 +861,10 @@ func (h *proxyHandler) imageFanoutEndpoint(r *http.Request) string {
 }
 
 func mapResponsesPath(in string) string {
+	// Only public/v1 Responses paths map to ChatGPT's /responses join form.
+	// /backend-api/codex/responses must keep the /codex/responses suffix so
+	// CodexProvider.NormalizePath + whamBase still produce
+	// https://chatgpt.com/backend-api/codex/responses (not /backend-api/responses).
 	switch {
 	case strings.HasPrefix(in, "/v1/responses/compact") || strings.HasPrefix(in, "/responses/compact"):
 		return "/responses/compact"
@@ -859,9 +875,29 @@ func mapResponsesPath(in string) string {
 	}
 }
 
+// isCodexResponsesPath reports Codex-shaped Responses endpoints, including the
+// private ChatGPT backend path clients often configure as OPENAI_BASE_URL.
+// Oversized/chunked requests on these paths must still model-route: without
+// that, Grok/Kimi/etc. are forwarded to ChatGPT and fail with
+// "not supported when using Codex with a ChatGPT account".
 func isCodexResponsesPath(path string) bool {
-	return path == "/responses" || path == "/v1/responses" ||
-		strings.HasPrefix(path, "/responses/") || strings.HasPrefix(path, "/v1/responses/")
+	path = normalizeNoopPath(path)
+	if path == "/responses" || path == "/v1/responses" ||
+		strings.HasPrefix(path, "/responses/") || strings.HasPrefix(path, "/v1/responses/") {
+		return true
+	}
+	if path == "/backend-api/codex/responses" || strings.HasPrefix(path, "/backend-api/codex/responses/") {
+		return true
+	}
+	if path == "/api/codex/responses" || strings.HasPrefix(path, "/api/codex/responses/") {
+		return true
+	}
+	return false
+}
+
+func isStreamedModelRoutePath(path string) bool {
+	path = normalizeNoopPath(path)
+	return path == "/v1/messages" || isCodexResponsesPath(path)
 }
 
 func codexPassthroughNeedsBodyRewrite(path string) bool {
@@ -878,6 +914,15 @@ func ensureCodexResponsesCompactBody(body []byte) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
+	out := compactResponsesObject(obj)
+	rewritten, err := json.Marshal(out)
+	if err != nil {
+		return body
+	}
+	return rewritten
+}
+
+func compactResponsesObject(obj map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, key := range []string{"model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "service_tier", "text", "previous_response_id"} {
 		if v, ok := obj[key]; ok {
@@ -900,11 +945,7 @@ func ensureCodexResponsesCompactBody(body []byte) []byte {
 	}
 	stripHostedMCPFromResponsesRequest(out)
 	prepareCodexSchemasInBody(out)
-	rewritten, err := json.Marshal(out)
-	if err != nil {
-		return body
-	}
-	return rewritten
+	return out
 }
 
 func ensureCodexResponsesInstructions(body []byte) []byte {
@@ -915,6 +956,15 @@ func ensureCodexResponsesInstructions(body []byte) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
+	prepareResponsesObject(obj)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func prepareResponsesObject(obj map[string]any) {
 	if _, ok := obj["instructions"]; !ok {
 		obj["instructions"] = ""
 	}
@@ -934,11 +984,6 @@ func ensureCodexResponsesInstructions(body []byte) []byte {
 		}
 	}
 	stripHostedMCPFromResponsesRequest(obj)
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
 }
 
 func prepareCodexSchemasInBody(obj map[string]any) {
@@ -1385,6 +1430,15 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		rewritten := rewriteAndSanitizeGrokRequestBody(body, canonical)
 		return p, p.UpstreamURL(path), rewritten
 	}
+	if isOpencodeGoModel(model) {
+		p := h.registry.ForType(AccountTypeOpencodeGo)
+		if p == nil {
+			return nil, nil, nil
+		}
+		// The Go upstream expects the bare model ID in the body.
+		rewritten := rewriteModelInBody(body, opencodeGoUpstreamModel(opencodeGoCanonicalModel(model)))
+		return p, p.UpstreamURL(path), rewritten
+	}
 	// Cross-format model routing: detect if the model belongs to a different provider
 	// than the one the request path would normally select.
 	if isOpenAIModel(model) {
@@ -1407,17 +1461,22 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 const streamedModelRoutePeekBytes = 64 * 1024
 
 func shouldPeekStreamedModelRoute(r *http.Request) bool {
-	if r == nil || r.ContentLength < streamedModelRoutePeekBytes {
+	if r == nil || r.Method != http.MethodPost || !isStreamedModelRoutePath(r.URL.Path) {
 		return false
 	}
-	return r.Method == http.MethodPost && r.URL.Path == "/v1/messages"
+	// Chunked Responses bodies never advertise a size. Peek anyway so a leading
+	// "model" field can divert Grok/Kimi/etc. before Codex streaming fallthrough.
+	if r.ContentLength < 0 {
+		return isCodexResponsesPath(r.URL.Path)
+	}
+	return r.ContentLength >= streamedModelRoutePeekBytes
 }
 
 func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provider, targetBase *url.URL, reqID string) (Provider, *url.URL, error) {
 	if r == nil || r.Body == nil || h == nil || h.registry == nil {
 		return provider, targetBase, nil
 	}
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+	if r.Method != http.MethodPost || !isStreamedModelRoutePath(r.URL.Path) {
 		return provider, targetBase, nil
 	}
 	if strings.TrimSpace(r.Header.Get("Content-Encoding")) != "" {
@@ -1485,16 +1544,26 @@ func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, 
 		{AccountTypeXiaomi, isXiaomiModel, xiaomiCanonicalModel},
 		{AccountTypeGrok, isGrokModel, grokCanonicalModel},
 		{AccountTypeAdverserial, isAdverserialModel, adverserialCanonicalModel},
+		{AccountTypeOpencodeGo, isOpencodeGoModel, opencodeGoStreamCanonicalModel},
 	}
 	for _, candidate := range routes {
-		if !candidate.matches(model) {
+		discoveredModel := ""
+		discovered := false
+		if h.pool != nil {
+			discoveredModel, discovered = h.pool.discoveredCanonicalModel(candidate.accountType, model)
+		}
+		if !candidate.matches(model) && !discovered {
 			continue
 		}
 		provider := h.registry.ForType(candidate.accountType)
 		if provider == nil {
 			return nil, nil, model
 		}
-		return provider, provider.UpstreamURL(path), candidate.canonical(model)
+		canonical := candidate.canonical(model)
+		if discovered {
+			canonical = discoveredModel
+		}
+		return provider, provider.UpstreamURL(path), canonical
 	}
 	return nil, nil, model
 }
@@ -1864,16 +1933,20 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		accountType = provider.Type()
 		streamBody = streamBody || accountType == AccountTypeXiaomi
 	}
-	// Native Codex Responses requests need rewriting and hosted-MCP filtering,
-	// but large prompts must not be decoded into map[string]any. Transform them
-	// token-by-token into a disk-backed body, then stream that body upstream.
-	if accountType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) {
+	// Codex-shaped Responses paths need rewriting and hosted-MCP filtering, but
+	// large prompts must not be decoded into map[string]any. Spool token-by-token,
+	// then model-route: Grok/Kimi/MiniMax/ZAI/Xiaomi/Adverserial must not inherit
+	// the path-selected Codex upstream (especially /backend-api/codex/responses).
+	if isCodexResponsesPath(r.URL.Path) {
 		largeOrChunked := r.ContentLength < 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes
 		encoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
 		uncompressedJSON := encoding == "" || encoding == "identity"
 		isCompact := strings.HasSuffix(normalizeNoopPath(r.URL.Path), "/compact")
 		if largeOrChunked && uncompressedJSON && !isCompact {
-			releaseSpool := h.acquireLargeReplayBody(r.ContentLength)
+			releaseSpool, err := h.acquireLargeReplayBody(r.Context(), r.ContentLength)
+			if err != nil {
+				return
+			}
 			defer releaseSpool()
 			rewriteModel := func(model string) string {
 				model = strings.TrimSpace(model)
@@ -1882,6 +1955,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 				if base, _, hasSuffix := parseThinkingSuffix(model); hasSuffix {
 					model = base
+				}
+				if routed, _, canonical := h.resolveStreamedModelRoute(r.URL.Path, model); routed != nil && canonical != "" {
+					return canonical
 				}
 				return model
 			}
@@ -1900,26 +1976,45 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				http.Error(w, "oversized Responses requests currently require stream=true", http.StatusBadRequest)
 				return
 			}
-			if spooled.Model != "" && !isOpenAIModel(spooled.Model) {
-				http.Error(w, "oversized Responses requests currently require a Codex model", http.StatusBadRequest)
-				return
+			if spooled.Model != "" {
+				if routed, routeBase, _ := h.resolveStreamedModelRoute(r.URL.Path, spooled.Model); routed != nil {
+					provider = routed
+					targetBase = routeBase
+					accountType = routed.Type()
+					if h.cfg.debug.Load() {
+						log.Printf("[%s] oversized Responses model-route: model=%s provider=%s", reqID, spooled.Model, accountType)
+					}
+				} else if accountType == AccountTypeCodex && !isOpenAIModel(spooled.Model) {
+					http.Error(w, fmt.Sprintf("oversized Responses model %q has no routable provider", spooled.Model), http.StatusBadRequest)
+					return
+				}
+			}
+			if accountType == AccountTypeGrok {
+				if err := sanitizeSpooledGrokRequest(spooled); err != nil {
+					http.Error(w, "grok request sanitizing error: "+err.Error(), http.StatusBadRequest)
+					return
+				}
 			}
 			r.Body = spooled.File
+			// Only the disk-backed body remains; generation must not hold a RAM slot.
+			releaseSpool()
 			r.ContentLength = spooled.Size
 			r.Header.Del("Content-Length")
 			r.Header.Set("Content-Type", "application/json")
-			log.Printf("[%s] disk-streaming Responses request: bytes=%d model=%s transform_ms=%d",
-				reqID, spooled.Size, spooled.Model, time.Since(spoolStarted).Milliseconds())
+			log.Printf("[%s] disk-streaming Responses request: bytes=%d model=%s provider=%s transform_ms=%d",
+				reqID, spooled.Size, spooled.Model, accountType, time.Since(spoolStarted).Milliseconds())
 			h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
 			return
 		}
-		streamBody = false
+		if accountType == AccountTypeCodex {
+			streamBody = false
+		}
 	}
 	// Adverserial rejects any effort outside low/high/max with a 400, and the
 	// streamed path rewrites only the model name. Buffer the body so the effort
 	// clamp runs for chunked and oversized requests too; otherwise the clamp is
 	// advisory and a large request fails upstream instead.
-	if accountType == AccountTypeAdverserial {
+	if accountType == AccountTypeAdverserial || accountType == AccountTypeGrok {
 		streamBody = false
 	}
 	if streamBody {
@@ -1931,7 +2026,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	releaseLargeBody := h.acquireLargeReplayBody(r.ContentLength)
+	releaseLargeBody, err := h.acquireLargeReplayBody(r.Context(), r.ContentLength)
+	if err != nil {
+		return
+	}
 	defer releaseLargeBody()
 	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.maxInMemoryBodyBytes, h.cfg.logBodies, h.cfg.bodyLogLimit)
 	if err != nil {
@@ -1974,7 +2072,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		inspect = bodySample
 	}
 	inspect = bodyForInspection(r, inspect)
-	conversationID := extractConversationIDFromJSON(inspect)
+	var originalObject map[string]any
+	originalJSONErr := json.Unmarshal(inspect, &originalObject)
+	if originalJSONErr != nil {
+		originalObject = nil
+	}
+	// Capture client intent before normalization forces upstream streaming or
+	// removes metadata. Routing and timeout must describe the original request.
+	originalModel, _ := originalObject["model"].(string)
+	originalModel = strings.TrimSpace(originalModel)
+	originalStream, _ := originalObject["stream"].(bool)
+	intent := requestIntent{stream: originalStream, image: valueHasImageGenerationTool(originalObject)}
+	conversationID := extractConversationIDFromObject(originalObject)
 	if conversationID == "" {
 		conversationID = extractConversationIDFromHeaders(r.Header)
 	}
@@ -1987,7 +2096,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 		}
 	}
-	requestedModel := extractRequestedModelFromJSON(inspect)
+	if h.cfg.debug.Load() && conversationID == "" && originalJSONErr == nil {
+		keys := make([]string, 0, len(originalObject))
+		for key := range originalObject {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		if len(keys) > 30 {
+			keys = keys[:30]
+		}
+		log.Printf("[%s] conv_id empty; top-level keys (first %d): %s", reqID, len(keys), strings.Join(keys, ","))
+	}
+	requestedModel := originalModel
 	if requestedModel == "" {
 		requestedModel = antigravityModelFromGeminiPath(r.URL.Path)
 	}
@@ -2037,7 +2157,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	// Inject thinking budget if the original model had a (budget) suffix.
 	if requestedModel != "" {
-		origModel := extractRequestedModelFromJSON(inspect)
+		origModel := originalModel
 		if origModel != "" {
 			_, budget, hasSuffix := parseThinkingSuffix(origModel)
 			if hasSuffix && budget > 0 {
@@ -2069,16 +2189,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// When client sends /v1/chat/completions and provider is Codex, translate to Responses API format.
 	// The Codex upstream (chatgpt.com/backend-api/codex) only speaks Responses API.
 	// Codex always requires streaming, so we track whether the client originally wanted non-streaming.
-	clientWantsNonStreaming := false
+	clientWantsNonStreaming := originalJSONErr == nil && !originalStream
 	imagesResponseFormat := ""
-	if len(inspect) > 0 {
-		var obj map[string]any
-		if json.Unmarshal(inspect, &obj) == nil {
-			if s, ok := obj["stream"].(bool); !ok || !s {
-				clientWantsNonStreaming = true
-			}
-		}
-	}
 	if translateDir == TranslateNone && accountType == AccountTypeCodex && (strings.HasPrefix(r.URL.Path, "/v1/images/generations") || strings.HasPrefix(r.URL.Path, "/v1/images/edits")) {
 		translateDir = TranslateImagesToResponses
 		clientWantsNonStreaming = true
@@ -2095,14 +2207,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if translateDir == TranslateNone && accountType == AccountTypeClaude {
 		if strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses") {
 			translateDir = TranslateResponsesToClaude
-		}
-	}
-
-	if translateDir == TranslateNone && accountType == AccountTypeCodex && (strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
-		if strings.HasPrefix(r.URL.Path, "/v1/responses/compact") || strings.HasPrefix(r.URL.Path, "/responses/compact") {
-			bodyBytes = ensureCodexResponsesCompactBody(bodyBytes)
-		} else {
-			bodyBytes = ensureCodexResponsesInstructions(bodyBytes)
 		}
 	}
 
@@ -2165,33 +2269,42 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			r.URL.Path = "/v1/responses"
 		}
 	}
-	if accountType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) {
-		filtered, _, filterErr := filterHostedMCPRequestJSON(bodyBytes)
-		if filterErr != nil {
-			http.Error(w, "hosted MCP request filtering error: "+filterErr.Error(), http.StatusBadRequest)
-			return
+	imageGenerationRequest := false
+	if accountType == AccountTypeCodex {
+		// Byte-oriented translators retain their contracts. Reuse the original
+		// tree only when none of them changed the body; decode changed bytes once.
+		upstreamObject := originalObject
+		if !bytes.Equal(bodyBytes, inspect) {
+			upstreamObject = nil
+			if json.Unmarshal(bodyBytes, &upstreamObject) != nil {
+				upstreamObject = nil
+			}
 		}
-		bodyBytes = filtered
+		if upstreamObject != nil && isCodexResponsesPath(r.URL.Path) {
+			changed := false
+			if translateDir == TranslateNone && (strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
+				if strings.HasPrefix(r.URL.Path, "/v1/responses/compact") || strings.HasPrefix(r.URL.Path, "/responses/compact") {
+					upstreamObject = compactResponsesObject(upstreamObject)
+				} else {
+					prepareResponsesObject(upstreamObject)
+				}
+				changed = true
+			} else {
+				changed = stripHostedMCPFromResponsesRequest(upstreamObject)
+			}
+			if changed {
+				bodyBytes, err = json.Marshal(upstreamObject)
+				if err != nil {
+					http.Error(w, "hosted MCP request filtering error: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+		}
+		imageGenerationRequest = valueHasImageGenerationTool(upstreamObject)
 	}
 
 	if accountType == AccountTypeGrok {
 		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
-	}
-
-	if h.cfg.debug.Load() && conversationID == "" && len(inspect) > 0 {
-		// Help debug why conversation id isn't being extracted without dumping the full body.
-		var obj map[string]any
-		if err := json.Unmarshal(inspect, &obj); err == nil {
-			keys := make([]string, 0, len(obj))
-			for k := range obj {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			if len(keys) > 30 {
-				keys = keys[:30]
-			}
-			log.Printf("[%s] conv_id empty; top-level keys (first %d): %s", reqID, len(keys), strings.Join(keys, ","))
-		}
 	}
 
 	if h.cfg.debug.Load() {
@@ -2226,7 +2339,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	// Determine timeout: honour X-Stainless-Timeout from the Anthropic SDK when present,
 	// otherwise fall back to streaming vs non-streaming defaults.
-	timeout := clientOrDefaultTimeout(r, h.cfg.requestTimeout, h.cfg.streamTimeout, inspect)
+	timeout := timeoutForRequestIntent(r, h.cfg.requestTimeout, h.cfg.streamTimeout, intent)
 
 	ctx := r.Context()
 	var cancel context.CancelFunc
@@ -2258,7 +2371,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
 	const preferredImageCodexAccountID = "neon"
-	imageGenerationRequest := accountType == AccountTypeCodex && requestHasImageGenerationTool(bodyBytes)
 	imageFanoutChild := r.Header.Get("X-Codex-Pool-Image-Fanout") != ""
 	imageFanoutIndex, _ := strconv.Atoi(r.Header.Get("X-Codex-Pool-Image-Fanout-Index"))
 
@@ -2295,7 +2407,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if imageGenerationRequest {
 				candidateConversationID = ""
 			}
-			acc = h.pool.candidate(candidateConversationID, candidateExclude, accountType, requiredPlan, originIP)
+			acc = h.pool.candidateForModel(candidateConversationID, candidateExclude, accountType, requiredPlan, originIP, requestedModel)
 		}
 		if acc == nil {
 			// All accounts excluded or rate-limited. If there are rate-limited
@@ -2869,6 +2981,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				writer = hw
 			}
 
+			usageWriter := &streamUsageWriter{record: func(usage RequestUsage) { h.recordUsage(acc, usage) }}
 			var claudeAccum *RequestUsage
 
 			usageCallback := func(data []byte) {
@@ -2920,7 +3033,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						if ru.Model == "" {
 							ru.Model = requestedModel
 						}
-						h.recordUsage(acc, *ru)
+						usageWriter.add(*ru)
 					}
 					return
 				}
@@ -2934,39 +3047,35 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if ru.Model == "" {
 					ru.Model = requestedModel
 				}
-				h.recordUsage(acc, *ru)
+				usageWriter.add(*ru)
 			}
 
 			if isSSE {
 				if translateDir == TranslateCompletionsToResponses {
 					writer = &responsesToCompletionsWriter{
-						w:        writer,
-						callback: usageCallback,
-						debug:    h.cfg.debug.Load(),
-						reqID:    reqID,
+						w:     writer,
+						debug: h.cfg.debug.Load(),
+						reqID: reqID,
 					}
 				} else if translateDir == TranslateChatToResponses {
 					writer = &responsesToChatCompletionsWriter{
-						w:        writer,
-						callback: usageCallback,
-						debug:    h.cfg.debug.Load(),
-						reqID:    reqID,
+						w:     writer,
+						debug: h.cfg.debug.Load(),
+						reqID: reqID,
 					}
 				} else if translateDir == TranslateResponsesToClaude {
 					// Claude SSE response → Responses API SSE
 					writer = &claudeToResponsesWriter{
-						w:        writer,
-						callback: usageCallback,
-						debug:    h.cfg.debug.Load(),
-						reqID:    reqID,
+						w:     writer,
+						debug: h.cfg.debug.Load(),
+						reqID: reqID,
 					}
 				} else if translateDir == TranslateClaudeToResponses {
 					// Responses API SSE → Claude SSE
 					writer = &responsesToClaudeWriter{
-						w:        writer,
-						callback: usageCallback,
-						debug:    h.cfg.debug.Load(),
-						reqID:    reqID,
+						w:     writer,
+						debug: h.cfg.debug.Load(),
+						reqID: reqID,
 					}
 				} else if translateDir != TranslateNone {
 					// Response direction is opposite of request direction:
@@ -2979,36 +3088,21 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					writer = &sseTranslateWriter{
 						w:         writer,
 						direction: responseDir,
-						callback:  usageCallback,
 						debug:     h.cfg.debug.Load(),
 						reqID:     reqID,
 					}
-				} else {
-					needsPolicyInspection := accountType == AccountTypeCodex && !acc.CyberAccess
-					needsUsageInspection := sampleBuf != nil
-					if needsPolicyInspection || needsUsageInspection {
-						interceptWriter := &sseInterceptWriter{
-							w:        writer,
-							callback: usageCallback,
-						}
-						if needsPolicyInspection {
-							suppressor := &cyberPolicyHTTPSuppressor{
-								h:              h,
-								reqID:          reqID,
-								conversationID: conversationID,
-								requiredPlan:   requiredPlan,
-								clientIP:       originIP,
-								accountID:      acc.ID,
-								pinned:         &cyberPinned,
-							}
-							interceptWriter.onEvent = suppressor.onEvent
-						}
-						writer = interceptWriter
+				} else if accountType == AccountTypeCodex && !acc.CyberAccess {
+					suppressor := &cyberPolicyHTTPSuppressor{
+						h: h, reqID: reqID, conversationID: conversationID,
+						requiredPlan: requiredPlan, clientIP: originIP, accountID: acc.ID, pinned: &cyberPinned,
 					}
+					writer = &sseInterceptWriter{w: writer, onEvent: suppressor.onEvent}
 				}
 				if accountType == AccountTypeCodex {
 					writer = &hostedMCPResponseFilterWriter{w: writer}
 				}
+				// Inspect received bytes even if translation or filtering stops on a write error.
+				writer = &sseInterceptWriter{w: writer, callback: usageCallback}
 			}
 
 			var idleReader *idleTimeoutReader
@@ -3017,13 +3111,21 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				resp.Body = idleReader
 			}
 
+			if isSSE {
+				usageWriter.w = writer
+				writer = usageWriter
+			}
 			_, copyErr := io.Copy(writer, resp.Body)
 			resp.Body.Close()
 			if hw != nil {
-				hw.Stop()
+				if err := hw.Stop(); copyErr == nil {
+					copyErr = err
+				}
 			}
 			if fw != nil {
-				fw.stop()
+				if err := fw.stop(); copyErr == nil {
+					copyErr = err
+				}
 			}
 
 			if claudeAccum != nil {
@@ -3509,6 +3611,10 @@ func relayWebSocket(
 	wsURL := *upstreamURL
 	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(ctx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
+		if upstreamResp != nil {
+			status := writeWebSocketRejection(w, upstreamResp)
+			return webSocketRelayResult{statusCode: status}
+		}
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return webSocketRelayResult{err: err, termination: classifyWebSocketTermination(err)}
 	}
@@ -3955,6 +4061,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	// Claude sends usage across two SSE events (message_start: input, message_delta: output).
 	// Accumulate them into a single RequestUsage before recording.
 	// Declared outside the if-block so it can be flushed after io.Copy completes.
+	usageWriter := &streamUsageWriter{record: func(usage RequestUsage) { h.recordUsage(acc, usage) }}
 	var claudeAccum2 *RequestUsage
 	cyberPinned := false
 	conversationID := extractConversationIDFromHeaders(r.Header)
@@ -4017,11 +4124,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 						if ru.SecondaryUsedPct == 0 && headerSecondaryPct > 0 {
 							ru.SecondaryUsedPct = headerSecondaryPct
 						}
-						h.recordUsage(acc, *ru)
+						usageWriter.add(*ru)
 					}
 					return
 				}
-				// Non-Claude: record immediately
+				// Non-Claude usage commits after forwarding this chunk.
 				ru.AccountID = acc.ID
 				ru.UserID = userID
 				ru.OriginID = originID
@@ -4029,7 +4136,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 				acc.mu.Lock()
 				ru.PlanType = acc.PlanType
 				acc.mu.Unlock()
-				h.recordUsage(acc, *ru)
+				usageWriter.add(*ru)
 			},
 		}
 		if accountType == AccountTypeCodex && !acc.CyberAccess {
@@ -4042,12 +4149,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 				accountID:      acc.ID,
 				pinned:         &cyberPinned,
 			}
-			interceptWriter.onEvent = suppressor.onEvent
+			writer = &sseInterceptWriter{w: writer, onEvent: suppressor.onEvent}
 		}
+		if accountType == AccountTypeCodex {
+			writer = &hostedMCPResponseFilterWriter{w: writer}
+		}
+		interceptWriter.w = writer
 		writer = interceptWriter
-	}
-	if isSSE && accountType == AccountTypeCodex {
-		writer = &hostedMCPResponseFilterWriter{w: writer}
 	}
 
 	// Wrap response body with idle timeout to kill zombie SSE connections.
@@ -4057,12 +4165,20 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		resp.Body = idleReader
 	}
 
+	if isSSE {
+		usageWriter.w = writer
+		writer = usageWriter
+	}
 	_, copyErr := io.Copy(writer, resp.Body)
 	if hw2 != nil {
-		hw2.Stop()
+		if err := hw2.Stop(); copyErr == nil {
+			copyErr = err
+		}
 	}
 	if fw != nil {
-		fw.stop()
+		if err := fw.stop(); copyErr == nil {
+			copyErr = err
+		}
 	}
 
 	// Flush any accumulated Claude usage that wasn't emitted (e.g., stream ended
@@ -4136,18 +4252,28 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 // clientOrDefaultTimeout picks the request timeout. If the client sent X-Stainless-Timeout
 // (Anthropic SDK), use that. Otherwise fall back to streaming vs non-streaming defaults.
 func clientOrDefaultTimeout(r *http.Request, reqTimeout, streamTimeout time.Duration, body []byte) time.Duration {
+	var obj any
+	if json.Unmarshal(body, &obj) != nil {
+		obj = nil
+	}
+	request, _ := obj.(map[string]any)
+	stream, _ := request["stream"].(bool)
+	return timeoutForRequestIntent(r, reqTimeout, streamTimeout, requestIntent{
+		stream: stream,
+		image:  valueHasImageGenerationTool(obj),
+	})
+}
+
+type requestIntent struct {
+	stream bool
+	image  bool
+}
+
+func timeoutForRequestIntent(r *http.Request, reqTimeout, streamTimeout time.Duration, intent requestIntent) time.Duration {
 	const codexExpectedStreamTimeout = 5 * time.Minute
 
-	isStreaming := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
-	if !isStreaming && len(body) > 0 {
-		var obj map[string]any
-		if json.Unmarshal(body, &obj) == nil {
-			if s, ok := obj["stream"].(bool); ok && s {
-				isStreaming = true
-			}
-		}
-	}
-	isImageGeneration := len(body) > 0 && requestHasImageGenerationTool(body)
+	isStreaming := intent.stream || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+	isImageGeneration := intent.image
 
 	// Streaming requests can run for a long time. Use the configured stream
 	// timeout only; a zero value means no hard cap.
@@ -4468,7 +4594,10 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	releaseLargeBody := h.acquireLargeReplayBody(r.ContentLength)
+	releaseLargeBody, err := h.acquireLargeReplayBody(r.Context(), r.ContentLength)
+	if err != nil {
+		return
+	}
 	defer releaseLargeBody()
 	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.maxInMemoryBodyBytes, h.cfg.logBodies, h.cfg.bodyLogLimit)
 	if err != nil {
@@ -4672,8 +4801,9 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	flusher, _ := w.(http.Flusher)
 
 	var writer io.Writer = w
+	var fw *flushWriter
 	if isSSE && flusher != nil {
-		fw := &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
+		fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
 		writer = fw
 		defer fw.stop()
 	}
@@ -4697,7 +4827,13 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	if idleReader != nil {
 		source = idleReader
 	}
-	if _, copyErr := io.Copy(writer, source); copyErr != nil {
+	_, copyErr := io.Copy(writer, source)
+	if fw != nil {
+		if err := fw.stop(); copyErr == nil {
+			copyErr = err
+		}
+	}
+	if copyErr != nil {
 		if r.Context().Err() == nil {
 			h.recent.add(copyErr.Error())
 			h.metrics.inc("error", "passthrough")
@@ -4815,8 +4951,9 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
 
 	var writer io.Writer = w
+	var fw *flushWriter
 	if isSSE && flusher != nil {
-		fw := &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
+		fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
 		writer = fw
 		defer fw.stop()
 	}
@@ -4835,7 +4972,13 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	if idleReader != nil {
 		source = idleReader
 	}
-	if _, copyErr := io.Copy(writer, source); copyErr != nil {
+	_, copyErr := io.Copy(writer, source)
+	if fw != nil {
+		if err := fw.stop(); copyErr == nil {
+			copyErr = err
+		}
+	}
+	if copyErr != nil {
 		h.recent.add(copyErr.Error())
 		h.metrics.inc("error", "passthrough")
 		if idleReader != nil {
@@ -4869,7 +5012,10 @@ func (h *proxyHandler) tryOnce(
 		return nil, nil, false, errors.New("nil account")
 	}
 	refreshFailed := false // Track if refresh was attempted but failed
-	rawIncomingBody := append([]byte(nil), bodyBytes...)
+	var rawIncomingBody []byte
+	if provider.Type() == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
+		rawIncomingBody = append([]byte(nil), bodyBytes...)
+	}
 	if provider.Type() == AccountTypeGrok {
 		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
 	}

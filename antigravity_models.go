@@ -29,6 +29,7 @@ type AntigravityModelInfo struct {
 	MaxOutputTokens    int                        `json:"max_output_tokens,omitempty"`
 	SupportsImages     bool                       `json:"supports_images,omitempty"`
 	SupportsThinking   bool                       `json:"supports_thinking,omitempty"`
+	SupportsTools      bool                       `json:"supports_tools,omitempty"`
 	ThinkingBudget     int                        `json:"thinking_budget,omitempty"`
 	Recommended        bool                       `json:"recommended,omitempty"`
 	SupportedMimeTypes []string                   `json:"supported_mime_types,omitempty"`
@@ -267,17 +268,29 @@ func antigravityAccountModelAvailable(pool *poolState, accountID, model string) 
 }
 
 var antigravityFallbackModels = []AntigravityCatalogModel{
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 Thinking", SupportsThinking: true}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3-flash-agent", DisplayName: "Gemini 3 Flash Agent"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.1-flash-image", DisplayName: "Gemini 3.1 Flash Image", SupportsImages: true}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-pro-agent", DisplayName: "Gemini Pro Agent"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.1-pro-low", DisplayName: "Gemini 3.1 Pro Low", SupportsThinking: true}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gpt-oss-120b-medium", DisplayName: "GPT OSS 120B Medium"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.1-flash-lite", DisplayName: "Gemini 3.1 Flash Lite"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.5-flash-low", DisplayName: "Gemini 3.5 Flash Low"}},
-	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.5-flash-extra-low", DisplayName: "Gemini 3.5 Flash Extra Low"}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 Thinking", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3-flash", DisplayName: "Gemini 3 Flash", SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3-flash-agent", DisplayName: "Gemini 3.5 Flash (High)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.1-flash-image", DisplayName: "Gemini 3.1 Flash Image", MaxTokens: 131072, MaxOutputTokens: 32768, SupportsImages: true, SupportsThinking: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-pro-agent", DisplayName: "Gemini 3.1 Pro (High)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.1-pro-low", DisplayName: "Gemini 3.1 Pro (Low)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gpt-oss-120b-medium", DisplayName: "GPT OSS 120B (Medium)", SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.1-flash-lite", DisplayName: "Gemini 3.1 Flash Lite", SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.5-flash-low", DisplayName: "Gemini 3.5 Flash (Medium)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.5-flash-extra-low", DisplayName: "Gemini 3.5 Flash (Low)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.6-flash-high", DisplayName: "Gemini 3.6 Flash (High)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.6-flash-medium", DisplayName: "Gemini 3.6 Flash (Medium)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.6-flash-low", DisplayName: "Gemini 3.6 Flash (Low)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.6-flash-tiered", DisplayName: "Gemini 3.6 Flash (Tiered)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.7-flash-high", DisplayName: "Gemini 3.7 Flash (High)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.7-flash-medium", DisplayName: "Gemini 3.7 Flash (Medium)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.7-flash-low", DisplayName: "Gemini 3.7 Flash (Low)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.7-flash-tiered", DisplayName: "Gemini 3.7 Flash (Tiered)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-high", DisplayName: "Gemini 3.8 Flash (High)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-medium", DisplayName: "Gemini 3.8 Flash (Medium)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-low", DisplayName: "Gemini 3.8 Flash (Low)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-tiered", DisplayName: "Gemini 3.8 Flash (Tiered)", SupportsThinking: true, SupportsTools: true}},
 }
 
 func parseAntigravityModelSnapshot(body []byte, fetchedAt time.Time) (AntigravityAccountSnapshot, error) {
@@ -317,7 +330,7 @@ func parseAntigravityModelSnapshot(body []byte, fetchedAt time.Time) (Antigravit
 		if antigravityHiddenModelIDs[id] {
 			continue
 		}
-		model := AntigravityModelInfo{ID: id, Raw: raw, WebSearch: webSearch[id]}
+		model := AntigravityModelInfo{ID: id, Raw: raw, WebSearch: webSearch[id], SupportsTools: true}
 		decodeRaw(raw, "displayName", &model.DisplayName)
 		if displayName := antigravityCorrectedDisplayNames[id]; displayName != "" {
 			model.DisplayName = displayName
@@ -328,6 +341,7 @@ func parseAntigravityModelSnapshot(body []byte, fetchedAt time.Time) (Antigravit
 		decodeRaw(raw, "supportsThinking", &model.SupportsThinking)
 		decodeRaw(raw, "thinkingBudget", &model.ThinkingBudget)
 		decodeRaw(raw, "recommended", &model.Recommended)
+		applyAntigravityModelCorrections(&model)
 		var mimeMap map[string]bool
 		if json.Unmarshal(raw["supportedMimeTypes"], &mimeMap) == nil {
 			for mime, enabled := range mimeMap {
@@ -381,8 +395,27 @@ var antigravityHiddenModelIDs = map[string]bool{
 }
 
 var antigravityCorrectedDisplayNames = map[string]string{
-	"gemini-2.5-flash":      "Gemini 2.5 Flash",
-	"gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
+	"gemini-2.5-flash":        "Gemini 2.5 Flash",
+	"gemini-2.5-flash-lite":   "Gemini 2.5 Flash Lite",
+	"gemini-3.6-flash-tiered": "Gemini 3.6 Flash (Tiered)",
+	"gemini-3.7-flash-tiered": "Gemini 3.7 Flash (Tiered)",
+	"gemini-3.8-flash-tiered": "Gemini 3.8 Flash (Tiered)",
+}
+
+func applyAntigravityModelCorrections(model *AntigravityModelInfo) {
+	if model == nil {
+		return
+	}
+	if displayName := antigravityCorrectedDisplayNames[model.ID]; displayName != "" {
+		model.DisplayName = displayName
+	}
+	if model.ID == "gemini-3.1-flash-image" {
+		model.MaxTokens = 131072
+		model.MaxOutputTokens = 32768
+		model.SupportsImages = true
+		model.SupportsThinking = true
+		model.SupportsTools = false
+	}
 }
 
 func decodeRaw(raw map[string]json.RawMessage, key string, target any) {

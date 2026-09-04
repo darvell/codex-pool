@@ -360,7 +360,7 @@ foreach ($prop in $incoming.PSObject.Properties) {
 
 Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 20)
 Write-Host "cute-code pool settings saved to $settingsFile"
-Write-Host 'Run: cute-code --model gpt-5.6-sol'
+Write-Host 'Run: cute-code --model gpt-6-astra'
 `, publicURL, token)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
@@ -417,7 +417,7 @@ fi
 
 rm -f "$TMP_FILE"
 printf 'cute-code pool settings saved to %%s\n' "$SETTINGS_FILE"
-printf 'Run: cute-code --model gpt-5.6-sol\n'
+printf 'Run: cute-code --model gpt-6-astra\n'
 `, publicURL, token)
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
@@ -717,6 +717,13 @@ $existing = ''
 try { $existing = Get-Content -Path $configFile -Raw } catch {}
 if ($null -eq $existing) { $existing = '' }
 
+# Only a root model selects the default; profile models remain independent.
+$rootConfig = ($existing -split '(?m)^[ \t]*\[', 2)[0]
+if ($rootConfig -notmatch '(?m)^[ \t]*model[ \t]*=') {
+  $existing = 'model = "gpt-6-astra"' + $nl + $existing
+  Set-Utf8NoBom -Path $configFile -Value $existing
+}
+
 if ($existing -notmatch 'codex-pool') {
   $new = @"
 # Codex Pool Proxy Config
@@ -966,6 +973,15 @@ chmod 700 "$MCP_SCRIPT"
 echo "4. Updating configuration..."
 if [ ! -f "$CONFIG_FILE" ]; then
     touch "$CONFIG_FILE"
+fi
+
+# Only a root model selects the default; profile models remain independent.
+if ! awk '/^[[:space:]]*\[/ { exit } /^[[:space:]]*model[[:space:]]*=/ { found=1 } END { exit !found }' "$CONFIG_FILE"; then
+    TEMP_FILE=$(mktemp)
+    printf 'model = "gpt-6-astra"\n' > "$TEMP_FILE"
+    cat "$CONFIG_FILE" >> "$TEMP_FILE"
+    mv "$TEMP_FILE" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
 fi
 
 # Check if config already exists to avoid duplication

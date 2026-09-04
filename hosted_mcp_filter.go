@@ -166,58 +166,46 @@ func filterHostedMCPNonStreamingResponse(resp *http.Response) error {
 const hostedMCPMaxSSEEventBytes = 512 * 1024 * 1024
 
 type hostedMCPResponseFilterWriter struct {
-	w   io.Writer
-	buf []byte
+	w      io.Writer
+	buf    []byte
+	framer sseFramer
+	err    error
 }
 
 func (fw *hostedMCPResponseFilterWriter) Write(p []byte) (int, error) {
+	if fw.err != nil {
+		return 0, fw.err
+	}
 	fw.buf = append(fw.buf, p...)
 	for {
-		event, advance, ok := nextSSEEvent(fw.buf)
+		event, advance, ok := fw.framer.next(fw.buf)
 		if !ok {
 			if len(fw.buf) > hostedMCPMaxSSEEventBytes {
-				return len(p), fmt.Errorf("Responses SSE event exceeded %d bytes", hostedMCPMaxSSEEventBytes)
+				fw.err = fmt.Errorf("Responses SSE event exceeded %d bytes", hostedMCPMaxSSEEventBytes)
+				fw.buf = nil
 			}
-			break
+			return len(p), fw.err
 		}
-		rawEvent := append([]byte(nil), fw.buf[:advance]...)
+		rawEvent := fw.buf[:advance]
 		fw.buf = fw.buf[advance:]
 		eventName, data := parseSSEEvent(event)
-		if len(data) == 0 {
-			if _, err := fw.w.Write(rawEvent); err != nil {
-				return len(p), err
-			}
-			continue
-		}
 		filtered, drop, changed := filterHostedMCPResponseJSON(bytes.TrimSpace(data))
 		if drop {
 			continue
 		}
-		if !changed {
-			if _, err := fw.w.Write(rawEvent); err != nil {
-				return len(p), err
+		if changed {
+			if eventName != "" {
+				rawEvent = []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventName, filtered))
+			} else {
+				rawEvent = []byte(fmt.Sprintf("data: %s\n\n", filtered))
 			}
-			continue
 		}
-		if eventName != "" {
-			if _, err := fmt.Fprintf(fw.w, "event: %s\ndata: %s\n\n", eventName, filtered); err != nil {
-				return len(p), err
-			}
-		} else if _, err := fmt.Fprintf(fw.w, "data: %s\n\n", filtered); err != nil {
-			return len(p), err
+		writeSSE(fw.w, rawEvent, &fw.err)
+		if fw.err != nil {
+			fw.buf = nil
+			return len(p), fw.err
 		}
 	}
-	return len(p), nil
-}
-
-func nextSSEEvent(buf []byte) (event []byte, advance int, ok bool) {
-	if idx := bytes.Index(buf, []byte("\n\n")); idx >= 0 {
-		return buf[:idx], idx + 2, true
-	}
-	if idx := bytes.Index(buf, []byte("\r\n\r\n")); idx >= 0 {
-		return buf[:idx], idx + 4, true
-	}
-	return nil, 0, false
 }
 
 func filterHostedMCPResponseSample(data []byte, isSSE bool) []byte {

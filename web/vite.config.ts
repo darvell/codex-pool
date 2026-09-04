@@ -14,6 +14,10 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     manifest: true,
+    // Never inline fonts as data: URIs. The app is served under
+    // `font-src 'self'`, which blocks them, and small subsets (the ~1.3kB
+    // Cyrillic ones) would otherwise be inlined and fail to load.
+    assetsInlineLimit: (filePath) => (/\.(woff2?|ttf|otf|eot)$/.test(filePath) ? false : undefined),
   },
   server: {
     proxy: {

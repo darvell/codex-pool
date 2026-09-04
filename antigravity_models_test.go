@@ -93,6 +93,33 @@ func TestParseAntigravityModelSnapshotHidesInternalAndRetiredModels(t *testing.T
 	}
 }
 
+func TestParseAntigravityModelSnapshotRepairsKnownMetadataGaps(t *testing.T) {
+	body := []byte(`{"models":{
+		"gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image","supportsImages":true},
+		"gemini-3.6-flash-tiered":{"maxTokens":1048576,"maxOutputTokens":65536},
+		"gemini-3.7-flash-tiered":{"maxTokens":1048576,"maxOutputTokens":65536},
+		"gemini-3.8-flash-tiered":{"maxTokens":1048576,"maxOutputTokens":65536}
+	}}`)
+
+	snapshot, err := parseAntigravityModelSnapshot(body, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := snapshot.Models["gemini-3.1-flash-image"]
+	if image.MaxTokens != 131072 || image.MaxOutputTokens != 32768 || !image.SupportsThinking || image.SupportsTools {
+		t.Fatalf("Gemini 3.1 Flash Image metadata = %#v", image)
+	}
+	for id, want := range map[string]string{
+		"gemini-3.6-flash-tiered": "Gemini 3.6 Flash (Tiered)",
+		"gemini-3.7-flash-tiered": "Gemini 3.7 Flash (Tiered)",
+		"gemini-3.8-flash-tiered": "Gemini 3.8 Flash (Tiered)",
+	} {
+		if got := snapshot.Models[id].DisplayName; got != want {
+			t.Fatalf("%s display name = %q, want %q", id, got, want)
+		}
+	}
+}
+
 func TestFetchAntigravityModelsUsesDailyThenProductionAndEmptyBody(t *testing.T) {
 	daily, _ := url.Parse("https://daily.example.test")
 	production, _ := url.Parse("https://prod.example.test")

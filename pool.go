@@ -27,6 +27,7 @@ const (
 	AccountTypeXiaomi      AccountType = "xiaomi"
 	AccountTypeGrok        AccountType = "grok"
 	AccountTypeAdverserial AccountType = "adverserial"
+	AccountTypeOpencodeGo  AccountType = "opencode_go"
 
 	// For ordinary Codex traffic, cyber-approved accounts receive twice the
 	// routing weight of non-cyber accounts when their quota health is
@@ -85,6 +86,8 @@ type Account struct {
 	Email                   string
 	ProjectID               string
 	ModelRateLimits         map[string]time.Time
+	Models                  map[string]DiscoveredModel
+	ModelsFetchedAt         time.Time
 	NeedsVerification       bool
 	VerificationURL         string
 	HealthError             string
@@ -363,6 +366,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		"xiaomi":      AccountTypeXiaomi,
 		"grok":        AccountTypeGrok,
 		"adverserial": AccountTypeAdverserial,
+		"opencode_go": AccountTypeOpencodeGo,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -418,6 +422,16 @@ func applyCommonAccountFileState(account *Account, data []byte) {
 	if raw, ok := root["added_at"].(string); ok {
 		if addedAt, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 			account.AddedAt = addedAt.UTC()
+		}
+	}
+	if raw, ok := root["provider_model_snapshot"]; ok {
+		encoded, err := json.Marshal(raw)
+		if err == nil {
+			var snapshot providerModelSnapshot
+			if json.Unmarshal(encoded, &snapshot) == nil {
+				account.Models = snapshot.Models
+				account.ModelsFetchedAt = snapshot.FetchedAt
+			}
 		}
 	}
 	if account.AddedAt.IsZero() {
@@ -629,6 +643,85 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 		p.rr++
 	}
 	return best
+}
+
+func (p *poolState) candidateForModel(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan, clientIP, model string) *Account {
+	if !p.discoveredModelRequiresEntitlement(accountType, model) {
+		return p.candidate(conversationID, exclude, accountType, requiredPlan, clientIP)
+	}
+
+	filtered := make(map[string]bool, len(exclude)+p.countByType(accountType))
+	for id, blocked := range exclude {
+		filtered[id] = blocked
+	}
+	for _, account := range p.allAccounts() {
+		if account.Type != accountType {
+			continue
+		}
+		account.mu.Lock()
+		_, supported := accountDiscoveredModel(account, model)
+		account.mu.Unlock()
+		if !supported {
+			filtered[account.ID] = true
+		}
+	}
+	return p.candidate(conversationID, filtered, accountType, requiredPlan, clientIP)
+}
+
+func accountSupportsDiscoveredModel(account *Account, model string) bool {
+	if account == nil {
+		return false
+	}
+	account.mu.Lock()
+	defer account.mu.Unlock()
+	_, ok := accountDiscoveredModel(account, model)
+	return ok
+}
+
+func accountDiscoveredModel(account *Account, model string) (DiscoveredModel, bool) {
+	for id, discovered := range account.Models {
+		if strings.EqualFold(id, model) {
+			return discovered, true
+		}
+	}
+	return DiscoveredModel{}, false
+}
+
+func (p *poolState) discoveredCanonicalModel(accountType AccountType, model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	for _, account := range p.allAccounts() {
+		if account.Type != accountType {
+			continue
+		}
+		account.mu.Lock()
+		discovered, ok := accountDiscoveredModel(account, model)
+		account.mu.Unlock()
+		if ok {
+			return discovered.ID, true
+		}
+	}
+	return "", false
+}
+
+func (p *poolState) discoveredModelKnown(accountType AccountType, model string) bool {
+	_, ok := p.discoveredCanonicalModel(accountType, model)
+	return ok
+}
+
+func (p *poolState) discoveredModelRequiresEntitlement(accountType AccountType, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	if entry, ok := modelForProvider(accountType, model); ok {
+		return entry.RequiresDiscovery
+	}
+	if accountType == AccountTypeGrok {
+		if _, ok := grokModelByName(model); ok {
+			return false
+		}
+	}
+	return p.discoveredModelKnown(accountType, model)
 }
 
 func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, clientIP string) *Account {
@@ -1283,6 +1376,8 @@ func saveAccount(a *Account) error {
 		return saveAPIKeyAccount(a)
 	case AccountTypeAdverserial:
 		return saveAPIKeyAccount(a)
+	case AccountTypeOpencodeGo:
+		return saveAPIKeyAccount(a)
 	case AccountTypeGrok:
 		return saveGrokAccount(a)
 	default:
@@ -1291,6 +1386,9 @@ func saveAccount(a *Account) error {
 }
 
 func persistAccountAddedAt(root map[string]any, a *Account) {
+	if len(a.Models) > 0 {
+		root["provider_model_snapshot"] = providerModelSnapshot{FetchedAt: a.ModelsFetchedAt, Models: a.Models}
+	}
 	if a.AddedAt.IsZero() {
 		a.AddedAt = time.Now().UTC()
 	}

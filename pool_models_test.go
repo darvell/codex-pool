@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,12 +23,15 @@ func TestPoolModelDescriptorsCoverEveryProvider(t *testing.T) {
 		"gpt-5.6-sol":      "openai",
 		"gpt-5.6-sol[1m]":  "openai",
 		"gpt-5.6-luna[1m]": "openai",
+		"gemini-3.7-flash": "gemini",
 		"claude-sonnet-5":  "anthropic",
+		"claude-fable-5-1": "anthropic",
 		"claude-opus-5":    "anthropic",
 		"k3":               "anthropic",
 		"kimi-for-coding":  "anthropic",
 		"MiniMax-M3":       "anthropic",
 		"glm-5.3":          "anthropic",
+		"glm-5.3-flash":    "anthropic",
 		"mimo-v2.5-pro":    "anthropic",
 		"grok-4.5":         "openai",
 	}
@@ -50,6 +54,35 @@ func TestPoolModelDescriptorsCoverEveryProvider(t *testing.T) {
 				t.Fatalf("GLM-5.3 aliases = %#v, want [glm-5.2]", descriptor.Aliases)
 			}
 		}
+	}
+}
+
+func TestPoolModelDescriptorsMatchCurrentProviderCatalogs(t *testing.T) {
+	t.Parallel()
+
+	byID := make(map[string]poolModelDescriptor)
+	for _, descriptor := range poolModelDescriptors() {
+		byID[descriptor.ID] = descriptor
+	}
+
+	if _, ok := byID["claude-opus-4-1-20250805"]; ok {
+		t.Fatal("retired Claude Opus 4.1 is still advertised")
+	}
+	if got := byID["claude-sonnet-5"].MaxOutputTokens; got != 128000 {
+		t.Fatalf("Claude Sonnet 5 max output = %d, want 128000", got)
+	}
+	for _, id := range []string{"k3-256k", "mimo-v2.5", "grok-4.6"} {
+		if _, ok := byID[id]; !ok {
+			t.Fatalf("current model %q is missing", id)
+		}
+	}
+	for _, id := range []string{"MiniMax-M2.7", "MiniMax-M2.7-highspeed"} {
+		if slices.Contains(byID[id].Modalities, "image") {
+			t.Fatalf("%s incorrectly advertises image input on the Anthropic endpoint", id)
+		}
+	}
+	if !slices.Contains(byID["MiniMax-M3"].Modalities, "video") {
+		t.Fatal("MiniMax-M3 does not advertise video input")
 	}
 }
 
@@ -93,6 +126,11 @@ func TestPoolModelDescriptorsAdvertiseVerifiedNativeWebSearchRoutes(t *testing.T
 			Endpoint: "/v1/messages",
 			ToolType: "web_search_20250305",
 		},
+		"mimo-v2.5-pro": {
+			Protocol: "anthropic-messages",
+			Endpoint: "/v1/messages",
+			ToolType: "web_search_20250305",
+		},
 	}
 
 	for id, want := range tests {
@@ -112,7 +150,7 @@ func TestPoolModelDescriptorsAdvertiseVerifiedNativeWebSearchRoutes(t *testing.T
 		}
 	}
 
-	for _, id := range []string{"gpt-5.6-terra", "MiniMax-M3", "mimo-v2.5-pro"} {
+	for _, id := range []string{"gpt-5.6-terra", "MiniMax-M3"} {
 		descriptor := byID[id]
 		if descriptor.Capabilities["web_search"] || descriptor.NativeTools["web_search"].Endpoint != "" {
 			t.Fatalf("unverified model %q advertises native web search", id)
@@ -130,6 +168,27 @@ func TestPoolModelDescriptorsUseRelativeNativeToolEndpoints(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestUnifiedGeminiCatalogIncludesGeminiAccounts(t *testing.T) {
+	pool := newPoolState([]*Account{{ID: "gemini", Type: AccountTypeGemini}}, false)
+	recorder := httptest.NewRecorder()
+	serveUnifiedGeminiModels(recorder, pool)
+
+	var body struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range body.Models {
+		if model.Name == "models/gemini-3.7-flash" {
+			return
+		}
+	}
+	t.Fatal("Gemini OAuth catalog is absent from the native models endpoint")
 }
 
 func TestServePoolModelsOmitsCredentials(t *testing.T) {
@@ -161,6 +220,78 @@ func TestServePoolModelsOmitsCredentials(t *testing.T) {
 		if _, ok := model["baseUrl"]; ok {
 			t.Fatalf("model %q exposed baseUrl", model["id"])
 		}
+	}
+}
+
+func TestServePoolModelsIncludesNativeGeminiProtocol(t *testing.T) {
+	t.Parallel()
+
+	antigravityModels.Reset()
+	t.Cleanup(antigravityModels.Reset)
+	antigravityModels.ReplaceAccount("ag-1", AntigravityAccountSnapshot{
+		FetchedAt: time.Now().UTC(),
+		Models: map[string]AntigravityModelInfo{
+			"gemini-3.8-flash-tiered": {
+				ID:            "gemini-3.8-flash-tiered",
+				DisplayName:   "Gemini 3.8 Flash (Tiered)",
+				SupportsTools: true,
+			},
+			"claude-sonnet-4-6": {
+				ID:            "claude-sonnet-4-6",
+				DisplayName:   "Claude Sonnet 4.6",
+				SupportsTools: true,
+			},
+		},
+	})
+
+	recorder := httptest.NewRecorder()
+	servePoolModels(recorder)
+
+	var response struct {
+		Models []struct {
+			ID       string `json:"id"`
+			Protocol string `json:"protocol"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	var foundGrok46, foundGemini38, foundGeminiCLI, foundClaudeAG bool
+	for _, model := range response.Models {
+		if model.ID == "grok-4.6" {
+			foundGrok46 = true
+		}
+		if model.ID == "antigravity/gemini-3.8-flash-tiered" {
+			foundGemini38 = true
+			if model.Protocol != "gemini" {
+				t.Fatalf("antigravity/gemini-3.8-flash-tiered protocol = %q, want gemini", model.Protocol)
+			}
+		}
+		if model.ID == "antigravity/claude-sonnet-4-6" {
+			foundClaudeAG = true
+			if model.Protocol != "openai" {
+				t.Fatalf("antigravity/claude-sonnet-4-6 protocol = %q, want openai", model.Protocol)
+			}
+		}
+		if model.ID == "gemini-3.7-flash" {
+			foundGeminiCLI = true
+			if model.Protocol != "gemini" {
+				t.Fatalf("gemini-3.7-flash protocol = %q, want gemini", model.Protocol)
+			}
+		}
+	}
+	if !foundGrok46 {
+		t.Fatal("grok-4.6 missing from cute-code catalog")
+	}
+	if !foundGemini38 {
+		t.Fatal("antigravity/gemini-3.8-flash-tiered missing from cute-code catalog")
+	}
+	if !foundClaudeAG {
+		t.Fatal("antigravity/claude-sonnet-4-6 missing from cute-code catalog")
+	}
+	if !foundGeminiCLI {
+		t.Fatal("gemini-3.7-flash missing from cute-code catalog")
 	}
 }
 
@@ -264,6 +395,9 @@ func TestPoolModelDescriptorsUseOneCanonicalAntigravityRow(t *testing.T) {
 		count++
 		if descriptor.ID != "antigravity/gemini-test" {
 			t.Fatalf("canonical ID = %q", descriptor.ID)
+		}
+		if descriptor.Protocol != "gemini" {
+			t.Fatalf("protocol = %q, want gemini", descriptor.Protocol)
 		}
 		if len(descriptor.Aliases) != 1 || descriptor.Aliases[0] != "gemini-test" {
 			t.Fatalf("aliases = %#v", descriptor.Aliases)

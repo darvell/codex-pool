@@ -122,8 +122,8 @@ export async function loadConsolePrincipals(hours = 168): Promise<{ principals: 
 export async function createMemberLink(email: string, displayName: string, purpose: "onboard" | "recover"): Promise<{ principal: PassportPrincipal; link: string; expires_at: string }> {
   return decode(await fetch("/api/console/members", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() }, body: JSON.stringify({ email, display_name: displayName, purpose }) }));
 }
-export async function loadConsolePrincipalUsage(id: string): Promise<{ principal: PassportPrincipal; hourly: PassportUsagePoint[]; excludes_passthrough: boolean }> {
-  const result = await decode<{ principal: PassportPrincipal; hourly: PassportUsagePoint[] | null; excludes_passthrough: boolean }>(await fetch(`/api/console/principals/${encodeURIComponent(id)}/usage`, { cache: "no-store", credentials: "same-origin" }));
+export async function loadConsolePrincipalUsage(id: string, hours = 168): Promise<{ principal: PassportPrincipal; hourly: PassportUsagePoint[]; excludes_passthrough: boolean }> {
+  const result = await decode<{ principal: PassportPrincipal; hourly: PassportUsagePoint[] | null; excludes_passthrough: boolean }>(await fetch(`/api/console/principals/${encodeURIComponent(id)}/usage?hours=${hours}`, { cache: "no-store", credentials: "same-origin" }));
   return { ...result, hourly: result.hourly ?? [] };
 }
 export async function loadConsoleAudit(): Promise<PassportAuditEntry[]> {
@@ -132,8 +132,8 @@ export async function loadConsoleAudit(): Promise<PassportAuditEntry[]> {
 export async function loadAnalyticsHealth(): Promise<{ health: { state: "CURRENT" | "LAGGING" | "FAULTED" | "GAP"; outbox_depth: number; oldest_outbox_at?: string; fault?: string; last_reconciliation?: { checked_at: string; clean: boolean; detail?: string } }; accounting_gaps: Array<{ started_at: string; ended_at?: string; reason: string }>; active_gap?: { started_at: string; reason: string } | null }> {
   return decode(await fetch("/api/console/analytics-health", { cache: "no-store", credentials: "same-origin" }));
 }
-export async function setPrincipalStatus(id: string, status: "active" | "suspended"): Promise<PassportPrincipal> {
-  return decode(await fetch(`/api/principals/${encodeURIComponent(id)}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() }, body: JSON.stringify({ status }) }));
+export async function setPrincipalStatus(id: string, status: "active" | "suspended", kind?: "operator" | "member" | "guest"): Promise<PassportPrincipal> {
+  return decode(await fetch(`/api/principals/${encodeURIComponent(id)}`, { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() }, body: JSON.stringify(kind === undefined ? { status } : { status, kind }) }));
 }
 
 async function decode<T>(response: Response): Promise<T> {
@@ -230,8 +230,10 @@ export interface AccountContributionResult {
 	  error?: string;
 }
 
-export async function contributeAPIKey(provider: "kimi" | "minimax" | "zai" | "xiaomi", apiKey: string) {
-  return decode<AccountContributionResult>(await fetch(`/api/pool/accounts/${provider}/add`, {
+export async function contributeAPIKey(provider: "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go", apiKey: string) {
+  // The backend route uses a hyphen (opencode-go); the pool type uses an underscore.
+  const route = provider === "opencode_go" ? "opencode-go" : provider;
+  return decode<AccountContributionResult>(await fetch(`/api/pool/accounts/${route}/add`, {
     method: "POST",
     credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
     body: JSON.stringify({ api_key: apiKey }),

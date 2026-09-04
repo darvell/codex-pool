@@ -59,6 +59,51 @@ func parseCodexRateLimitMap(rateLimit map[string]any, now time.Time, source stri
 	return normalizeCodexUsageWindows(primary, secondary, now, source)
 }
 
+// parseWhamUsage maps Codex WHAM usage onto the 5-hour / weekly windows the
+// pool uses for display and routing.
+//
+// Current WHAM payloads put the default Codex quota in rate_limit (often a
+// weekly-only window) and the model-family 5-hour window in
+// additional_rate_limits. Prefer the top-level window of each kind, then fill
+// any missing 5-hour window from additional limits so Spark quota is visible
+// without hiding a full default week.
+func parseWhamUsage(payload map[string]any, now time.Time) (UsageSnapshot, bool) {
+	if payload == nil {
+		return UsageSnapshot{}, false
+	}
+
+	var fiveHour, weekly *codexUsageWindow
+	take := func(window *codexUsageWindow, prefer bool) {
+		if window == nil {
+			return
+		}
+		switch classifyCodexUsageWindow(window.WindowMinutes) {
+		case codexWindowFiveHour:
+			if fiveHour == nil || prefer {
+				fiveHour = window
+			}
+		case codexWindowWeekly:
+			if weekly == nil || prefer {
+				weekly = window
+			}
+		}
+	}
+	takeRateLimit := func(rateLimit map[string]any, prefer bool) {
+		take(codexUsageWindowFromMap(firstMap(rateLimit, "primary_window", "primary")), prefer)
+		take(codexUsageWindowFromMap(firstMap(rateLimit, "secondary_window", "secondary")), prefer)
+	}
+
+	takeRateLimit(firstMap(payload, "rate_limit"), true)
+	if additional, ok := payload["additional_rate_limits"].([]any); ok {
+		for _, item := range additional {
+			entry, _ := item.(map[string]any)
+			takeRateLimit(firstMap(entry, "rate_limit"), false)
+		}
+	}
+
+	return normalizeCodexUsageWindows(fiveHour, weekly, now, "wham")
+}
+
 func firstMap(m map[string]any, keys ...string) map[string]any {
 	for _, key := range keys {
 		if value, ok := m[key].(map[string]any); ok {

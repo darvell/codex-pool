@@ -17,7 +17,7 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 		"opus":        "claude-opus-5",
 		"opus[1m]":    "claude-opus-5 [1m]",
 		"opus [1m]":   "claude-opus-5 [1m]",
-		"fable":       "claude-fable-5",
+		"fable":       "claude-fable-5-1",
 		"haiku":       "claude-haiku-4-5-20251001",
 	}
 
@@ -61,6 +61,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		contextWindow int
 		maxTokens     int
 	}{
+		"gpt-6-astra":         {contextWindow: 1050000, maxTokens: 128000},
 		"gpt-5.6-sol":         {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.6-sol[1m]":     {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.6-terra":       {contextWindow: 372000, maxTokens: 128000},
@@ -88,7 +89,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 				)
 			}
 		}
-		if model.ID == "gpt-5.6" || strings.HasPrefix(model.ID, "gpt-5.6-") {
+		if model.ID == "gpt-6-astra" || model.ID == "gpt-5.6" || strings.HasPrefix(model.ID, "gpt-5.6-") {
 			if model.ThinkingLevelMap["xhigh"] != "xhigh" || model.ThinkingLevelMap["max"] != "max" {
 				t.Fatalf("codex model %q thinking levels = %#v, want xhigh+max", model.ID, model.ThinkingLevelMap)
 			}
@@ -112,6 +113,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		"claude-haiku-4-5-20251001": false,
 		"claude-sonnet-5":           false,
 		"claude-sonnet-4-6":         false,
+		"claude-fable-5-1":          false,
 		"claude-fable-5":            false,
 		"claude-opus-4-8":           false,
 		"claude-opus-4-7":           false,
@@ -147,11 +149,12 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if kimi.API != "anthropic-messages" {
 		t.Fatalf("kimi api = %q", kimi.API)
 	}
-	if len(kimi.Models) != 3 {
+	if len(kimi.Models) != 4 {
 		t.Fatalf("kimi model count = %d", len(kimi.Models))
 	}
 	needKimiIDs := map[string]bool{
 		"k3":                        false,
+		"k3-256k":                   false,
 		"kimi-for-coding":           false,
 		"kimi-for-coding-highspeed": false,
 	}
@@ -159,7 +162,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		if _, ok := needKimiIDs[model.ID]; ok {
 			needKimiIDs[model.ID] = true
 		}
-		if len(model.Input) != 2 || model.Input[0] != "text" || model.Input[1] != "image" {
+		if len(model.Input) < 2 || model.Input[0] != "text" || model.Input[1] != "image" {
 			t.Fatalf("kimi model %q inputs = %#v, want text+image", model.ID, model.Input)
 		}
 		if model.ID == "k3" && model.ContextWindow != 1048576 {
@@ -188,8 +191,12 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		if _, ok := needMinimaxIDs[model.ID]; ok {
 			needMinimaxIDs[model.ID] = true
 		}
-		if len(model.Input) != 2 || model.Input[0] != "text" || model.Input[1] != "image" {
-			t.Fatalf("minimax model %q inputs = %#v, want text+image", model.ID, model.Input)
+		if model.ID == "MiniMax-M3" {
+			if len(model.Input) != 3 || model.Input[0] != "text" || model.Input[1] != "image" || model.Input[2] != "video" {
+				t.Fatalf("MiniMax-M3 inputs = %#v, want text+image+video", model.Input)
+			}
+		} else if len(model.Input) != 1 || model.Input[0] != "text" {
+			t.Fatalf("minimax model %q inputs = %#v, want text", model.ID, model.Input)
 		}
 		if model.ID == "MiniMax-M3" && model.ContextWindow != 1000000 {
 			t.Fatalf("minimax m3 context window = %d, want 1000000", model.ContextWindow)
@@ -205,11 +212,12 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if zai.API != "anthropic-messages" {
 		t.Fatalf("zai api = %q", zai.API)
 	}
-	if len(zai.Models) != 1 {
+	if len(zai.Models) != 2 {
 		t.Fatalf("zai model count = %d", len(zai.Models))
 	}
 	wantZAIContexts := map[string]int{
-		"glm-5.3": 1000000,
+		"glm-5.3":       1000000,
+		"glm-5.3-flash": 1000000,
 	}
 	for _, model := range zai.Models {
 		wantContext, ok := wantZAIContexts[model.ID]
@@ -238,12 +246,11 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if grok.BaseURL != "https://pool.example.com" {
 		t.Fatalf("grok baseUrl = %q", grok.BaseURL)
 	}
-	if len(grok.Models) != 1 {
+	if len(grok.Models) != 2 {
 		t.Fatalf("grok model count = %d", len(grok.Models))
 	}
-	model := grok.Models[0]
-	if model.ID != "grok-4.5" || model.ContextWindow != 500000 || model.MaxTokens != 30000 {
-		t.Fatalf("grok model = %#v", model)
+	if grok.Models[0].ID != "grok-4.6" || grok.Models[0].ContextWindow != 500000 || grok.Models[0].MaxTokens != 30000 {
+		t.Fatalf("current grok model = %#v", grok.Models[0])
 	}
 }
 

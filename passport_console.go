@@ -104,6 +104,18 @@ func (h *proxyHandler) handleConsolePrincipals(w http.ResponseWriter, r *http.Re
 	respondJSON(w, map[string]any{"principals": h.passport.consolePrincipals(usage), "hours": hours, "excludes_passthrough": true})
 }
 
+func consoleUsageHours(r *http.Request) int {
+	const defaultHours = 30 * 24
+	const maxHours = 24 * 366
+
+	hours, err := strconv.Atoi(r.URL.Query().Get("hours"))
+	if err != nil || hours <= 0 || hours > maxHours {
+		return defaultHours
+	}
+
+	return hours
+}
+
 func (h *proxyHandler) handleConsolePrincipalUsage(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if _, _, ok := h.requireMember(w, r); !ok {
@@ -117,7 +129,7 @@ func (h *proxyHandler) handleConsolePrincipalUsage(w http.ResponseWriter, r *htt
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	rows, err := h.duckAnalytics.UserHourly(ctx, principalID, time.Now().Add(-30*24*time.Hour))
+	rows, err := h.duckAnalytics.UserHourly(ctx, principalID, time.Now().Add(-time.Duration(consoleUsageHours(r))*time.Hour))
 	if err != nil {
 		respondJSONError(w, 500, "analytics query failed")
 		return

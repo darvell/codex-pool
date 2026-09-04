@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -54,8 +55,9 @@ type codexCyberSwapResult struct {
 // the client when the swap is skipped or fails so the user sees the
 // real upstream error instead of a fabricated message.
 type swapPendingErr struct {
-	next  *Account
-	frame []byte
+	next           *Account
+	frame          []byte
+	conversationID string
 }
 
 func (e *swapPendingErr) Error() string {
@@ -86,6 +88,10 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 
 	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(ctx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
+		if upstreamResp != nil {
+			status := writeWebSocketRejection(w, upstreamResp)
+			return codexCyberSwapResult{statusCode: status, finalAccount: opts.InitialAccount}
+		}
 		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		return codexCyberSwapResult{err: err, finalAccount: opts.InitialAccount}
 	}
@@ -145,10 +151,22 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 	return state.result(statusCode, relayErr, termination)
 }
 
+type codexRelayTurn struct {
+	request        []byte
+	model          string
+	conversationID string
+	account        *Account
+	responseID     string
+}
+
 type codexRelayState struct {
-	h    *proxyHandler
-	opts codexCyberSwapOptions
-	ctx  context.Context
+	// Both pumps transition turns under this lock; response IDs bind to the
+	// request snapshot, never to the most recently received client frame.
+	turnMu sync.Mutex
+	turns  []*codexRelayTurn
+	h      *proxyHandler
+	opts   codexCyberSwapOptions
+	ctx    context.Context
 
 	clientConn    *websocket.Conn
 	clientWriter  *webSocketWriter
@@ -164,12 +182,7 @@ type codexRelayState struct {
 	// up" — once true, no further swap attempts.
 	swapDone bool
 
-	// lastResponseCreate holds the most recent client-originated
-	// response.create frame so the swap path can replay it on the new
-	// upstream.
-	lastResponseCreate   []byte
 	activeConversationID string
-	requestedModel       string
 	recordedResponses    map[string]struct{}
 	clientClosing        bool
 	upstreamClosing      bool
@@ -185,9 +198,12 @@ func (s *codexRelayState) run() (int, error) {
 		if errors.As(err, &swap) {
 			if swap.next != nil {
 				if doErr := s.doSwap(swap.next); doErr != nil {
-					log.Printf("[%s] cyber swap dial failed: %v; forwarding upstream cyber_policy frame", s.opts.ReqID, doErr)
+					if len(swap.frame) == 0 {
+						return 101, doErr
+					}
+					log.Printf("[%s] account swap dial failed: %v; forwarding upstream cyber_policy frame", s.opts.ReqID, doErr)
 					s.forwardCyberPolicy(swap.frame)
-					s.legacyPin()
+					s.legacyPin(swap.conversationID)
 					return 101, nil
 				}
 				continue
@@ -195,7 +211,7 @@ func (s *codexRelayState) run() (int, error) {
 			// No swap target — surface the upstream's real cyber_policy
 			// frame and end the relay cleanly.
 			s.forwardCyberPolicy(swap.frame)
-			s.legacyPin()
+			s.legacyPin(swap.conversationID)
 			return 101, nil
 		}
 		return 101, err
@@ -339,14 +355,18 @@ func pumpFrames(
 }
 
 func (s *codexRelayState) markClientForwarded(data []byte) {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
 	if s.session != nil && isCodexResponseCreate(data) {
-		s.session.setActive(true)
+		s.session.setActive(len(s.turns) != 0)
 	}
 }
 
 func (s *codexRelayState) markUpstreamForwarded(data []byte) {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
 	if s.session != nil && isTerminalCodexWebSocketEvent(data) {
-		s.session.setActive(false)
+		s.session.setActive(len(s.turns) != 0)
 	}
 }
 
@@ -360,11 +380,14 @@ func isTerminalCodexWebSocketEvent(data []byte) bool {
 	if json.Unmarshal(data, &event) != nil {
 		return false
 	}
-	return event.Type == "response.completed" || event.Type == "response.failed"
+	return event.Type == "response.completed" || event.Type == "response.failed" || event.Type == "response.incomplete"
 }
 
 func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
-	s.recordCompletedUsage(data)
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	turn := s.responseTurn(data)
+	s.recordCompletedUsage(data, turn)
 	filtered, drop, changed := filterHostedMCPResponseJSON(data)
 	if drop {
 		return []byte{}, nil
@@ -373,26 +396,39 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 		data = filtered
 	}
 	if !isCyberPolicyError(data) {
+		if isTerminalCodexWebSocketEvent(data) {
+			s.finishTurn(turn)
+		}
 		return data, nil
 	}
 	log.Printf("[%s] cyber_policy frame from account %s", s.opts.ReqID, s.activeAccount.ID)
 	if s.h != nil && s.h.metrics != nil {
 		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "suppressed_ws")
 	}
-	if !s.swapDone && s.lastResponseCreate != nil {
+	if turn == nil && len(s.turns) == 1 {
+		turn = s.turns[0]
+	}
+	conversationID := ""
+	if turn != nil {
+		conversationID = turn.conversationID
+	}
+	// A swap cannot move other outstanding response chains to a new account.
+	if !s.swapDone && len(s.turns) == 1 && turn == s.turns[0] {
 		if cand := s.pickCyberAccessCandidate(); cand != nil {
 			s.swapDone = true
-			return data, &swapPendingErr{next: cand, frame: data}
+			return data, &swapPendingErr{next: cand, frame: data, conversationID: conversationID}
 		}
 	}
 	s.swapDone = true
 	if s.h != nil && s.h.metrics != nil {
 		s.h.metrics.incCyberPolicy(s.activeAccount.ID, "swap_no_candidate")
 	}
-	return data, &swapPendingErr{frame: data}
+	return data, &swapPendingErr{frame: data, conversationID: conversationID}
 }
 
 func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
 	if !isCodexResponseCreate(data) {
 		return data, nil
 	}
@@ -405,16 +441,49 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if changed {
 		data = filtered
 	}
-	s.lastResponseCreate = append(s.lastResponseCreate[:0], data...)
-	s.requestedModel = extractRequestedModelFromJSON(data)
-	if s.activeAccount != nil {
-		s.swapDone = s.activeAccount.CyberAccess
-	}
-
 	conversationID := extractConversationIDFromJSON(data)
 	if conversationID == "" {
 		conversationID = s.activeConversationID
 	}
+	model := extractCodexWebSocketRequestedModel(data)
+	turn := &codexRelayTurn{request: append([]byte(nil), data...), model: model, conversationID: conversationID, account: s.activeAccount}
+	s.turns = append(s.turns, turn)
+	if s.h != nil && s.h.pool != nil && s.h.pool.discoveredModelRequiresEntitlement(AccountTypeCodex, model) && !accountSupportsDiscoveredModel(s.activeAccount, model) {
+		if len(s.turns) > 1 {
+			s.finishTurn(turn)
+			return nil, fmt.Errorf("cannot change websocket account while responses are pending")
+		}
+		exclude := map[string]bool{s.activeAccount.ID: true}
+		next := s.h.pool.candidateForModel(conversationID, exclude, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, model)
+		if next == nil {
+			s.finishTurn(turn)
+			return nil, fmt.Errorf("no Codex account is entitled to websocket model %q", model)
+		}
+		return nil, &swapPendingErr{next: next}
+	}
+	if modelRequiresHTTPProviderRoute(model) {
+		s.finishTurn(turn)
+		payload, _ := json.Marshal(map[string]any{
+			"type":   "error",
+			"status": 400,
+			"error": map[string]any{
+				"type": "invalid_request_error",
+				"message": fmt.Sprintf(
+					"model %q is not supported on the Codex Responses WebSocket; use HTTP POST /responses so the pool can route it",
+					model,
+				),
+			},
+		})
+		if s.clientWriter != nil {
+			_ = s.clientWriter.Write(s.ctx, websocket.MessageText, payload)
+		}
+		log.Printf("[%s] rejecting websocket model %q (HTTP model-route only)", s.opts.ReqID, model)
+		return nil, fmt.Errorf("websocket model route rejected: %s", model)
+	}
+	if s.activeAccount != nil {
+		s.swapDone = s.activeAccount.CyberAccess
+	}
+
 	if conversationID == "" {
 		return data, nil
 	}
@@ -431,11 +500,67 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	return data, nil
 }
 
+// responseTurn binds server-assigned IDs in acceptance order. Subsequent
+// events may complete out of order without changing request attribution.
+// The caller holds turnMu.
+func (s *codexRelayState) responseTurn(data []byte) *codexRelayTurn {
+	var event struct {
+		Type       string `json:"type"`
+		ResponseID string `json:"response_id"`
+		Response   struct {
+			ID string `json:"id"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(data, &event) != nil {
+		return nil
+	}
+	id := event.Response.ID
+	if id == "" {
+		id = event.ResponseID
+	}
+	if id != "" {
+		for _, turn := range s.turns {
+			if turn.responseID == id {
+				return turn
+			}
+		}
+		if _, recorded := s.recordedResponses[id]; recorded {
+			return nil
+		}
+	}
+	if event.Type != "response.created" && !isTerminalCodexWebSocketEvent(data) {
+		return nil
+	}
+	for _, turn := range s.turns {
+		if turn.responseID == "" {
+			turn.responseID = id
+			return turn
+		}
+	}
+	return nil
+}
+
+func (s *codexRelayState) finishTurn(done *codexRelayTurn) {
+	for i, turn := range s.turns {
+		if turn == done {
+			if turn.responseID != "" {
+				if s.recordedResponses == nil {
+					s.recordedResponses = make(map[string]struct{})
+				}
+				s.recordedResponses[turn.responseID] = struct{}{}
+			}
+			copy(s.turns[i:], s.turns[i+1:])
+			s.turns[len(s.turns)-1] = nil
+			s.turns = s.turns[:len(s.turns)-1]
+			return
+		}
+	}
+}
+
 // recordCompletedUsage sends terminal Codex websocket usage through the same
-// accounting path as HTTP/SSE. A websocket can carry multiple turns, and a
-// cyber swap changes which account owns the active turn, so attribution is
-// resolved from state at the moment the completion arrives.
-func (s *codexRelayState) recordCompletedUsage(data []byte) {
+// accounting path as HTTP/SSE, using the originating request snapshot.
+// The caller holds turnMu.
+func (s *codexRelayState) recordCompletedUsage(data []byte, turn *codexRelayTurn) {
 	if s.h == nil || s.opts.Provider == nil || s.activeAccount == nil || len(data) == 0 {
 		return
 	}
@@ -471,6 +596,9 @@ func (s *codexRelayState) recordCompletedUsage(data []byte) {
 	}
 
 	account := s.activeAccount
+	if turn != nil {
+		account = turn.account
+	}
 	ru.AccountID = account.ID
 	ru.AccountType = account.Type
 	ru.UserID = s.opts.UserID
@@ -478,8 +606,8 @@ func (s *codexRelayState) recordCompletedUsage(data []byte) {
 	account.mu.Lock()
 	ru.PlanType = account.PlanType
 	account.mu.Unlock()
-	if ru.Model == "" {
-		ru.Model = s.requestedModel
+	if ru.Model == "" && turn != nil {
+		ru.Model = turn.model
 	}
 	s.h.recordUsage(account, *ru)
 }
@@ -508,8 +636,23 @@ func applyModelAliasToJSONFrame(h *proxyHandler, reqID string, data []byte) []by
 }
 
 func (s *codexRelayState) doSwap(cand *Account) error {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	// A client frame may arrive while the other pump is stopping. Never
+	// replay that later turn in place of the one that triggered the swap.
+	if len(s.turns) != 1 {
+		return fmt.Errorf("cannot swap websocket account with %d pending responses", len(s.turns))
+	}
+	turn := s.turns[0]
+	s.activeConversationID = turn.conversationID
 	newConn, newResp, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
+		if newResp != nil {
+			if newResp.Body != nil {
+				newResp.Body.Close()
+			}
+			s.h.applyWebSocketStatusEffects(s.opts.ReqID, cand, "", false, false, newResp.StatusCode)
+		}
 		return err
 	}
 	captureCodexResponseState(cand, newResp, s.opts.ReqID)
@@ -520,7 +663,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	// would cause an immediate "previous_response_not_found" error.
 	// Losing the prior turn's reasoning context is the lesser evil
 	// versus a hard failure surfacing to the user.
-	replay := stripPreviousResponseID(s.lastResponseCreate)
+	replay := stripPreviousResponseID(turn.request)
 	if err := newConn.Write(s.ctx, websocket.MessageText, replay); err != nil {
 		newConn.CloseNow()
 		return fmt.Errorf("replay client request to swap upstream: %w", err)
@@ -541,6 +684,8 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	s.upstreamConn = newConn
 	s.upstreamCh = startWebSocketReader(s.ctx, newConn)
 	s.activeAccount = cand
+	turn.account = cand
+	turn.responseID = ""
 	return nil
 }
 
@@ -555,11 +700,11 @@ func (s *codexRelayState) pickCyberAccessCandidate() *Account {
 	return s.h.pool.candidateWithCyberAccess(exclude, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP)
 }
 
-func (s *codexRelayState) legacyPin() {
-	if s.activeConversationID == "" {
+func (s *codexRelayState) legacyPin(conversationID string) {
+	if conversationID == "" {
 		return
 	}
-	s.h.pinConversationToCyberAccess(s.activeConversationID, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, s.activeAccount.ID, s.opts.ReqID)
+	s.h.pinConversationToCyberAccess(conversationID, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, s.activeAccount.ID, s.opts.ReqID)
 }
 
 // cyberPolicyHTTPSuppressor wires sseInterceptWriter.onEvent so the
@@ -673,7 +818,7 @@ func (h *proxyHandler) dialSwappedUpstream(
 
 	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
-		return nil, nil, err
+		return nil, resp, err
 	}
 	return conn, resp, nil
 }
@@ -731,7 +876,7 @@ func dialUpstreamWebSocketWithSubprotocols(
 	}
 	conn, resp, err := websocket.Dial(ctx, wsURL.String(), dialOpts)
 	if err != nil {
-		return nil, nil, subprotocols, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
+		return nil, resp, subprotocols, fmt.Errorf("dial upstream WS %s: %w", wsURL.Host, err)
 	}
 	conn.SetReadLimit(readLimit)
 	return conn, resp, subprotocols, nil
@@ -792,6 +937,39 @@ func isCodexResponseCreate(data []byte) bool {
 	return head.Type == "response.create"
 }
 
+// extractCodexWebSocketRequestedModel reads model from either the flat HTTP
+// Responses shape or the nested Codex websocket response.create envelope.
+func extractCodexWebSocketRequestedModel(data []byte) string {
+	if model := extractRequestedModelFromJSON(data); model != "" {
+		return model
+	}
+	var nested struct {
+		Response struct {
+			Model string `json:"model"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(data, &nested); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(nested.Response.Model)
+}
+
+// modelRequiresHTTPProviderRoute reports models that the HTTP proxy would
+// divert away from ChatGPT/Codex via modelRouteOverride. The Codex websocket
+// tunnel is dialed before the body arrives, so these must not be forwarded.
+func modelRequiresHTTPProviderRoute(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	return isGrokModel(model) ||
+		isKimiModel(model) ||
+		isMinimaxModel(model) ||
+		isZAIModel(model) ||
+		isXiaomiModel(model) ||
+		isAdverserialModel(model)
+}
+
 // stripPreviousResponseID removes previous_response_id from a
 // response.create payload so the swap replay is accepted by an account
 // that did not mint the original response_id. If parsing fails or the
@@ -813,4 +991,21 @@ func stripPreviousResponseID(data []byte) []byte {
 		return data
 	}
 	return out
+}
+
+// writeWebSocketRejection owns only failed handshake bodies. Successful
+// upgrades belong to websocket.Conn and must not be closed here.
+func writeWebSocketRejection(w http.ResponseWriter, resp *http.Response) int {
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	status := resp.StatusCode
+	if status < http.StatusBadRequest || status > 599 {
+		status = http.StatusBadGateway
+	}
+	if retry := resp.Header.Get("Retry-After"); retry != "" {
+		w.Header().Set("Retry-After", retry)
+	}
+	http.Error(w, http.StatusText(status), status)
+	return status
 }

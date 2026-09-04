@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -67,6 +68,23 @@ func TestAccountPlanForSubscriptionPreservesProLite(t *testing.T) {
 	}
 }
 
+func TestClaudeSonnet5PricingDoesNotIncreaseAfterLaunch(t *testing.T) {
+	t.Parallel()
+
+	for _, date := range []time.Time{
+		time.Date(2026, time.August, 31, 23, 59, 59, 0, time.UTC),
+		time.Date(2026, time.September, 2, 0, 0, 0, 0, time.UTC),
+	} {
+		got := publishedModelPricing(date)["claude-sonnet-5"]
+		if math.Abs(got.InputCostPerToken-2e-6) > 1e-12 ||
+			math.Abs(got.OutputCostPerToken-10e-6) > 1e-12 ||
+			math.Abs(got.CacheReadCost-0.2e-6) > 1e-12 ||
+			math.Abs(got.CacheWriteCost-2.5e-6) > 1e-12 {
+			t.Fatalf("Claude Sonnet 5 pricing at %s = %#v", date, got)
+		}
+	}
+}
+
 func TestLookupPricingUsesClaudeSonnet5Aliases(t *testing.T) {
 	t.Parallel()
 
@@ -80,6 +98,19 @@ func TestLookupPricingUsesClaudeSonnet5Aliases(t *testing.T) {
 		if !ok || got != want {
 			t.Fatalf("lookupPricing(%q) = %#v, %v; want %#v, true", model, got, ok, want)
 		}
+	}
+}
+
+func TestLookupPricingIncludesClaudeFable51Fallback(t *testing.T) {
+	t.Parallel()
+
+	pd := newPricingData()
+	got, ok := pd.lookupPricing("claude-fable-5-1")
+	if !ok {
+		t.Fatal("missing Claude Fable 5.1 fallback pricing")
+	}
+	if got.InputCostPerToken != 10e-6 || got.OutputCostPerToken != 50e-6 || got.CacheReadCost != 0.25e-6 {
+		t.Fatalf("Claude Fable 5.1 pricing = %#v", got)
 	}
 }
 
@@ -119,6 +150,23 @@ func TestLookupPricingGLM53UsesPublishedRates(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("lookupPricing(%q) = %#v, want %#v", model, got, want)
+		}
+	}
+
+	wantFlash := ModelPricing{
+		InputCostPerToken:  0.14e-6,
+		OutputCostPerToken: 0.44e-6,
+		CacheReadCost:      0.026e-6,
+	}
+	for _, model := range []string{"glm-5.3-flash", "zai.glm-5.3-flash"} {
+		got, ok := pd.lookupPricing(model)
+		if !ok {
+			t.Fatalf("missing pricing for %q", model)
+		}
+		if got.InputCostPerToken != wantFlash.InputCostPerToken ||
+			got.OutputCostPerToken != wantFlash.OutputCostPerToken ||
+			math.Abs(got.CacheReadCost-wantFlash.CacheReadCost) > 1e-12 {
+			t.Fatalf("lookupPricing(%q) = %#v, want %#v", model, got, wantFlash)
 		}
 	}
 }
@@ -215,6 +263,28 @@ func TestCalculateCostAppliesLongContextTier(t *testing.T) {
 	want := 100_000*10e-6 + 200_000*1e-6 + 1_000*45e-6
 	if cost < want-1e-12 || cost > want+1e-12 {
 		t.Fatalf("long-context cost = %.12f, want %.12f", cost, want)
+	}
+}
+
+func TestAntigravityAliasesUseCurrentGeminiPricing(t *testing.T) {
+	t.Parallel()
+
+	pd := newPricingData()
+	for alias, canonical := range map[string]string{
+		"gemini-3-flash-agent":       "gemini-3.5-flash",
+		"gemini-3.5-flash-extra-low": "gemini-3.5-flash",
+		"gemini-3.6-flash-tiered":    "gemini-3.6-flash",
+		"gemini-3.7-flash-tiered":    "gemini-3.7-flash",
+		"gemini-3.8-flash-tiered":    "gemini-3.8-flash",
+	} {
+		got, ok := pd.lookupPricing(alias)
+		if !ok {
+			t.Fatalf("missing pricing for %q", alias)
+		}
+		want, ok := pd.lookupPricing(canonical)
+		if !ok || got != want {
+			t.Fatalf("pricing for %q = %#v, want %q %#v", alias, got, canonical, want)
+		}
 	}
 }
 

@@ -330,11 +330,16 @@ func parseGrokBillingUsage(monthlyBody, weeklyBody []byte, now time.Time) (Usage
 	}
 
 	var weekly grokBillingResponse
-	if json.Unmarshal(weeklyBody, &weekly) == nil && weekly.Config != nil && weekly.Config.CreditUsagePercent != nil {
+	if json.Unmarshal(weeklyBody, &weekly) == nil && weekly.Config != nil {
 		// creditUsagePercent is always percent units (0-100), matching the
 		// sibling productUsage[].usagePercent field. Never ratio units, so a
 		// magnitude heuristic would read 1% as 100% and strand fresh accounts.
-		used := *weekly.Config.CreditUsagePercent / 100
+		// After a weekly reset the field can be omitted; treat that as 0% so
+		// mergeUsage cannot keep a stale 99% exclude.
+		used := 0.0
+		if weekly.Config.CreditUsagePercent != nil {
+			used = *weekly.Config.CreditUsagePercent / 100
+		}
 		snap.SecondaryUsed = clampRateLimitPercent(used)
 		snap.SecondaryUsedPercent = snap.SecondaryUsed
 		snap.secondarySet = true
@@ -438,6 +443,29 @@ type grokReasoningEffort struct {
 // grokCLIModelCatalog mirrors cli-chat-proxy's live model-discovery payload.
 var grokCLIModelCatalog = []grokClientModel{
 	{
+		ID:                          "grok-4.6",
+		Object:                      "model",
+		OwnedBy:                     "xAI",
+		Model:                       "grok-4.6",
+		Name:                        "Grok 4.6",
+		Description:                 "SpaceXAI's latest frontier model",
+		ContextWindow:               500000,
+		AutoCompactThresholdPercent: 80,
+		SystemPromptLabel:           "Grok 4.6",
+		APIBackend:                  "responses",
+		ReasoningEffort:             "high",
+		SupportsReasoningEffort:     true,
+		ReasoningEfforts: []grokReasoningEffort{
+			{ID: "xhigh", Value: "xhigh", Label: "Extra High Effort", Description: "Highest effort and reasoning level"},
+			{ID: "high", Value: "high", Label: "High Effort", Description: "Higher implementation quality with extensive reasoning", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium Effort", Description: "Balanced effort with standard implementation and testing"},
+			{ID: "low", Value: "low", Label: "Low Effort", Description: "Quick, fast implementations"},
+		},
+		SupportsBackendSearch: true,
+		CompactionAtTokens:    true,
+		ShowModelFingerprint:  true,
+	},
+	{
 		ID:                          "grok-4.5",
 		Object:                      "model",
 		OwnedBy:                     "xAI",
@@ -521,10 +549,9 @@ func grokSetupModels() []grokSetupModel {
 	return models
 }
 
-// Catalog sourced from cli-chat-proxy GET /v1/models (Grok Build 0.2.93) plus
-// still-routable legacy IDs verified against the same Responses API.
+// Catalog sourced from cli-chat-proxy GET /v1/models.
 var grokModelCatalog = []grokModelInfo{
-	// Verified against cli-chat-proxy /v1/models on 2026-07-31.
+	{ID: "grok-4.6", Name: "Grok 4.6", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-build-latest", "grok-4.6-build"}},
 	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
 }
 
@@ -556,11 +583,11 @@ func grokCanonicalModel(model string) string {
 }
 
 // grokPublicAliases returns request-compatible names that clients may discover.
-// grok-4.5-build is an internal xAI response identifier, not a public model.
+// Versioned -build identifiers are internal xAI response names, not public models.
 func grokPublicAliases(model grokModelInfo) []string {
 	aliases := make([]string, 0, len(model.Aliases))
 	for _, alias := range model.Aliases {
-		if strings.EqualFold(alias, "grok-4.5-build") {
+		if strings.HasSuffix(strings.ToLower(alias), "-build") {
 			continue
 		}
 		aliases = append(aliases, alias)
@@ -591,6 +618,13 @@ func grokModelMaxCompletionTokens(model string) int {
 
 func grokModelSupportsReasoningEffort(model string) bool {
 	return strings.EqualFold(grokCanonicalModel(model), "grok-4.5")
+}
+
+func sanitizeSpooledGrokRequest(spooled *streamedResponsesRequest) error {
+	if spooled == nil || spooled.File == nil {
+		return nil
+	}
+	return rewriteGrokSpool(spooled)
 }
 
 func rewriteAndSanitizeGrokRequestBody(body []byte, model string) []byte {

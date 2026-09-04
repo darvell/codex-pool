@@ -115,6 +115,57 @@ func (p *PassportStore) setPrincipalStatus(actorID, principalID string, status P
 	return &cp, nil
 }
 
+// setPrincipalKind changes a principal's role. Promoting keeps sessions;
+// removing the operator role drops them so the demotion takes effect
+// immediately. The last operator cannot be demoted.
+func (p *PassportStore) setPrincipalKind(actorID, principalID string, kind PrincipalKind) (*Principal, error) {
+	if kind != PrincipalOperator && kind != PrincipalMember && kind != PrincipalGuest {
+		return nil, errors.New("kind must be operator, member, or guest")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	current := p.principals[principalID]
+	if current == nil {
+		return nil, errors.New("principal not found")
+	}
+	if current.Kind == kind {
+		cp := *current
+		return &cp, nil
+	}
+	if current.Kind == PrincipalOperator {
+		operators := 0
+		for _, other := range p.principals {
+			if other.Kind == PrincipalOperator {
+				operators++
+			}
+		}
+		if operators < 2 {
+			return nil, errors.New("cannot demote the last operator")
+		}
+	}
+
+	updated := *current
+	updated.Kind = kind
+	demoteOperator := current.Kind == PrincipalOperator
+	err := p.db.Update(func(tx *bbolt.Tx) error {
+		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &updated); err != nil {
+			return err
+		}
+		if demoteOperator {
+			if err := deletePrincipalSessions(tx, principalID); err != nil {
+				return err
+			}
+		}
+		return p.audit(tx, actorID, "principal.kind_changed", principalID, string(current.Kind)+" -> "+string(kind))
+	})
+	if err != nil {
+		return nil, err
+	}
+	p.principals[principalID] = &updated
+	cp := updated
+	return &cp, nil
+}
+
 func (p *PassportStore) rotateClient(actorID, principalID, clientID string) (*ClientCredential, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -485,16 +536,39 @@ func (h *proxyHandler) handlePrincipalItem(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var input struct {
-		Status PrincipalStatus `json:"status"`
+		Status *PrincipalStatus `json:"status"`
+		Kind   *PrincipalKind   `json:"kind"`
 	}
 	if json.NewDecoder(r.Body).Decode(&input) != nil {
 		respondJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	principal, err := h.passport.setPrincipalStatus(actor.ID, principalID, input.Status)
-	if err != nil {
-		respondJSONError(w, http.StatusBadRequest, err.Error())
+	// Accept a username or email in place of the principal ID.
+	if h.passport.principal(principalID) == nil {
+		if found := h.passport.byLogin(principalID); found != nil {
+			principalID = found.ID
+		}
+	}
+	principal := h.passport.principal(principalID)
+	if principal == nil {
+		respondJSONError(w, http.StatusNotFound, "principal not found")
 		return
+	}
+	if input.Status != nil {
+		var err error
+		principal, err = h.passport.setPrincipalStatus(actor.ID, principalID, *input.Status)
+		if err != nil {
+			respondJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if input.Kind != nil {
+		var err error
+		principal, err = h.passport.setPrincipalKind(actor.ID, principalID, *input.Kind)
+		if err != nil {
+			respondJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	respondJSON(w, publicPrincipal(principal))
 }

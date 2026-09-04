@@ -9,7 +9,20 @@ import (
 	"strings"
 )
 
+func responseFinishReason(response map[string]any) string {
+	details, _ := response["incomplete_details"].(map[string]any)
+	switch details["reason"] {
+	case "max_output_tokens":
+		return "length"
+	case "content_filter":
+		return "content_filter"
+	default:
+		return "stop"
+	}
+}
+
 type responsesBufferingWriter struct {
+	framer              sseFramer
 	buf                 []byte
 	id                  string
 	model               string
@@ -36,17 +49,11 @@ func (bw *responsesBufferingWriter) Write(p []byte) (int, error) {
 
 func (bw *responsesBufferingWriter) scanEvents() {
 	for {
-		idx := bytes.Index(bw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				return
-			}
+		event, advance, ok := bw.framer.next(bw.buf)
+		if !ok {
+			return
 		}
-		event := bw.buf[:idx]
-		bw.buf = bw.buf[idx+advance:]
+		bw.buf = bw.buf[advance:]
 		bw.processEvent(event)
 	}
 }
@@ -109,9 +116,11 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 		bw.addImageGenerationResult(obj, "partial_image_b64")
 	case "response.image_generation_call.completed":
 		bw.addImageGenerationResult(obj, "result")
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		bw.applyResponse(obj)
-		if bw.status == "" {
+		if eventType == "response.incomplete" {
+			bw.status = "incomplete"
+		} else if bw.status == "" {
 			bw.status = "completed"
 		}
 	case "response.failed":
@@ -350,6 +359,9 @@ func (bw *responsesBufferingWriter) Result() []byte {
 }
 
 type responsesToCompletionsWriter struct {
+	framer    sseFramer
+	err       error
+	terminal  bool
 	w         io.Writer
 	buf       []byte
 	callback  func([]byte)
@@ -361,30 +373,33 @@ type responsesToCompletionsWriter struct {
 }
 
 func (rw *responsesToCompletionsWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
+	if rw.err != nil {
+		return 0, rw.err
+	}
 	rw.buf = append(rw.buf, p...)
 	rw.scanAndTranslate()
-	return origLen, nil
+	return len(p), rw.err
 }
 
 func (rw *responsesToCompletionsWriter) scanAndTranslate() {
 	for {
-		idx := bytes.Index(rw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(rw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				return
-			}
+		if rw.err != nil {
+			rw.buf = nil
+			return
 		}
-		event := rw.buf[:idx]
-		rw.buf = rw.buf[idx+advance:]
+		event, advance, ok := rw.framer.next(rw.buf)
+		if !ok {
+			return
+		}
+		rw.buf = rw.buf[advance:]
 		rw.processEvent(event)
 	}
 }
 
 func (rw *responsesToCompletionsWriter) processEvent(event []byte) {
+	if rw.terminal {
+		return
+	}
 	eventType, data := parseSSEEvent(event)
 	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		rw.callback(data)
@@ -416,24 +431,15 @@ func (rw *responsesToCompletionsWriter) processEvent(event []byte) {
 		if delta, _ := obj["delta"].(string); delta != "" {
 			rw.emitChunk(delta, "", nil)
 		}
-	case "response.completed":
-		usage := map[string]any(nil)
-		finishReason := "stop"
-		if resp, _ := obj["response"].(map[string]any); resp != nil {
-			if u := completionsUsageFromResponses(resp); u != nil {
-				usage = u
-			}
-			if status, _ := resp["status"].(string); status == "incomplete" {
-				if details, _ := resp["incomplete_details"].(map[string]any); details != nil {
-					if reason, _ := details["reason"].(string); reason == "max_output_tokens" {
-						finishReason = "length"
-					}
-				}
-			}
-		}
+	case "response.completed", "response.incomplete":
+		rw.terminal = true
+		resp, _ := obj["response"].(map[string]any)
+		usage := completionsUsageFromResponses(resp)
+		finishReason := responseFinishReason(resp)
 		rw.emitChunk("", finishReason, usage)
 		rw.writeRaw("data: [DONE]\n\n")
 	case "response.failed":
+		rw.terminal = true
 		rw.emitChunk("[Error: response failed]", "stop", nil)
 		rw.writeRaw("data: [DONE]\n\n")
 	}
@@ -466,12 +472,14 @@ func (rw *responsesToCompletionsWriter) emitChunk(text, finishReason string, usa
 }
 
 func (rw *responsesToCompletionsWriter) writeRaw(s string) {
-	if _, err := rw.w.Write([]byte(s)); err != nil && rw.debug {
-		log.Printf("[%s] responses->completions write error: %v", rw.reqID, err)
+	writeSSE(rw.w, []byte(s), &rw.err)
+	if rw.err != nil && rw.debug {
+		log.Printf("[%s] responses->completions write error: %v", rw.reqID, rw.err)
 	}
 }
 
 type responsesToCompletionsBufferingWriter struct {
+	framer       sseFramer
 	buf          []byte
 	callback     func([]byte)
 	debug        bool
@@ -496,17 +504,11 @@ func (bw *responsesToCompletionsBufferingWriter) Write(p []byte) (int, error) {
 
 func (bw *responsesToCompletionsBufferingWriter) scanEvents() {
 	for {
-		idx := bytes.Index(bw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				return
-			}
+		event, advance, ok := bw.framer.next(bw.buf)
+		if !ok {
+			return
 		}
-		event := bw.buf[:idx]
-		bw.buf = bw.buf[idx+advance:]
+		bw.buf = bw.buf[advance:]
 		bw.processEvent(event)
 	}
 }
@@ -543,7 +545,7 @@ func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
 		if delta, _ := obj["delta"].(string); delta != "" {
 			bw.contentText = append(bw.contentText, delta...)
 		}
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		if resp, _ := obj["response"].(map[string]any); resp != nil {
 			if created := toInt64(resp["created_at"]); created > 0 {
 				bw.createdAt = created
@@ -555,13 +557,7 @@ func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
 					bw.cachedTokens = toInt64(details["cached_tokens"])
 				}
 			}
-			if status, _ := resp["status"].(string); status == "incomplete" {
-				if details, _ := resp["incomplete_details"].(map[string]any); details != nil {
-					if reason, _ := details["reason"].(string); reason == "max_output_tokens" {
-						bw.finishReason = "length"
-					}
-				}
-			}
+			bw.finishReason = responseFinishReason(resp)
 		}
 		if bw.finishReason == "" {
 			bw.finishReason = "stop"
@@ -623,6 +619,9 @@ func (bw *responsesToCompletionsBufferingWriter) Result() []byte {
 // responsesToChatCompletionsWriter intercepts upstream Responses API SSE events
 // and translates them to OpenAI Chat Completions streaming format.
 type responsesToChatCompletionsWriter struct {
+	framer   sseFramer
+	err      error
+	terminal bool
 	w        io.Writer
 	buf      []byte
 	callback func([]byte) // called with original event data for usage parsing
@@ -644,34 +643,34 @@ type responsesToChatCompletionsWriter struct {
 }
 
 func (rw *responsesToChatCompletionsWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
+	if rw.err != nil {
+		return 0, rw.err
+	}
 	rw.buf = append(rw.buf, p...)
 	rw.scanAndTranslate()
-	return origLen, nil
+	return len(p), rw.err
 }
 
 func (rw *responsesToChatCompletionsWriter) scanAndTranslate() {
 	for {
-		idx := bytes.Index(rw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(rw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				if len(rw.buf) > 1024*1024 {
-					rw.buf = rw.buf[len(rw.buf)-512*1024:]
-				}
-				return
-			}
+		if rw.err != nil {
+			rw.buf = nil
+			return
+		}
+		event, advance, ok := rw.framer.next(rw.buf)
+		if !ok {
+			return
 		}
 
-		event := rw.buf[:idx]
-		rw.buf = rw.buf[idx+advance:]
+		rw.buf = rw.buf[advance:]
 		rw.processEvent(event)
 	}
 }
 
 func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
+	if rw.terminal {
+		return
+	}
 	eventType, data := parseSSEEvent(event)
 
 	// Forward original data to usage callback
@@ -810,7 +809,7 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 			}, "", nil)
 		}
 
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
 			if created := toInt64(resp["created_at"]); created > 0 {
@@ -825,23 +824,9 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 			}
 		}
 
-		// Determine finish reason
-		finishReason := "stop"
-		if resp != nil {
-			if status, ok := resp["status"].(string); ok {
-				switch status {
-				case "completed":
-					finishReason = "stop"
-				case "incomplete":
-					if reason, ok := resp["incomplete_details"].(map[string]any); ok {
-						if r, _ := reason["reason"].(string); r == "max_output_tokens" {
-							finishReason = "length"
-						}
-					}
-				}
-			}
-		}
-		if rw.toolCallIndex > 0 {
+		rw.terminal = true
+		finishReason := responseFinishReason(resp)
+		if rw.toolCallIndex > 0 && finishReason == "stop" {
 			finishReason = "tool_calls"
 		}
 
@@ -857,6 +842,7 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 		rw.writeRaw("data: [DONE]\n\n")
 
 	case "response.failed":
+		rw.terminal = true
 		// Emit error as a final chunk
 		resp, _ := obj["response"].(map[string]any)
 		errMsg := "response failed"
@@ -987,10 +973,9 @@ func (rw *responsesToChatCompletionsWriter) emitChunk(delta map[string]any, fini
 }
 
 func (rw *responsesToChatCompletionsWriter) writeRaw(s string) {
-	if _, err := rw.w.Write([]byte(s)); err != nil {
-		if rw.debug {
-			log.Printf("[%s] responses->chat write error: %v", rw.reqID, err)
-		}
+	writeSSE(rw.w, []byte(s), &rw.err)
+	if rw.err != nil && rw.debug {
+		log.Printf("[%s] responses->chat write error: %v", rw.reqID, rw.err)
 	}
 }
 
@@ -998,6 +983,7 @@ func (rw *responsesToChatCompletionsWriter) writeRaw(s string) {
 // but buffers all SSE events and produces a single non-streaming JSON response.
 // Used when the client sends stream:false but Codex backend requires streaming.
 type responsesToChatCompletionsBufferingWriter struct {
+	framer   sseFramer
 	buf      []byte
 	callback func([]byte) // usage callback
 	debug    bool
@@ -1029,17 +1015,11 @@ func (bw *responsesToChatCompletionsBufferingWriter) Write(p []byte) (int, error
 
 func (bw *responsesToChatCompletionsBufferingWriter) scanEvents() {
 	for {
-		idx := bytes.Index(bw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				return
-			}
+		event, advance, ok := bw.framer.next(bw.buf)
+		if !ok {
+			return
 		}
-		event := bw.buf[:idx]
-		bw.buf = bw.buf[idx+advance:]
+		bw.buf = bw.buf[advance:]
 		bw.processEvent(event)
 	}
 }
@@ -1141,7 +1121,7 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 			fn["arguments"] = args
 		}
 
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
 			if usage, ok := resp["usage"].(map[string]any); ok {
@@ -1149,20 +1129,8 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 				bw.outputTokens = toInt64(usage["output_tokens"])
 			}
 		}
-		bw.finishReason = "stop"
-		if resp != nil {
-			if status, ok := resp["status"].(string); ok {
-				switch status {
-				case "incomplete":
-					if reason, ok := resp["incomplete_details"].(map[string]any); ok {
-						if r, _ := reason["reason"].(string); r == "max_output_tokens" {
-							bw.finishReason = "length"
-						}
-					}
-				}
-			}
-		}
-		if bw.toolCallIndex > 0 {
+		bw.finishReason = responseFinishReason(resp)
+		if bw.toolCallIndex > 0 && bw.finishReason == "stop" {
 			bw.finishReason = "tool_calls"
 		}
 
@@ -1302,6 +1270,7 @@ func (bw *responsesToChatCompletionsBufferingWriter) Result() []byte {
 // responsesToClaudeBufferingWriter buffers Responses API SSE events into a
 // non-streaming Claude Messages API response.
 type responsesToClaudeBufferingWriter struct {
+	framer   sseFramer
 	buf      []byte
 	callback func([]byte)
 	debug    bool
@@ -1328,17 +1297,11 @@ func (bw *responsesToClaudeBufferingWriter) Write(p []byte) (int, error) {
 
 func (bw *responsesToClaudeBufferingWriter) scanEvents() {
 	for {
-		idx := bytes.Index(bw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(bw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				return
-			}
+		event, advance, ok := bw.framer.next(bw.buf)
+		if !ok {
+			return
 		}
-		event := bw.buf[:idx]
-		bw.buf = bw.buf[idx+advance:]
+		bw.buf = bw.buf[advance:]
 		bw.processEvent(event)
 	}
 }
@@ -1420,7 +1383,7 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 		if index, ok := bw.toolUseIndexForEvent(obj); ok {
 			bw.finishToolUse(index)
 		}
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
 			if id, ok := resp["id"].(string); ok && bw.id == "" {
@@ -1433,14 +1396,9 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 				bw.inputTokens = toInt64(usage["input_tokens"])
 				bw.outputTokens = toInt64(usage["output_tokens"])
 			}
-			if status, ok := resp["status"].(string); ok && status == "incomplete" {
-				bw.stopReason = "max_tokens"
-			}
 		}
-		if bw.stopReason == "" {
-			bw.stopReason = "end_turn"
-		}
-		if len(bw.toolUses) > 0 {
+		bw.stopReason = oaiFinishReasonToClaude(responseFinishReason(resp))
+		if len(bw.toolUses) > 0 && responseFinishReason(resp) == "stop" {
 			bw.stopReason = "tool_use"
 		}
 	case "response.failed":
@@ -1550,6 +1508,8 @@ func (bw *responsesToClaudeBufferingWriter) Result() []byte {
 // to OpenAI Responses API SSE events. Used when Codex CLI sends to /responses
 // with a Claude model.
 type claudeToResponsesWriter struct {
+	framer   sseFramer
+	err      error
 	w        io.Writer
 	buf      []byte
 	callback func([]byte)
@@ -1574,28 +1534,25 @@ type claudeToResponsesWriter struct {
 }
 
 func (cw *claudeToResponsesWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
+	if cw.err != nil {
+		return 0, cw.err
+	}
 	cw.buf = append(cw.buf, p...)
 	cw.scanAndTranslate()
-	return origLen, nil
+	return len(p), cw.err
 }
 
 func (cw *claudeToResponsesWriter) scanAndTranslate() {
 	for {
-		idx := bytes.Index(cw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(cw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				if len(cw.buf) > 1024*1024 {
-					cw.buf = cw.buf[len(cw.buf)-512*1024:]
-				}
-				return
-			}
+		if cw.err != nil {
+			cw.buf = nil
+			return
 		}
-		event := cw.buf[:idx]
-		cw.buf = cw.buf[idx+advance:]
+		event, advance, ok := cw.framer.next(cw.buf)
+		if !ok {
+			return
+		}
+		cw.buf = cw.buf[advance:]
 		cw.processEvent(event)
 	}
 }
@@ -1870,10 +1827,9 @@ func (cw *claudeToResponsesWriter) emitEvent(eventType string, data map[string]a
 		return
 	}
 	out := fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(b))
-	if _, err := cw.w.Write([]byte(out)); err != nil {
-		if cw.debug {
-			log.Printf("[%s] claude->responses write error: %v", cw.reqID, err)
-		}
+	writeSSE(cw.w, []byte(out), &cw.err)
+	if cw.err != nil && cw.debug {
+		log.Printf("[%s] claude->responses write error: %v", cw.reqID, cw.err)
 	}
 }
 
@@ -1881,6 +1837,9 @@ func (cw *claudeToResponsesWriter) emitEvent(eventType string, data map[string]a
 // API SSE events. Used when Claude Code sends /v1/messages with a Codex model,
 // so the Responses API SSE from upstream needs to be converted back to Claude SSE.
 type responsesToClaudeWriter struct {
+	framer   sseFramer
+	err      error
+	terminal bool
 	w        io.Writer
 	buf      []byte
 	callback func([]byte)
@@ -1901,33 +1860,33 @@ type responsesToClaudeWriter struct {
 }
 
 func (rw *responsesToClaudeWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
+	if rw.err != nil {
+		return 0, rw.err
+	}
 	rw.buf = append(rw.buf, p...)
 	rw.scanAndTranslate()
-	return origLen, nil
+	return len(p), rw.err
 }
 
 func (rw *responsesToClaudeWriter) scanAndTranslate() {
 	for {
-		idx := bytes.Index(rw.buf, []byte("\n\n"))
-		advance := 2
-		if idx < 0 {
-			idx = bytes.Index(rw.buf, []byte("\r\n\r\n"))
-			advance = 4
-			if idx < 0 {
-				if len(rw.buf) > 1024*1024 {
-					rw.buf = rw.buf[len(rw.buf)-512*1024:]
-				}
-				return
-			}
+		if rw.err != nil {
+			rw.buf = nil
+			return
 		}
-		event := rw.buf[:idx]
-		rw.buf = rw.buf[idx+advance:]
+		event, advance, ok := rw.framer.next(rw.buf)
+		if !ok {
+			return
+		}
+		rw.buf = rw.buf[advance:]
 		rw.processEvent(event)
 	}
 }
 
 func (rw *responsesToClaudeWriter) processEvent(event []byte) {
+	if rw.terminal {
+		return
+	}
 	eventType, data := parseSSEEvent(event)
 
 	// Forward original data to usage callback
@@ -1978,8 +1937,7 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 	case "response.output_text.delta":
 		delta, _ := obj["delta"].(string)
 		if delta != "" {
-			// Fallback: if response.created was dropped (e.g. huge event
-			// exceeding buffer), emit message_start now.
+			// Some upstreams begin with a delta rather than response.created.
 			if !rw.started {
 				rw.started = true
 				rw.emitClaudeMessageStart()
@@ -2064,7 +2022,7 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 			}
 		}
 
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
 			if usage, ok := resp["usage"].(map[string]any); ok {
@@ -2077,24 +2035,24 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 			rw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
 				`{"type":"content_block_stop","index":%d}`, rw.contentBlockIndex))
 		}
-		// Determine stop reason
-		stopReason := "end_turn"
-		if resp != nil {
-			if status, ok := resp["status"].(string); ok && status == "incomplete" {
-				stopReason = "max_tokens"
-			}
-		}
-		if rw.toolCallIndex > 0 {
+		rw.terminal = true
+		stopReason := oaiFinishReasonToClaude(responseFinishReason(resp))
+		if rw.toolCallIndex > 0 && responseFinishReason(resp) == "stop" {
 			stopReason = "tool_use"
+		}
+		if !rw.started {
+			rw.started = true
+			rw.emitClaudeMessageStart()
 		}
 		rw.finishReason = stopReason
 		// Emit message_delta and message_stop
 		rw.emitClaudeEvent("message_delta", fmt.Sprintf(
-			`{"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null},"usage":{"output_tokens":%d}}`,
-			mustMarshalString(stopReason), rw.outputTokens))
+			`{"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`,
+			mustMarshalString(stopReason), rw.inputTokens, rw.outputTokens))
 		rw.emitClaudeEvent("message_stop", `{"type":"message_stop"}`)
 
 	case "response.failed":
+		rw.terminal = true
 		resp, _ := obj["response"].(map[string]any)
 		errMsg := "response failed"
 		if resp != nil {
@@ -2156,9 +2114,8 @@ func (rw *responsesToClaudeWriter) emitClaudeEvent(eventType, data string) {
 		}
 		log.Printf("[%s] responses->claude EMIT: %s (len=%d) %s", rw.reqID, eventType, len(data), preview)
 	}
-	if _, err := rw.w.Write([]byte(out)); err != nil {
-		if rw.debug {
-			log.Printf("[%s] responses->claude write error: %v", rw.reqID, err)
-		}
+	writeSSE(rw.w, []byte(out), &rw.err)
+	if rw.err != nil && rw.debug {
+		log.Printf("[%s] responses->claude write error: %v", rw.reqID, rw.err)
 	}
 }
