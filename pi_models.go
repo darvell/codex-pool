@@ -303,7 +303,7 @@ func piModelsForProvider(accountType AccountType) []piModelConfig {
 			MaxTokens:     model.MaxTokens,
 			Cost:          advertisedModelCost(model.ID, time.Now()),
 		}
-		if accountType == AccountTypeCodex && (model.ID == defaultCodexModel || strings.HasPrefix(model.ID, "gpt-5.6-")) {
+		if accountType == AccountTypeCodex && (strings.HasPrefix(model.ID, defaultCodexModel) || strings.HasPrefix(model.ID, "gpt-5.6-")) {
 			config.ThinkingLevelMap = map[string]string{"xhigh": "xhigh", "max": "max"}
 		}
 		if accountType == AccountTypeClaude && ccModelSupportsEffort(model.ID) {

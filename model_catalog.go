@@ -18,10 +18,12 @@ type poolModel struct {
 	Input             []string
 }
 
-// Astra limits are published API maxima; Codex discovery can report a smaller default budget.
-// https://developers.openai.com/api/docs/models/gpt-6-astra (2026-09-04).
+// Codex discovery reports context_window 272000 and max_context_window 872000
+// for the GPT-6 family (GET /backend-api/codex/models, 2026-09-04); the [1m]
+// entries are client-facing 1M context profiles routed to the base model ID.
 var poolModels = []poolModel{
-	{AccountType: AccountTypeCodex, ID: defaultCodexModel, DisplayName: "GPT-6-Astra", Description: "Frontier model for complex, demanding work.", ContextWindow: 1050000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
+	{AccountType: AccountTypeCodex, ID: defaultCodexModel, DisplayName: "GPT-6-Astra", Description: "Frontier model for complex, demanding work.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
+	{AccountType: AccountTypeCodex, ID: "gpt-6-astra[1m]", DisplayName: "GPT-6-Astra (1M)", Description: "This is really fucking expensive.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Description: "Frontier agentic coding model.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, Aliases: []string{"gpt-5.6"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-sol[1m]", DisplayName: "GPT-5.6-Sol (1M)", Description: "Frontier agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-terra", DisplayName: "GPT-5.6-Terra", Description: "Balanced agentic coding model for everyday work.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},

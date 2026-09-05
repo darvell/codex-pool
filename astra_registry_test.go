@@ -7,8 +7,15 @@ import (
 
 func TestAstraRegistry(t *testing.T) {
 	model, ok := modelForProvider(AccountTypeCodex, "gpt-6-astra")
-	if !ok || model.ContextWindow != 1050000 || model.MaxTokens != 128000 || !model.Reasoning || !model.WebSearch {
+	if !ok || model.ContextWindow != 272000 || model.MaxTokens != 128000 || !model.Reasoning || !model.WebSearch {
 		t.Fatalf("Astra catalog metadata = %+v, present=%v", model, ok)
+	}
+	variant, ok := modelForProvider(AccountTypeCodex, "gpt-6-astra[1m]")
+	if !ok || variant.ContextWindow != 1000000 || variant.MaxTokens != 128000 || !variant.Reasoning || !variant.WebSearch {
+		t.Fatalf("Astra 1M catalog metadata = %+v, present=%v", variant, ok)
+	}
+	if resolved, aliased := newModelAliases(nil).resolve("gpt-6-astra[1m]"); !aliased || resolved != "gpt-6-astra" {
+		t.Fatalf("Astra 1M alias = %q, aliased=%v", resolved, aliased)
 	}
 	if defaultModelForProvider[AccountTypeCodex] != model.ID {
 		t.Fatalf("Codex default = %q", defaultModelForProvider[AccountTypeCodex])
@@ -58,7 +65,7 @@ func TestAstraAccountEntitlement(t *testing.T) {
 			continue
 		}
 		found++
-		if model.ContextWindow != 1050000 || model.MaxOutputTokens != 128000 || model.SupportingAccounts != 1 || model.AvailableAccounts != 1 {
+		if model.ContextWindow != 272000 || model.MaxOutputTokens != 128000 || model.SupportingAccounts != 1 || model.AvailableAccounts != 1 {
 			t.Fatalf("Astra descriptor = %+v", model)
 		}
 	}

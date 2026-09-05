@@ -61,7 +61,8 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		contextWindow int
 		maxTokens     int
 	}{
-		"gpt-6-astra":         {contextWindow: 1050000, maxTokens: 128000},
+		"gpt-6-astra":         {contextWindow: 272000, maxTokens: 128000},
+		"gpt-6-astra[1m]":     {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.6-sol":         {contextWindow: 372000, maxTokens: 128000},
 		"gpt-5.6-sol[1m]":     {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.6-terra":       {contextWindow: 372000, maxTokens: 128000},
@@ -89,7 +90,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 				)
 			}
 		}
-		if model.ID == "gpt-6-astra" || model.ID == "gpt-5.6" || strings.HasPrefix(model.ID, "gpt-5.6-") {
+		if model.ID == "gpt-6-astra" || strings.HasPrefix(model.ID, "gpt-6-astra") || model.ID == "gpt-5.6" || strings.HasPrefix(model.ID, "gpt-5.6-") {
 			if model.ThinkingLevelMap["xhigh"] != "xhigh" || model.ThinkingLevelMap["max"] != "max" {
 				t.Fatalf("codex model %q thinking levels = %#v, want xhigh+max", model.ID, model.ThinkingLevelMap)
 			}
