@@ -1,0 +1,24 @@
+apiVersion: v2
+name: codex-pool
+description: >-
+  Single-instance deployment of codex-pool, a reverse proxy that spreads
+  coding-agent sessions across pooled provider accounts.
+type: application
+# Chart version. Bump on every chart change; unrelated to appVersion.
+version: 0.1.0
+# The application does not cut releases yet, so the chart tracks the default
+# branch. The image published by .github/workflows/build.yml is tagged `main`
+# for every push to that branch, and `X.Y.Z` once a `vX.Y.Z` tag exists.
+appVersion: "main"
+home: https://github.com/darvell/codex-pool
+sources:
+  - https://github.com/darvell/codex-pool
+keywords:
+  - proxy
+  - codex
+  - claude
+  - llm
+  - openai-compatible
+annotations:
+  # The chart deploys exactly one replica by design; see templates/_guard.tpl.
+  category: AIInfrastructure

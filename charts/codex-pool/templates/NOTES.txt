@@ -1,0 +1,39 @@
+codex-pool ({{ .Chart.AppVersion }}) is deployed as {{ include "codex-pool.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Topology (fixed by the chart, not configurable):
+  replicas ....... 1
+  strategy ....... Recreate
+  state volume ... {{ include "codex-pool.pvcName" . }} (ReadWriteOnce{{ with .Values.persistence.storageClass }}, StorageClass {{ . }}{{ end }})
+
+The pod will not start until Secret "{{ .Values.auth.existingSecret }}" exists in
+namespace {{ .Release.Namespace }} with key "{{ .Values.auth.encryptionKeyKey }}".
+The chart never creates it. If you have not created it yet:
+
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.auth.existingSecret }} \
+    --from-literal={{ .Values.auth.encryptionKeyKey }}="$(openssl rand -hex 32)"
+
+Reachability:
+{{- if .Values.ingress.enabled }}
+  Ingress:
+  {{- $tlsHosts := dict }}
+  {{- range .Values.ingress.tls }}{{ range .hosts }}{{ $_ := set $tlsHosts . true }}{{ end }}{{ end }}
+  {{- range .Values.ingress.hosts }}
+  {{- $host := .host }}
+  {{- $scheme := ternary "https" "http" (hasKey $tlsHosts $host) }}
+  {{- range .paths }}
+    {{ $scheme }}://{{ $host }}{{ .path }}
+  {{- end }}
+  {{- end }}
+{{- else }}
+  Service {{ include "codex-pool.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }} ({{ .Values.service.type }}).
+  {{- if eq .Values.service.type "ClusterIP" }}
+  Nothing is published outside the cluster. To try it locally:
+
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "codex-pool.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  {{- end }}
+{{- end }}
+
+No provider account is enrolled by this chart. Until credential JSON exists under
+/app/pool/<provider>/, the proxy starts, logs "loaded 0 accounts" and answers
+GET /healthz with 200 while serving no model traffic. Enrol accounts through the
+setup dashboard, or by placing credential files on the state volume.

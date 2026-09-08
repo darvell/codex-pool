@@ -217,6 +217,27 @@ Antigravity model names come from Google's live `fetchAvailableModels` response.
 
 ---
 
+## Kubernetes
+
+A Helm chart lives in [`charts/codex-pool`](charts/codex-pool). Container images
+are built and published to `ghcr.io/<owner>/codex-pool` by
+[`.github/workflows/build.yml`](.github/workflows/build.yml) on every push to
+`main` and on `v*` tags.
+
+```sh
+kubectl create namespace codex-pool
+kubectl -n codex-pool create secret generic codex-pool-auth \
+  --from-literal=pool-auth-encryption-key="$(openssl rand -hex 32)"
+helm install codex-pool ./charts/codex-pool -n codex-pool
+```
+
+The chart deploys exactly one replica with a `Recreate` strategy and a single
+`ReadWriteOnce` volume, and refuses to render if you try to scale it: pooled
+credential files are rewritten without cross-process locking and pending OAuth
+logins are process-local. See [`charts/codex-pool/README.md`](charts/codex-pool/README.md).
+
+---
+
 ## Disclaimer
 
 This pools credentials you own. Using multiple accounts or sharing access may violate terms of service. If something goes sideways, that's on you.
