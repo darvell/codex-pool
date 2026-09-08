@@ -1,0 +1,184 @@
+# codex-pool — default values.
+#
+# TOPOLOGY IS NOT CONFIGURABLE. The application keeps every piece of its state
+# on the filesystem (BoltDB at data/proxy.db, SQLite at data/analytics.db,
+# DuckDB at data/usage.duckdb, per-provider credential JSON under pool/<provider>/)
+# and rewrites credential files without cross-process locking, while pending
+# OAuth login sessions live in a process-local in-memory map whose browser
+# redirect has to land back on the same process. The chart therefore hardcodes
+# one replica, the Recreate strategy and a single ReadWriteOnce volume, and
+# refuses to render if `replicaCount`, `replicas`, `autoscaling`, `strategy`,
+# `podDisruptionBudget` or `persistence.accessModes` are supplied.
+# See templates/_guard.tpl.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Published by .github/workflows/build.yml to this repository's GitHub
+  # Container Registry namespace. Repoint it if you build the image yourself.
+  repository: ghcr.io/korkin25/codex-pool
+  # Preferred in production: pin the exact manifest the workflow pushed, e.g.
+  # sha256:… . A digest always wins over `tag`.
+  digest: ""
+  # Falls back to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Names of existing kubernetes.io/dockerconfigjson Secrets in the release
+# namespace. The chart never creates a pull secret. Only needed while the
+# GHCR package is private — a public package is pulled anonymously.
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  # Defaults to the release fullname when empty.
+  name: ""
+  annotations: {}
+  # The application never talks to the Kubernetes API.
+  automountServiceAccountToken: false
+
+# ---------------------------------------------------------------- persistence
+persistence:
+  # Cannot be disabled: pooled credentials, OAuth refresh tokens and usage
+  # history would otherwise live on the pod's ephemeral filesystem.
+  enabled: true
+  # Mount an already-provisioned claim instead of creating one.
+  existingClaim: ""
+  # Empty means "use the cluster default StorageClass". Prefer a class with a
+  # Retain reclaim policy: the volume holds provider refresh tokens.
+  storageClass: ""
+  size: 8Gi
+  # Adds helm.sh/resource-policy: keep so `helm uninstall` does not collect the
+  # credential state. Set to false if you want the claim removed with the release.
+  keepOnDelete: true
+  annotations: {}
+  # accessModes is intentionally absent: ReadWriteOnce is enforced in-template.
+
+# ------------------------------------------------------------------- workload
+service:
+  type: ClusterIP
+  port: 8989
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: codex-pool.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Container listen port. Upstream defaults to 127.0.0.1:8989, which is
+# unreachable from outside the container; the chart always binds 0.0.0.0.
+containerPort: 8989
+
+# Non-secret settings rendered into /app/config.toml. main.go reads config.toml
+# from the working directory (/app) — CONFIG_PATH only steers the hot-reload
+# watcher — so the file is mounted there with a subPath.
+config:
+  enabled: true
+  # Absolute base URL this pool is reached on; used in generated client configs
+  # and in OAuth redirects. Set it once the Service or Ingress is published.
+  publicURL: ""
+  poolDir: /app/pool
+  dbPath: /app/data/proxy.db
+  poolUsersPath: /app/data/pool_users.json
+  duckdbPath: /app/data/usage.duckdb
+  maxAttempts: 3
+  disableRefresh: false
+  debug: false
+  # Secondary-usage share above which the router prefers a lower tier.
+  tierThreshold: 0.5
+  # short name -> upstream model
+  modelAliases: {}
+  # Appended verbatim to the END of the generated config.toml. Because TOML
+  # tables run to the next header, start the snippet with its own `[table]`
+  # header, or its keys will land inside the last table the chart emitted.
+  # Never put secrets here: this file is rendered from plain chart values.
+  extraToml: ""
+
+# Secret material. The chart never creates a Secret; it only projects keys out
+# of one you (or an external secret operator) already own. Create it with:
+#
+#   kubectl -n <namespace> create secret generic codex-pool-auth \
+#     --from-literal=pool-auth-encryption-key="$(openssl rand -hex 32)"
+#
+auth:
+  # Required. codex-pool refuses to start Passport without
+  # POOL_AUTH_ENCRYPTION_KEY (or POOL_JWT_SECRET) and exits.
+  existingSecret: codex-pool-auth
+  encryptionKeyKey: pool-auth-encryption-key
+  # Optional break-glass operator credential (ADMIN_TOKEN) in the same Secret.
+  # Leave empty to run without one; /metrics and /admin/* stay closed either way.
+  adminTokenKey: ""
+
+# Extra plain environment variables, e.g. UPSTREAM_* overrides.
+env: []
+# Extra environment from existing ConfigMaps/Secrets.
+envFrom: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    # DuckDB analytics plus the 64 MiB analytics reserve; the proxy itself is
+    # mostly stream forwarding.
+    cpu: "2"
+    memory: 1Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The image's `codex` system account.
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# The application answers GET /healthz with 200 {"status":"ok"} as soon as the
+# listener is up, with zero accounts enrolled.
+probes:
+  startup:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 30
+    timeoutSeconds: 3
+  readiness:
+    enabled: true
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 3
+  liveness:
+    enabled: true
+    periodSeconds: 30
+    failureThreshold: 5
+    timeoutSeconds: 5
+
+# /tmp scratch for os.CreateTemp (request spooling, Grok spool files). Needed
+# because the root filesystem is read-only.
+tmpDir:
+  sizeLimit: 1Gi
+
+terminationGracePeriodSeconds: 60
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

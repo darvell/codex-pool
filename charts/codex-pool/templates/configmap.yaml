@@ -1,0 +1,38 @@
+{{- include "codex-pool.guard" . -}}
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "codex-pool.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "codex-pool.labels" . | nindent 4 }}
+data:
+  # Rendered by the chart. main.go loads "config.toml" relative to the working
+  # directory (/app); CONFIG_PATH only points the hot-reload watcher. Secrets
+  # never appear here — this file is derived from plain chart values.
+  # config.extraToml is appended last; give it its own [table] header.
+  config.toml: |
+    listen_addr = "0.0.0.0:{{ .Values.containerPort }}"
+    pool_dir = {{ .Values.config.poolDir | quote }}
+    db_path = {{ .Values.config.dbPath | quote }}
+    max_attempts = {{ .Values.config.maxAttempts | int }}
+    disable_refresh = {{ .Values.config.disableRefresh }}
+    debug = {{ .Values.config.debug }}
+    tier_threshold = {{ .Values.config.tierThreshold }}
+    public_url = {{ .Values.config.publicURL | quote }}
+
+    [pool_users]
+    storage_path = {{ .Values.config.poolUsersPath | quote }}
+    {{- if .Values.config.modelAliases }}
+
+    [model_aliases]
+    {{- range $alias, $target := .Values.config.modelAliases }}
+    {{ $alias | quote }} = {{ $target | quote }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.config.extraToml }}
+
+    {{ . | nindent 4 | trim }}
+    {{- end }}
+{{- end }}

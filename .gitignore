@@ -53,3 +53,7 @@ node_modules/
 
 # Reference checkout (not part of this repo)
 codex/
+
+# The build-artifact patterns above (`codex-pool`, `codexpool`, …) are
+# unanchored, so they also match the Helm chart directory. Keep it tracked.
+!charts/codex-pool/

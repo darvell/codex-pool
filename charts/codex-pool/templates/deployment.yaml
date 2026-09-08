@@ -1,0 +1,170 @@
+{{- include "codex-pool.guard" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "codex-pool.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "codex-pool.labels" . | nindent 4 }}
+spec:
+  # Literal 1. Not a value, not overridable — see templates/_guard.tpl.
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    # Recreate, not RollingUpdate: the state volume is ReadWriteOnce, so a
+    # surge pod would block on the attach and the rollout would never finish.
+    # It also guarantees only one process ever writes pool/<provider>/*.json.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "codex-pool.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "codex-pool.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.config.enabled }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "codex-pool.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: codex-pool
+          image: {{ include "codex-pool.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          env:
+            # Upstream default is 127.0.0.1:8989, which no kubelet probe and no
+            # Service endpoint can reach. Always bind the pod IP.
+            - name: PROXY_LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.containerPort }}"
+            - name: POOL_DIR
+              value: {{ .Values.config.poolDir | quote }}
+            - name: PROXY_DB_PATH
+              value: {{ .Values.config.dbPath | quote }}
+            - name: POOL_USERS_PATH
+              value: {{ .Values.config.poolUsersPath | quote }}
+            - name: DUCKDB_PATH
+              value: {{ .Values.config.duckdbPath | quote }}
+            {{- if .Values.config.enabled }}
+            - name: CONFIG_PATH
+              value: /app/config.toml
+            {{- end }}
+            # os.CreateTemp("") spools large request bodies; the root filesystem
+            # is read-only, so point it at the emptyDir below.
+            - name: TMPDIR
+              value: /tmp
+            - name: POOL_AUTH_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "auth.existingSecret is required: codex-pool refuses to start Passport without POOL_AUTH_ENCRYPTION_KEY" .Values.auth.existingSecret }}
+                  key: {{ required "auth.encryptionKeyKey is required" .Values.auth.encryptionKeyKey }}
+            {{- with .Values.auth.adminTokenKey }}
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.auth.existingSecret }}
+                  key: {{ . }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # File databases: proxy.db (BoltDB) + its 64 MiB analytics reserve,
+            # analytics.db (SQLite, hardcoded to ./data), usage.duckdb,
+            # pool_users.json.
+            - name: state
+              mountPath: /app/data
+              subPath: data
+            # Per-provider credential JSON, hot-reloaded by an fsnotify watcher.
+            - name: state
+              mountPath: /app/pool
+              subPath: pool
+            {{- if .Values.config.enabled }}
+            - name: config
+              mountPath: /app/config.toml
+              subPath: config.toml
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "codex-pool.pvcName" . }}
+        {{- if .Values.config.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "codex-pool.fullname" . }}-config
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpDir.sizeLimit }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
