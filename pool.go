@@ -464,12 +464,45 @@ func newPoolState(accs []*Account, debug bool) *poolState {
 }
 
 // replace swaps the pool accounts (used on reload).
+//
+// Conversation pins are carried across the swap for every account that is
+// still in the incoming set; only pins whose account has gone away are
+// dropped. This function used to clear the whole map, which moved every live
+// conversation to a different account on any reload — including a reload that
+// changed nothing at all, since the pool directory is watched and any touch
+// triggers one.
+//
+// Keeping a pin is safe because candidate() re-validates the pinned account on
+// every request: dead, disabled, account type, required plan, client IP,
+// rate-limit cooldown, primary and secondary usage thresholds and token
+// expiry, falling through to ordinary selection when any of those fails.
+// Nothing is trusted here that the read path does not check again.
 func (p *poolState) replace(accs []*Account) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.accounts = accs
-	p.convPin = map[string]string{}
+	p.convPin = retainConvPins(p.convPin, accs)
 	p.rr = 0
+}
+
+// retainConvPins returns the pins whose account is still present in accs.
+func retainConvPins(pins map[string]string, accs []*Account) map[string]string {
+	kept := make(map[string]string, len(pins))
+	if len(pins) == 0 {
+		return kept
+	}
+	present := make(map[string]struct{}, len(accs))
+	for _, a := range accs {
+		if a != nil {
+			present[a.ID] = struct{}{}
+		}
+	}
+	for conversationID, accountID := range pins {
+		if _, ok := present[accountID]; ok {
+			kept[conversationID] = accountID
+		}
+	}
+	return kept
 }
 
 func (p *poolState) count() int {
