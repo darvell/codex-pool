@@ -11,6 +11,8 @@
 
 # Testing / automation
 .playwright-mcp/
+test-results/
+web/.impeccable/
 
 # Desloppify
 .desloppify/
@@ -38,6 +40,7 @@ codex-pool-linux
 codex-pool-linux-*
 codex-pool-proxy-linux
 codex-pool-proxy-linux-*
+codex-pool-proxy-test-linux-*
 codexpool
 tmp/
 bin/
@@ -47,6 +50,10 @@ coverage.out
 # Python
 __pycache__/
 *.pyc
+
+# Temp / scratch
+.tmp_*
+*-local-command-caveat*.txt
 
 # Node / package managers
 node_modules/
