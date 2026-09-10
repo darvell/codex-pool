@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -185,9 +186,9 @@ func TestModelRouteOverrideOpencodeGo(t *testing.T) {
 
 	// Bare overlapping IDs keep their existing provider.
 	overlaps := map[string]AccountType{
-		"mimo-v2.5-pro":  AccountTypeXiaomi,
-		"glm-5.2":        AccountTypeZAI,
-		"grok-4.6":       AccountTypeGrok,
+		"mimo-v2.5-pro":   AccountTypeXiaomi,
+		"glm-5.2":         AccountTypeZAI,
+		"grok-4.6":        AccountTypeGrok,
 		"kimi-for-coding": AccountTypeKimi,
 	}
 	for model, want := range overlaps {
@@ -399,6 +400,132 @@ func TestProxyRequestRoutesOpencodeGoModel(t *testing.T) {
 	}
 }
 
+func TestOpencodeGoUpstreamBody(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"opencode-go/longcat-2.0","session_id":"conv-1","messages":[{"role":"user","content":"hi"}]}`)
+	got := opencodeGoUpstreamBody(body, "opencode-go/longcat-2.0")
+	var obj map[string]any
+	if err := json.Unmarshal(got, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["model"] != "longcat-2.0" {
+		t.Fatalf("model = %v, want bare longcat-2.0", obj["model"])
+	}
+	if _, ok := obj["session_id"]; ok {
+		t.Fatal("session_id must be stripped; Go rejects it with HTTP 400")
+	}
+	if _, ok := obj["messages"]; !ok {
+		t.Fatal("sanitization dropped unrelated fields")
+	}
+
+	// A clean body is returned untouched.
+	clean := []byte(`{"model":"longcat-2.0","messages":[]}`)
+	if got := opencodeGoUpstreamBody(clean, "longcat-2.0"); string(got) != string(clean) {
+		t.Fatalf("clean body mutated: %s", got)
+	}
+}
+
+func TestOpencodeGoCuteModelsUseMatchingProtocols(t *testing.T) {
+	t.Parallel()
+
+	byID := map[string]cuteCodeModelConfig{}
+	for _, model := range opencodeGoCuteModels("https://pool.example", "tok") {
+		byID[model.ID] = model
+	}
+
+	if model, ok := byID["opencode-go/minimax-m3"]; !ok || model.Protocol != "anthropic" {
+		t.Fatalf("minimax-m3 = %#v, want anthropic protocol", byID["opencode-go/minimax-m3"])
+	}
+	if model, ok := byID["opencode-go/longcat-2.0"]; !ok || model.Protocol != "openai" {
+		t.Fatalf("longcat-2.0 = %#v, want openai protocol", byID["opencode-go/longcat-2.0"])
+	}
+	if _, ok := byID["opencode-go/grok-4.6"]; ok {
+		t.Fatal("grok-4.6 is Responses-only and must not be offered to Cute Code")
+	}
+}
+
+func TestOpencodeGoSessionHeader(t *testing.T) {
+	t.Parallel()
+
+	// Client-supplied value wins.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("x-opencode-session", "ses-client")
+	if got := opencodeGoSessionHeader(req, "conv-1", "user-1"); got != "ses-client" {
+		t.Fatalf("client session = %q, want ses-client", got)
+	}
+
+	// Conversation ID yields a stable, header-safe derived value.
+	req.Header.Del("x-opencode-session")
+	derived := opencodeGoSessionHeader(req, "conv-1", "user-1")
+	again := opencodeGoSessionHeader(req, "conv-1", "user-1")
+	if derived == "" || derived != again {
+		t.Fatalf("derived session not stable: %q vs %q", derived, again)
+	}
+	if strings.ContainsAny(derived, " \t\r\n") {
+		t.Fatalf("derived session contains unsafe characters: %q", derived)
+	}
+	// Different conversations must not collapse to the same session.
+	if other := opencodeGoSessionHeader(req, "conv-2", "user-1"); other == derived {
+		t.Fatalf("distinct conversations share session %q", derived)
+	}
+
+	// With no conversation, fall back to the pool user (still non-empty).
+	if fallback := opencodeGoSessionHeader(req, "", "user-1"); fallback == "" {
+		t.Fatal("expected non-empty fallback for user with no conversation")
+	}
+}
+
+func TestProxyRequestStampsOpencodeGoSession(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	goBase, _ := url.Parse("https://opencode.ai/zen/go/v1")
+	claudeBase, _ := url.Parse("https://api.anthropic.com")
+	codexBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	acc := &Account{Type: AccountTypeOpencodeGo, ID: "go", AccessToken: "sk-go-upstream", PlanType: "opencode_go"}
+
+	var gotSession string
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool:    newPoolState([]*Account{acc}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(codexBase, codexBase, nil),
+			NewClaudeProvider(claudeBase),
+			NewGeminiProvider(claudeBase, claudeBase),
+			NewOpencodeGoProvider(goBase),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotSession = req.Header.Get("x-opencode-session")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"chatcmpl-1","object":"chat.completion","model":"longcat-2.0","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`)),
+			}, nil
+		}),
+	}
+
+	reqBody := []byte(`{"model":"opencode-go/longcat-2.0","session_id":"conv-abc","messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "go-user"))
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-go-session")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if gotSession == "" {
+		t.Fatal("outbound request is missing x-opencode-session")
+	}
+	if want := ccDerivedHexID("conv-abc", "opencode-go-session", ccProcessSessionID); gotSession != want {
+		t.Fatalf("x-opencode-session = %q, want %q", gotSession, want)
+	}
+}
+
 func TestOpencodeGoAdminAddValidatesAndSavesAccount(t *testing.T) {
 	t.Parallel()
 
@@ -539,4 +666,99 @@ func TestOpencodeGoCatalogCoversLiveModels(t *testing.T) {
 			t.Errorf("no catalog entry for Go model %q", bare)
 		}
 	}
+}
+
+// TestOpencodeGoLiveProbe drives the real proxy code path against the live Go
+// upstream. It is hermetic by default and only runs when OPENCODE_GO_LIVE=1 is
+// set, because it spends subscription quota and needs pool/opencode_go/main.json.
+func TestOpencodeGoLiveProbe(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "opencode-go-live-secret")
+	if os.Getenv("OPENCODE_GO_LIVE") != "1" {
+		t.Skip("set OPENCODE_GO_LIVE=1 to run the live OpenCode Go probe")
+	}
+
+	raw, err := os.ReadFile(filepath.Join("pool", "opencode_go", "main.json"))
+	if err != nil {
+		t.Fatalf("read Go account: %v", err)
+	}
+	var auth OpencodeGoAuthJSON
+	if err := json.Unmarshal(raw, &auth); err != nil || strings.TrimSpace(auth.APIKey) == "" {
+		t.Fatalf("parse Go account: %v", err)
+	}
+
+	base, _ := url.Parse("https://opencode.ai/zen/go/v1")
+	acc := &Account{Type: AccountTypeOpencodeGo, ID: "main", AccessToken: auth.APIKey, PlanType: "opencode_go"}
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 1 << 20},
+		pool:    newPoolState([]*Account{acc}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(base, base, nil),
+			NewClaudeProvider(base),
+			NewGeminiProvider(base, base),
+			NewOpencodeGoProvider(base),
+		),
+		transport: http.DefaultTransport,
+	}
+
+	run := func(t *testing.T, stream bool) string {
+		t.Helper()
+		reqBody := []byte(`{"model":"opencode-go/longcat-2.0","session_id":"live-conv-1","messages":[{"role":"user","content":"reply with exactly: ok"}],"stream":` + strconv.FormatBool(stream) + `}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Api-Key", generateClaudePoolToken("opencode-go-live-secret", "live-user"))
+		rr := httptest.NewRecorder()
+
+		h.proxyRequest(rr, req, "live-go")
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("live Go request (stream=%v) status=%d body=%s", stream, rr.Code, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+
+	nonStreaming := run(t, false)
+	if !strings.Contains(nonStreaming, "ok") {
+		t.Fatalf("unexpected live Go body: %s", nonStreaming)
+	}
+	t.Logf("live Go non-streaming response: %s", nonStreaming)
+
+	streaming := run(t, true)
+	if !strings.Contains(streaming, "data:") || !strings.Contains(streaming, "ok") {
+		t.Fatalf("unexpected live Go stream: %s", streaming)
+	}
+	t.Logf("live Go streaming response: %s", streaming)
+
+	// The other two Go endpoint families must also pass the session header and
+	// survive their respective request shapes.
+	post := func(t *testing.T, path, body, authHeader, authValue string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(authHeader, authValue)
+		rr := httptest.NewRecorder()
+		h.proxyRequest(rr, req, "live-go-"+path)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("live Go %s status=%d body=%s", path, rr.Code, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+
+	poolToken := generateClaudePoolToken("opencode-go-live-secret", "live-user")
+	messages := post(t, "/v1/messages",
+		`{"model":"opencode-go/minimax-m3","max_tokens":64,"messages":[{"role":"user","content":"reply with exactly: ok"}]}`,
+		"X-Api-Key", poolToken)
+	if !strings.Contains(messages, "ok") {
+		t.Fatalf("unexpected live Go messages body: %s", messages)
+	}
+	t.Logf("live Go messages response: %s", messages)
+
+	responses := post(t, "/v1/responses",
+		`{"model":"opencode-go/grok-4.6","input":"reply with exactly: ok","stream":false}`,
+		"Authorization", "Bearer "+poolToken)
+	if !strings.Contains(responses, "ok") {
+		t.Fatalf("unexpected live Go responses body: %s", responses)
+	}
+	t.Logf("live Go responses response: %s", responses)
 }

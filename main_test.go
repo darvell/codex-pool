@@ -1923,19 +1923,19 @@ func TestStripCodexModelSuffixes(t *testing.T) {
 	}
 }
 
-func TestEnsureCodexResponsesCompactBodyDoesNotForceStream(t *testing.T) {
+func TestPrepareCompactModelControls(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4-mini-high-fast","input":"summarize","stream":false,"store":true,"temperature":0,"parallel_tool_calls":true,"reasoning":{"summary":"auto"}}`)
 	body, _ = applyCodexModelSuffixControls(body, "gpt-5.4-mini-high-fast")
-	out := ensureCodexResponsesCompactBody(body)
 	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
+	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, ok := got["stream"]; ok {
-		t.Fatalf("compact body should not force stream: %#v", got)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", nil)
+	if err := prepareCompactRequest(req, got); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := got["store"]; ok {
-		t.Fatalf("compact body should not preserve store: %#v", got)
+	if got["stream"] != true || got["store"] != false {
+		t.Fatalf("compact turn must stream without storage: %#v", got)
 	}
 	if got["parallel_tool_calls"] != true {
 		t.Fatalf("compact body should preserve parallel_tool_calls: %#v", got)

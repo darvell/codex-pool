@@ -314,6 +314,9 @@ func codexUsageWindowFromHeaders(headers http.Header, slot string) *codexUsageWi
 }
 
 func (p *CodexProvider) UpstreamURL(path string) *url.URL {
+	if contextRoute(path) {
+		return p.responsesBase
+	}
 	if isCodexLegacyLiveCallCreatePath(path) {
 		// Codex creates Frameless WebRTC calls through the ChatGPT backend, but
 		// joins their sideband sockets through the direct Realtime origin.
@@ -364,6 +367,9 @@ func (p *CodexProvider) MatchesPath(path string) bool {
 }
 
 func (p *CodexProvider) NormalizePath(path string) string {
+	if contextRoute(path) {
+		return nativeContextPath(path)
+	}
 	normalized := normalizeNoopPath(path)
 	if normalized == "/live" {
 		return "/v1/live"

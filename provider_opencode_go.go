@@ -71,6 +71,25 @@ func (p *OpencodeGoProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	req.Header.Set("X-Api-Key", acc.AccessToken)
 }
 
+// opencodeGoSessionHeader returns the value for the `x-opencode-session`
+// header. Go's router hard-requires this header and rejects every request
+// without it (HTTP 400 "MissingSessionID"), so we always send one. Prefer the
+// client's own value when present; otherwise derive a stable ID from the
+// conversation (or pool user) so routing and prompt caching stay consistent
+// across the turns of one conversation.
+func opencodeGoSessionHeader(r *http.Request, conversationID, userID string) string {
+	if r != nil {
+		if v := strings.TrimSpace(r.Header.Get("x-opencode-session")); v != "" {
+			return v
+		}
+	}
+	seed := strings.TrimSpace(conversationID)
+	if seed == "" {
+		seed = strings.TrimSpace(userID)
+	}
+	return ccDerivedHexID(seed, "opencode-go-session", ccProcessSessionID)
+}
+
 func (p *OpencodeGoProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
 	// API keys don't need refresh
 	return nil
@@ -292,6 +311,37 @@ func opencodeGoUpstreamModel(model string) string {
 		return bare
 	}
 	return strings.TrimSpace(model)
+}
+
+// opencodeGoUpstreamBody rewrites the model to the bare upstream ID and drops
+// request fields the Go router's downstream providers reject. The session must
+// travel as the x-opencode-session header: a top-level session_id in the body
+// makes the upstream provider fail the whole request with HTTP 400.
+func opencodeGoUpstreamBody(body []byte, model string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	changed := false
+	if _, ok := obj["session_id"]; ok {
+		delete(obj, "session_id")
+		changed = true
+	}
+	if want := opencodeGoUpstreamModel(opencodeGoCanonicalModel(model)); obj["model"] != want {
+		obj["model"] = want
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	rewritten, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return rewritten
 }
 
 // opencodeGoStreamCanonicalModel is the resolveStreamedModelRoute canonical

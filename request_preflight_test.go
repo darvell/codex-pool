@@ -137,8 +137,8 @@ func TestPreflightOriginalIntent(t *testing.T) {
 					t.Errorf("model=%v, want %s", obj["model"], tc.model)
 				}
 				if tc.compact {
-					if _, exists := obj["stream"]; exists {
-						t.Error("compact includes stream")
+					if obj["stream"] != true || obj["store"] != false {
+						t.Error("compact must stream without storage")
 					}
 					if _, exists := obj["max_output_tokens"]; exists {
 						t.Error("compact includes max_output_tokens")
@@ -191,8 +191,17 @@ func TestPreflightHostedMCP(t *testing.T) {
 				_ = req.Body.Close()
 				tools, _ := obj["tools"].([]any)
 				input, _ := obj["input"].([]any)
-				if len(tools) != 2 || len(input) != 1 {
+				wantTools, wantInput := 2, 1
+				if isCompactPath(path) {
+					wantTools, wantInput = 0, 2
+				}
+				if len(tools) != wantTools || len(input) != wantInput {
 					t.Errorf("hosted MCP filtering: tools=%v input=%v", tools, input)
+				}
+				for _, raw := range input {
+					if item, _ := raw.(map[string]any); item["type"] == "mcp_call" {
+						t.Error("hosted MCP input retained")
+					}
 				}
 				if _, exists := obj["tool_choice"]; exists {
 					t.Error("hosted MCP tool_choice retained")

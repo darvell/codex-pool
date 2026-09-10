@@ -521,6 +521,13 @@ func main() {
 		pacer:                pacer,
 		largeReplayBodies:    make(chan struct{}, 1),
 	}
+	if store != nil {
+		contextStore, err := newNativeContextStore(store.db)
+		if err != nil {
+			log.Fatalf("initialize native context store: %v", err)
+		}
+		h.nativeContext = &nativeContext{store: contextStore, pool: pool, provider: registry.ForType(AccountTypeCodex), transport: h.transport, refresh: h.refreshAccountAfterAuthFailure}
+	}
 	h.startUsagePoller()
 	if getenv("PROXY_ENABLE_QUOTA_INTELLIGENCE", "1") != "0" {
 		h.startQuotaIntelligenceRefresher()
@@ -654,6 +661,7 @@ type proxyHandler struct {
 	passport             *PassportStore
 	registry             *ProviderRegistry
 	store                *usageStore
+	nativeContext        *nativeContext
 	analyticsStore       *AnalyticsStore
 	duckAnalytics        *DuckAnalytics
 	pricing              *PricingData
@@ -904,48 +912,6 @@ func codexPassthroughNeedsBodyRewrite(path string) bool {
 	return strings.HasPrefix(path, "/v1/messages") ||
 		strings.HasPrefix(path, "/v1/chat/completions") ||
 		strings.HasPrefix(path, "/v1/completions")
-}
-
-func ensureCodexResponsesCompactBody(body []byte) []byte {
-	if len(body) == 0 {
-		return body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	out := compactResponsesObject(obj)
-	rewritten, err := json.Marshal(out)
-	if err != nil {
-		return body
-	}
-	return rewritten
-}
-
-func compactResponsesObject(obj map[string]any) map[string]any {
-	out := map[string]any{}
-	for _, key := range []string{"model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "service_tier", "text", "previous_response_id"} {
-		if v, ok := obj[key]; ok {
-			out[key] = v
-		}
-	}
-	if _, ok := out["instructions"]; !ok {
-		out["instructions"] = ""
-	}
-	if input, ok := out["input"].(string); ok {
-		out["input"] = []any{
-			map[string]any{
-				"type": "message",
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "input_text", "text": input},
-				},
-			},
-		}
-	}
-	stripHostedMCPFromResponsesRequest(out)
-	prepareCodexSchemasInBody(out)
-	return out
 }
 
 func ensureCodexResponsesInstructions(body []byte) []byte {
@@ -1246,7 +1212,7 @@ func extractConversationIDFromObject(obj map[string]any) string {
 			return v
 		}
 	}
-	for _, containerKey := range []string{"metadata", "meta"} {
+	for _, containerKey := range []string{"client_metadata", "metadata", "meta"} {
 		if sub, ok := obj[containerKey].(map[string]any); ok {
 			for _, key := range []string{"conversation_id", "conversation", "session_id", "user_id"} {
 				if v, ok := sub[key].(string); ok && v != "" {
@@ -1435,8 +1401,9 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		if p == nil {
 			return nil, nil, nil
 		}
-		// The Go upstream expects the bare model ID in the body.
-		rewritten := rewriteModelInBody(body, opencodeGoUpstreamModel(opencodeGoCanonicalModel(model)))
+		// The Go upstream expects the bare model ID in the body and rejects the
+		// proxy-only session_id field, which must travel as a header instead.
+		rewritten := opencodeGoUpstreamBody(body, model)
 		return p, p.UpstreamURL(path), rewritten
 	}
 	// Cross-format model routing: detect if the model belongs to a different provider
@@ -1868,6 +1835,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// Every pool credential path shares one parser and one live authorization check.
 	userID, _, _, credentialKind, credentialAllowed := h.authorizePoolCredentialRequest(r)
 	if credentialKind != "" && !credentialAllowed {
+		if isContextRequestPath(r.URL.Path) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"message":"Pool credential rejected. Sign in again."}}`)
+			return
+		}
 		http.Error(w, "pool credential revoked, expired, or unknown", http.StatusForbidden)
 		return
 	}
@@ -1889,7 +1862,17 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	// Reject unauthenticated requests - require a valid pool token
 	if userID == "" {
+		if isContextRequestPath(r.URL.Path) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"Sign in with a valid pool credential."}}`)
+			return
+		}
 		http.Error(w, "unauthorized: valid pool token required", http.StatusUnauthorized)
+		return
+	}
+	if isContextRequestPath(r.URL.Path) {
+		h.proxyNativeContext(w, r, userID)
 		return
 	}
 	if r.Method == http.MethodGet && normalizeNoopPath(r.URL.Path) == "/api/pool/models" {
@@ -1994,6 +1977,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					http.Error(w, "grok request sanitizing error: "+err.Error(), http.StatusBadRequest)
 					return
 				}
+			}
+			if accountType == AccountTypeCodex {
+				r = r.WithContext(context.WithValue(r.Context(), contextSpoolKey{}, spooled))
 			}
 			r.Body = spooled.File
 			// Only the disk-backed body remains; generation must not hold a RAM slot.
@@ -2155,6 +2141,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 	}
 
+	// OpenCode Go's router rejects requests missing x-opencode-session (HTTP 400
+	// "MissingSessionID"). Stamp it on the incoming request so every outbound
+	// attempt — streamed or buffered — carries a stable per-conversation value.
+	if accountType == AccountTypeOpencodeGo {
+		r.Header.Set("x-opencode-session", opencodeGoSessionHeader(r, conversationID, userID))
+	}
+
 	// Inject thinking budget if the original model had a (budget) suffix.
 	if requestedModel != "" {
 		origModel := originalModel
@@ -2270,6 +2263,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 	}
 	imageGenerationRequest := false
+	compactRequest := accountType == AccountTypeCodex && r.Method == http.MethodPost && isCompactPath(r.URL.Path)
 	if accountType == AccountTypeCodex {
 		// Byte-oriented translators retain their contracts. Reuse the original
 		// tree only when none of them changed the body; decode changed bytes once.
@@ -2280,18 +2274,26 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				upstreamObject = nil
 			}
 		}
+		if compactRequest && upstreamObject == nil {
+			http.Error(w, "compaction request must be a JSON object", http.StatusBadRequest)
+			return
+		}
 		if upstreamObject != nil && isCodexResponsesPath(r.URL.Path) {
 			changed := false
-			if translateDir == TranslateNone && (strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
-				if strings.HasPrefix(r.URL.Path, "/v1/responses/compact") || strings.HasPrefix(r.URL.Path, "/responses/compact") {
-					upstreamObject = compactResponsesObject(upstreamObject)
-				} else {
-					prepareResponsesObject(upstreamObject)
+			if compactRequest {
+				if err := prepareCompactRequest(r, upstreamObject); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
 				}
+				changed = true
+			} else if translateDir == TranslateNone && (strings.HasPrefix(r.URL.Path, "/v1/responses") || strings.HasPrefix(r.URL.Path, "/responses")) {
+				prepareResponsesObject(upstreamObject)
 				changed = true
 			} else {
 				changed = stripHostedMCPFromResponsesRequest(upstreamObject)
 			}
+			// Retain the original envelope for revalidation on each account attempt.
+			r = r.WithContext(context.WithValue(r.Context(), contextFrameKey{}, upstreamObject))
 			if changed {
 				bodyBytes, err = json.Marshal(upstreamObject)
 				if err != nil {
@@ -2326,7 +2328,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			log.Printf("[%s] requested model=%s", reqID, requestedModel)
 		}
 	}
-	if h.cfg.logBodies && len(bodySample) > 0 {
+	if h.cfg.logBodies && len(bodySample) > 0 && !(accountType == AccountTypeCodex && mayHaveContext(bodyBytes)) {
 		logSample := bodySample
 		if accountType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) {
 			logSample = bodyBytes
@@ -2450,6 +2452,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&h.inflight, -1)
 
 		if err != nil {
+			if isContextError(err) {
+				writeContextError(w, err)
+				return
+			}
 			lastErr = err
 			// Don't retry if client already disconnected — context is dead,
 			// every subsequent tryOnce will also fail instantly.
@@ -2593,6 +2599,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				resp.Body = io.NopCloser(bytes.NewReader(translated))
 			} else {
 				resp.Body = io.NopCloser(strings.NewReader(errBodyStr))
+			}
+		}
+
+		if compactRequest {
+			if err := compactHTTPResponse(resp, cancel); err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
 			}
 		}
 
@@ -3323,7 +3336,11 @@ func (h *proxyHandler) proxyRequestWebSocket(
 
 	// Use a temporary request to set provider auth headers.
 	tmpReq := &http.Request{Header: upstreamHeaders}
-	provider.SetAuthHeaders(tmpReq, acc)
+	authAccount := acc
+	if accountType == AccountTypeCodex {
+		authAccount = contextAuthSnapshot(acc)
+	}
+	provider.SetAuthHeaders(tmpReq, authAccount)
 	upstreamHeaders = tmpReq.Header
 	// The Codex Responses relay still uses its websocket beta header, but the
 	// GA Realtime API explicitly rejects that legacy beta shape. Preserve the
@@ -3351,8 +3368,10 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	if accountType == AccountTypeCodex {
 		swap := h.relayCodexWithCyberSwap(w, r, codexCyberSwapOptions{
 			ReqID:                       reqID,
+			RequestPath:                 r.URL.Path,
 			Provider:                    provider,
 			InitialAccount:              acc,
+			InitialContextAccount:       authAccount,
 			InitialOutURL:               outURL,
 			InitialUpstreamHeaders:      upstreamHeaders,
 			ConversationID:              conversationID,
@@ -3831,6 +3850,10 @@ func relayMessagesStreaming(ctx context.Context, src *websocket.Conn, dst *webSo
 }
 
 func logRelayFrame(logLabel, label string, msgType websocket.MessageType, data []byte) {
+	if mayHaveContext(data) {
+		log.Printf("[ws-relay %s] %s: type=%v len=%d", logLabel, label, msgType, len(data))
+		return
+	}
 	summary := data
 	suffix := ""
 	if len(summary) > 200 {
@@ -3843,10 +3866,15 @@ func logRelayFrame(logLabel, label string, msgType websocket.MessageType, data [
 func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL) {
 	start := time.Now()
 	accountType := provider.Type()
+	spooled, _ := r.Context().Value(contextSpoolKey{}).(*streamedResponsesRequest)
+	contextSession := ""
+	if spooled != nil {
+		contextSession = contextSessionID(spooled.contextMetadata)
+	}
 
 	requiredPlan := requiredPlanForRequest(accountType, r, "")
 	clientIP := getClientIP(r)
-	acc := h.pool.candidate("", map[string]bool{}, accountType, requiredPlan, clientIP)
+	acc := h.pool.candidate(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -3887,15 +3915,31 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	authAccount := acc
+	if spooled != nil {
+		if err := h.nativeContext.prepareSpool(contextScope(userID), clientIP, spooled); err != nil {
+			writeContextError(w, err)
+			return
+		}
+		r.Body = spooled.File
+		r.ContentLength = spooled.Size
+		r.Header.Del("Content-Length")
+		authAccount = contextAuthSnapshot(acc)
+		if err := h.nativeContext.recordDispatch(contextScope(userID), spooled.contextMetadata, authAccount, clientIP); err != nil {
+			writeContextError(w, err)
+			return
+		}
+	}
+
 	outURL := new(url.URL)
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
 	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
 
-	acc.mu.Lock()
-	access := acc.AccessToken
-	acc.mu.Unlock()
+	authAccount.mu.Lock()
+	access := authAccount.AccessToken
+	authAccount.mu.Unlock()
 	if access == "" {
 		http.Error(w, fmt.Sprintf("account %s has empty access token", acc.ID), http.StatusServiceUnavailable)
 		return
@@ -3910,7 +3954,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	var reqSample *bytes.Buffer
 	var body io.Reader = r.Body
-	if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
+	if spooled == nil && h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 		reqSample = &bytes.Buffer{}
 		body = io.TeeReader(r.Body, &limitedWriter{w: reqSample, n: h.cfg.bodyLogLimit})
 	}
@@ -3944,23 +3988,15 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	outReq.Header.Del("X-Forwarded-Proto")
 	outReq.Header.Del("X-Real-Ip")
 
-	// Use provider's SetAuthHeaders method for provider-specific auth
-	provider.SetAuthHeaders(outReq, acc)
+	// Register and authenticate with the same credential snapshot.
+	provider.SetAuthHeaders(outReq, authAccount)
 
 	// Force uncompressed responses — SSE frame parsing and client decompression
 	// break on gzip-compressed streams that split across TCP segments.
 	outReq.Header.Set("Accept-Encoding", "identity")
 
 	if h.cfg.debug.Load() {
-		authHeader := outReq.Header.Get("Authorization")
-		authLen := len(authHeader)
-		authPreview := ""
-		if authLen > 20 {
-			authPreview = authHeader[:20] + "..."
-		} else if authLen > 0 {
-			authPreview = authHeader
-		}
-		log.Printf("[%s] streamed -> %s %s (account=%s account_id=%s auth_len=%d auth=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID, acc.AccountID, authLen, authPreview)
+		log.Printf("[%s] streamed -> %s %s (account=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID)
 	}
 
 	resp, err := h.transport.RoundTrip(outReq)
@@ -4610,6 +4646,32 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	}
 
 	passthroughTranslateDir := TranslateNone
+	compactRequest := providerType == AccountTypeCodex && r.Method == http.MethodPost && isCompactPath(path)
+	if compactRequest {
+		decoded, changed, err := decodeRequestBody(r.Header.Get("Content-Encoding"), bodyBytes, h.cfg.maxInMemoryBodyBytes)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if changed {
+			r.Header.Del("Content-Encoding")
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(decoded, &obj); err != nil {
+			http.Error(w, "compaction request must be a JSON object", http.StatusBadRequest)
+			return
+		}
+		if err := prepareCompactRequest(r, obj); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		bodyBytes, err = json.Marshal(obj)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		path = r.URL.Path
+	}
 	if providerType == AccountTypeCodex {
 		if strings.HasPrefix(originalPath, "/v1/completions") && !strings.HasPrefix(originalPath, "/v1/chat/completions") {
 			passthroughTranslateDir = TranslateCompletionsToResponses
@@ -4718,6 +4780,12 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	defer resp.Body.Close()
+	if compactRequest {
+		if err := compactHTTPResponse(resp, cancel); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
 	if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
 		sampleLimit := h.claudeTraceSampleLimit(16 * 1024)
 		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
@@ -5052,8 +5120,33 @@ func (h *proxyHandler) tryOnce(
 	}
 
 	var claudeToolNameMapper map[string]string
+	contextBody := bodyBytes
+	contextObject, _ := in.Context().Value(contextFrameKey{}).(map[string]any)
 
 	buildReq := func() (*http.Request, error) {
+		authAccount := acc
+		if provider.Type() == AccountTypeCodex && isCodexResponsesPath(in.URL.Path) {
+			authAccount = contextAuthSnapshot(acc)
+			bodyBytes = contextBody
+			if contextObject != nil {
+				prepared, changed, err := h.prepareContextObject(userID, getClientIP(in), contextObject, authAccount)
+				if err != nil {
+					return nil, err
+				}
+				if changed {
+					bodyBytes, err = json.Marshal(prepared)
+					if err != nil {
+						return nil, errContextInvalid
+					}
+				}
+			} else {
+				var err error
+				bodyBytes, err = h.prepareContextFrame(userID, getClientIP(in), contextBody, authAccount)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 		var body io.Reader
 		if len(bodyBytes) > 0 {
 			body = bytes.NewReader(bodyBytes)
@@ -5075,16 +5168,16 @@ func (h *proxyHandler) tryOnce(
 		// Remove Gemini API key header (we use Bearer auth for pool accounts)
 		outReq.Header.Del("x-goog-api-key")
 
-		acc.mu.Lock()
-		access := acc.AccessToken
-		acc.mu.Unlock()
+		authAccount.mu.Lock()
+		access := authAccount.AccessToken
+		authAccount.mu.Unlock()
 
 		if access == "" {
 			return nil, fmt.Errorf("account %s has empty access token", acc.ID)
 		}
 
 		// Use provider's SetAuthHeaders method for provider-specific auth
-		provider.SetAuthHeaders(outReq, acc)
+		provider.SetAuthHeaders(outReq, authAccount)
 		// Native Realtime and GPT Live reject the Codex Responses websocket beta
 		// header. Keep it only on the Responses transport that requires it.
 		if provider.Type() == AccountTypeCodex && isCodexRealtimePath(in.URL.Path) {
@@ -5510,8 +5603,12 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	}
 	if existing, ok := h.refreshCalls[key]; ok {
 		h.refreshCallsMu.Unlock()
-		<-existing.done
-		return existing.err
+		select {
+		case <-existing.done:
+			return existing.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	call := &refreshCall{done: make(chan struct{})}
 	h.refreshCalls[key] = call

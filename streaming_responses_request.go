@@ -39,6 +39,7 @@ type streamedResponsesRequest struct {
 	Size                    int64
 	Model                   string
 	ClientWantsNonStreaming bool
+	contextMetadata         map[string]any
 }
 
 func (s *streamedResponsesRequest) Close() {
@@ -392,6 +393,23 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 				res.Model = model
 				x = writeField(key, func() error { v, _ := json.Marshal(model); _, z := bw.Write(v); return z })
 			}
+		case "client_metadata", "reasoning":
+			// Keep control values separate from the prompt, including when they follow input.
+			var raw json.RawMessage
+			x = lex.decodeSmallValue(&raw, contextRequestLimit)
+			if x == nil {
+				var value any
+				decoder := json.NewDecoder(strings.NewReader(string(raw)))
+				decoder.UseNumber()
+				x = decoder.Decode(&value)
+				if x == nil {
+					if res.contextMetadata == nil {
+						res.contextMetadata = make(map[string]any)
+					}
+					res.contextMetadata[key] = value
+					x = writeField(key, func() error { _, z := bw.Write(raw); return z })
+				}
+			}
 		case "tools":
 			x = writeField(key, func() error { return lex.copyToolsArray(bw) })
 		case "input":
@@ -642,30 +660,35 @@ func (l *jsonLex) copyFilteredArrayAfterOpen(out io.Writer) error {
 	}
 }
 func (l *jsonLex) spoolValueAndCheckMCP() (*os.File, bool, error) {
+	f, typ, err := l.spoolValueType()
+	typ = strings.TrimSpace(typ)
+	return f, typ != hostedMCPToolType && !isHostedMCPItemType(typ), err
+}
+
+func (l *jsonLex) spoolValueType() (*os.File, string, error) {
 	f, e := os.CreateTemp("", "codex-pool-value-*.json")
 	if e != nil {
-		return nil, false, e
+		return nil, "", e
 	}
 	fw := bufio.NewWriterSize(f, 64*1024)
 	if e = l.copyValue(fw); e != nil {
 		removeLexTemp(f)
-		return nil, false, e
+		return nil, "", e
 	}
 	if e = fw.Flush(); e != nil {
 		removeLexTemp(f)
-		return nil, false, e
+		return nil, "", e
 	}
 	if _, e = f.Seek(0, 0); e != nil {
 		removeLexTemp(f)
-		return nil, false, e
+		return nil, "", e
 	}
 	typ, e := scanDirectType(f)
 	if e != nil {
 		removeLexTemp(f)
-		return nil, false, e
+		return nil, "", e
 	}
-	typ = strings.TrimSpace(typ)
-	return f, typ != hostedMCPToolType && !isHostedMCPItemType(typ), nil
+	return f, typ, nil
 }
 func scanDirectType(r io.Reader) (string, error) {
 	l := newJSONLex(r)
@@ -674,7 +697,17 @@ func scanDirectType(r io.Reader) (string, error) {
 		return "", e
 	}
 	if b == '"' {
-		return l.copyString(io.Discard, 64*1024)
+		// Scalar input text is unbounded; only short tool-choice names need capture.
+		capture := &jsonStringCapture{limit: 64 * 1024}
+		if _, e = l.copyString(capture, 0); e != nil {
+			return "", e
+		}
+		if capture.overflow {
+			return "", nil
+		}
+		var value string
+		e = json.Unmarshal(capture.raw, &value)
+		return value, e
 	}
 	if b != '{' {
 		return "", nil

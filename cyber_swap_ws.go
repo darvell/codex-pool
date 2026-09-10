@@ -19,8 +19,10 @@ import (
 // codexCyberSwapOptions configures the cyber-aware Codex websocket relay.
 type codexCyberSwapOptions struct {
 	ReqID                       string
+	RequestPath                 string
 	Provider                    Provider
 	InitialAccount              *Account
+	InitialContextAccount       *Account
 	InitialOutURL               *url.URL
 	InitialUpstreamHeaders      http.Header
 	ConversationID              string
@@ -135,6 +137,7 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 		clientWriter:         &webSocketWriter{conn: clientConn},
 		upstreamConn:         upstreamConn,
 		activeAccount:        opts.InitialAccount,
+		contextAccount:       opts.InitialContextAccount,
 		subprotocols:         subprotocols,
 		clientCh:             startWebSocketReader(relayCtx, clientConn),
 		upstreamCh:           startWebSocketReader(relayCtx, upstreamConn),
@@ -168,11 +171,12 @@ type codexRelayState struct {
 	opts   codexCyberSwapOptions
 	ctx    context.Context
 
-	clientConn    *websocket.Conn
-	clientWriter  *webSocketWriter
-	upstreamConn  *websocket.Conn
-	activeAccount *Account
-	subprotocols  []string
+	clientConn     *websocket.Conn
+	clientWriter   *webSocketWriter
+	upstreamConn   *websocket.Conn
+	activeAccount  *Account
+	contextAccount *Account
+	subprotocols   []string
 
 	clientCh   <-chan wsFrame
 	upstreamCh <-chan wsFrame
@@ -198,6 +202,12 @@ func (s *codexRelayState) run() (int, error) {
 		if errors.As(err, &swap) {
 			if swap.next != nil {
 				if doErr := s.doSwap(swap.next); doErr != nil {
+					if isContextError(doErr) {
+						if err := s.writeContextError(doErr); err != nil {
+							return http.StatusSwitchingProtocols, err
+						}
+						continue
+					}
 					if len(swap.frame) == 0 {
 						return 101, doErr
 					}
@@ -426,6 +436,17 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 	return data, &swapPendingErr{frame: data, conversationID: conversationID}
 }
 
+func (s *codexRelayState) contextEnabled() bool {
+	return isCodexResponsesPath(s.opts.RequestPath)
+}
+
+func (s *codexRelayState) writeContextError(err error) error {
+	if s.clientWriter == nil {
+		return nil
+	}
+	return s.clientWriter.Write(s.ctx, websocket.MessageText, contextErrorBody(err))
+}
+
 func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
@@ -479,6 +500,13 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 		}
 		log.Printf("[%s] rejecting websocket model %q (HTTP model-route only)", s.opts.ReqID, model)
 		return nil, fmt.Errorf("websocket model route rejected: %s", model)
+	}
+	if s.contextEnabled() {
+		data, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, data, s.contextAccount)
+		if err != nil {
+			s.finishTurn(turn)
+			return []byte{}, s.writeContextError(err)
+		}
 	}
 	if s.activeAccount != nil {
 		s.swapDone = s.activeAccount.CyberAccess
@@ -645,7 +673,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	}
 	turn := s.turns[0]
 	s.activeConversationID = turn.conversationID
-	newConn, newResp, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
+	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
 		if newResp != nil {
 			if newResp.Body != nil {
@@ -664,6 +692,14 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	// Losing the prior turn's reasoning context is the lesser evil
 	// versus a hard failure surfacing to the user.
 	replay := stripPreviousResponseID(turn.request)
+	if s.contextEnabled() {
+		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
+		if err != nil {
+			newConn.CloseNow()
+			s.finishTurn(turn)
+			return err
+		}
+	}
 	if err := newConn.Write(s.ctx, websocket.MessageText, replay); err != nil {
 		newConn.CloseNow()
 		return fmt.Errorf("replay client request to swap upstream: %w", err)
@@ -684,6 +720,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	s.upstreamConn = newConn
 	s.upstreamCh = startWebSocketReader(s.ctx, newConn)
 	s.activeAccount = cand
+	s.contextAccount = authAccount
 	turn.account = cand
 	turn.responseID = ""
 	return nil
@@ -792,7 +829,7 @@ func (h *proxyHandler) dialSwappedUpstream(
 	opts codexCyberSwapOptions,
 	acc *Account,
 	subprotocols []string,
-) (*websocket.Conn, *http.Response, error) {
+) (*websocket.Conn, *http.Response, *Account, error) {
 	if !h.cfg.disableRefresh && h.needsRefresh(acc) {
 		if err := h.refreshAccount(ctx, acc); err != nil {
 			if h.cfg.debug.Load() {
@@ -805,7 +842,7 @@ func (h *proxyHandler) dialSwappedUpstream(
 	access := acc.AccessToken
 	acc.mu.Unlock()
 	if access == "" {
-		return nil, nil, fmt.Errorf("swap account %s has empty access token", acc.ID)
+		return nil, nil, nil, fmt.Errorf("swap account %s has empty access token", acc.ID)
 	}
 
 	headers := cloneHeader(opts.InitialUpstreamHeaders)
@@ -814,13 +851,14 @@ func (h *proxyHandler) dialSwappedUpstream(
 	headers.Del("X-Api-Key")
 	headers.Del("x-goog-api-key")
 	tmpReq := &http.Request{Header: headers}
-	opts.Provider.SetAuthHeaders(tmpReq, acc)
+	authAccount := contextAuthSnapshot(acc)
+	opts.Provider.SetAuthHeaders(tmpReq, authAccount)
 
 	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {
-		return nil, resp, err
+		return nil, resp, nil, err
 	}
-	return conn, resp, nil
+	return conn, resp, authAccount, nil
 }
 
 // dialUpstreamWebSocket dials the upstream as a websocket. It scrubs
@@ -922,10 +960,11 @@ func startWebSocketReader(ctx context.Context, conn *websocket.Conn) <-chan wsFr
 }
 
 func isCodexResponseCreate(data []byte) bool {
+	data = bytes.TrimSpace(data)
 	if len(data) == 0 || data[0] != '{' {
 		return false
 	}
-	if !bytes.Contains(data, []byte(`"response.create"`)) {
+	if !bytes.Contains(data, []byte(`"response.create"`)) && !bytes.Contains(data, []byte(`\`)) {
 		return false
 	}
 	var head struct {
@@ -982,10 +1021,17 @@ func stripPreviousResponseID(data []byte) []byte {
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return data
 	}
-	if _, ok := obj["previous_response_id"]; !ok {
+	_, changed := obj["previous_response_id"]
+	delete(obj, "previous_response_id")
+	if response, ok := obj["response"].(map[string]any); ok {
+		if _, exists := response["previous_response_id"]; exists {
+			delete(response, "previous_response_id")
+			changed = true
+		}
+	}
+	if !changed {
 		return data
 	}
-	delete(obj, "previous_response_id")
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return data
