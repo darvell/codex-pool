@@ -100,6 +100,47 @@ func TestCapCodexEffortInBodyNestedResponseCreate(t *testing.T) {
 	}
 }
 
+// Every effort above the ceiling must be clamped, not just the xhigh that
+// prompted this cap.
+func TestCapCodexEffortInBodyLowersEveryEffortAboveCap(t *testing.T) {
+	for _, effort := range []string{"high", "xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			body := []byte(`{"reasoning":{"effort":"` + effort + `"}}`)
+			out, previous, changed := capCodexEffortInBody(body, "medium")
+			if !changed {
+				t.Fatalf("effort %q above the medium cap was not clamped", effort)
+			}
+			if previous != effort {
+				t.Errorf("previous = %q, want %q", previous, effort)
+			}
+			if got := string(out); got != `{"reasoning":{"effort":"medium"}}` {
+				t.Errorf("clamped body = %s", got)
+			}
+		})
+	}
+}
+
+// Anthropic sends output_config.effort, which passes the cheap
+// strings.Contains prefilter. The Codex cap only owns reasoning.effort and
+// must leave other providers' bodies byte-identical.
+func TestCapCodexEffortIgnoresNonCodexEffortFields(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{name: "claude output_config", body: `{"model":"claude-opus-5","output_config":{"effort":"high"},"stream":true}`},
+		{name: "unrelated nested effort", body: `{"metadata":{"effort":"xhigh"}}`},
+		{name: "effort on a tool schema", body: `{"tools":[{"name":"x","input_schema":{"properties":{"effort":"high"}}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, previous, changed := capCodexEffortInBody([]byte(tc.body), "medium")
+			if changed || previous != "" {
+				t.Fatalf("non-Codex effort field rewritten: changed=%v previous=%q", changed, previous)
+			}
+			if string(out) != tc.body {
+				t.Fatalf("body mutated:\n got %s\nwant %s", out, tc.body)
+			}
+		})
+	}
+}
+
 func TestCapCodexEffortInBodyOnlyLowersEffort(t *testing.T) {
 	for _, tc := range []struct {
 		name, effort string
