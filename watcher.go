@@ -155,6 +155,14 @@ func (pw *poolWatcher) reloadConfig() {
 		log.Printf("reloaded model aliases (config overrides=%d)", len(cfg.ModelAliases))
 	}
 
+	// Reasoning-effort caps are operational throttles, so they retune without
+	// a restart like aliases do.
+	if pw.handler.effortCap != nil {
+		pw.handler.effortCap.reload(cfg.MaxReasoningEffortByUser, cfg.MaxReasoningEffortByOrigin)
+		log.Printf("reloaded reasoning effort caps (users=%d origins=%d)",
+			len(cfg.MaxReasoningEffortByUser), len(cfg.MaxReasoningEffortByOrigin))
+	}
+
 	log.Printf("config hot-reload complete (debug=%v, tier_threshold=%.2f)",
 		newDebug, pw.handler.cfg.tierThreshold)
 }

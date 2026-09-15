@@ -24,6 +24,11 @@ type ConfigFile struct {
 
 	ModelAliases map[string]string `toml:"model_aliases"`
 
+	// Caps on Codex reasoning effort, keyed by pool user ID and by raw client
+	// IP. Values are effort names ("medium", "high", ...).
+	MaxReasoningEffortByUser   map[string]string `toml:"max_reasoning_effort_by_user"`
+	MaxReasoningEffortByOrigin map[string]string `toml:"max_reasoning_effort_by_origin"`
+
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
 }
 

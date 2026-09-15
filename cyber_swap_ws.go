@@ -89,7 +89,38 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 	ctx := clientReq.Context()
 
 	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(ctx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
+	excluded := map[string]bool{opts.InitialAccount.ID: true}
+	for attempt := 0; err != nil && upstreamResp != nil && upstreamResp.StatusCode == http.StatusUnauthorized; attempt++ {
+		if h.retryPoolAuth(ctx, opts.InitialAccount) {
+			_ = upstreamResp.Body.Close()
+			upstreamConn, upstreamResp, opts.InitialContextAccount, err = h.dialSwappedUpstream(ctx, opts, opts.InitialAccount, subprotocols)
+			if err == nil || upstreamResp == nil || upstreamResp.StatusCode != http.StatusUnauthorized {
+				break
+			}
+		}
+		h.applyWebSocketStatusEffects(opts.ReqID, opts.InitialAccount, "", false, false, http.StatusUnauthorized)
+		if attempt+1 >= h.cfg.maxAttempts {
+			break
+		}
+		next := h.pool.candidate(opts.ConversationID, excluded, AccountTypeCodex, opts.RequiredPlan, opts.ClientIP)
+		if next == nil {
+			break
+		}
+		_ = upstreamResp.Body.Close()
+		excluded[next.ID] = true
+		opts.InitialAccount = next
+		if opts.SetActiveAccount != nil {
+			opts.SetActiveAccount(next)
+		}
+		upstreamConn, upstreamResp, opts.InitialContextAccount, err = h.dialSwappedUpstream(ctx, opts, next, subprotocols)
+	}
 	if err != nil {
+		if upstreamResp != nil && upstreamResp.StatusCode == http.StatusUnauthorized {
+			_ = upstreamResp.Body.Close()
+			log.Printf("[%s] upstream authentication unavailable: account=%s path=websocket", opts.ReqID, opts.InitialAccount.ID)
+			writeUpstreamAuthError(w)
+			return codexCyberSwapResult{statusCode: http.StatusServiceUnavailable, finalAccount: opts.InitialAccount}
+		}
 		if upstreamResp != nil {
 			status := writeWebSocketRejection(w, upstreamResp)
 			return codexCyberSwapResult{statusCode: status, finalAccount: opts.InitialAccount}
@@ -455,6 +486,7 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	}
 
 	data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
+	data = applyEffortCapToJSONFrame(s.h, s.opts.ReqID, s.opts.UserID, s.opts.ClientIP, data)
 	filtered, changed, err := filterHostedMCPRequestJSON(data)
 	if err != nil {
 		return nil, err
@@ -661,6 +693,26 @@ func applyModelAliasToJSONFrame(h *proxyHandler, reqID string, data []byte) []by
 		return rewritten
 	}
 	return data
+}
+
+// applyEffortCapToJSONFrame clamps reasoning effort on a websocket
+// response.create frame for capped principals/origins. Codex Desktop sends
+// effort inside the nested "response" envelope, which capCodexEffortInBody
+// handles alongside the flat shape.
+func applyEffortCapToJSONFrame(h *proxyHandler, reqID, userID, clientIP string, data []byte) []byte {
+	if h == nil || len(data) == 0 {
+		return data
+	}
+	limit := h.effortCap.limitFor(userID, clientIP)
+	if limit == "" {
+		return data
+	}
+	capped, previous, changed := capCodexEffortInBody(data, limit)
+	if !changed {
+		return data
+	}
+	log.Printf("[%s] ws effort cap: %s -> %s (user=%s ip=%s)", reqID, previous, limit, userID, clientIP)
+	return capped
 }
 
 func (s *codexRelayState) doSwap(cand *Account) error {

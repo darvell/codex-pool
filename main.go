@@ -70,6 +70,7 @@ type config struct {
 	adminToken                 string
 	backupDir                  string
 	restoreManifest            string
+	compactBoltOutput          string
 	duckPath                   string
 	requestTimeout             time.Duration // Timeout for non-streaming requests (0 = no timeout)
 	streamTimeout              time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
@@ -264,6 +265,7 @@ func buildConfig() *config {
 	flag.StringVar(&cfg.listenAddr, "listen", cfg.listenAddr, "listen address")
 	flag.StringVar(&cfg.backupDir, "backup-dir", "", "create an offline paired Bolt/DuckDB backup in this directory, then exit")
 	flag.StringVar(&cfg.restoreManifest, "restore-manifest", "", "restore Bolt/DuckDB from a paired backup manifest, then exit")
+	flag.StringVar(&cfg.compactBoltOutput, "compact-bolt-output", "", "write a compacted, optimized copy of the offline Bolt database, then exit")
 	flag.Parse()
 	return cfg
 }
@@ -272,8 +274,14 @@ func main() {
 	cfg := buildConfig()
 	duckPath := getenv("DUCKDB_PATH", "./data/usage.duckdb")
 	cfg.duckPath = duckPath
-	if cfg.backupDir != "" && cfg.restoreManifest != "" {
-		log.Fatal("choose only one of -backup-dir or -restore-manifest")
+	maintenanceActions := 0
+	for _, value := range []string{cfg.backupDir, cfg.restoreManifest, cfg.compactBoltOutput} {
+		if value != "" {
+			maintenanceActions++
+		}
+	}
+	if maintenanceActions > 1 {
+		log.Fatal("choose only one maintenance operation")
 	}
 	if cfg.backupDir != "" {
 		manifest, err := createPairedBackup(cfg.storePath, duckPath, cfg.backupDir)
@@ -288,6 +296,14 @@ func main() {
 			log.Fatalf("restore paired backup: %v", err)
 		}
 		log.Printf("paired backup restored from %s", cfg.restoreManifest)
+		return
+	}
+	if cfg.compactBoltOutput != "" {
+		result, err := compactUsageDatabase(cfg.storePath, cfg.compactBoltOutput)
+		if err != nil {
+			log.Fatalf("compact Bolt database: %v", err)
+		}
+		log.Printf("Bolt database compacted: rows=%d before=%d after=%d output=%s", result.RewrittenRows, result.BeforeBytes, result.AfterBytes, cfg.compactBoltOutput)
 		return
 	}
 	startCodexFingerprintUpdater()
@@ -483,8 +499,11 @@ func main() {
 	}
 
 	var aliasesCfg map[string]string
+	var effortByUser, effortByOrigin map[string]string
 	if globalConfigFile != nil {
 		aliasesCfg = globalConfigFile.ModelAliases
+		effortByUser = globalConfigFile.MaxReasoningEffortByUser
+		effortByOrigin = globalConfigFile.MaxReasoningEffortByOrigin
 	}
 
 	// Initialize request pacer from env var. Default to disabled so the proxy
@@ -514,6 +533,7 @@ func main() {
 		duckAnalytics:        duckAnalytics,
 		pricing:              pricing,
 		aliases:              newModelAliases(aliasesCfg),
+		effortCap:            newEffortCap(effortByUser, effortByOrigin),
 		bruteForce:           newBruteForceTracker(),
 		metrics:              newMetrics(),
 		recent:               newRecentErrors(50),
@@ -666,6 +686,7 @@ type proxyHandler struct {
 	duckAnalytics        *DuckAnalytics
 	pricing              *PricingData
 	aliases              *modelAliases
+	effortCap            *effortCap
 	bruteForce           *bruteForceTracker
 	metrics              *metrics
 	recent               *recentErrors
@@ -1982,6 +2003,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				r = r.WithContext(context.WithValue(r.Context(), contextSpoolKey{}, spooled))
 			}
 			r.Body = spooled.File
+			r.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(io.NewSectionReader(spooled.File, 0, spooled.Size)), nil
+			}
 			// Only the disk-backed body remains; generation must not hold a RAM slot.
 			releaseSpool()
 			r.ContentLength = spooled.Size
@@ -2114,6 +2138,24 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		var baseModel string
 		bodyBytes, baseModel = applyCodexModelSuffixControls(bodyBytes, requestedModel)
 		requestedModel = baseModel
+		// Applied after suffix controls so a "-xhigh" model name cannot escape
+		// the cap. inspect is the routing/analytics view of the body and must
+		// stay consistent with what is actually sent upstream.
+		if limit := h.effortCap.limitFor(userID, originIP); limit != "" {
+			capped, previous, changed := capCodexEffortInBody(bodyBytes, limit)
+			if changed {
+				bodyBytes = capped
+				inspect = bodyForInspection(r, capped)
+				if json.Unmarshal(inspect, &originalObject) != nil {
+					originalObject = nil
+				}
+				if r.ContentLength >= 0 {
+					r.ContentLength = int64(len(bodyBytes))
+					r.Header.Del("Content-Length")
+				}
+				log.Printf("[%s] effort cap: %s -> %s (user=%s origin=%s model=%s)", reqID, previous, limit, userID, originID, requestedModel)
+			}
+		}
 	}
 
 	// Parse thinking budget suffix before routing (e.g. "claude-sonnet-4-5(16384)").
@@ -3954,9 +3996,17 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	var reqSample *bytes.Buffer
 	var body io.Reader = r.Body
+	if r.GetBody != nil {
+		var err error
+		body, err = r.GetBody()
+		if err != nil {
+			http.Error(w, "request replay unavailable", http.StatusInternalServerError)
+			return
+		}
+	}
 	if spooled == nil && h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
 		reqSample = &bytes.Buffer{}
-		body = io.TeeReader(r.Body, &limitedWriter{w: reqSample, n: h.cfg.bodyLogLimit})
+		body = io.TeeReader(body, &limitedWriter{w: reqSample, n: h.cfg.bodyLogLimit})
 	}
 
 	outReq, err := http.NewRequestWithContext(ctx, r.Method, outURL.String(), body)
@@ -4009,7 +4059,43 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if resp.StatusCode == http.StatusUnauthorized && r.GetBody != nil && h.retryPoolAuth(ctx, acc) {
+		_ = resp.Body.Close()
+		authAccount = contextAuthSnapshot(acc)
+		if spooled != nil {
+			if err := h.nativeContext.recordDispatch(contextScope(userID), spooled.contextMetadata, authAccount, clientIP); err != nil {
+				writeContextError(w, err)
+				return
+			}
+		}
+		retry := outReq.Clone(ctx)
+		retry.Body, err = r.GetBody()
+		if err != nil {
+			http.Error(w, "request replay unavailable", http.StatusInternalServerError)
+			return
+		}
+		provider.SetAuthHeaders(retry, authAccount)
+		resp, err = h.transport.RoundTrip(retry)
+		captureCodexResponseState(acc, resp, reqID)
+		if err != nil {
+			http.Error(w, "upstream request failed after authentication recovery", http.StatusBadGateway)
+			return
+		}
+	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		markedDead, _ := applyProxyAuthFailure(acc, refreshFailed)
+		if markedDead {
+			if err := saveAccount(acc); err != nil {
+				log.Printf("[%s] failed to save account %s after auth failure: %v", reqID, acc.ID, err)
+			}
+		}
+		log.Printf("[%s] upstream authentication unavailable: account=%s path=streamed", reqID, acc.ID)
+		h.metrics.inc(strconv.Itoa(http.StatusServiceUnavailable), acc.ID)
+		writeUpstreamAuthError(w)
+		return
+	}
 
 	if h.cfg.logBodies && reqSample != nil && reqSample.Len() > 0 {
 		log.Printf("[%s] request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
