@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// AdverserialProvider handles platform.adverserial.ai accounts through its
-// Anthropic-compatible API.
+// AdverserialProvider handles api.adverserial.ai wallet keys through the
+// shim's Anthropic-compatible API.
 type AdverserialProvider struct {
 	adverserialBase *url.URL
 }

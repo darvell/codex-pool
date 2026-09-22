@@ -539,6 +539,10 @@ func convertClaudeToolsToOpenAI(tools []any) []map[string]any {
 // sanitizeToolSchema recursively strips JSON Schema fields that OpenAI rejects.
 // Currently strips: "format":"uri" (and other format values that cause issues).
 func sanitizeToolSchema(schema map[string]any) map[string]any {
+	if required, ok := schema["required"]; ok && required == nil {
+		schema["required"] = []any{}
+	}
+
 	// Strip problematic format values
 	if f, ok := schema["format"].(string); ok {
 		switch f {
@@ -1248,12 +1252,12 @@ func claudeCanonicalModel(model string) string {
 	baseLower := strings.TrimSpace(strings.ReplaceAll(lower, "[1m]", ""))
 
 	var canonical string
-	if strings.HasPrefix(baseLower, "claude") {
+	if baseLower == "claude-opus-5" || baseLower == "opus" {
+		canonical = "claude-opus-5-5"
+	} else if strings.HasPrefix(baseLower, "claude") {
 		canonical = baseRaw
 	} else {
 		switch baseLower {
-		case "opus":
-			canonical = "claude-opus-5"
 		case "fable":
 			canonical = "claude-fable-5-1"
 		case "sonnet":

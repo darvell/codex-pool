@@ -8,30 +8,31 @@ import (
 	"time"
 )
 
-func TestParseWhamUsageFillsFiveHourFromAdditional(t *testing.T) {
+func TestParseWhamUsageIgnoresSparkAdditionalLimits(t *testing.T) {
 	payload := map[string]any{
 		"rate_limit": map[string]any{
 			"allowed":       true,
 			"limit_reached": false,
 			"primary_window": map[string]any{
-				"used_percent":         100.0,
+				"used_percent":         0.0,
 				"limit_window_seconds": 604800.0,
-				"reset_at":             1788748328.0,
+				"reset_at":             1789767898.0,
 			},
+			"secondary_window": nil,
 		},
 		"additional_rate_limits": []any{
 			map[string]any{
 				"limit_name": "GPT-5.3-Codex-Spark",
 				"rate_limit": map[string]any{
 					"primary_window": map[string]any{
-						"used_percent":         0.0,
+						"used_percent":         99.0,
 						"limit_window_seconds": 18000.0,
-						"reset_at":             1788503384.0,
+						"reset_at":             1789180722.0,
 					},
 					"secondary_window": map[string]any{
-						"used_percent":         0.0,
+						"used_percent":         44.0,
 						"limit_window_seconds": 604800.0,
-						"reset_at":             1789090184.0,
+						"reset_at":             1789767522.0,
 					},
 				},
 			},
@@ -51,14 +52,14 @@ func TestParseWhamUsageFillsFiveHourFromAdditional(t *testing.T) {
 	if !ok {
 		t.Fatal("expected WHAM payload to parse")
 	}
-	if got := usagePrimaryUsed(snap); got != 0 {
-		t.Fatalf("5h used = %.2f, want 0 from additional Spark window", got)
+	// Spark's 99% 5h quota is model-specific and must not become the default
+	// 5h window. The default 5h window is absent, so no primary window data.
+	if usagePrimaryWindowAvailable(snap) {
+		t.Fatalf("primary window should be unavailable, got used=%.2f minutes=%d",
+			usagePrimaryUsed(snap), snap.PrimaryWindowMinutes)
 	}
-	if snap.PrimaryWindowMinutes != 300 {
-		t.Fatalf("5h window minutes = %d, want 300", snap.PrimaryWindowMinutes)
-	}
-	if got := usageSecondaryUsed(snap); got != 1 {
-		t.Fatalf("weekly used = %.2f, want 1 from top-level default window", got)
+	if got := usageSecondaryUsed(snap); got != 0 {
+		t.Fatalf("weekly used = %.2f, want 0 from top-level default window", got)
 	}
 	if snap.SecondaryWindowMinutes != 10080 {
 		t.Fatalf("weekly window minutes = %d, want 10080", snap.SecondaryWindowMinutes)
@@ -110,6 +111,26 @@ func TestRetireAfterRefreshFailKeepsLiveCodex(t *testing.T) {
 	}
 	if !retireAfterRefreshFail(expired, err, now) {
 		t.Fatal("expired Codex access token with a reused refresh token should retire")
+	}
+}
+
+func TestPersistDeadAccountSkipsRewrite(t *testing.T) {
+	acc := &Account{ID: "x", Type: AccountTypeCodex, Dead: true, File: "/no/such/codex.json"}
+	persistDeadAccount(acc, "refresh token revoked")
+	if !acc.Dead {
+		t.Fatal("expected account to stay dead")
+	}
+}
+
+func TestCodexAccessFarFromExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	live := &Account{Type: AccountTypeCodex, ExpiresAt: now.Add(9 * 24 * time.Hour)}
+	if !codexAccessFarFromExpiry(live, now) {
+		t.Fatal("expected days of remaining life to skip refresh")
+	}
+	dying := &Account{Type: AccountTypeCodex, ExpiresAt: now.Add(time.Hour)}
+	if codexAccessFarFromExpiry(dying, now) {
+		t.Fatal("expected headroom window to allow refresh")
 	}
 }
 

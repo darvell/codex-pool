@@ -111,7 +111,7 @@ func TestStreamCodexResponsesRequestRejectsDuplicateTypeBypass(t *testing.T) {
 }
 
 func TestStreamCodexResponsesRequestNormalizesToolSchema(t *testing.T) {
-	got, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"tools":[{"type":"function","name":"x","parameters":{"type":"object"}}]}`), 64*1024*1024, nil)
+	got, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"tools":[{"type":"function","name":"x","parameters":{"type":"object","properties":{"nested":{"type":"object","required":null}},"required":null}}]}`), 64*1024*1024, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +124,13 @@ func TestStreamCodexResponsesRequestNormalizesToolSchema(t *testing.T) {
 	params := obj["tools"].([]any)[0].(map[string]any)["parameters"].(map[string]any)
 	if params["additionalProperties"] != false || params["properties"] == nil {
 		t.Fatalf("%#v", params)
+	}
+	if required, ok := params["required"].([]any); !ok || len(required) != 0 {
+		t.Fatalf("top-level required = %#v", params["required"])
+	}
+	nested := params["properties"].(map[string]any)["nested"].(map[string]any)
+	if required, ok := nested["required"].([]any); !ok || len(required) != 0 {
+		t.Fatalf("nested required = %#v", nested["required"])
 	}
 }
 

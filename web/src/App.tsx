@@ -2535,7 +2535,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
       <div className={classNames("accounts-layout", selected && "inspecting")}>
         <div className="account-table" role="list" aria-label="Provider accounts" aria-hidden={mobileInspector && Boolean(selected) ? true : undefined}>
           <div className="account-row account-head" aria-hidden="true">
-            <span>Provider / plan / account</span><span>State</span><span>Weekly pace</span><span>Reset windows</span><span>24h burn</span><span>Return</span><span>Trend</span>
+            <span>Provider / plan / account</span><span>State</span><span>Weekly pace</span><span>Reset windows</span><span>24h burn</span><span>Return</span><span>Resets</span><span>Trend</span>
           </div>
           {filteredAccounts.length === 0 && <div className="empty-state">{stats.accounts.length === 0 ? "No provider accounts are connected." : "No accounts match this filter."}</div>}
           {filteredAccounts.map((account) => {
@@ -2559,6 +2559,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                 </span>
                 <span data-label="24h burn">{formatTokens(accountThroughput(account))}</span>
                 <strong data-label="Return">{account.subscription_spend ? `${account.roi.toFixed(2)}×` : "—"}</strong>
+                <span className="account-resets" data-label="Resets"><ResetCreditBadge account={account} /></span>
                 <span className="account-spark" aria-hidden="true"><Sparkline data={[0, account.total_input_tokens, accountThroughput(account), account.total_output_tokens]} color={provider.dither} /></span>
               </button>
             );

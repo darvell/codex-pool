@@ -8,7 +8,7 @@ import (
 )
 
 func TestClaudeCodeFingerprintProfileIsCoherent(t *testing.T) {
-	if got, want := ccUserAgent(), "claude-cli/2.1.258 (external, cli)"; got != want {
+	if got, want := ccUserAgent(), "claude-cli/2.1.280 (external, cli)"; got != want {
 		t.Fatalf("user agent = %q, want %q", got, want)
 	}
 

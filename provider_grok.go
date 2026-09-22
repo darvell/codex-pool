@@ -443,6 +443,28 @@ type grokReasoningEffort struct {
 // grokCLIModelCatalog mirrors cli-chat-proxy's live model-discovery payload.
 var grokCLIModelCatalog = []grokClientModel{
 	{
+		ID:                          "grok-4.7",
+		Object:                      "model",
+		OwnedBy:                     "xAI",
+		Model:                       "grok-4.7",
+		Name:                        "Grok 4.7",
+		Description:                 "SpaceXAI's latest frontier model",
+		ContextWindow:               500000,
+		AutoCompactThresholdPercent: 80,
+		SystemPromptLabel:           "Grok 4.7",
+		APIBackend:                  "responses",
+		ReasoningEffort:             "high",
+		SupportsReasoningEffort:     true,
+		ReasoningEfforts: []grokReasoningEffort{
+			{ID: "xhigh", Value: "xhigh", Label: "Extra High Effort", Description: "Maximum reasoning for the hardest tasks."},
+			{ID: "high", Value: "high", Label: "High Effort", Description: "Thorough reasoning and quality. Recommended.", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium Effort", Description: "Strong quality with a faster turnaround."},
+			{ID: "low", Value: "low", Label: "Low Effort", Description: "Fastest responses. Best for simple tasks."},
+		},
+		SupportsBackendSearch: true,
+		CompactionAtTokens:    true,
+	},
+	{
 		ID:                          "grok-4.6",
 		Object:                      "model",
 		OwnedBy:                     "xAI",
@@ -551,6 +573,7 @@ func grokSetupModels() []grokSetupModel {
 
 // Catalog sourced from cli-chat-proxy GET /v1/models.
 var grokModelCatalog = []grokModelInfo{
+	{ID: "grok-4.7", Name: "Grok 4.7", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 1000000, Aliases: []string{"grok-4.7-build"}},
 	{ID: "grok-4.6", Name: "Grok 4.6", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-build-latest", "grok-4.6-build"}},
 	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
 }
@@ -617,7 +640,8 @@ func grokModelMaxCompletionTokens(model string) int {
 }
 
 func grokModelSupportsReasoningEffort(model string) bool {
-	return strings.EqualFold(grokCanonicalModel(model), "grok-4.5")
+	canonical := grokCanonicalModel(model)
+	return strings.EqualFold(canonical, "grok-4.5") || strings.EqualFold(canonical, "grok-4.7")
 }
 
 func sanitizeSpooledGrokRequest(spooled *streamedResponsesRequest) error {
@@ -732,6 +756,9 @@ func sanitizeGrokTools(obj map[string]any) bool {
 			changed = true
 			continue
 		}
+		if sanitizeGrokToolSchema(tool) {
+			changed = true
+		}
 		if sanitizeGrokNestedUnsupportedFields(tool) {
 			changed = true
 		}
@@ -749,6 +776,35 @@ func sanitizeGrokTools(obj map[string]any) bool {
 	}
 	obj["tools"] = tools
 	return changed
+}
+
+func sanitizeGrokToolSchema(value any) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		changed := false
+		if required, ok := v["required"]; ok && required == nil {
+			// xAI rejects JSON null here; coding clients may emit it for an
+			// optional tool list.
+			v["required"] = []any{}
+			changed = true
+		}
+		for _, child := range v {
+			if sanitizeGrokToolSchema(child) {
+				changed = true
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for _, child := range v {
+			if sanitizeGrokToolSchema(child) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
 }
 
 func sanitizeGrokNestedUnsupportedFields(value any) bool {

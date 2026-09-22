@@ -43,7 +43,7 @@ var poolModels = []poolModel{
 	{AccountType: AccountTypeClaude, ID: "claude-sonnet-5", DisplayName: "Claude Sonnet 5", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, Aliases: []string{"sonnet"}},
 	{AccountType: AccountTypeClaude, ID: "claude-fable-5-1", DisplayName: "Claude Fable 5.1", Description: "Demanding reasoning and long-horizon agentic work.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, Aliases: []string{"fable"}},
 	{AccountType: AccountTypeClaude, ID: "claude-fable-5", DisplayName: "Claude Fable 5", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
-	{AccountType: AccountTypeClaude, ID: "claude-opus-5", DisplayName: "Claude Opus 5", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, Aliases: []string{"opus"}},
+	{AccountType: AccountTypeClaude, ID: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, Aliases: []string{"opus", "claude-opus-5"}},
 	{AccountType: AccountTypeClaude, ID: "claude-opus-4-8", DisplayName: "Claude Opus 4.8", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeClaude, ID: "claude-opus-4-7", DisplayName: "Claude Opus 4.7", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeClaude, ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", ContextWindow: 1000000, MaxTokens: 64000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
@@ -72,6 +72,9 @@ var poolModels = []poolModel{
 	// Upstream advertises max_model_len 524288 and enforces it: a 600k-token
 	// prompt is rejected with "maximum context length is 524288 tokens".
 	{AccountType: AccountTypeAdverserial, ID: "lordx64/cyberkimi", DisplayName: "CyberKimi", Description: "Security-focused Kimi variant via adverserial.ai.", ContextWindow: 524288, MaxTokens: 32768, Reasoning: true, Input: []string{"text"}, Aliases: []string{"cyberkimi"}},
+	// Official client budget is 131072. Chat/API id is lordx64/cyberglm;
+	// the raw upstream connection also exposes the unprefixed cyberglm id.
+	{AccountType: AccountTypeAdverserial, ID: "lordx64/cyberglm", DisplayName: "CyberGLM", Description: "Budget GLM-5.3-Flash via adverserial.ai.", ContextWindow: 131072, MaxTokens: 32768, Reasoning: true, Input: []string{"text"}, Aliases: []string{"cyberglm"}},
 
 	// OpenCode Go subscription models (https://opencode.ai/zen/go/v1).
 	// Canonical pool IDs use the `opencode-go/<id>` prefix, matching OpenCode's

@@ -77,6 +77,9 @@ var subscriptionCosts = map[subscriptionKey]struct {
 // getSubscriptionCost returns monthly cost and label for an account.
 func getSubscriptionCost(accType AccountType, planType string) (monthly float64, label string) {
 	planType = strings.ToLower(strings.TrimSpace(planType))
+	if accType == AccountTypeCodex {
+		planType = normalizeCodexPlanType(planType)
+	}
 	// Try exact match first
 	if info, ok := subscriptionCosts[subscriptionKey{accType, planType}]; ok {
 		return info.monthly, info.label
@@ -227,6 +230,8 @@ var pricingModelAliases = map[string]string{
 	"gpt-6-astra[1m]":            "gpt-6-astra",
 	"gpt-6-astra [1m]":           "gpt-6-astra",
 	"gpt-6-astra-none":           "gpt-6-astra",
+	"claude-opus-5-5 [1m]":       "claude-opus-5-5",
+	"claude-opus-5-5[1m]":        "claude-opus-5-5",
 	"claude-opus-5 [1m]":         "claude-opus-5",
 	"claude-opus-5[1m]":          "claude-opus-5",
 	"claude-sonnet-5 [1m]":       "claude-sonnet-5",
@@ -239,6 +244,7 @@ var pricingModelAliases = map[string]string{
 	"zai.glm-5.2":                "glm-5.3",
 	"zai.glm-5.3":                "glm-5.3",
 	"zai.glm-5.3-flash":          "glm-5.3-flash",
+	"grok-4.7-build":             "grok-4.7",
 	"grok-4.6-build":             "grok-4.6",
 	"grok-4.5-build":             "grok-4.5",
 	"grok-build-latest":          "grok-4.6",

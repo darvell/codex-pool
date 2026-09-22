@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +15,10 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-const originWeeklyBackfillMarker = "\x00backfill-v1"
+const (
+	originWeeklyBackfillMarker = "\x00backfill-v1"
+	usageTimeKeyPrefix         = "\x00usage|"
+)
 
 const (
 	bucketUsageRequests     = "usage_requests"
@@ -100,14 +106,15 @@ type UserDailyUsage struct {
 
 // UserHourlyUsage tracks per-hour per-provider token usage.
 type UserHourlyUsage struct {
-	Hour            string `json:"hour"`         // "2025-02-05T14" (ISO hour)
-	AccountType     string `json:"account_type"` // "claude", "codex", "gemini"
-	InputTokens     int64  `json:"input_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	BillableTokens  int64  `json:"billable_tokens"`
-	RequestCount    int64  `json:"request_count"`
+	Hour                string `json:"hour"`         // "2025-02-05T14" (ISO hour)
+	AccountType         string `json:"account_type"` // "claude", "codex", "gemini"
+	InputTokens         int64  `json:"input_tokens"`
+	CachedTokens        int64  `json:"cached_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens,omitempty"`
+	OutputTokens        int64  `json:"output_tokens"`
+	ReasoningTokens     int64  `json:"reasoning_tokens"`
+	BillableTokens      int64  `json:"billable_tokens"`
+	RequestCount        int64  `json:"request_count"`
 }
 
 type usageStore struct {
@@ -132,6 +139,98 @@ type rateLimitSnapshot struct {
 	PrimaryPct   float64
 	SecondaryPct float64
 	Timestamp    time.Time
+}
+
+type storedRequestUsage struct {
+	Version                int         `json:"v"`
+	Timestamp              int64       `json:"t"`
+	AccountID              string      `json:"a,omitempty"`
+	PlanType               string      `json:"p,omitempty"`
+	UserID                 string      `json:"u,omitempty"`
+	OriginID               string      `json:"o,omitempty"`
+	PromptCacheKey         string      `json:"k,omitempty"`
+	RequestID              string      `json:"r,omitempty"`
+	ProxyRequestID         string      `json:"x,omitempty"`
+	ClientCredentialID     string      `json:"c,omitempty"`
+	UsageSequence          int         `json:"s,omitempty"`
+	AttemptNumber          int         `json:"n,omitempty"`
+	UsageCompleteness      string      `json:"q,omitempty"`
+	InputTokens            int64       `json:"i,omitempty"`
+	CachedInputTokens      int64       `json:"h,omitempty"`
+	CacheCreationTokens    int64       `json:"w,omitempty"`
+	InputTokenMode         string      `json:"d,omitempty"`
+	OutputTokens           int64       `json:"e,omitempty"`
+	ReasoningTokens        int64       `json:"g,omitempty"`
+	BillableTokens         int64       `json:"b,omitempty"`
+	PrimaryUsedPct         float64     `json:"f,omitempty"`
+	SecondaryUsedPct       float64     `json:"j,omitempty"`
+	PrimaryResetAt         int64       `json:"m,omitempty"`
+	SecondaryResetAt       int64       `json:"z,omitempty"`
+	PrimaryWindowMinutes   int         `json:"l,omitempty"`
+	SecondaryWindowMinutes int         `json:"y,omitempty"`
+	Model                  string      `json:"mo,omitempty"`
+	AccountType            AccountType `json:"at,omitempty"`
+}
+
+func storedTime(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UnixNano()
+}
+
+func loadStoredTime(value int64) time.Time {
+	if value == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, value).UTC()
+}
+
+func encodeRequestUsage(usage RequestUsage) ([]byte, error) {
+	return json.Marshal(storedRequestUsage{
+		Version: 1, Timestamp: storedTime(usage.Timestamp), AccountID: usage.AccountID, PlanType: usage.PlanType,
+		UserID: usage.UserID, OriginID: usage.OriginID, PromptCacheKey: usage.PromptCacheKey,
+		RequestID: usage.RequestID, ProxyRequestID: usage.ProxyRequestID, ClientCredentialID: usage.ClientCredentialID,
+		UsageSequence: usage.UsageSequence, AttemptNumber: usage.AttemptNumber, UsageCompleteness: usage.UsageCompleteness,
+		InputTokens: usage.InputTokens, CachedInputTokens: usage.CachedInputTokens, CacheCreationTokens: usage.CacheCreationTokens,
+		InputTokenMode: usage.InputTokenMode, OutputTokens: usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
+		BillableTokens: usage.BillableTokens, PrimaryUsedPct: usage.PrimaryUsedPct, SecondaryUsedPct: usage.SecondaryUsedPct,
+		PrimaryResetAt: storedTime(usage.PrimaryResetAt), SecondaryResetAt: storedTime(usage.SecondaryResetAt),
+		PrimaryWindowMinutes: usage.PrimaryWindowMinutes, SecondaryWindowMinutes: usage.SecondaryWindowMinutes,
+		Model: usage.Model, AccountType: usage.AccountType,
+	})
+}
+
+func decodeRequestUsage(data []byte, usage *RequestUsage) error {
+	var version struct {
+		Version int `json:"v"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return err
+	}
+	if version.Version == 0 {
+		return json.Unmarshal(data, usage)
+	}
+	if version.Version != 1 {
+		return fmt.Errorf("unsupported request usage storage version %d", version.Version)
+	}
+	var stored storedRequestUsage
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+	*usage = RequestUsage{
+		Timestamp: loadStoredTime(stored.Timestamp), AccountID: stored.AccountID, PlanType: stored.PlanType,
+		UserID: stored.UserID, OriginID: stored.OriginID, PromptCacheKey: stored.PromptCacheKey,
+		RequestID: stored.RequestID, ProxyRequestID: stored.ProxyRequestID, ClientCredentialID: stored.ClientCredentialID,
+		UsageSequence: stored.UsageSequence, AttemptNumber: stored.AttemptNumber, UsageCompleteness: stored.UsageCompleteness,
+		InputTokens: stored.InputTokens, CachedInputTokens: stored.CachedInputTokens, CacheCreationTokens: stored.CacheCreationTokens,
+		InputTokenMode: stored.InputTokenMode, OutputTokens: stored.OutputTokens, ReasoningTokens: stored.ReasoningTokens,
+		BillableTokens: stored.BillableTokens, PrimaryUsedPct: stored.PrimaryUsedPct, SecondaryUsedPct: stored.SecondaryUsedPct,
+		PrimaryResetAt: loadStoredTime(stored.PrimaryResetAt), SecondaryResetAt: loadStoredTime(stored.SecondaryResetAt),
+		PrimaryWindowMinutes: stored.PrimaryWindowMinutes, SecondaryWindowMinutes: stored.SecondaryWindowMinutes,
+		Model: stored.Model, AccountType: stored.AccountType,
+	}
+	return nil
 }
 
 // CapacitySample records a single observation of tokens vs rate limit change.
@@ -162,6 +261,13 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketOriginUsage, bucketOriginMetadata, bucketOriginWeeklyUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage, bucketAnalyticsOutbox, bucketAnalyticsState} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
+			}
+		}
+
+		state := tx.Bucket([]byte(bucketAnalyticsState))
+		if state.Get([]byte(analyticsHourlyStartKey)) == nil {
+			if err := state.Put([]byte(analyticsHourlyStartKey), []byte(startedAt.Format(time.RFC3339Nano))); err != nil {
+				return err
 			}
 		}
 
@@ -249,18 +355,20 @@ func (s *usageStore) recordWithCost(u RequestUsage, costUSD float64) error {
 		s.lastRateLimitsMu.Unlock()
 	}
 
-	key := fmt.Sprintf("%s|%020d", safeID(u.AccountID), u.Timestamp.UnixNano())
+	key := fmt.Sprintf("%s%020d|%s", usageTimeKeyPrefix, u.Timestamp.UnixNano(), safeID(u.AccountID))
 	if u.RequestID != "" {
-		key = key + "|" + u.RequestID
+		key += "|" + u.RequestID
 	}
-	val, err := json.Marshal(u)
+	val, err := encodeRequestUsage(u)
 	if err != nil {
 		return err
 	}
 
 	err = s.db.Update(func(tx *bbolt.Tx) error {
 		// Store raw request and its canonical analytics handoff atomically.
-		if err := tx.Bucket([]byte(bucketUsageRequests)).Put([]byte(key), val); err != nil {
+		requests := tx.Bucket([]byte(bucketUsageRequests))
+		requests.FillPercent = 0.9
+		if err := requests.Put([]byte(key), val); err != nil {
 			return err
 		}
 		if u.UserID != "" {
@@ -378,6 +486,7 @@ func (s *usageStore) recordWithCost(u RequestUsage, costUSD float64) error {
 			hourly.AccountType = acctType
 			hourly.InputTokens += u.InputTokens
 			hourly.CachedTokens += u.CachedInputTokens
+			hourly.CacheCreationTokens += u.CacheCreationTokens
 			hourly.OutputTokens += u.OutputTokens
 			hourly.ReasoningTokens += u.ReasoningTokens
 			hourly.BillableTokens += u.BillableTokens
@@ -403,6 +512,7 @@ func (s *usageStore) recordWithCost(u RequestUsage, costUSD float64) error {
 			globalHourly.AccountType = acctType
 			globalHourly.InputTokens += u.InputTokens
 			globalHourly.CachedTokens += u.CachedInputTokens
+			globalHourly.CacheCreationTokens += u.CacheCreationTokens
 			globalHourly.OutputTokens += u.OutputTokens
 			globalHourly.ReasoningTokens += u.ReasoningTokens
 			globalHourly.BillableTokens += u.BillableTokens
@@ -601,17 +711,9 @@ func (s *usageStore) backfillOriginWeeklyUsage(startedAt time.Time) {
 		if bucket == nil {
 			return nil
 		}
-		return bucket.ForEach(func(rawKey, value []byte) error {
-			parts := strings.SplitN(string(rawKey), "|", 3)
-			if len(parts) < 2 {
-				return nil
-			}
-			timestamp, err := timeFromKey(parts[1])
-			if err != nil || timestamp.Before(historyCutoff) || !timestamp.Before(startedAt) {
-				return nil
-			}
+		return bucket.ForEach(func(_, value []byte) error {
 			var usage RequestUsage
-			if err := json.Unmarshal(value, &usage); err != nil || usage.OriginID == "" {
+			if err := decodeRequestUsage(value, &usage); err != nil || usage.OriginID == "" || usage.Timestamp.Before(historyCutoff) || !usage.Timestamp.Before(startedAt) {
 				return nil
 			}
 			key := originWeeklyKey(usage)
@@ -940,21 +1042,39 @@ func (s *usageStore) prune() {
 	const maxRequestDeletes = 5000
 	deleted := 0
 	_ = s.db.Update(func(tx *bbolt.Tx) error {
-		// Request keys are account-first, not time-first. Every account range must
-		// be inspected; stopping at the first recent row leaves old rows from all
-		// later accounts behind indefinitely.
+		// Time-ordered rows can skip the retained range in one seek. Legacy
+		// account-first rows still need inspection until they age out.
 		requests := tx.Bucket([]byte(bucketUsageRequests)).Cursor()
-		for key, _ := requests.First(); key != nil; key, _ = requests.Next() {
-			parts := strings.SplitN(string(key), "|", 3)
-			if len(parts) < 2 {
+		for key, _ := requests.First(); key != nil; {
+			timestamp, ordered, err := usageTimeFromKey(key)
+			if err == nil && ordered && !timestamp.Before(cutoff) {
+				key, _ = requests.Seek([]byte{1})
 				continue
 			}
-			timestamp, err := timeFromKey(parts[1])
 			if err == nil && timestamp.Before(cutoff) {
 				if err := requests.Delete(); err == nil {
 					deleted++
 				}
 				if deleted >= maxRequestDeletes {
+					break
+				}
+			}
+			key, _ = requests.Next()
+		}
+
+		sampleDeletes := 0
+		samples := tx.Bucket([]byte(bucketCapacitySamples)).Cursor()
+		for key, _ := samples.First(); key != nil; key, _ = samples.Next() {
+			parts := strings.SplitN(string(key), "|", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			timestamp, err := timeFromKey(parts[1])
+			if err == nil && timestamp.Before(cutoff) {
+				if err := samples.Delete(); err == nil {
+					sampleDeletes++
+				}
+				if sampleDeletes >= maxRequestDeletes {
 					break
 				}
 			}
@@ -972,6 +1092,9 @@ func (s *usageStore) prune() {
 			}
 			break
 		}
+		if sampleDeletes > deleted {
+			deleted = sampleDeletes
+		}
 		return nil
 	})
 	if deleted >= maxRequestDeletes {
@@ -981,9 +1104,27 @@ func (s *usageStore) prune() {
 	}
 }
 
+func usageTimeFromKey(key []byte) (time.Time, bool, error) {
+	raw := string(key)
+	if ordered, found := strings.CutPrefix(raw, usageTimeKeyPrefix); found {
+		timestamp, _, ok := strings.Cut(ordered, "|")
+		if !ok {
+			return time.Time{}, true, errors.New("invalid time-ordered usage key")
+		}
+		parsed, err := timeFromKey(timestamp)
+		return parsed, true, err
+	}
+	parts := strings.SplitN(raw, "|", 3)
+	if len(parts) < 2 {
+		return time.Time{}, false, errors.New("invalid legacy usage key")
+	}
+	parsed, err := timeFromKey(parts[1])
+	return parsed, false, err
+}
+
 func timeFromKey(tsPart string) (time.Time, error) {
-	var n int64
-	if _, err := fmt.Sscanf(tsPart, "%d", &n); err != nil {
+	n, err := strconv.ParseInt(tsPart, 10, 64)
+	if err != nil {
 		return time.Time{}, err
 	}
 	return time.Unix(0, n), nil
@@ -1181,7 +1322,7 @@ func (s *usageStore) getRecentRequestUsage(days int) ([]RequestUsage, error) {
 		}
 		return bucket.ForEach(func(_, value []byte) error {
 			var row RequestUsage
-			if err := json.Unmarshal(value, &row); err == nil && !row.Timestamp.Before(cutoff) {
+			if err := decodeRequestUsage(value, &row); err == nil && !row.Timestamp.Before(cutoff) {
 				rows = append(rows, row)
 			}
 			return nil
@@ -1318,25 +1459,23 @@ func (s *usageStore) getUserDailyUsage(userID string, days int) ([]UserDailyUsag
 		days = 30
 	}
 
-	// Generate date keys for the last N days
-	today := time.Now().UTC()
-	dateKeys := make(map[string]bool)
-	for i := 0; i < days; i++ {
-		d := today.AddDate(0, 0, -i)
-		dateKeys[d.Format("2006-01-02")] = true
-	}
+	now := time.Now().UTC()
+	today := now.Format("2006-01-02")
+	oldest := now.AddDate(0, 0, -(days - 1)).Format("2006-01-02")
 
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketUserDailyUsage))
 		prefix := []byte(userID + "|")
+		start := append(append([]byte(nil), prefix...), oldest...)
 		c := b.Cursor()
-		for k, v := c.Seek(prefix); k != nil && len(k) > len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
-			dateStr := string(k[len(prefix):])
-			if dateKeys[dateStr] {
-				var d UserDailyUsage
-				if err := json.Unmarshal(v, &d); err == nil {
-					daily = append(daily, d)
-				}
+		for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			date := string(k[len(prefix):])
+			if date > today {
+				break
+			}
+			var item UserDailyUsage
+			if err := json.Unmarshal(v, &item); err == nil {
+				daily = append(daily, item)
 			}
 		}
 		return nil
@@ -1345,14 +1484,9 @@ func (s *usageStore) getUserDailyUsage(userID string, days int) ([]UserDailyUsag
 		return nil, err
 	}
 
-	// Sort by date descending (most recent first)
-	for i := 0; i < len(daily); i++ {
-		for j := i + 1; j < len(daily); j++ {
-			if daily[j].Date > daily[i].Date {
-				daily[i], daily[j] = daily[j], daily[i]
-			}
-		}
-	}
+	sort.Slice(daily, func(i, j int) bool {
+		return daily[i].Date > daily[j].Date
+	})
 	return daily, nil
 }
 
@@ -1366,31 +1500,27 @@ func (s *usageStore) getUserHourlyUsage(userID string, hours int) ([]UserHourlyU
 		hours = 24
 	}
 
-	// Generate hour keys for the last N hours
-	now := time.Now().UTC()
-	hourKeys := make(map[string]bool)
-	for i := 0; i < hours; i++ {
-		h := now.Add(-time.Duration(i) * time.Hour)
-		hourKeys[h.Format("2006-01-02T15")] = true
-	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	currentHour := now.Format("2006-01-02T15")
+	oldestHour := now.Add(-time.Duration(hours-1) * time.Hour).Format("2006-01-02T15")
 
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketUserHourlyUsage))
 		prefix := []byte(userID + "|")
+		start := append(append([]byte(nil), prefix...), oldestHour...)
 		c := b.Cursor()
-		for k, v := c.Seek(prefix); k != nil && len(k) > len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
-			// Key format: userID|hourKey|accountType
+		for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
 			rest := string(k[len(prefix):])
-			parts := strings.SplitN(rest, "|", 2)
-			if len(parts) < 1 {
+			hour, _, ok := strings.Cut(rest, "|")
+			if !ok {
 				continue
 			}
-			hourKey := parts[0]
-			if hourKeys[hourKey] {
-				var h UserHourlyUsage
-				if err := json.Unmarshal(v, &h); err == nil {
-					result = append(result, h)
-				}
+			if hour > currentHour {
+				break
+			}
+			var item UserHourlyUsage
+			if err := json.Unmarshal(v, &item); err == nil {
+				result = append(result, item)
 			}
 		}
 		return nil
@@ -1399,14 +1529,9 @@ func (s *usageStore) getUserHourlyUsage(userID string, hours int) ([]UserHourlyU
 		return nil, err
 	}
 
-	// Sort by hour descending
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Hour > result[i].Hour {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
-	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Hour > result[j].Hour
+	})
 	return result, nil
 }
 
@@ -1420,44 +1545,34 @@ func (s *usageStore) getGlobalHourlyUsage(hours int) ([]UserHourlyUsage, error) 
 		hours = 24
 	}
 
-	// Generate hour keys for the last N hours
-	now := time.Now().UTC()
-	hourKeys := make(map[string]bool)
-	for i := 0; i < hours; i++ {
-		h := now.Add(-time.Duration(i) * time.Hour)
-		hourKeys[h.Format("2006-01-02T15")] = true
-	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	currentHour := now.Format("2006-01-02T15")
+	oldestHour := now.Add(-time.Duration(hours-1) * time.Hour).Format("2006-01-02T15")
 
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketGlobalHourlyUsage))
-		return b.ForEach(func(k, v []byte) error {
-			// Key format: hourKey|accountType
-			key := string(k)
-			parts := strings.SplitN(key, "|", 2)
-			if len(parts) < 1 {
-				return nil
+		c := b.Cursor()
+		for k, v := c.Seek([]byte(oldestHour + "|")); k != nil; k, v = c.Next() {
+			hour, _, ok := strings.Cut(string(k), "|")
+			if !ok {
+				continue
 			}
-			hourKey := parts[0]
-			if hourKeys[hourKey] {
-				var h UserHourlyUsage
-				if err := json.Unmarshal(v, &h); err == nil {
-					result = append(result, h)
-				}
+			if hour > currentHour {
+				break
 			}
-			return nil
-		})
+			var item UserHourlyUsage
+			if err := json.Unmarshal(v, &item); err == nil {
+				result = append(result, item)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Sort by hour descending
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Hour > result[i].Hour {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
-	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Hour > result[j].Hour
+	})
 	return result, nil
 }

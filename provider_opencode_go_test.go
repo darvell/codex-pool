@@ -66,11 +66,27 @@ func TestOpencodeGoNormalizePath(t *testing.T) {
 		"/v1/messages":         "/messages",
 		"/v1/chat/completions": "/chat/completions",
 		"/v1/responses":        "/responses",
+		// Clients that set the Codex private Responses path as OPENAI_BASE_URL
+		// still model-route here; the Go base only serves the endpoint suffix.
+		"/backend-api/codex/responses":        "/responses",
+		"/backend-api/codex/chat/completions": "/chat/completions",
+		"/backend-api/codex/messages":         "/messages",
+		"/api/codex/responses":                "/responses",
+		"/responses":                          "/responses",
 	}
 	for in, want := range cases {
 		if got := p.NormalizePath(in); got != want {
 			t.Fatalf("NormalizePath(%q) = %q, want %q", in, got, want)
 		}
+	}
+
+	// The joined upstream URL is what actually failed: the Codex-private path
+	// was appended to the Go base, so opencode.ai answered 404 with its site
+	// HTML instead of routing the model.
+	upstream := p.UpstreamURL("/backend-api/codex/responses")
+	joined := singleJoin(upstream.Path, p.NormalizePath("/backend-api/codex/responses"))
+	if got := upstream.Scheme + "://" + upstream.Host + joined; got != "https://opencode.ai/zen/go/v1/responses" {
+		t.Fatalf("joined upstream URL = %q", got)
 	}
 }
 
@@ -82,15 +98,117 @@ func TestOpencodeGoEndpointForModel(t *testing.T) {
 			t.Fatalf("endpoint(%q) = %q, want responses", model, got)
 		}
 	}
-	for _, model := range []string{"minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"} {
+	for _, model := range []string{"minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "union-alpha"} {
 		if got := opencodeGoEndpointForModel(model); got != opencodeGoEndpointMessages {
 			t.Fatalf("endpoint(%q) = %q, want messages", model, got)
 		}
 	}
-	for _, model := range []string{"kimi-k3", "longcat-2.0", "omen-alpha", "hy3", "glm-5.3", "deepseek-v4-flash", "mimo-v2.5-pro", "qwen3.5-plus"} {
+	for _, model := range []string{"kimi-k3", "longcat-2.0", "omen-alpha", "hy3", "hy4-preview", "glm-5.1", "glm-5.3", "glm-5.3-flash", "kimi-k2.6", "kimi-k2.7-code", "deepseek-v4-flash", "deepseek-v4.1-flash", "mimo-v2.5", "mimo-v2.5-pro", "qwen3.5-plus"} {
 		if got := opencodeGoEndpointForModel(model); got != opencodeGoEndpointChat {
 			t.Fatalf("endpoint(%q) = %q, want chat", model, got)
 		}
+	}
+}
+
+// The Go router serves chat-family models only on /chat/completions, so a
+// Messages client must be translated. Every other family is native on the
+// route its protocol label already selects.
+func TestOpencodeGoTargetFormat(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"opencode-go/glm-5.3", "opencode-go/kimi-k3", "opencode-go/longcat-2.0", "glm-5.3"} {
+		if got := opencodeGoTargetFormat(model); got != FormatOpenAI {
+			t.Fatalf("targetFormat(%q) = %v, want openai/chat", model, got)
+		}
+	}
+	for _, model := range []string{"opencode-go/minimax-m3", "opencode-go/union-alpha", "opencode-go/qwen3.7-max", "opencode-go/muse-spark-1.3-contributor", "opencode-go/gpt-5.6-luna", "opencode-go/grok-4.6"} {
+		if got := opencodeGoTargetFormat(model); got != FormatUnknown {
+			t.Fatalf("targetFormat(%q) = %v, want no translation", model, got)
+		}
+	}
+}
+
+// The Go router rejects a model on the endpoint that does not serve it, so the
+// client-facing protocol label must name the one endpoint that does. Only the
+// responses-family models need the client's OpenAI Responses protocol; every
+// other Go model is reachable over the Anthropic messages route.
+func TestOpencodeGoClientProtocol(t *testing.T) {
+	t.Parallel()
+
+	responsesFamily := []string{
+		"opencode-go/muse-spark-1.3-contributor", "opencode-go/muse-spark-1.2-contributor",
+		"opencode-go/gpt-5.6-luna", "opencode-go/grok-4.6", "opencode-go/grok-4.5",
+	}
+	for _, model := range responsesFamily {
+		if got := opencodeGoClientProtocol(model); got != "openai" {
+			t.Fatalf("protocol(%q) = %q, want openai", model, got)
+		}
+	}
+
+	anthropicFamily := []string{
+		"opencode-go/minimax-m3", "opencode-go/qwen3.7-max",
+		"opencode-go/kimi-k3", "opencode-go/glm-5.3", "opencode-go/longcat-2.0",
+		"opencode-go/deepseek-v4-flash",
+	}
+	for _, model := range anthropicFamily {
+		if got := opencodeGoClientProtocol(model); got != "anthropic" {
+			t.Fatalf("protocol(%q) = %q, want anthropic", model, got)
+		}
+	}
+}
+
+// Discovered Go models carry the bare upstream ID. They must get the same
+// per-endpoint label as the catalog entries: a responses-family model
+// advertised as Anthropic Messages makes every client request fail on the
+// upstream's /messages route.
+func TestDiscoveredOpencodeGoModelsGetEndpointProtocol(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		ID: "go", Type: AccountTypeOpencodeGo,
+		Models: map[string]DiscoveredModel{
+			"muse-spark-1.3-contributor": {ID: "muse-spark-1.3-contributor", DisplayName: "muse-spark-1.3-contributor"},
+			"longcat-2.0":                {ID: "longcat-2.0", DisplayName: "longcat-2.0"},
+		},
+	}
+	pool := newPoolState([]*Account{account}, false)
+
+	byID := make(map[string]string)
+	for _, descriptor := range discoveredModelsForPool(pool) {
+		byID[descriptor.ID] = descriptor.Protocol
+	}
+
+	if got := byID["muse-spark-1.3-contributor"]; got != "openai" {
+		t.Fatalf("discovered muse-spark protocol = %q, want openai", got)
+	}
+	if got := byID["longcat-2.0"]; got != "anthropic" {
+		t.Fatalf("discovered longcat protocol = %q, want anthropic", got)
+	}
+
+	// The client reads the label from /api/pool/models, so assert the payload.
+	recorder := httptest.NewRecorder()
+	servePoolModels(recorder, pool)
+	var response struct {
+		Models []struct {
+			ID       string `json:"id"`
+			Protocol string `json:"protocol"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, model := range response.Models {
+		if model.ID != "muse-spark-1.3-contributor" {
+			continue
+		}
+		found = true
+		if model.Protocol != "openai" {
+			t.Fatalf("/api/pool/models protocol for muse-spark = %q, want openai", model.Protocol)
+		}
+	}
+	if !found {
+		t.Fatal("/api/pool/models is missing the discovered muse-spark model")
 	}
 }
 
@@ -437,11 +555,15 @@ func TestOpencodeGoCuteModelsUseMatchingProtocols(t *testing.T) {
 	if model, ok := byID["opencode-go/minimax-m3"]; !ok || model.Protocol != "anthropic" {
 		t.Fatalf("minimax-m3 = %#v, want anthropic protocol", byID["opencode-go/minimax-m3"])
 	}
-	if model, ok := byID["opencode-go/longcat-2.0"]; !ok || model.Protocol != "openai" {
-		t.Fatalf("longcat-2.0 = %#v, want openai protocol", byID["opencode-go/longcat-2.0"])
+	if model, ok := byID["opencode-go/longcat-2.0"]; !ok || model.Protocol != "anthropic" {
+		t.Fatalf("longcat-2.0 = %#v, want anthropic protocol", byID["opencode-go/longcat-2.0"])
 	}
-	if _, ok := byID["opencode-go/grok-4.6"]; ok {
-		t.Fatal("grok-4.6 is Responses-only and must not be offered to Cute Code")
+	// The router only serves responses-family models on /responses, so Cute
+	// Code must be handed them under its Responses protocol.
+	for _, id := range []string{"opencode-go/grok-4.6", "opencode-go/muse-spark-1.3-contributor", "opencode-go/gpt-5.6-luna"} {
+		if model, ok := byID[id]; !ok || model.Protocol != "openai" {
+			t.Fatalf("%s = %#v, want openai protocol", id, byID[id])
+		}
 	}
 }
 

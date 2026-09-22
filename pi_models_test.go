@@ -11,14 +11,17 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"sonnet":      "claude-sonnet-5",
-		"sonnet[1m]":  "claude-sonnet-5 [1m]",
-		"sonnet [1m]": "claude-sonnet-5 [1m]",
-		"opus":        "claude-opus-5",
-		"opus[1m]":    "claude-opus-5 [1m]",
-		"opus [1m]":   "claude-opus-5 [1m]",
-		"fable":       "claude-fable-5-1",
-		"haiku":       "claude-haiku-4-5-20251001",
+		"sonnet":              "claude-sonnet-5",
+		"sonnet[1m]":          "claude-sonnet-5 [1m]",
+		"sonnet [1m]":         "claude-sonnet-5 [1m]",
+		"opus":                "claude-opus-5-5",
+		"opus[1m]":            "claude-opus-5-5 [1m]",
+		"opus [1m]":           "claude-opus-5-5 [1m]",
+		"claude-opus-5":       "claude-opus-5-5",
+		"claude-opus-5[1m]":   "claude-opus-5-5 [1m]",
+		"claude-opus-5(high)": "claude-opus-5-5",
+		"fable":               "claude-fable-5-1",
+		"haiku":               "claude-haiku-4-5-20251001",
 	}
 
 	for input, want := range tests {
@@ -119,7 +122,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		"claude-opus-4-8":           false,
 		"claude-opus-4-7":           false,
 		"claude-opus-4-6":           false,
-		"claude-opus-5":             false,
+		"claude-opus-5-5":           false,
 	}
 	for _, model := range claude.Models {
 		if _, ok := needClaudeIDs[model.ID]; ok {
@@ -247,10 +250,10 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if grok.BaseURL != "https://pool.example.com" {
 		t.Fatalf("grok baseUrl = %q", grok.BaseURL)
 	}
-	if len(grok.Models) != 2 {
+	if len(grok.Models) != 3 {
 		t.Fatalf("grok model count = %d", len(grok.Models))
 	}
-	if grok.Models[0].ID != "grok-4.6" || grok.Models[0].ContextWindow != 500000 || grok.Models[0].MaxTokens != 30000 {
+	if grok.Models[0].ID != "grok-4.7" || grok.Models[0].ContextWindow != 500000 || grok.Models[0].MaxTokens != 1000000 {
 		t.Fatalf("current grok model = %#v", grok.Models[0])
 	}
 }

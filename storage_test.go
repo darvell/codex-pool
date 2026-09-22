@@ -12,6 +12,42 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+func TestRequestUsageStorageCodec(t *testing.T) {
+	usage := RequestUsage{
+		Timestamp: time.Now().UTC().Truncate(time.Nanosecond), AccountID: "account", PlanType: "pro",
+		UserID: "principal", OriginID: "origin", PromptCacheKey: "cache", RequestID: "upstream",
+		ProxyRequestID: "proxy", ClientCredentialID: "client", UsageSequence: 2, AttemptNumber: 3,
+		UsageCompleteness: "complete", InputTokens: 100, CachedInputTokens: 40, CacheCreationTokens: 5,
+		InputTokenMode: "inclusive", OutputTokens: 20, ReasoningTokens: 10, BillableTokens: 80,
+		PrimaryUsedPct: 0.2, SecondaryUsedPct: 0.4, PrimaryResetAt: time.Now().UTC().Add(time.Hour).Truncate(time.Nanosecond),
+		SecondaryResetAt: time.Now().UTC().Add(24 * time.Hour).Truncate(time.Nanosecond), PrimaryWindowMinutes: 300,
+		SecondaryWindowMinutes: 10080, Model: "gpt-test", AccountType: AccountTypeCodex,
+	}
+	compact, err := encodeRequestUsage(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compact) >= len(legacy) {
+		t.Fatalf("compact bytes = %d, legacy bytes = %d", len(compact), len(legacy))
+	}
+	for name, data := range map[string][]byte{"compact": compact, "legacy": legacy} {
+		var decoded RequestUsage
+		if err := decodeRequestUsage(data, &decoded); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if decoded != usage {
+			t.Fatalf("%s decoded = %+v, want %+v", name, decoded, usage)
+		}
+	}
+	if err := decodeRequestUsage([]byte(`{"v":2}`), new(RequestUsage)); err == nil {
+		t.Fatal("accepted unsupported storage version")
+	}
+}
+
 func TestUsageStoreRecordAndAggregate(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "proxy.db")
@@ -32,6 +68,15 @@ func TestUsageStoreRecordAndAggregate(t *testing.T) {
 	}
 	if agg.TotalBillableTokens != 85 || agg.TotalInputTokens != 100 {
 		t.Fatalf("unexpected aggregate: %+v", agg)
+	}
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		key, _ := tx.Bucket([]byte(bucketUsageRequests)).Cursor().First()
+		if !strings.HasPrefix(string(key), usageTimeKeyPrefix) {
+			t.Fatalf("usage key %q is not time ordered", key)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	info, err := os.Stat(path)
@@ -126,26 +171,118 @@ func TestUsageStorePrune(t *testing.T) {
 	}
 	defer s.Close()
 
-	old := time.Now().Add(-48 * time.Hour)
-	// The recent "aaa" range sorts before the stale "zzz" range. Pruning must
-	// not stop when it encounters the first recent account.
-	s.record(RequestUsage{AccountID: "aaa", BillableTokens: 1, Timestamp: time.Now()})
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	s.record(RequestUsage{AccountID: "aaa", BillableTokens: 1, Timestamp: now})
 	s.record(RequestUsage{AccountID: "zzz", BillableTokens: 1, Timestamp: old})
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		requests := tx.Bucket([]byte(bucketUsageRequests))
+		for account, at := range map[string]time.Time{"aaa": now, "zzz": old} {
+			value, err := json.Marshal(RequestUsage{AccountID: account, BillableTokens: 1, Timestamp: at})
+			if err != nil {
+				return err
+			}
+			key := fmt.Sprintf("%s|%020d|legacy", account, at.UnixNano())
+			if err := requests.Put([]byte(key), value); err != nil {
+				return err
+			}
+		}
+
+		bucket := tx.Bucket([]byte(bucketCapacitySamples))
+		for _, at := range []time.Time{old, now} {
+			value, err := json.Marshal(CapacitySample{Timestamp: at, PlanType: "team"})
+			if err != nil {
+				return err
+			}
+			key := fmt.Sprintf("team|%020d", at.UnixNano())
+			if err := bucket.Put([]byte(key), value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// Force prune
 	s.nextPrune = time.Now().Add(-time.Hour)
-	_ = s.record(RequestUsage{AccountID: "aaa", BillableTokens: 1, Timestamp: time.Now()})
+	_ = s.record(RequestUsage{AccountID: "aaa", BillableTokens: 1, Timestamp: now})
 
 	err = s.db.View(func(tx *bbolt.Tx) error {
-		c := tx.Bucket([]byte(bucketUsageRequests)).Cursor()
+		requests := tx.Bucket([]byte(bucketUsageRequests))
+		c := requests.Cursor()
 		for k, _ := c.First(); k != nil; k, _ = c.Next() {
 			if strings.Contains(string(k), fmt.Sprintf("%d", old.UnixNano())) {
-				t.Fatalf("old entry not pruned")
+				t.Fatalf("old request not pruned")
 			}
+		}
+		recentLegacyKey := fmt.Sprintf("aaa|%020d|legacy", now.UnixNano())
+		if requests.Get([]byte(recentLegacyKey)) == nil {
+			t.Fatal("recent legacy request was pruned")
+		}
+
+		samples := tx.Bucket([]byte(bucketCapacitySamples))
+		c = samples.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			if strings.Contains(string(k), fmt.Sprintf("%d", old.UnixNano())) {
+				t.Fatalf("old capacity sample not pruned")
+			}
+		}
+		recentKey := fmt.Sprintf("team|%020d", now.UnixNano())
+		if samples.Get([]byte(recentKey)) == nil {
+			t.Fatal("recent capacity sample was pruned")
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("view: %v", err)
+	}
+}
+
+func TestUsageStoreReadsBoundedTimeSeries(t *testing.T) {
+	s, err := newUsageStore(filepath.Join(t.TempDir(), "db.db"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC().Truncate(time.Hour)
+	for _, usage := range []RequestUsage{
+		{Timestamp: now, AccountID: "a", AccountType: AccountTypeCodex, UserID: "p1", BillableTokens: 1},
+		{Timestamp: now.Add(-time.Hour), AccountID: "a", AccountType: AccountTypeCodex, UserID: "p1", BillableTokens: 2},
+		{Timestamp: now.Add(-72 * time.Hour), AccountID: "a", AccountType: AccountTypeCodex, UserID: "p1", BillableTokens: 100},
+	} {
+		if err := s.record(usage); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	daily, err := s.getUserDailyUsage("p1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hourly, err := s.getUserHourlyUsage("p1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, err := s.getGlobalHourlyUsage(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rows := range map[string][]UserHourlyUsage{"user": hourly, "global": global} {
+		var total int64
+		for _, row := range rows {
+			total += row.BillableTokens
+		}
+		if total != 3 {
+			t.Fatalf("%s hourly total = %d, want 3", name, total)
+		}
+	}
+	var dailyTotal int64
+	for _, row := range daily {
+		dailyTotal += row.BillableTokens
+	}
+	if dailyTotal != 3 {
+		t.Fatalf("daily total = %d, want 3", dailyTotal)
 	}
 }
 

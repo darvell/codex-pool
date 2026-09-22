@@ -3,7 +3,8 @@ package main
 import "time"
 
 var forcePublishedPricing = map[string]bool{
-	"gpt-6-astra":              true,
+	"claude-opus-5-5":           true,
+	"gpt-6-astra":               true,
 	"claude-fable-5-1":          true,
 	"claude-sonnet-5":           true,
 	"k3":                        true,
@@ -17,9 +18,11 @@ var forcePublishedPricing = map[string]bool{
 	"glm-5.3-flash":             true,
 	"mimo-v2.5-pro":             true,
 	"mimo-v2.5":                 true,
+	"grok-4.7":                  true,
 	"grok-4.6":                  true,
 	"grok-4.5":                  true,
 	"lordx64/cyberkimi":         true,
+	"lordx64/cyberglm":          true,
 }
 
 // publishedModelPricing is the source of truth for models the pool advertises
@@ -36,6 +39,7 @@ var forcePublishedPricing = map[string]bool{
 //   - Xiaomi: https://mimo.mi.com/docs/zh-CN/price/pay-as-you-go
 //   - xAI: https://docs.x.ai/developers/models/grok-4.5
 //   - Google: https://ai.google.dev/gemini-api/docs/pricing
+//   - Adverserial: https://adverserial.ai/docs.html and billing.adverserial.ai rate card
 func publishedModelPricing(now time.Time) map[string]ModelPricing {
 	prices := map[string]ModelPricing{
 		// OpenAI GPT-6 Astra model page, verified 2026-09-04; long rates cover the full request.
@@ -50,6 +54,7 @@ func publishedModelPricing(now time.Time) map[string]ModelPricing {
 
 		"claude-fable-5-1":           flatPricing(10, 50, 0.25, 12.5),
 		"claude-fable-5":             flatPricing(10, 50, 1, 12.5),
+		"claude-opus-5-5":            flatPricing(4, 20, 0.2, 5),
 		"claude-opus-5":              flatPricing(5, 25, 0.5, 6.25),
 		"claude-opus-4-8":            flatPricing(5, 25, 0.5, 6.25),
 		"claude-opus-4-7":            flatPricing(5, 25, 0.5, 6.25),
@@ -71,9 +76,11 @@ func publishedModelPricing(now time.Time) map[string]ModelPricing {
 		"glm-5.3-flash":             flatPricing(0.14, 0.44, 0.026, 0),
 		"mimo-v2.5-pro":             flatPricing(0.435, 0.87, 0.0036, 0),
 		"mimo-v2.5":                 flatPricing(0.14, 0.28, 0.0028, 0),
+		"grok-4.7":                  flatPricing(2, 6, 0.3, 0),
 		"grok-4.6":                  flatPricing(2, 6, 0.3, 0),
 		"grok-4.5":                  flatPricing(2, 6, 0.3, 0),
-		"lordx64/cyberkimi":         flatPricing(3, 15, 0.3, 0), // Kimi K3 API-equivalent value; provider has no public rate.
+		"lordx64/cyberkimi":         flatPricing(8, 30, 0.8, 0), // billing.adverserial.ai rate card, 2026-09-15
+		"lordx64/cyberglm":          flatPricing(4, 15, 0.8, 0), // CyberGLM listing on chat.adverserial.ai, 2026-09-15
 
 		"gemini-3.1-pro-preview": tieredPricing(2, 12, 0.2, 0, 200000, 4, 18, 0.4, 0),
 		"gemini-3-flash-preview": flatPricing(0.5, 3, 0.05, 0),
@@ -82,7 +89,7 @@ func publishedModelPricing(now time.Time) map[string]ModelPricing {
 		"gemini-3.6-flash":       flatPricing(1.5, 7.5, 0.15, 0),
 		"gemini-3.7-flash":       flatPricing(0.75, 3.75, 0.075, 0),
 		// Gemini 3.8 Flash has no published API rate yet (2026-09); mirror 3.7 Flash.
-		"gemini-3.8-flash":       flatPricing(0.75, 3.75, 0.075, 0),
+		"gemini-3.8-flash": flatPricing(0.75, 3.75, 0.075, 0),
 	}
 
 	prices["claude-sonnet-5"] = flatPricing(2, 10, 0.2, 2.5)

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -68,7 +67,7 @@ func (s *AnalyticsStore) rebuildPricingFromBoltDB(store *usageStore, pricing *Pr
 		}
 		return bucket.ForEach(func(_, value []byte) error {
 			var ru RequestUsage
-			if err := json.Unmarshal(value, &ru); err != nil {
+			if err := decodeRequestUsage(value, &ru); err != nil {
 				return nil
 			}
 			if ru.InputTokens == 0 && ru.CachedInputTokens == 0 && ru.CacheCreationTokens == 0 && ru.OutputTokens == 0 {

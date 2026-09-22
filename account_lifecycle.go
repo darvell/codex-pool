@@ -20,6 +20,18 @@ func codexAccessLive(a *Account, now time.Time) bool {
 	return exp.IsZero() || exp.After(now)
 }
 
+func codexAccessFarFromExpiry(a *Account, now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.Type != AccountTypeCodex || a.ExpiresAt.IsZero() {
+		return false
+	}
+	return a.ExpiresAt.After(now.Add(codexRefreshHeadroom))
+}
+
 func retireAfterRefreshFail(a *Account, err error, now time.Time) bool {
 	if !isPermanentRefreshTokenError(err) {
 		return false
@@ -28,6 +40,32 @@ func retireAfterRefreshFail(a *Account, err error, now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// persistDeadAccount retires an account once. Repeating the write is what made
+// the pool watcher hot-reload every minute after a refresh token was revoked.
+func persistDeadAccount(a *Account, reason string) {
+	if a == nil {
+		return
+	}
+
+	a.mu.Lock()
+	alreadyDead := a.Dead
+	a.Dead = true
+	if !alreadyDead {
+		a.Penalty += 100.0
+	}
+	accountID := a.ID
+	a.mu.Unlock()
+
+	if alreadyDead {
+		return
+	}
+
+	log.Printf("marking account %s as dead: %s", accountID, reason)
+	if err := saveAccount(a); err != nil {
+		log.Printf("warning: failed to save dead account %s: %v", accountID, err)
+	}
 }
 
 func accountUsesStaticAPIKey(accountType AccountType) bool {

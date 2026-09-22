@@ -176,6 +176,7 @@ const (
 	grokNested grokSpoolContext = iota
 	grokRoot
 	grokTools
+	grokToolSchema
 )
 
 func (g *grokSpoolRewrite) imageTool() (bool, error) {
@@ -272,7 +273,11 @@ func (g *grokSpoolRewrite) array(out io.Writer, context grokSpoolContext) (int, 
 				return kept, err
 			}
 		}
-		if err := g.value(out, grokNested); err != nil {
+		childContext := context
+		if context == grokTools {
+			childContext = grokToolSchema
+		}
+		if err := g.value(out, childContext); err != nil {
 			return kept, err
 		}
 		kept++
@@ -349,7 +354,21 @@ func (g *grokSpoolRewrite) object(out io.Writer, context grokSpoolContext) error
 		if err := writeByte(out, ':'); err != nil {
 			return err
 		}
-		if err := g.value(out, grokNested); err != nil {
+		if context == grokToolSchema && key == "required" {
+			replaced, err := g.replaceNullRequired(out)
+			if err != nil {
+				return err
+			}
+			if replaced {
+				wrote = true
+				continue
+			}
+		}
+		childContext := grokNested
+		if context == grokToolSchema {
+			childContext = grokToolSchema
+		}
+		if err := g.value(out, childContext); err != nil {
 			return err
 		}
 		wrote = true
@@ -360,6 +379,25 @@ func (g *grokSpoolRewrite) object(out io.Writer, context grokSpoolContext) error
 		}
 	}
 	return writeByte(out, '}')
+}
+
+func (g *grokSpoolRewrite) replaceNullRequired(out io.Writer) (bool, error) {
+	start := g.cursor.pos()
+	b, err := g.cursor.lex.nonspace()
+	if err != nil {
+		return false, err
+	}
+	if err := g.cursor.reset(start); err != nil {
+		return false, err
+	}
+	if b != 'n' {
+		return false, nil
+	}
+	if err := g.cursor.lex.copyValue(io.Discard); err != nil {
+		return false, err
+	}
+	_, err = io.WriteString(out, "[]")
+	return true, err
 }
 
 func (g *grokSpoolRewrite) appendFields(out io.Writer, wrote bool) error {

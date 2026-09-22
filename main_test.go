@@ -293,7 +293,7 @@ func TestAutoRedeemCodexResetCreditWhenExhausted(t *testing.T) {
 							"primary_window": {"used_percent": 0, "reset_at": 1788748328, "limit_window_seconds": 604800}
 						}
 					}`)),
-					Header:     make(http.Header),
+					Header: make(http.Header),
 				}, nil
 			default:
 				t.Fatalf("unexpected request %d", requests)
@@ -460,6 +460,7 @@ func TestResolveStreamedModelRouteCoversExternalProviders(t *testing.T) {
 		{"glm-5.2", AccountTypeZAI},
 		{"mimo-v2.5-pro", AccountTypeXiaomi},
 		{"lordx64/cyberkimi", AccountTypeAdverserial},
+		{"cyberglm", AccountTypeAdverserial},
 	}
 	for _, path := range []string{"/responses", "/backend-api/codex/responses", "/v1/responses"} {
 		for _, tc := range cases {
@@ -771,6 +772,25 @@ func TestModelRouteOverrideRewritesClaudeFableAlias(t *testing.T) {
 	}
 }
 
+func TestOpus5RoutesToOpus55(t *testing.T) {
+	base, _ := url.Parse("https://api.anthropic.com")
+	handler := &proxyHandler{registry: NewProviderRegistry(NewCodexProvider(base, base, nil), NewClaudeProvider(base), NewGeminiProvider(base, base))}
+	for _, model := range []string{"opus", "claude-opus-5", "claude-opus-5-5"} {
+		body, _ := json.Marshal(map[string]any{"model": model, "output_config": map[string]any{"effort": "low"}})
+		provider, _, rewritten := handler.modelRouteOverride("/v1/messages", model, body)
+		if provider == nil || provider.Type() != AccountTypeClaude {
+			t.Fatalf("%s did not route to Claude", model)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(rewritten, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["model"] != "claude-opus-5-5" {
+			t.Fatalf("%s routed to %v", model, got["model"])
+		}
+	}
+}
+
 func TestModelRouteOverrideRewritesClaudeSonnetAlias(t *testing.T) {
 	base, _ := url.Parse("https://api.anthropic.com")
 	handler := &proxyHandler{
@@ -896,7 +916,7 @@ func TestClaudePoolTranslatesResponsesClientFormat(t *testing.T) {
 	if upstreamPath != "/v1/messages" {
 		t.Fatalf("upstream path = %q", upstreamPath)
 	}
-	if upstreamModel != "claude-opus-5" {
+	if upstreamModel != "claude-opus-5-5" {
 		t.Fatalf("upstream model = %q", upstreamModel)
 	}
 }

@@ -253,6 +253,73 @@ func normalizeOpenAIToolSchema(schema map[string]any) map[string]any {
 	return prepareCodexJSONSchema(schema)
 }
 
+func normalizeResponsesSchemaBody(body []byte) []byte {
+	var obj map[string]any
+	if len(body) == 0 || json.Unmarshal(body, &obj) != nil {
+		return body
+	}
+
+	changed := false
+	if text, _ := obj["text"].(map[string]any); text != nil {
+		if format, _ := text["format"].(map[string]any); format != nil {
+			if schema, _ := format["schema"].(map[string]any); schema != nil && normalizeRequiredArrays(schema) {
+				changed = true
+			}
+		}
+	}
+	if tools, _ := obj["tools"].([]any); tools != nil {
+		for _, raw := range tools {
+			tool, _ := raw.(map[string]any)
+			if tool == nil {
+				continue
+			}
+			if params, _ := tool["parameters"].(map[string]any); params != nil && normalizeRequiredArrays(params) {
+				changed = true
+			}
+			if fn, _ := tool["function"].(map[string]any); fn != nil {
+				if params, _ := fn["parameters"].(map[string]any); params != nil && normalizeRequiredArrays(params) {
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	encoded, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+func normalizeRequiredArrays(value any) bool {
+	switch node := value.(type) {
+	case map[string]any:
+		changed := false
+		if required, ok := node["required"]; ok && required == nil {
+			node["required"] = []any{}
+			changed = true
+		}
+		for _, child := range node {
+			if normalizeRequiredArrays(child) {
+				changed = true
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for _, child := range node {
+			if normalizeRequiredArrays(child) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
+}
+
 func prepareCodexJSONSchema(schema map[string]any) map[string]any {
 	return prepareCodexJSONSchemaValue(schema).(map[string]any)
 }
@@ -262,6 +329,10 @@ func prepareCodexJSONSchemaValue(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(node)+2)
 		for k, child := range node {
+			if k == "required" && child == nil {
+				out[k] = []any{}
+				continue
+			}
 			out[k] = prepareCodexJSONSchemaValue(child)
 		}
 		if typ, _ := out["type"].(string); typ == "object" {

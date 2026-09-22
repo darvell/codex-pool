@@ -366,6 +366,12 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 		protocol := "anthropic"
 		if entry.provider == AccountTypeCodex || entry.provider == AccountTypeGrok {
 			protocol = "openai"
+		} else if entry.provider == AccountTypeOpencodeGo {
+			// Discovered Go models carry the bare upstream ID, so they need the
+			// same per-endpoint protocol label the catalog entries get. Without
+			// it a responses-family model is advertised as Anthropic Messages
+			// and every request fails on the upstream's /messages route.
+			protocol = opencodeGoClientProtocol(entry.model.ID)
 		}
 		capabilities := map[string]bool{"reasoning": entry.model.Reasoning, "tools": true}
 		if entry.model.WebSearch {

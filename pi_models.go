@@ -352,22 +352,19 @@ func opencodeGoPiModels() []piModelConfig {
 	return result
 }
 
-// opencodeGoCuteModels returns the Go models Cute Code can reach with its
-// supported protocols: chat models over OpenAI chat completions, and
-// messages-family models over Anthropic messages. Responses-family models
-// (grok-4.6, gpt-5.6-luna, muse-spark-*) are omitted because Cute Code has no
-// Responses protocol; they remain available through /api/pool/models and
-// native clients.
+// opencodeGoCuteModels returns the Go models Cute Code can reach. Its `openai`
+// protocol is the Responses API and its `anthropic` protocol is the Messages
+// API — the two routes the Go router serves — so the per-model protocol label
+// selects the config entry.
 func opencodeGoCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 	models := modelsForProvider(AccountTypeOpencodeGo)
 	result := make([]cuteCodeModelConfig, 0, len(models))
 	for _, model := range models {
-		switch opencodeGoEndpointForModel(opencodeGoUpstreamModel(model.ID)) {
-		case opencodeGoEndpointMessages:
-			result = append(result, cuteAnthropicModel(baseURL, apiKey, model.ID, model.DisplayName, model.ContextWindow, model.Description))
-		case opencodeGoEndpointChat:
+		if opencodeGoClientProtocol(model.ID) == "openai" {
 			result = append(result, cuteOpenAIModel(baseURL, apiKey, model.ID, model.DisplayName, model.ContextWindow, model.Description))
+			continue
 		}
+		result = append(result, cuteAnthropicModel(baseURL, apiKey, model.ID, model.DisplayName, model.ContextWindow, model.Description))
 	}
 	return result
 }

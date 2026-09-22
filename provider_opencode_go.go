@@ -189,11 +189,26 @@ func (p *OpencodeGoProvider) MatchesPath(path string) bool {
 	return false
 }
 
+// opencodeGoEndpointPaths are the endpoint suffixes the Go base serves,
+// longest-first so a shorter suffix cannot shadow a longer one.
+var opencodeGoEndpointPaths = []string{"/chat/completions", "/responses", "/messages"}
+
 func (p *OpencodeGoProvider) NormalizePath(path string) string {
 	// Client paths (/v1/messages, /v1/chat/completions, /v1/responses) map
 	// onto the same suffixes under the Go base (/zen/go/v1/...).
 	if strings.HasPrefix(path, "/v1/") {
 		return strings.TrimPrefix(path, "/v1")
+	}
+	// Model overrides can originate on Codex's private Responses path, which
+	// clients configure as OPENAI_BASE_URL (…/backend-api/codex/responses).
+	// The Go base serves only the endpoint suffixes above, so reduce that path
+	// to its suffix instead of joining the Codex-only prefix onto the base and
+	// 404ing on opencode.ai.
+	trimmed := strings.TrimRight(path, "/")
+	for _, suffix := range opencodeGoEndpointPaths {
+		if strings.HasSuffix(trimmed, suffix) {
+			return suffix
+		}
 	}
 	return path
 }
@@ -212,15 +227,21 @@ const (
 )
 
 // opencodeGoEndpointForModel returns the Go endpoint serving the given bare
-// model ID, mirroring the endpoint table in the OpenCode Go docs. Models not
-// listed there default to chat completions.
+// model ID, mirroring the "Endpoints" table in the OpenCode Go docs
+// (packages/web/src/content/docs/go.mdx, which names the AI SDK package per
+// model: @ai-sdk/openai is the Responses route, @ai-sdk/anthropic the
+// Messages route, @ai-sdk/openai-compatible Chat Completions). The router
+// provisions each model on the front-ends its upstream supports, so a model
+// can answer on more than one; this returns the one the client should use.
+// Models not listed default to chat completions.
 func opencodeGoEndpointForModel(bare string) opencodeGoEndpoint {
 	switch strings.ToLower(strings.TrimSpace(bare)) {
 	case "grok-4.6", "grok-4.5", "gpt-5.6-luna",
 		"muse-spark-1.3-contributor", "muse-spark-1.2-contributor":
 		return opencodeGoEndpointResponses
 	case "minimax-m3", "minimax-m2.7", "minimax-m2.5",
-		"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus":
+		"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
+		"union-alpha":
 		return opencodeGoEndpointMessages
 	default:
 		return opencodeGoEndpointChat
@@ -228,12 +249,30 @@ func opencodeGoEndpointForModel(bare string) opencodeGoEndpoint {
 }
 
 // opencodeGoClientProtocol returns the pool client protocol label for a Go
-// pool model ID, based on the endpoint serving it.
+// pool model ID, based on the endpoint serving it. Only the responses-family
+// models need the client's OpenAI Responses protocol: the Go router serves
+// messages- and chat-family models over its Anthropic /messages route and
+// rejects them on /responses with "not supported for format", while a
+// responses-family model is rejected on /messages the same way.
 func opencodeGoClientProtocol(poolModelID string) string {
-	if opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID)) == opencodeGoEndpointMessages {
-		return "anthropic"
+	if opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID)) == opencodeGoEndpointResponses {
+		return "openai"
 	}
-	return "openai"
+	return "anthropic"
+}
+
+// opencodeGoTargetFormat is the request format the Go router serves the model
+// on, for the format-translation layer. Chat-family models are the one case
+// that needs translating: the router serves them only on /chat/completions,
+// where its /messages route answers 500 for them, so a Messages client must be
+// converted to Chat Completions. Messages- and responses-family models are
+// already native on the route the client's protocol label selects, so they
+// report FormatUnknown and pass through untouched.
+func opencodeGoTargetFormat(poolModelID string) RequestFormat {
+	if opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID)) == opencodeGoEndpointChat {
+		return FormatOpenAI
+	}
+	return FormatUnknown
 }
 
 // opencodeGoBareID splits an `opencode-go/<id>` (or `opencode_go/<id>`)

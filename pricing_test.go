@@ -68,6 +68,21 @@ func TestAccountPlanForSubscriptionPreservesProLite(t *testing.T) {
 	}
 }
 
+func TestOpus55Pricing(t *testing.T) {
+	t.Parallel()
+
+	pd := newPricingData()
+	for _, model := range []string{"claude-opus-5-5", "claude-opus-5-5[1m]", "claude-opus-5-5 [1m]"} {
+		got, ok := pd.lookupPricing(model)
+		if !ok || math.Abs(got.InputCostPerToken-4e-6) > 1e-12 ||
+			math.Abs(got.OutputCostPerToken-20e-6) > 1e-12 ||
+			math.Abs(got.CacheReadCost-0.2e-6) > 1e-12 ||
+			math.Abs(got.CacheWriteCost-5e-6) > 1e-12 {
+			t.Fatalf("lookupPricing(%q) = %#v, %v", model, got, ok)
+		}
+	}
+}
+
 func TestClaudeSonnet5PricingDoesNotIncreaseAfterLaunch(t *testing.T) {
 	t.Parallel()
 

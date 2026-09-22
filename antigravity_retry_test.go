@@ -46,9 +46,31 @@ func TestAntigravityRefreshesBeforeTokenExpiry(t *testing.T) {
 		t.Fatal("Antigravity token inside the 50-minute refresh window should refresh")
 	}
 
-	codex := &Account{Type: AccountTypeCodex, RefreshToken: "refresh", ExpiresAt: time.Now().Add(49 * time.Minute)}
-	if handler.needsRefresh(codex) {
-		t.Fatal("other providers must retain expiry-only refresh behavior")
+	codexDying := &Account{Type: AccountTypeCodex, RefreshToken: "refresh", ExpiresAt: time.Now().Add(49 * time.Minute)}
+	if !handler.needsRefresh(codexDying) {
+		t.Fatal("Codex access token inside the 6-hour headroom should refresh")
+	}
+
+	codexLive := &Account{Type: AccountTypeCodex, RefreshToken: "refresh", ExpiresAt: time.Now().Add(9 * 24 * time.Hour)}
+	if handler.needsRefresh(codexLive) {
+		t.Fatal("Codex access token with days of life left should not refresh")
+	}
+}
+
+func TestRefreshAfterAuthFailureSkipsLiveCodex(t *testing.T) {
+	handler := &proxyHandler{}
+	acc := &Account{
+		Type:         AccountTypeCodex,
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().Add(9 * 24 * time.Hour),
+		LastRefresh:  time.Now().Add(-24 * time.Hour),
+	}
+	err := handler.refreshAccountAfterAuthFailure(context.Background(), acc)
+	if err == nil || !strings.Contains(err.Error(), "still live") {
+		t.Fatalf("err = %v", err)
+	}
+	if acc.LastRefresh.IsZero() {
+		t.Fatal("live Codex refresh must not clear LastRefresh")
 	}
 }
 

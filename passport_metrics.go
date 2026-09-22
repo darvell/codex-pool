@@ -63,6 +63,10 @@ func (h *proxyHandler) serveOperationalMetrics(w http.ResponseWriter, r *http.Re
 			open = 1
 		}
 		fmt.Fprintf(w, "codexpool_accounting_gap_open %d\n", open)
+		stats := h.store.db.Stats()
+		fmt.Fprintf(w, "codexpool_bolt_free_bytes %d\n", stats.FreeAlloc)
+		fmt.Fprintf(w, "codexpool_bolt_pending_pages %d\n", stats.PendingPageN)
+		fmt.Fprintf(w, "codexpool_bolt_open_read_transactions %d\n", stats.OpenTxN)
 	}
 	if h.cfg != nil {
 		fmt.Fprintf(w, "codexpool_bolt_database_bytes %d\n", fileBytes(h.cfg.storePath))

@@ -510,12 +510,25 @@ func accountTier(accType AccountType, planType string) int {
 }
 
 func isCodexProAccessPlan(planType string) bool {
-	switch strings.ToLower(strings.TrimSpace(planType)) {
+	switch normalizeCodexPlanType(planType) {
 	case "pro", "prolite":
 		return true
 	default:
 		return false
 	}
+}
+
+// normalizeCodexPlanType maps Codex plan variants to their canonical form.
+// Business/self-serve variants such as "self_serve_business_prolite" carry
+// the same quota as Pro Lite, so they normalize to "prolite". Matching is
+// substring-based so future "business_prolite" variants work without a new
+// special case.
+func normalizeCodexPlanType(planType string) string {
+	p := strings.ToLower(strings.TrimSpace(planType))
+	if strings.Contains(p, "prolite") {
+		return "prolite"
+	}
+	return p
 }
 
 func accountAllowsClientIPLocked(a *Account, clientIP string) bool {
@@ -596,7 +609,7 @@ func (p *poolState) candidateByID(id string, accountType AccountType, requiredPl
 	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
 		return nil
 	}
-	if accountPrimaryUsageLocked(a) >= primaryHardExcludeThreshold || accountSecondaryUsageLocked(a) >= secondaryHardExcludeThreshold {
+	if primaryUsageBlocksRoutingLocked(a, accountPrimaryUsageLocked(a)) || accountSecondaryUsageLocked(a) >= secondaryHardExcludeThreshold {
 		return nil
 	}
 	return a
@@ -627,7 +640,7 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 		// account happens to have just expired.
 		primaryUsed := accountPrimaryUsageLocked(a)
 		secondaryUsed := accountSecondaryUsageLocked(a)
-		if primaryUsed >= primaryHardExcludeThreshold || secondaryUsed >= secondaryHardExcludeThreshold {
+		if primaryUsageBlocksRoutingLocked(a, primaryUsed) || secondaryUsed >= secondaryHardExcludeThreshold {
 			a.mu.Unlock()
 			continue
 		}
@@ -760,9 +773,11 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 							conversationID, id, secondaryUsed*100, secondaryHardExcludeThreshold*100)
 					}
 				}
-				// Also unpin if primary usage is at/above 95% (hard limit)
+				// Also unpin if primary usage is at/above 95% (hard limit).
+				// Grok monthly spend is display-only (see
+				// primaryUsageBlocksRoutingLocked) and never unpins.
 				primaryUsed := accountPrimaryUsageLocked(a)
-				if ok && primaryUsed >= primaryHardExcludeThreshold {
+				if ok && primaryUsageBlocksRoutingLocked(a, primaryUsed) {
 					ok = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from account %s (%.0f%% primary >= %.0f%%)",
@@ -824,9 +839,10 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			}
 			continue
 		}
-		// Hard exclusion: >=95% primary usage
+		// Hard exclusion: >=95% primary usage (Grok monthly spend is
+		// display-only and exempt via primaryUsageBlocksRoutingLocked).
 		primaryUsed := accountPrimaryUsageLocked(a)
-		if primaryUsed >= primaryHardExcludeThreshold {
+		if primaryUsageBlocksRoutingLocked(a, primaryUsed) {
 			a.mu.Unlock()
 			if p.debug {
 				log.Printf("excluding account %s: primary usage %.1f%% >= %.0f%%", a.ID, primaryUsed*100, primaryHardExcludeThreshold*100)
@@ -1080,6 +1096,9 @@ func planMatchesRequired(planType, requiredPlan string) bool {
 	if required == "pro" {
 		return isCodexProAccessPlan(plan)
 	}
+	if normalizeCodexPlanType(plan) == normalizeCodexPlanType(required) {
+		return true
+	}
 	return plan == required
 }
 
@@ -1199,8 +1218,10 @@ func scoreAccountBreakdownLocked(a *Account, now time.Time) scoreBreakdown {
 
 	// When both windows exist, use five-hour headroom as the burst signal on
 	// top of the weekly base. If five-hour is the only window, it is already the
-	// base and must not be counted twice.
-	if out.PrimaryAvailable && out.SecondaryAvailable {
+	// base and must not be counted twice. Grok's Primary slot is monthly API
+	// spend (display-only, not a burst window), so it neither bonuses nor
+	// penalizes the score; weekly credits drive it.
+	if a.Type != AccountTypeGrok && out.PrimaryAvailable && out.SecondaryAvailable {
 		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
 			hoursRemaining := a.Usage.PrimaryResetAt.Sub(now).Hours()
 			primaryHeadroom := 1.0 - primaryUsed

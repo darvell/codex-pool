@@ -131,6 +131,9 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 	captureCodexResponseState(opts.InitialAccount, upstreamResp, opts.ReqID)
 	if turnState := upstreamResp.Header.Get("x-codex-turn-state"); turnState != "" {
 		w.Header().Set("x-codex-turn-state", turnState)
+		// The downstream handshake carries this account's blob; remember the
+		// minter so a later redial to another account drops the echo.
+		h.noteCodexTurnState(opts.UserID, opts.ConversationID, opts.InitialAccount, turnState)
 	}
 
 	acceptOpts := &websocket.AcceptOptions{
@@ -905,6 +908,10 @@ func (h *proxyHandler) dialSwappedUpstream(
 	tmpReq := &http.Request{Header: headers}
 	authAccount := contextAuthSnapshot(acc)
 	opts.Provider.SetAuthHeaders(tmpReq, authAccount)
+	// The swap target must not see the previous account's turn-state echo:
+	// the replayed response.create would otherwise carry a blob this account
+	// did not mint, a contradiction real Codex never produces.
+	h.guardCodexTurnStateEcho(opts.UserID, opts.ConversationID, acc, tmpReq.Header)
 
 	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)
 	if err != nil {

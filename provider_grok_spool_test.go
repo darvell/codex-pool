@@ -20,6 +20,7 @@ func TestGrokSpoolParity(t *testing.T) {
 		`{"tools":[{"type":"image_generation","description":"drop"}],"tool_choice":"auto","parallel_tool_calls":true}`,
 		`{"tools":[],"tool_choice":"auto","parallel_tool_calls":false}`,
 		`{"tools":[null,3,"image_generation",{"type":"function","parameters":{"external_web_access":true}},{"type":"image_generation"}],"tool_choice":"auto"}`,
+		`{"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"filter":{"type":"object","required":null}},"required":null}}],"required":null}`,
 		`{"tools":null,"tool_choice":"auto","reasoningEffort":3}`,
 		`{"reasoningEffort":"\t\u2003 ","external_web_access":false}`,
 		`{"tools":[{"type":"image_generation","type":"function"},{"type":"function","type":"image_generation"}]}`,
@@ -28,7 +29,7 @@ func TestGrokSpoolParity(t *testing.T) {
 		`{"\u0065xternal_web_access":true,"tools":[{"t\u0079pe":"image\u005fgeneration"}],"reasoningEffort":"\\ \" x \n"}`,
 		`{"input":"` + strings.Repeat("x", 128*1024) + `","` + strings.Repeat("k", 128*1024) + `":{"external_web_access":true},"reasoningEffort":"  ` + strings.Repeat("e", 128*1024) + `  "}`,
 	}
-	for _, model := range []string{"grok-4.5-build", "grok-4.6"} {
+	for _, model := range []string{"grok-4.5-build", "grok-4.6", "grok-4.7"} {
 		for i, body := range cases {
 			t.Run(model+"/"+string(rune('A'+i)), func(t *testing.T) {
 				s := newGrokTestSpool(t, strings.NewReader(body), model)

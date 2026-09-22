@@ -445,7 +445,7 @@ func parseCodexClaims(idToken string) codexJWTClaims {
 			out.ChatGPTAccountID = acc
 		}
 		if plan, ok := auth["chatgpt_plan_type"].(string); ok {
-			out.PlanType = strings.ToLower(strings.TrimSpace(plan))
+			out.PlanType = normalizeCodexPlanType(plan)
 		}
 	}
 	if out.PlanType == "" {

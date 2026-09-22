@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -649,7 +648,7 @@ func (s *AnalyticsStore) seedFromBoltDB(store *usageStore, pricing *PricingData)
 		}
 		return b.ForEach(func(k, v []byte) error {
 			var ru RequestUsage
-			if err := json.Unmarshal(v, &ru); err != nil {
+			if err := decodeRequestUsage(v, &ru); err != nil {
 				return nil // skip bad records
 			}
 			if ru.InputTokens == 0 && ru.OutputTokens == 0 {

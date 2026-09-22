@@ -198,6 +198,14 @@ func TestAdverserialModelRouting(t *testing.T) {
 			t.Errorf("adverserialCanonicalModel(%q) = %q, want lordx64/cyberkimi", name, got)
 		}
 	}
+	for _, name := range []string{"lordx64/cyberglm", "cyberglm", "CyberGLM", "  cyberglm  "} {
+		if !isAdverserialModel(name) {
+			t.Errorf("isAdverserialModel(%q) = false, want true", name)
+		}
+		if got := adverserialCanonicalModel(name); got != "lordx64/cyberglm" {
+			t.Errorf("adverserialCanonicalModel(%q) = %q, want lordx64/cyberglm", name, got)
+		}
+	}
 	for _, name := range []string{"kimi-for-coding", "glm-5.3", "gpt-5.6-sol", "mimo-v2.5-pro"} {
 		if isAdverserialModel(name) {
 			t.Errorf("isAdverserialModel(%q) = true, want false", name)
@@ -214,7 +222,7 @@ func TestAdverserialModelDoesNotCollideWithKimi(t *testing.T) {
 }
 
 func TestAdverserialProviderIsModelRouted(t *testing.T) {
-	base, _ := url.Parse("https://platform.adverserial.ai/api")
+	base, _ := url.Parse("https://api.adverserial.ai")
 	p := NewAdverserialProvider(base)
 
 	if p.Type() != AccountTypeAdverserial {
@@ -227,7 +235,7 @@ func TestAdverserialProviderIsModelRouted(t *testing.T) {
 			t.Errorf("MatchesPath(%q) = true, want false", path)
 		}
 	}
-	if got := p.UpstreamURL("/v1/messages").String(); got != "https://platform.adverserial.ai/api" {
+	if got := p.UpstreamURL("/v1/messages").String(); got != "https://api.adverserial.ai" {
 		t.Errorf("UpstreamURL = %q", got)
 	}
 	if !p.DetectsSSE("/v1/messages", "text/event-stream") {
@@ -236,7 +244,7 @@ func TestAdverserialProviderIsModelRouted(t *testing.T) {
 }
 
 func TestAdverserialProviderLoadAccount(t *testing.T) {
-	base, _ := url.Parse("https://platform.adverserial.ai/api")
+	base, _ := url.Parse("https://api.adverserial.ai")
 	p := NewAdverserialProvider(base)
 
 	acc, err := p.LoadAccount("cyberkimi.json", "/pool/adverserial/cyberkimi.json", []byte(`{"api_key":"sk-test"}`))
@@ -261,11 +269,11 @@ func TestAdverserialProviderLoadAccount(t *testing.T) {
 }
 
 func TestAdverserialProviderAuthHeaders(t *testing.T) {
-	base, _ := url.Parse("https://platform.adverserial.ai/api")
+	base, _ := url.Parse("https://api.adverserial.ai")
 	p := NewAdverserialProvider(base)
 	acc := &Account{Type: AccountTypeAdverserial, AccessToken: "sk-test"}
 
-	req, _ := http.NewRequest("POST", "https://platform.adverserial.ai/api/v1/messages", strings.NewReader("{}"))
+	req, _ := http.NewRequest("POST", "https://api.adverserial.ai/v1/messages", strings.NewReader("{}"))
 	req.Header.Set("X-Api-Key", "client-supplied-key")
 	p.SetAuthHeaders(req, acc)
 
@@ -278,7 +286,7 @@ func TestAdverserialProviderAuthHeaders(t *testing.T) {
 }
 
 func TestAdverserialProviderParseUsage(t *testing.T) {
-	base, _ := url.Parse("https://platform.adverserial.ai/api")
+	base, _ := url.Parse("https://api.adverserial.ai")
 	p := NewAdverserialProvider(base)
 
 	start := map[string]any{

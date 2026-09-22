@@ -285,7 +285,7 @@ func TestGrokProviderSetsBearerHeaders(t *testing.T) {
 }
 
 func TestSanitizeGrokRequestBodyRemovesUnsupportedFields(t *testing.T) {
-	body := []byte(`{"model":"grok-4.5","input":"hello","metadata":{"conversation_id":"c"},"prompt_cache_retention":"24h","external_web_access":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"abc","service_tier":"priority","response_format":{"type":"json_object"},"reasoning":{"effort":"high"},"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true},{"type":"function","name":"ok","description":"ok","parameters":{"type":"object"},"strict":true}],"tool_choice":"auto","parallel_tool_calls":true}`)
+	body := []byte(`{"model":"grok-4.5","input":"hello","metadata":{"conversation_id":"c"},"prompt_cache_retention":"24h","external_web_access":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"abc","service_tier":"priority","response_format":{"type":"json_object"},"reasoning":{"effort":"high"},"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true},{"type":"function","name":"ok","description":"ok","parameters":{"type":"object","required":null},"strict":true}],"tool_choice":"auto","parallel_tool_calls":true}`)
 	rewritten := sanitizeGrokRequestBody(body, "grok-4.5")
 	text := string(rewritten)
 	for _, forbidden := range []string{"metadata", "external_web_access", "response_format", "reasoningEffort"} {
@@ -300,6 +300,36 @@ func TestSanitizeGrokRequestBodyRemovesUnsupportedFields(t *testing.T) {
 	}
 	if !strings.Contains(text, `"text":{"format":{"type":"json_object"}}`) {
 		t.Fatalf("rewritten body missing text.format: %s", text)
+	}
+	if !strings.Contains(text, `"required":[]`) {
+		t.Fatalf("rewritten body did not normalize null required: %s", text)
+	}
+}
+
+func TestNormalizeResponsesSchemaBodyAcrossProviders(t *testing.T) {
+	body := []byte(`{"model":"muse-spark-1.3-contributor","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"nested":{"type":"object","required":null}},"required":null}}],"required":null}`)
+	rewritten := normalizeResponsesSchemaBody(body)
+	if strings.Count(string(rewritten), `"required":[]`) != 2 {
+		t.Fatalf("tool schemas were not normalized: %s", rewritten)
+	}
+	if !strings.Contains(string(rewritten), `"required":null`) {
+		t.Fatalf("non-schema field was unexpectedly normalized: %s", rewritten)
+	}
+}
+
+func TestGrok47CatalogAndSchemaCompatibility(t *testing.T) {
+	model, ok := grokModelByName("grok-4.7-build")
+	if !ok || model.ID != "grok-4.7" || model.ContextWindow != 500000 || model.MaxTokens != 1000000 {
+		t.Fatalf("grok-4.7 catalog entry = %#v, found=%v", model, ok)
+	}
+	if !grokModelSupportsReasoningEffort("grok-4.7") {
+		t.Fatal("grok-4.7 should preserve reasoning effort")
+	}
+
+	body := []byte(`{"model":"grok-4.7","input":"hello","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"filter":{"type":"object","required":null}},"required":null}}]}`)
+	rewritten := rewriteAndSanitizeGrokRequestBody(body, "grok-4.7")
+	if strings.Count(string(rewritten), `"required":[]`) != 2 {
+		t.Fatalf("nested null required values were not normalized: %s", rewritten)
 	}
 }
 
@@ -552,8 +582,8 @@ func TestPollUpstreamUsageFetchesGrokWhileCoolingDown(t *testing.T) {
 	}
 	handler := &proxyHandler{
 		cfg: &config{
-			grokBase:      mustParse(server.URL + "/v1"),
-			usageRefresh:  time.Minute,
+			grokBase:       mustParse(server.URL + "/v1"),
+			usageRefresh:   time.Minute,
 			disableRefresh: true,
 		},
 		pool:      newPoolState([]*Account{account}, false),
@@ -626,6 +656,69 @@ func TestGrokSanitizesTranslatedRequestBody(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("sanitized translated body still contains %q: %s", forbidden, text)
 		}
+	}
+}
+
+// Live 2026-09-11: xAI reports monthly spend used=655/limit=380 (172%,
+// clamped to 100%) for the whole team while serving Build traffic normally
+// (HTTP 200) against a fresh weekly-credit period. Monthly spend must therefore
+// be display-only for Grok: it must not exclude accounts from routing, unpin
+// conversations, or penalize scores. Weekly credits (Secondary) stay enforcing.
+func TestGrokMonthlySpendDoesNotBlockRouting(t *testing.T) {
+	t.Parallel()
+
+	overMonthly := UsageSnapshot{
+		PrimaryUsedPercent:     1.0,
+		PrimaryUsed:            1.0,
+		SecondaryUsedPercent:   0,
+		SecondaryUsed:          0,
+		PrimaryWindowMinutes:   31 * 24 * 60,
+		SecondaryWindowMinutes: 7 * 24 * 60,
+		primarySet:             true,
+		secondarySet:           true,
+		Source:                 "grok_billing",
+		RetrievedAt:            time.Now(),
+	}
+	grok := &Account{ID: "pp-grok", Type: AccountTypeGrok, PlanType: "grok", Usage: overMonthly}
+	codex := &Account{ID: "codex", Type: AccountTypeCodex, PlanType: "pro", Usage: overMonthly}
+
+	if accountUsageExhaustedLocked(grok) {
+		t.Fatalf("grok account exhausted by monthly spend: %+v", grok.Usage)
+	}
+	if !accountUsageExhaustedLocked(codex) {
+		t.Fatal("control codex account with 100%/100% should still be exhausted")
+	}
+
+	p := newPoolState([]*Account{grok}, false)
+	if got := p.candidate("", nil, AccountTypeGrok, "", ""); got == nil || got.ID != "pp-grok" {
+		t.Fatalf("grok account not routable despite fresh weekly quota, got %+v", got)
+	}
+	if got := p.candidateByID("pp-grok", AccountTypeGrok, "", ""); got == nil {
+		t.Fatal("candidateByID refused grok account pinned by conversation")
+	}
+
+	if breakdown := scoreAccountBreakdownLocked(grok, time.Now()); breakdown.PrimaryPenalty != 0 {
+		t.Fatalf("grok score penalized by monthly spend: %+v", breakdown)
+	}
+}
+
+func TestGrokWeeklyCreditsStillExcludeWhenExhausted(t *testing.T) {
+	t.Parallel()
+
+	grok := &Account{ID: "pp-grok", Type: AccountTypeGrok, PlanType: "grok", Usage: UsageSnapshot{
+		PrimaryUsedPercent:   1.0,
+		SecondaryUsedPercent: 0.99,
+		primarySet:           true,
+		secondarySet:         true,
+		Source:               "grok_billing",
+		RetrievedAt:          time.Now(),
+	}}
+	if !accountUsageExhaustedLocked(grok) {
+		t.Fatal("grok account at 99% weekly credits should be exhausted")
+	}
+	p := newPoolState([]*Account{grok}, false)
+	if got := p.candidate("", nil, AccountTypeGrok, "", ""); got != nil {
+		t.Fatalf("exhausted grok account still routable, got %+v", got)
 	}
 }
 

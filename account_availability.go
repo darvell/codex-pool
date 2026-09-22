@@ -44,8 +44,22 @@ func accountUsageExhaustedLocked(a *Account) bool {
 	if a == nil {
 		return false
 	}
-	return accountPrimaryUsageLocked(a) >= primaryHardExcludeThreshold ||
+	return primaryUsageBlocksRoutingLocked(a, accountPrimaryUsageLocked(a)) ||
 		accountSecondaryUsageLocked(a) >= secondaryHardExcludeThreshold
+}
+
+// primaryUsageBlocksRoutingLocked reports whether the Primary usage slot
+// disqualifies the account from routing. Grok's Primary slot carries monthly
+// API spend, which xAI does not enforce against Build traffic (verified live
+// 2026-09-11: inference HTTP 200 with used=655/limit=380), so it is
+// display-only. The weekly credit quota in the Secondary slot remains the
+// enforcing signal for Grok; a live 429 still cools the account down via
+// RateLimitUntil.
+func primaryUsageBlocksRoutingLocked(a *Account, primaryUsed float64) bool {
+	if a != nil && a.Type == AccountTypeGrok {
+		return false
+	}
+	return primaryUsed >= primaryHardExcludeThreshold
 }
 
 func accountAvailableForRoutingLocked(a *Account, now time.Time) bool {

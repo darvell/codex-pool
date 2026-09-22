@@ -46,7 +46,7 @@ type config struct {
 	zaiBase                *url.URL // Z.ai Anthropic-compatible endpoint
 	xiaomiBase             *url.URL // Xiaomi MiMo Token Plan Anthropic-compatible endpoint
 	grokBase               *url.URL // Grok Code OpenAI-compatible endpoint
-	adverserialBase        *url.URL // platform.adverserial.ai Anthropic-compatible endpoint
+	adverserialBase        *url.URL // api.adverserial.ai wallet shim (Anthropic + OpenAI)
 	opencodeGoBase         *url.URL // OpenCode Go subscription endpoint (zen/go/v1)
 	poolDir                string
 
@@ -154,7 +154,9 @@ func buildConfig() *config {
 	cfg.zaiBase = mustParse(getenv("UPSTREAM_ZAI_BASE", "https://api.z.ai/api/anthropic"))
 	cfg.xiaomiBase = mustParse(getenv("UPSTREAM_XIAOMI_BASE", "https://token-plan-sgp.xiaomimimo.com/anthropic"))
 	cfg.grokBase = mustParse(getConfigString("UPSTREAM_GROK_BASE", fileCfg.GrokBase, "https://cli-chat-proxy.grok.com/v1"))
-	cfg.adverserialBase = mustParse(getenv("UPSTREAM_ADVERSERIAL_BASE", "https://platform.adverserial.ai/api"))
+	// Wallet keys work only on the shim. platform.adverserial.ai/api is the
+	// chat product and returns 403 "Use of API key is not enabled".
+	cfg.adverserialBase = mustParse(getenv("UPSTREAM_ADVERSERIAL_BASE", "https://api.adverserial.ai"))
 	cfg.opencodeGoBase = mustParse(getenv("UPSTREAM_OPENCODE_GO_BASE", "https://opencode.ai/zen/go/v1"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
@@ -708,6 +710,14 @@ type proxyHandler struct {
 	quotaIntelMu    sync.RWMutex
 	quotaIntelBusy  bool
 	quotaIntel      quotaIntelligenceSnapshot
+
+	// turnStateOrigins tracks which Codex account minted the
+	// x-codex-turn-state blob each downstream session currently holds, so
+	// failover retries and hot-swaps can strip a known cross-account echo
+	// instead of replaying it to an account that did not mint it.
+	turnStateMu      sync.Mutex
+	turnStateOrigins map[string]codexTurnStateOrigin
+	turnStateWrites  uint64
 }
 
 type refreshCall struct {
@@ -2207,6 +2217,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// --- Format translation: detect mismatch between client format and provider format ---
 	sourceFormat := detectRequestFormat(r.URL.Path)
 	targetFormat := providerTargetFormat(accountType)
+	if accountType == AccountTypeOpencodeGo {
+		// The Go router serves each model on exactly one route, so the upstream
+		// format is a property of the model rather than of the provider.
+		targetFormat = opencodeGoTargetFormat(requestedModel)
+	}
 	translateDir := TranslateNone
 	if sourceFormat != FormatUnknown && targetFormat != FormatUnknown && sourceFormat != targetFormat {
 		if sourceFormat == FormatClaude && targetFormat == FormatOpenAI {
@@ -2347,6 +2362,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		imageGenerationRequest = valueHasImageGenerationTool(upstreamObject)
 	}
 
+	bodyBytes = normalizeResponsesSchemaBody(bodyBytes)
 	if accountType == AccountTypeGrok {
 		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
 	}
@@ -3239,6 +3255,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if conversationID != "" && !cyberPinned {
 				h.pool.pin(conversationID, acc.ID)
 			}
+			// The client now holds this account's turn-state blob. Record it
+			// so a later failover to another account strips the echo instead
+			// of replaying a blob that account did not mint. Discarded
+			// attempts return before this point, so they never poison it.
+			h.noteCodexTurnState(userID, conversationID, acc, resp.Header.Get("x-codex-turn-state"))
 			acc.mu.Lock()
 			acc.LastUsed = time.Now()
 			if acc.Penalty > 0 {
@@ -3384,6 +3405,9 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	}
 	provider.SetAuthHeaders(tmpReq, authAccount)
 	upstreamHeaders = tmpReq.Header
+	// The handshake echo belongs to whatever account minted it; never open a
+	// socket to a new account carrying a known foreign blob.
+	h.guardCodexTurnStateEcho(userID, conversationID, acc, upstreamHeaders)
 	// The Codex Responses relay still uses its websocket beta header, but the
 	// GA Realtime API explicitly rejects that legacy beta shape. Preserve the
 	// client-provided Realtime headers (for example openai-alpha) instead.
@@ -4018,6 +4042,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	outReq.Header = cloneHeader(r.Header)
 	removeHopByHopHeaders(outReq.Header)
 	removeConflictingProxyHeaders(outReq.Header)
+	// Single-account path has no retry, but the next request may pin this
+	// session elsewhere; never hand this account a known foreign echo.
+	h.guardCodexTurnStateEcho(userID, extractConversationIDFromHeaders(r.Header), acc, outReq.Header)
 	if r.ContentLength >= 0 {
 		outReq.ContentLength = r.ContentLength
 	}
@@ -4151,6 +4178,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	copyHeader(w.Header(), resp.Header)
 	removeHopByHopHeaders(w.Header())
 	h.replaceUsageHeaders(w.Header())
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// Single-account path commits here; every exit below writes to the
+		// client, so the blob (if any) is confirmedly downstream-held.
+		h.noteCodexTurnState(userID, extractConversationIDFromHeaders(r.Header), acc, resp.Header.Get("x-codex-turn-state"))
+	}
 	flusher, _ := w.(http.Flusher)
 	if isSSE {
 		applyStreamingResponseHeaders(w.Header())
@@ -5246,6 +5278,10 @@ func (h *proxyHandler) tryOnce(
 		outReq.Header = cloneHeader(in.Header)
 		removeHopByHopHeaders(outReq.Header)
 		removeConflictingProxyHeaders(outReq.Header)
+		// A client echo minted by another account is a proxy-chain-only
+		// contradiction upstream never sees from real Codex; strip it before
+		// this attempt's account sees it.
+		h.guardCodexTurnStateEcho(userID, conversationID, acc, outReq.Header)
 
 		// Always overwrite client-provided auth; the proxy is the single source of truth.
 		outReq.Header.Del("Authorization")
@@ -5539,15 +5575,9 @@ func (h *proxyHandler) tryOnce(
 				errStr := err.Error()
 				if isRateLimitError(err) {
 					h.applyRateLimit(acc, nil)
-				} else if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
-					// If refresh token is permanently invalid, mark account as dead immediately
-					acc.mu.Lock()
-					acc.Dead = true
-					acc.Penalty += 100.0
-					acc.mu.Unlock()
-					log.Printf("[%s] marking account %s as dead: refresh token revoked/invalid", reqID, acc.ID)
-					if err := saveAccount(acc); err != nil {
-						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+				} else if isPermanentRefreshTokenError(err) {
+					if retireAfterRefreshFail(acc, err, time.Now()) {
+						persistDeadAccount(acc, "refresh token revoked/invalid")
 					}
 					refreshFailed = true
 				} else if !strings.Contains(errStr, "rate limited") {
@@ -5657,6 +5687,13 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 		return true
 	}
 
+	// Codex access JWTs last about ten days. Refresh from the usage poller
+	// when that window is nearly closed instead of spending the refresh token
+	// on every WHAM/proxy 401.
+	if a.Type == AccountTypeCodex && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now.Add(codexRefreshHeadroom)) {
+		return true
+	}
+
 	// Other providers refresh after expiry and recover early invalidation with
 	// their existing same-account 401 retry.
 	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
@@ -5676,6 +5713,10 @@ const refreshMinInterval = 5 * time.Second
 // This is persisted to disk and survives restarts, preventing hammering OAuth endpoints
 // 15 minutes balances between preventing hammering and allowing recovery from expired tokens
 const refreshPerAccountInterval = 15 * time.Minute
+
+// codexRefreshHeadroom is how soon before access-token expiry the poller
+// should rotate. Codex access JWTs carry an `exp` claim of about ten days.
+const codexRefreshHeadroom = 6 * time.Hour
 
 func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	if a == nil {
@@ -5725,6 +5766,18 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 }
 
 func (h *proxyHandler) refreshAccountAfterAuthFailure(ctx context.Context, a *Account) error {
+	if a == nil {
+		return errors.New("nil account")
+	}
+	if a.Type == AccountTypeCodex {
+		// A 401 with a still-valid access JWT is not permission to spend the
+		// refresh token. OpenAI treats reuse as "session has ended" and can
+		// log out every copy of that login.
+		if codexAccessFarFromExpiry(a, time.Now()) {
+			return fmt.Errorf("codex access token still live, skipping refresh")
+		}
+		return h.refreshAccount(ctx, a)
+	}
 	a.mu.Lock()
 	a.LastRefresh = time.Time{}
 	a.RefreshBlocked = false

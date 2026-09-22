@@ -20,20 +20,22 @@ func TestPoolModelDescriptorsCoverEveryProvider(t *testing.T) {
 	}
 
 	tests := map[string]string{
-		"gpt-5.6-sol":      "openai",
-		"gpt-5.6-sol[1m]":  "openai",
-		"gpt-5.6-luna[1m]": "openai",
-		"gemini-3.7-flash": "gemini",
-		"claude-sonnet-5":  "anthropic",
-		"claude-fable-5-1": "anthropic",
-		"claude-opus-5":    "anthropic",
-		"k3":               "anthropic",
-		"kimi-for-coding":  "anthropic",
-		"MiniMax-M3":       "anthropic",
-		"glm-5.3":          "anthropic",
-		"glm-5.3-flash":    "anthropic",
-		"mimo-v2.5-pro":    "anthropic",
-		"grok-4.5":         "openai",
+		"gpt-5.6-sol":       "openai",
+		"gpt-5.6-sol[1m]":   "openai",
+		"gpt-5.6-luna[1m]":  "openai",
+		"gemini-3.7-flash":  "gemini",
+		"claude-sonnet-5":   "anthropic",
+		"claude-fable-5-1":  "anthropic",
+		"claude-opus-5-5":   "anthropic",
+		"k3":                "anthropic",
+		"kimi-for-coding":   "anthropic",
+		"MiniMax-M3":        "anthropic",
+		"glm-5.3":           "anthropic",
+		"glm-5.3-flash":     "anthropic",
+		"mimo-v2.5-pro":     "anthropic",
+		"grok-4.5":          "openai",
+		"lordx64/cyberkimi": "anthropic",
+		"lordx64/cyberglm":  "anthropic",
 	}
 	for id, protocol := range tests {
 		descriptor, ok := byID[id]
@@ -65,6 +67,9 @@ func TestPoolModelDescriptorsMatchCurrentProviderCatalogs(t *testing.T) {
 		byID[descriptor.ID] = descriptor
 	}
 
+	if model := byID["claude-opus-5-5"]; model.ContextWindow != 1000000 || model.MaxOutputTokens != 128000 {
+		t.Fatalf("Claude Opus 5.5 limits = %#v", model)
+	}
 	if _, ok := byID["claude-opus-4-1-20250805"]; ok {
 		t.Fatal("retired Claude Opus 4.1 is still advertised")
 	}

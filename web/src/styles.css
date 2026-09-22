@@ -452,7 +452,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .accounts-layout { display: grid; grid-template-columns: minmax(0,1fr); }
 .accounts-layout.inspecting { grid-template-columns: minmax(640px,1fr) 330px; }
 .account-table { min-width: 0; }
-.account-row { width: 100%; min-height: 62px; display: grid; grid-template-columns: minmax(210px,1.35fr) 78px 126px minmax(176px,1fr) 88px 68px 92px; align-items: center; border: 0; border-bottom: 1px solid var(--rule); background: transparent; text-align: left; font: .72rem "IBM Plex Mono", monospace; cursor: pointer; }
+.account-row { width: 100%; min-height: 62px; display: grid; grid-template-columns: minmax(210px,1.35fr) 78px 126px minmax(176px,1fr) 88px 68px 64px 92px; align-items: center; border: 0; border-bottom: 1px solid var(--rule); background: transparent; text-align: left; font: .72rem "IBM Plex Mono", monospace; cursor: pointer; }
 .account-row:last-child { border-bottom: 0; }
 .account-row > span, .account-row > strong { min-width: 0; padding: 0 9px; font-variant-numeric: tabular-nums; }
 .account-row:hover, .account-row.selected { background: color-mix(in srgb, var(--provider) 4%, transparent); box-shadow: inset 2px 0 0 var(--provider); }
@@ -630,7 +630,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .provider-head, .provider-lane { grid-template-columns: 150px minmax(150px,1fr) 100px 90px 70px 90px; }
   .provider-head span:last-child, .lane-status { display: none; }
   .accounts-layout.inspecting { grid-template-columns: minmax(520px,1fr) 300px; }
-  .account-row { grid-template-columns: minmax(180px,1.2fr) 70px 112px minmax(150px,1fr) 74px 58px; }
+  .account-row { grid-template-columns: minmax(180px,1.2fr) 70px 112px minmax(150px,1fr) 74px 58px 56px; }
   .account-spark, .account-head > span:last-child { display: none; }
 }
 

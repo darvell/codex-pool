@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -21,10 +22,13 @@ import (
 )
 
 const (
-	bucketAnalyticsOutbox = "analytics_outbox"
-	bucketAnalyticsState  = "analytics_state"
-	analyticsAckKey       = "acknowledged_sequence"
+	bucketAnalyticsOutbox   = "analytics_outbox"
+	bucketAnalyticsState    = "analytics_state"
+	analyticsAckKey         = "acknowledged_sequence"
+	analyticsHourlyStartKey = "hourly_reconciliation_v1_started_at"
 )
+
+var errHourlyReconciliationNotReady = errors.New("hourly reconciliation aggregate is not ready")
 
 type AnalyticsFact struct {
 	EventID              string    `json:"event_id"`
@@ -113,6 +117,7 @@ type DuckAnalytics struct {
 	fault          atomic.Value
 	reconciliation atomic.Value
 	closeOnce      sync.Once
+	ledgerMu       sync.Mutex
 }
 
 func newDuckAnalytics(path string, bolt *bbolt.DB) (*DuckAnalytics, error) {
@@ -134,6 +139,7 @@ func newDuckAnalytics(path string, bolt *bbolt.DB) (*DuckAnalytics, error) {
 		}
 	}
 	if os.Getenv("DUCKDB_LOW_MEMORY") != "" {
+		db.SetMaxOpenConns(1)
 		db.Exec("SET threads=1")
 		db.Exec("SET preserve_insertion_order=false")
 	}
@@ -207,7 +213,7 @@ func (a *DuckAnalytics) importLegacyBolt() error {
 		if raw != nil {
 			if err := raw.ForEach(func(key, value []byte) error {
 				var usage RequestUsage
-				if json.Unmarshal(value, &usage) != nil || usage.UserID == "" {
+				if decodeRequestUsage(value, &usage) != nil || usage.UserID == "" {
 					return nil
 				}
 				principalID, clientID := splitClientIdentity(usage.UserID)
@@ -300,18 +306,27 @@ func (a *DuckAnalytics) run() {
 	reconcileTicker := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	defer reconcileTicker.Stop()
+	var lastReconciledEnd time.Time
 	for {
 		select {
 		case <-a.stop:
 			_ = a.drain(4096)
 			return
-		case <-a.wake:
-			_ = a.drain(512)
 		case <-t.C:
+			select {
+			case <-a.wake:
+			default:
+			}
 			_ = a.drain(512)
 		case <-reconcileTicker.C:
 			now := time.Now().UTC().Truncate(time.Hour)
-			_, _ = a.Reconcile(now.Add(-time.Hour), now)
+			if now.Equal(lastReconciledEnd) {
+				continue
+			}
+			result, err := a.Reconcile(now.Add(-time.Hour), now)
+			if (err == nil && result.Clean) || errors.Is(err, errHourlyReconciliationNotReady) {
+				lastReconciledEnd = now
+			}
 		}
 	}
 }
@@ -322,6 +337,9 @@ type outboxRow struct {
 }
 
 func (a *DuckAnalytics) drain(limit int) error {
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+
 	rows := make([]outboxRow, 0, limit)
 	err := a.bolt.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketAnalyticsOutbox))
@@ -444,33 +462,78 @@ func totalsEqual(a, b analyticsTotals) bool {
 	return a == b
 }
 
+func hourlyReconciliationRange(start, end time.Time) bool {
+	start = start.UTC()
+	end = end.UTC()
+	return start.Equal(start.Truncate(time.Hour)) && end.Equal(start.Add(time.Hour))
+}
+
+func hourlyBoltTotals(tx *bbolt.Tx, start time.Time) (analyticsTotals, error) {
+	state := tx.Bucket([]byte(bucketAnalyticsState))
+	if state == nil {
+		return analyticsTotals{}, errHourlyReconciliationNotReady
+	}
+	startedRaw := state.Get([]byte(analyticsHourlyStartKey))
+	startedAt, err := time.Parse(time.RFC3339Nano, string(startedRaw))
+	if err != nil {
+		return analyticsTotals{}, errHourlyReconciliationNotReady
+	}
+	firstCompleteHour := startedAt.UTC().Truncate(time.Hour).Add(time.Hour)
+	if start.Before(firstCompleteHour) {
+		return analyticsTotals{}, errHourlyReconciliationNotReady
+	}
+
+	var totals analyticsTotals
+	prefix := []byte(start.UTC().Format("2006-01-02T15") + "|")
+	bucket := tx.Bucket([]byte(bucketGlobalHourlyUsage))
+	if bucket == nil {
+		return analyticsTotals{}, errHourlyReconciliationNotReady
+	}
+	cursor := bucket.Cursor()
+	for key, value := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, value = cursor.Next() {
+		var usage UserHourlyUsage
+		if err := json.Unmarshal(value, &usage); err != nil {
+			return analyticsTotals{}, err
+		}
+		totals.Events += usage.RequestCount
+		totals.Input += usage.InputTokens
+		totals.CacheRead += usage.CachedTokens
+		totals.CacheCreation += usage.CacheCreationTokens
+		totals.Output += usage.OutputTokens
+		totals.Reasoning += usage.ReasoningTokens
+		totals.Billable += usage.BillableTokens
+	}
+	return totals, nil
+}
+
 func (a *DuckAnalytics) Reconcile(start, end time.Time) (*AnalyticsReconciliation, error) {
+	// Keep ledger reads and the outbox snapshot on the same side of a drain.
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+
 	result := &AnalyticsReconciliation{StartedAt: start.UTC(), EndedAt: end.UTC(), CheckedAt: time.Now().UTC()}
-	duckEvents := map[string]struct{}{}
-	rows, err := a.db.Query(`SELECT event_id,input_tokens,cache_read_tokens,cache_creation_tokens,output_tokens,reasoning_tokens,billable_tokens
- FROM usage_events WHERE observed_at>=? AND observed_at<?`, start.UTC(), end.UTC())
+	err := a.db.QueryRow(`SELECT COUNT(*),
+ COALESCE(SUM(input_tokens),0),COALESCE(SUM(cache_read_tokens),0),COALESCE(SUM(cache_creation_tokens),0),
+ COALESCE(SUM(output_tokens),0),COALESCE(SUM(reasoning_tokens),0),COALESCE(SUM(billable_tokens),0)
+ FROM usage_events WHERE observed_at>=? AND observed_at<?`, start.UTC(), end.UTC()).Scan(
+		&result.Ledger.Events, &result.Ledger.Input, &result.Ledger.CacheRead, &result.Ledger.CacheCreation,
+		&result.Ledger.Output, &result.Ledger.Reasoning, &result.Ledger.Billable,
+	)
 	if err != nil {
 		return nil, err
 	}
-	for rows.Next() {
-		var id string
-		var fact AnalyticsFact
-		if err := rows.Scan(&id, &fact.InputTokens, &fact.CacheReadTokens, &fact.CacheCreationTokens, &fact.OutputTokens, &fact.ReasoningTokens, &fact.BillableTokens); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		fact.EventID = id
-		duckEvents[id] = struct{}{}
-		addFactTotals(&result.Ledger, fact)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
+	pending := make([]AnalyticsFact, 0)
 	err = a.bolt.View(func(tx *bbolt.Tx) error {
-		if bucket := tx.Bucket([]byte(bucketUsageRequests)); bucket != nil {
+		if hourlyReconciliationRange(start, end) {
+			totals, err := hourlyBoltTotals(tx, start.UTC())
+			if err != nil {
+				return err
+			}
+			result.Bolt = totals
+		} else if bucket := tx.Bucket([]byte(bucketUsageRequests)); bucket != nil {
 			if err := bucket.ForEach(func(_, value []byte) error {
 				var usage RequestUsage
-				if json.Unmarshal(value, &usage) != nil || usage.UserID == "" || usage.Timestamp.Before(start) || !usage.Timestamp.Before(end) {
+				if decodeRequestUsage(value, &usage) != nil || usage.UserID == "" || usage.Timestamp.Before(start) || !usage.Timestamp.Before(end) {
 					return nil
 				}
 				result.Bolt.Events++
@@ -488,11 +551,8 @@ func (a *DuckAnalytics) Reconcile(start, end time.Time) (*AnalyticsReconciliatio
 		if bucket := tx.Bucket([]byte(bucketAnalyticsOutbox)); bucket != nil {
 			return bucket.ForEach(func(_, value []byte) error {
 				var fact AnalyticsFact
-				if json.Unmarshal(value, &fact) != nil || fact.ObservedAt.Before(start) || !fact.ObservedAt.Before(end) {
-					return nil
-				}
-				if _, alreadyCommitted := duckEvents[fact.EventID]; !alreadyCommitted {
-					addFactTotals(&result.Ledger, fact)
+				if json.Unmarshal(value, &fact) == nil && !fact.ObservedAt.Before(start) && fact.ObservedAt.Before(end) {
+					pending = append(pending, fact)
 				}
 				return nil
 			})
@@ -501,6 +561,15 @@ func (a *DuckAnalytics) Reconcile(start, end time.Time) (*AnalyticsReconciliatio
 	})
 	if err != nil {
 		return nil, err
+	}
+	for _, fact := range pending {
+		var committed bool
+		if err := a.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM usage_events WHERE event_id=?)`, fact.EventID).Scan(&committed); err != nil {
+			return nil, err
+		}
+		if !committed {
+			addFactTotals(&result.Ledger, fact)
+		}
 	}
 	result.Clean = totalsEqual(result.Bolt, result.Ledger)
 	if !result.Clean {
