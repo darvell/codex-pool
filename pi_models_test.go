@@ -258,6 +258,33 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	}
 }
 
+func TestGeneratePiModelsJSONUsesVersionedChatCompletionsURLs(t *testing.T) {
+	t.Parallel()
+
+	data, err := generatePiModelsJSON("https://pool.example.com/proxy/", "codex-token", "claude-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg piModelsConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	wantEndpoints := map[string]string{
+		"antigravity": "https://pool.example.com/proxy/v1/chat/completions",
+		"opencode-go": "https://pool.example.com/proxy/v1/chat/completions",
+	}
+	for providerName, wantEndpoint := range wantEndpoints {
+		provider := cfg.Providers[providerName]
+		if provider.API != "openai-completions" {
+			t.Fatalf("%s api = %q, want openai-completions", providerName, provider.API)
+		}
+		if got := strings.TrimRight(provider.BaseURL, "/") + "/chat/completions"; got != wantEndpoint {
+			t.Fatalf("%s chat completions URL = %q, want %q", providerName, got, wantEndpoint)
+		}
+	}
+}
+
 func TestGeneratedClientConfigsIncludeDiscoveredAntigravityModels(t *testing.T) {
 	antigravityModels.Reset()
 	t.Cleanup(antigravityModels.Reset)
@@ -275,8 +302,26 @@ func TestGeneratedClientConfigsIncludeDiscoveredAntigravityModels(t *testing.T) 
 	if err := json.Unmarshal(piJSON, &piConfig); err != nil {
 		t.Fatal(err)
 	}
-	if models := piConfig.Providers["antigravity"].Models; len(models) != 1 || models[0].ID != "antigravity/gemini-live" {
+	models := piConfig.Providers["antigravity"].Models
+	if len(models) != 1 || models[0].ID != "antigravity/gemini-live" {
 		t.Fatalf("Pi Antigravity models = %#v", models)
+	}
+	if models[0].Compat == nil || !models[0].Compat.RequiresToolResultName {
+		t.Fatalf("Pi Antigravity model compat = %#v", models[0].Compat)
+	}
+	var serialized struct {
+		Providers map[string]struct {
+			Models []struct {
+				Compat map[string]json.RawMessage `json:"compat"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(piJSON, &serialized); err != nil {
+		t.Fatal(err)
+	}
+	requiresName, ok := serialized.Providers["antigravity"].Models[0].Compat["requiresToolResultName"]
+	if !ok || string(requiresName) != "true" {
+		t.Fatalf("serialized requiresToolResultName = %s, present = %v", requiresName, ok)
 	}
 	cuteJSON, err := generateCuteCodeSettingsJSON("https://pool.example.com", "pool-token")
 	if err != nil {
