@@ -30,7 +30,8 @@ type piModelConfig struct {
 }
 
 type piModelCompat struct {
-	ForceAdaptiveThinking bool `json:"forceAdaptiveThinking,omitempty"`
+	ForceAdaptiveThinking  bool `json:"forceAdaptiveThinking,omitempty"`
+	RequiresToolResultName bool `json:"requiresToolResultName,omitempty"`
 }
 
 type piModelCost struct {
@@ -81,7 +82,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				Models:  piModelsForProvider(AccountTypeClaude),
 			},
 			"antigravity": {
-				BaseURL: baseURL,
+				BaseURL: baseURL + "/v1",
 				APIKey:  codexAPIKey,
 				API:     "openai-completions",
 				Models:  antigravityPiModels(),
@@ -123,7 +124,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				Models:  grokPiModels(),
 			},
 			"opencode-go": {
-				BaseURL: baseURL,
+				BaseURL: baseURL + "/v1",
 				APIKey:  codexAPIKey,
 				API:     "openai-completions",
 				Models:  opencodeGoPiModels(),
@@ -163,7 +164,16 @@ func antigravityPiModels() []piModelConfig {
 		if model.SupportsImages {
 			input = append(input, "image")
 		}
-		result = append(result, piModelConfig{ID: "antigravity/" + model.ID, Name: model.DisplayName, Reasoning: boolPtr(model.SupportsThinking), Input: input, ContextWindow: model.MaxTokens, MaxTokens: model.MaxOutputTokens, Cost: advertisedModelCost(model.ID, time.Now())})
+		result = append(result, piModelConfig{
+			ID:            "antigravity/" + model.ID,
+			Name:          model.DisplayName,
+			Reasoning:     boolPtr(model.SupportsThinking),
+			Input:         input,
+			ContextWindow: model.MaxTokens,
+			MaxTokens:     model.MaxOutputTokens,
+			Cost:          advertisedModelCost(model.ID, time.Now()),
+			Compat:        &piModelCompat{RequiresToolResultName: true},
+		})
 	}
 	return result
 }
