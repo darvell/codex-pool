@@ -3,8 +3,22 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
+	"strings"
 	"time"
 )
+
+func upstreamTokenRevoked(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	for _, key := range []string{"X-Openai-Ide-Error-Code", "X-Openai-Ide-Root-Error-Code"} {
+		if strings.EqualFold(strings.TrimSpace(resp.Header.Get(key)), "token_revoked") {
+			return true
+		}
+	}
+	return false
+}
 
 func codexAccessLive(a *Account, now time.Time) bool {
 	if a == nil {

@@ -4078,6 +4078,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	resp, err := h.transport.RoundTrip(outReq)
 	captureCodexResponseState(acc, resp, reqID)
+	if provider.Type() == AccountTypeCodex && upstreamTokenRevoked(resp) {
+		persistDeadAccount(acc, "upstream token revoked")
+	}
 	if err != nil {
 		acc.mu.Lock()
 		acc.Penalty += 0.2
@@ -5520,6 +5523,10 @@ func (h *proxyHandler) tryOnce(
 	}
 
 	// If we got a 401/403, try to refresh and retry on the *same* account once.
+	if provider.Type() == AccountTypeCodex && upstreamTokenRevoked(resp) {
+		persistDeadAccount(acc, "upstream token revoked")
+		refreshFailed = true
+	}
 	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !h.cfg.disableRefresh {
 		// Log the error response body for debugging
 		if h.cfg.debug.Load() {

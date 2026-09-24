@@ -91,6 +91,9 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(ctx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	excluded := map[string]bool{opts.InitialAccount.ID: true}
 	for attempt := 0; err != nil && upstreamResp != nil && upstreamResp.StatusCode == http.StatusUnauthorized; attempt++ {
+		if upstreamTokenRevoked(upstreamResp) {
+			persistDeadAccount(opts.InitialAccount, "upstream token revoked")
+		}
 		if h.retryPoolAuth(ctx, opts.InitialAccount) {
 			_ = upstreamResp.Body.Close()
 			upstreamConn, upstreamResp, opts.InitialContextAccount, err = h.dialSwappedUpstream(ctx, opts, opts.InitialAccount, subprotocols)

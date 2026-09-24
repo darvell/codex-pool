@@ -1,11 +1,28 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestUpstreamTokenRevoked(t *testing.T) {
+	for _, header := range []string{"X-Openai-Ide-Error-Code", "X-Openai-Ide-Root-Error-Code"} {
+		resp := &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header)}
+		resp.Header.Set(header, "token_revoked")
+		if !upstreamTokenRevoked(resp) {
+			t.Fatalf("%s was not recognized", header)
+		}
+	}
+	if upstreamTokenRevoked(&http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header)}) {
+		t.Fatal("missing token error code was treated as revoked")
+	}
+	if upstreamTokenRevoked(&http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"X-Openai-Ide-Error-Code": {"token_revoked"}}}) {
+		t.Fatal("forbidden response was treated as token revoked")
+	}
+}
 
 func TestApplyProxyAuthFailure(t *testing.T) {
 	t.Run("codex proxy auth failure stays lightweight", func(t *testing.T) {
