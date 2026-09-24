@@ -24,6 +24,47 @@ func TestParseProviderModelsReadsSlugWhenIDMissing(t *testing.T) {
 	}
 }
 
+func TestGPT6CatalogUsesLongContextDespiteDiscoveryDefault(t *testing.T) {
+	models, err := parseProviderModels([]byte(`{"models":[
+		{"slug":"gpt-6-astra","context_window":272000},
+		{"slug":"gpt-6-sol","context_window":272000},
+		{"slug":"gpt-6-luna","context_window":272000}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := newPoolState([]*Account{{ID: "codex", Type: AccountTypeCodex, PlanType: "pro", Models: models}}, false)
+	found := make(map[string]bool)
+	for _, descriptor := range poolModelDescriptors(pool) {
+		if descriptor.Provider != string(AccountTypeCodex) || !strings.HasPrefix(descriptor.ID, "gpt-6-") {
+			continue
+		}
+		found[descriptor.ID] = true
+		wantContext := 272000
+		if strings.HasSuffix(descriptor.ID, "[1m]") {
+			wantContext = 1000000
+		}
+		if descriptor.ContextWindow != wantContext || descriptor.MaxOutputTokens != 128000 || descriptor.SupportingAccounts != 1 {
+			t.Fatalf("%s descriptor = %+v", descriptor.ID, descriptor)
+		}
+	}
+	for _, id := range []string{"gpt-6-astra", "gpt-6-astra[1m]", "gpt-6-sol", "gpt-6-sol[1m]", "gpt-6-luna", "gpt-6-luna[1m]"} {
+		if !found[id] {
+			t.Fatalf("%s missing from pool catalog", id)
+		}
+	}
+	aliases := newModelAliases(nil)
+	for _, id := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		variant := id + "[1m]"
+		if resolved, ok := aliases.resolve(variant); !ok || resolved != id {
+			t.Fatalf("%s resolves to %q, aliased=%v", variant, resolved, ok)
+		}
+		if got := pool.candidateForModel("", nil, AccountTypeCodex, "", "", variant); got == nil {
+			t.Fatalf("%s has no entitled candidate", variant)
+		}
+	}
+}
+
 func TestCodexModelsURLUsesDesktopClientVersion(t *testing.T) {
 	wham, _ := url.Parse("https://chatgpt.com/backend-api")
 	target, ok := providerModelsURL(NewCodexProvider(wham, wham, nil))

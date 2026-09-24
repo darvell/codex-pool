@@ -72,8 +72,13 @@ func TestAstraAccountEntitlement(t *testing.T) {
 	if found != 1 {
 		t.Fatalf("Astra descriptor count = %d", found)
 	}
+	if got := pool.candidateForModel("", nil, AccountTypeCodex, "", "", "gpt-6-astra[1m]"); got != entitled {
+		t.Fatalf("Astra 1M candidate = %+v, want entitled account", got)
+	}
 	cold := newPoolState([]*Account{other}, false)
-	if got := cold.candidateForModel("", nil, AccountTypeCodex, "", "", "gpt-6-astra"); got != nil {
-		t.Fatal("Astra routed before an account advertised access")
+	for _, id := range []string{"gpt-6-astra", "gpt-6-astra[1m]"} {
+		if got := cold.candidateForModel("", nil, AccountTypeCodex, "", "", id); got != nil {
+			t.Fatalf("%s routed before an account advertised access", id)
+		}
 	}
 }

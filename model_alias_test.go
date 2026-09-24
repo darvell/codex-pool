@@ -84,6 +84,22 @@ func TestApplyModelAliasRewritesBody(t *testing.T) {
 	}
 }
 
+func TestGPT6LongProfilesRewriteRequests(t *testing.T) {
+	aliases := newModelAliases(nil)
+	for _, id := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		variant := id + "[1m]"
+		body := []byte(`{"model":"` + variant + `","input":"hi"}`)
+		resolved, out := applyModelAlias(aliases, variant, body, false, "req")
+		if resolved != id || !bytes.Contains(out, []byte(`"model":"`+id+`"`)) {
+			t.Fatalf("%s HTTP request resolved to %q, body %s", variant, resolved, out)
+		}
+		frame := applyModelAliasToJSONFrame(&proxyHandler{aliases: aliases}, "req", []byte(`{"type":"response.create","model":"`+variant+`"}`))
+		if !bytes.Contains(frame, []byte(`"model":"`+id+`"`)) {
+			t.Fatalf("%s WebSocket frame = %s", variant, frame)
+		}
+	}
+}
+
 func TestApplyModelAliasToJSONFrameForWebSocket(t *testing.T) {
 	t.Parallel()
 

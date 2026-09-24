@@ -14,6 +14,8 @@ var defaultModelAliases = map[string]string{
 	// The 1M choices are client-facing context profiles. Upstream uses the
 	// corresponding base model ID.
 	"gpt-6-astra[1m]":   "gpt-6-astra",
+	"gpt-6-sol[1m]":     "gpt-6-sol",
+	"gpt-6-luna[1m]":    "gpt-6-luna",
 	"gpt-5.6-sol[1m]":   "gpt-5.6-sol",
 	"gpt-5.6-terra[1m]": "gpt-5.6-terra",
 	"gpt-5.6-luna[1m]":  "gpt-5.6-luna",

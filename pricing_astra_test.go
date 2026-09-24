@@ -29,6 +29,23 @@ func TestAstraPublishedPricing(t *testing.T) {
 	}
 }
 
+func TestGPT6LongContextPricing(t *testing.T) {
+	pd := newPricingData()
+	for _, tt := range []struct {
+		id   string
+		want ModelPricing
+	}{
+		{"gpt-6-sol", tieredPricing(2, 10, 0.2, 0, 272000, 4, 15, 0.4, 0)},
+		{"gpt-6-luna", tieredPricing(0.1, 0.5, 0.01, 0, 272000, 0.2, 0.75, 0.02, 0)},
+	} {
+		for _, id := range []string{tt.id, tt.id + "[1m]"} {
+			if got, ok := pd.lookupPricing(id); !ok || got != tt.want {
+				t.Fatalf("%s pricing = %+v, present=%v; want %+v", id, got, ok, tt.want)
+			}
+		}
+	}
+}
+
 func TestAstraCostThreshold(t *testing.T) {
 	pd := newPricingData()
 	for _, tt := range []struct {

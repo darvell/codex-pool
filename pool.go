@@ -692,6 +692,9 @@ func accountSupportsDiscoveredModel(account *Account, model string) bool {
 }
 
 func accountDiscoveredModel(account *Account, model string) (DiscoveredModel, bool) {
+	if upstream, ok := defaultModelAliases[strings.ToLower(model)]; ok {
+		model = upstream
+	}
 	for id, discovered := range account.Models {
 		if strings.EqualFold(id, model) {
 			return discovered, true
