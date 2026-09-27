@@ -30,6 +30,15 @@ const (
 
 type PrincipalKind string
 type PrincipalStatus string
+type PrincipalSource string
+
+const (
+	SourceMigratedCredential PrincipalSource = "migrated_credential"
+	SourceLegacyCodeSignup   PrincipalSource = "legacy_code_signup"
+	SourceOperatorInvite     PrincipalSource = "operator_invite"
+	SourceGuestPass          PrincipalSource = "guest_pass"
+	SourceOperatorBootstrap  PrincipalSource = "operator_bootstrap"
+)
 
 const (
 	PrincipalOperator  PrincipalKind   = "operator"
@@ -44,6 +53,7 @@ type Principal struct {
 	Kind                  PrincipalKind   `json:"kind"`
 	Status                PrincipalStatus `json:"status"`
 	Note                  string          `json:"note"`
+	Source                PrincipalSource `json:"source,omitempty"`
 	DisplayName           string          `json:"display_name,omitempty"`
 	Username              string          `json:"username,omitempty"`
 	Email                 string          `json:"email,omitempty"`
@@ -144,6 +154,9 @@ func newPassportStore(db *bbolt.DB, legacy *PoolUserStore, legacyAnalyticsSalt .
 	}); err != nil {
 		return nil, err
 	}
+	if err := p.backfillPrincipalSources(); err != nil {
+		return nil, err
+	}
 	if err := p.load(); err != nil {
 		return nil, err
 	}
@@ -156,6 +169,54 @@ func newPassportStore(db *bbolt.DB, legacy *PoolUserStore, legacyAnalyticsSalt .
 		}
 	}
 	return p, nil
+}
+
+// Backfill only from durable creation evidence. An edited note or current role
+// cannot establish where an account came from. Unprovable origins stay unknown.
+func (p *PassportStore) backfillPrincipalSources() error {
+	return p.db.Update(func(tx *bbolt.Tx) error {
+		evidence := make(map[string]PrincipalSource)
+		if err := tx.Bucket([]byte(bucketPassportAudit)).ForEach(func(_, value []byte) error {
+			var entry AuditEntry
+			if json.Unmarshal(value, &entry) != nil {
+				return nil // Preserve account access if an unrelated old audit row is damaged.
+			}
+			switch entry.Action {
+			case "member.legacy_signup":
+				evidence[entry.SubjectID] = SourceLegacyCodeSignup
+			case "member.onboarding_link_created":
+				evidence[entry.SubjectID] = SourceOperatorInvite
+			case "guest.created":
+				evidence[entry.SubjectID] = SourceGuestPass
+			case "operator.bootstrapped":
+				evidence[entry.SubjectID] = SourceOperatorBootstrap
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		bucket := tx.Bucket([]byte(bucketPrincipals))
+		return bucket.ForEach(func(key, value []byte) error {
+			var principal Principal
+			if err := json.Unmarshal(value, &principal); err != nil {
+				return err
+			}
+			if principal.Source != "" {
+				return nil
+			}
+			// The migration created this deterministic client ID. It survives account
+			// claims, role changes and credential rotation, unlike the note or kind.
+			if tx.Bucket([]byte(bucketClientCredentials)).Get([]byte("legacy-"+principal.ID)) != nil {
+				principal.Source = SourceMigratedCredential
+			} else {
+				principal.Source = evidence[principal.ID]
+			}
+			if principal.Source == "" {
+				return nil
+			}
+			return putJSON(bucket, string(key), &principal)
+		})
+	})
 }
 
 func (p *PassportStore) load() error {
@@ -200,7 +261,7 @@ func (p *PassportStore) migrateLegacy(users []*PoolUser) error {
 			if u.Disabled {
 				status = PrincipalSuspended
 			}
-			pr := Principal{ID: u.ID, Kind: PrincipalGuest, Status: status, Note: "legacy: " + u.Email, Email: u.Email, PlanType: u.PlanType, CreatedAt: u.CreatedAt}
+			pr := Principal{ID: u.ID, Kind: PrincipalGuest, Status: status, Source: SourceMigratedCredential, Note: "legacy: " + u.Email, Email: u.Email, PlanType: u.PlanType, CreatedAt: u.CreatedAt}
 			cl := ClientCredential{ID: "legacy-" + u.ID, PrincipalID: u.ID, Label: "LEGACY DEFAULT", Status: "active", CreatedAt: now}
 			digest := hashToken(u.Token)
 			cl.DownloadDigest = hex.EncodeToString(digest[:])

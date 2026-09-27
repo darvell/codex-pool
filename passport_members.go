@@ -82,7 +82,7 @@ func (p *PassportStore) createMemberLink(actorID, email, displayName, purpose st
 			return nil, err
 		}
 		principal = &Principal{
-			ID: id, Kind: PrincipalMember, Status: PrincipalActive,
+			ID: id, Kind: PrincipalMember, Status: PrincipalActive, Source: SourceOperatorInvite,
 			DisplayName: strings.TrimSpace(displayName), Email: email,
 			Note: "member", CreatedAt: time.Now().UTC(),
 		}
@@ -243,7 +243,7 @@ func (p *PassportStore) bootstrapOperator(username, email, displayName, password
 		if err != nil {
 			return nil, err
 		}
-		principal = &Principal{ID: id, Status: PrincipalActive, CreatedAt: time.Now().UTC()}
+		principal = &Principal{ID: id, Status: PrincipalActive, Source: SourceOperatorBootstrap, CreatedAt: time.Now().UTC()}
 	}
 	updated := *principal
 	updated.Kind = PrincipalOperator
@@ -295,7 +295,7 @@ func (p *PassportStore) claimLegacyAccount(username, password, downloadToken str
 		if err != nil {
 			return nil, "", "", err
 		}
-		principal = &Principal{ID: id, Kind: PrincipalMember, Status: PrincipalActive, Note: "legacy-code signup", CreatedAt: time.Now().UTC()}
+		principal = &Principal{ID: id, Kind: PrincipalMember, Status: PrincipalActive, Source: SourceLegacyCodeSignup, Note: "legacy-code signup", CreatedAt: time.Now().UTC()}
 	}
 	updated := *principal
 	// First legacy signup becomes operator if none exists yet.

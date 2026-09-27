@@ -16,6 +16,7 @@ export interface ConsolePrincipal {
   kind: "operator" | "member" | "guest";
   status: "active" | "suspended" | "expired";
   note: string;
+  source?: "migrated_credential" | "legacy_code_signup" | "operator_invite" | "guest_pass" | "operator_bootstrap";
   display_name?: string;
   username?: string;
   email?: string;
@@ -40,6 +41,7 @@ export interface PassportAuditEntry {
 export interface GuestPass {
   id: string;
   note: string;
+  source?: "migrated_credential" | "legacy_code_signup" | "operator_invite" | "guest_pass" | "operator_bootstrap";
   display_name?: string;
   avatar_url?: string;
   status: "active" | "suspended" | "expired";
