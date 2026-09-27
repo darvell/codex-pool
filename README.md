@@ -136,6 +136,12 @@ Members sign in with a username or email and may add a passkey. Members and oper
 
 Existing pool-user IDs and credentials migrate into guest principals. During the migration window, the former `friend_code` lets an existing holder choose a username and password; when the browser still has its old setup token, Passport claims the same principal ID and preserves its history. The code never authorizes ordinary API or provider requests. Clear it after migration to disable further account claims while the independently persisted analytics salt keeps historical origin hashes stable.
 
+Pool status economics now compare full tracked API-equivalent history with a
+sparse subscription-rate/payment ledger and show a separate last-30-days
+run-rate view. Backfilled rates are estimates, not invoices; see
+[Pool status economics](docs/pool-economics.md) for coverage, corrections, and
+pricing limitations.
+
 ---
 
 ## Configuration

@@ -142,6 +142,7 @@ export interface PoolStats {
     total_subscription_cost: number;
     total_subscription_monthly: number;
     overall_roi: number;
+    economics?: EconomicsSummary;
   };
   capacity_analysis?: {
     total_samples: number;
@@ -276,7 +277,21 @@ export interface ResetObservation {
   timing: "early" | "late" | "on_time" | "observed";
 }
 
+export interface EconomicsSummary {
+  since: string;
+  api_value: number;
+  subscription_spend: number;
+  recent_api_value: number;
+  recent_subscription_cost: number;
+  current_monthly: number;
+  estimated_cycles: number;
+  recorded_cycles: number;
+  unknown_accounts: number;
+  uncovered_value: number;
+}
+
 export interface SignalAnalytics {
+  economics_summary?: EconomicsSummary;
   generated_at: string;
   origin_data_since: string;
   economics: SignalEconomicsPoint[];

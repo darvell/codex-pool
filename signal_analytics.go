@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 )
@@ -20,6 +19,7 @@ type SignalAnalyticsResponse struct {
 	GeneratedAt       time.Time              `json:"generated_at"`
 	OriginDataSince   time.Time              `json:"origin_data_since"`
 	Economics         []SignalEconomicsPoint `json:"economics"`
+	EconomicsSummary  economicsSummary       `json:"economics_summary"`
 	Hourly            []UserHourlyUsage      `json:"hourly"`
 	OriginWeekly      []OriginWeeklyUsage    `json:"origin_weekly"`
 	ModelDaily        []ModelDailyUsageEntry `json:"model_daily"`
@@ -74,12 +74,17 @@ func (h *proxyHandler) handleSignalAnalytics(w http.ResponseWriter, r *http.Requ
 	}
 
 	if h.analyticsStore != nil {
-		economics, err := h.buildSignalEconomics(response.GeneratedAt)
+		if err := h.analyticsStore.syncSubscriptionRates(h.pool.allAccounts(), response.GeneratedAt); err != nil {
+			respondJSONError(w, http.StatusInternalServerError, "failed to record subscription state")
+			return
+		}
+		economics, summary, err := h.analyticsStore.economics(response.GeneratedAt)
 		if err != nil {
 			respondJSONError(w, http.StatusInternalServerError, "failed to build subscription economics")
 			return
 		}
 		response.Economics = economics
+		response.EconomicsSummary = summary
 		modelDaily, err := h.analyticsStore.getModelDailyUsage(42)
 		if err != nil {
 			respondJSONError(w, http.StatusInternalServerError, "failed to build model demand mix")
@@ -90,89 +95,4 @@ func (h *proxyHandler) handleSignalAnalytics(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
-}
-
-func (h *proxyHandler) buildSignalEconomics(now time.Time) ([]SignalEconomicsPoint, error) {
-	rows, err := h.analyticsStore.getAllAccountDailyCosts()
-	if err != nil {
-		return nil, err
-	}
-	costStats, err := h.analyticsStore.getAllTimeAccountCostStats()
-	if err != nil {
-		return nil, err
-	}
-
-	type subscription struct {
-		monthly   float64
-		firstSeen time.Time
-	}
-	currentAccounts := make(map[string]subscription)
-	for _, account := range h.pool.allAccounts() {
-		account.mu.Lock()
-		monthly, _ := getSubscriptionCost(account.Type, accountPlanForSubscription(account.PlanType))
-		firstSeen := costStats[account.ID].FirstSeen
-		if firstSeen.IsZero() {
-			firstSeen = now
-		}
-		currentAccounts[account.ID] = subscription{monthly: monthly, firstSeen: firstSeen.UTC()}
-		account.mu.Unlock()
-	}
-
-	dailyValue := make(map[string]float64)
-	dailyProviders := make(map[string]map[string]float64)
-	var firstDate time.Time
-	for _, row := range rows {
-		if _, ok := currentAccounts[row.AccountID]; !ok {
-			continue
-		}
-		date, err := time.Parse("2006-01-02", row.Date)
-		if err != nil {
-			continue
-		}
-		if firstDate.IsZero() || date.Before(firstDate) {
-			firstDate = date
-		}
-		dailyValue[row.Date] += row.CostUSD
-		if dailyProviders[row.Date] == nil {
-			dailyProviders[row.Date] = make(map[string]float64)
-		}
-		dailyProviders[row.Date][row.AccountType] += row.CostUSD
-	}
-	for _, sub := range currentAccounts {
-		date := time.Date(sub.firstSeen.Year(), sub.firstSeen.Month(), sub.firstSeen.Day(), 0, 0, 0, 0, time.UTC)
-		if firstDate.IsZero() || date.Before(firstDate) {
-			firstDate = date
-		}
-	}
-	if firstDate.IsZero() {
-		return nil, nil
-	}
-
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	points := make([]SignalEconomicsPoint, 0, int(today.Sub(firstDate).Hours()/24)+1)
-	cumulativeAPIValue := 0.0
-	for date := firstDate; !date.After(today); date = date.AddDate(0, 0, 1) {
-		dateKey := date.Format("2006-01-02")
-		cumulativeAPIValue += dailyValue[dateKey]
-		cumulativeSpend := 0.0
-		endOfDay := date.Add(24*time.Hour - time.Nanosecond)
-		for _, sub := range currentAccounts {
-			spend, _ := estimateSubscriptionSpend(sub.monthly, sub.firstSeen, endOfDay)
-			cumulativeSpend += spend
-		}
-		providerValues := dailyProviders[dateKey]
-		if providerValues == nil {
-			providerValues = map[string]float64{}
-		}
-		points = append(points, SignalEconomicsPoint{
-			Date:                        dateKey,
-			DailyAPIValue:               dailyValue[dateKey],
-			CumulativeAPIValue:          cumulativeAPIValue,
-			CumulativeSubscriptionSpend: cumulativeSpend,
-			ProviderAPIValue:            providerValues,
-		})
-	}
-
-	sort.Slice(points, func(i, j int) bool { return points[i].Date < points[j].Date })
-	return points, nil
 }

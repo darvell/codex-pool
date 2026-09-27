@@ -134,14 +134,14 @@ func TestPoolStatsROIUsesCumulativeSubscriptionSpendForCurrentAccounts(t *testin
 	if account.ROI != 2.5 {
 		t.Fatalf("account ROI = %v, want 2.5", account.ROI)
 	}
-	if stats.AggregateUsage.TotalAPICost != 1000 {
-		t.Fatalf("total API cost = %v, want current-account cost 1000", stats.AggregateUsage.TotalAPICost)
+	if stats.AggregateUsage.TotalAPICost != 10000 {
+		t.Fatalf("total API cost = %v, want full pool history 10000", stats.AggregateUsage.TotalAPICost)
 	}
 	if stats.AggregateUsage.TotalSubscriptionCost != 400 || stats.AggregateUsage.TotalSubscriptionMonthly != 200 {
 		t.Fatalf("subscription totals = spend %v monthly %v", stats.AggregateUsage.TotalSubscriptionCost, stats.AggregateUsage.TotalSubscriptionMonthly)
 	}
-	if stats.AggregateUsage.OverallROI != 2.5 {
-		t.Fatalf("overall ROI = %v, want 2.5", stats.AggregateUsage.OverallROI)
+	if stats.AggregateUsage.OverallROI != 0 || stats.AggregateUsage.Economics.UncoveredValue != 9000 {
+		t.Fatalf("pool ROI / uncovered value = %v / %v", stats.AggregateUsage.OverallROI, stats.AggregateUsage.Economics.UncoveredValue)
 	}
 	provider := stats.AggregateUsage.CostByProvider[string(AccountTypeCodex)]
 	if provider.SubscriptionCost != 400 || provider.MonthlySubscriptionCost != 200 || provider.ROI != 2.5 {

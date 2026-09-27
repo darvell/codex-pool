@@ -1533,7 +1533,11 @@ function Navigation({ view, principal, onChange, onSignOut }: { view: View; prin
 
 function Pulse({ stats, signal, onAccounts }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void }) {
   if (!stats || !signal) return <SignalSkeleton />;
-  const surplus = poolSurplus(stats.aggregate);
+  const economics = signal.economics_summary ?? stats.aggregate.economics;
+  const historical = economics ?? { ...stats.aggregate, since: "", estimated_cycles: 0, recorded_cycles: 0, unknown_accounts: 0, uncovered_value: 0, api_value: stats.aggregate.total_api_cost, subscription_spend: stats.aggregate.total_subscription_cost, recent_api_value: 0, recent_subscription_cost: 0, current_monthly: stats.aggregate.total_subscription_monthly };
+  const surplus = historical.api_value - historical.subscription_spend;
+  const recentSurplus = historical.recent_api_value - historical.recent_subscription_cost;
+  const incomplete = historical.unknown_accounts > 0 || historical.uncovered_value > 0;
   const burn = burnSummary(signal.hourly);
   const intervention = stats.accounts.filter((account) => account.status !== "healthy" || account.secondary_window_used_pct >= 80);
 
@@ -1566,22 +1570,27 @@ function Pulse({ stats, signal, onAccounts }: { stats: PoolStats | null; signal:
       )}
 
       <section className="inline-instruments" aria-label="Pool economics and demand">
-        <Instrument label="API-equivalent value" value={money.format(stats.aggregate.total_api_cost)} note={`${stats.aggregate.overall_roi.toFixed(2)}× subscription cost`} accent />
-        <Instrument label="Subscription spend" value={money.format(stats.aggregate.total_subscription_cost)} note={`${money.format(stats.aggregate.total_subscription_monthly)} per month`} />
-        <Instrument label="Net surplus" value={money.format(surplus)} note="API value less subscription spend" accent={surplus >= 0} danger={surplus < 0} />
+        <Instrument label="API-equivalent value" value={money.format(historical.api_value)} note={`Since ${historical.since || "tracking began"}; estimated API pricing`} accent />
+        <Instrument label="Subscription spend" value={money.format(historical.subscription_spend)} note={`${historical.recorded_cycles} recorded / ${historical.estimated_cycles} estimated cycles`} />
+        <Instrument label="Value above subscription spend" value={incomplete ? "Incomplete" : money.format(surplus)} note={incomplete ? `${historical.unknown_accounts} unknown cycles; ${money.format(historical.uncovered_value)} uncovered value` : "Estimated API value minus subscription spend; not profit"} accent={!incomplete && surplus >= 0} danger={!incomplete && surplus < 0} />
         <Instrument label="Tokens in 24 hours" value={formatTokens(burn.current24)} note={`${burn.delta >= 0 ? "+" : ""}${burn.delta.toFixed(1)}% from prior day`} danger={burn.delta > 25} />
       </section>
 
+      <section className="inline-instruments" aria-label="Recent economics (last 30 days)">
+        <Instrument label="30-day API value" value={money.format(historical.recent_api_value)} note="Estimated replacement value" />
+        <Instrument label="30-day subscription cost" value={money.format(historical.recent_subscription_cost)} note="Allocated across 30-day billing cycles" />
+        <Instrument label="30-day value above cost" value={incomplete ? "Incomplete" : money.format(recentSurplus)} note={`${money.format(historical.current_monthly)} / month current rate`} />
+      </section>
       <SignalPanel title="Provider health and capacity">
         <ProviderLanes accounts={stats.accounts} />
       </SignalPanel>
 
       <section className="primary-signal-grid">
-        <SignalPanel title="Value produced over subscription cost" className="value-panel">
+        <SignalPanel title="Cumulative estimated API value and subscription spend" className="value-panel">
           <ValueGapChart data={signal.economics} />
           <div className="chart-corner-readout">
-            <strong>{stats.aggregate.overall_roi.toFixed(2)}×</strong>
-            <span>return on cost</span>
+            <strong>{!incomplete && historical.subscription_spend > 0 ? `${(historical.api_value / historical.subscription_spend).toFixed(2)}×` : "—"}</strong>
+            <span>estimated value / cost</span>
             <small>{money.format(stats.aggregate.total_subscription_monthly)} / month</small>
           </div>
         </SignalPanel>

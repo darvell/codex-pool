@@ -689,6 +689,14 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/admin/economics" {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		h.handleEconomicsAdmin(w, r)
+		return
+	}
+
 	// Pool user admin routes
 	if strings.HasPrefix(r.URL.Path, "/admin/pool-users") {
 		if !h.checkAdminAuth(w, r) {

@@ -1804,6 +1804,7 @@ type AggregateStats struct {
 	TotalSubscriptionCost    float64                        `json:"total_subscription_cost"`
 	TotalSubscriptionMonthly float64                        `json:"total_subscription_monthly"`
 	OverallROI               float64                        `json:"overall_roi"`
+	Economics                economicsSummary               `json:"economics"`
 	CostByProvider           map[string]ProviderCostSummary `json:"cost_by_provider,omitempty"`
 }
 
@@ -2137,6 +2138,23 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		stats.AggregateUsage.TotalSubscriptionMonthly = totalSubMonthly
 		if totalSubCost > 0 {
 			stats.AggregateUsage.OverallROI = totalAPICost / totalSubCost
+		}
+
+		// Headline economics and the signal chart use the same population and
+		// billing history; per-account legacy estimates above are not totals.
+		if err := h.analyticsStore.syncSubscriptionRates(accounts, stats.GeneratedAt); err != nil {
+			log.Printf("economics: subscription sync: %v", err)
+		} else if _, economics, err := h.analyticsStore.economics(stats.GeneratedAt); err != nil {
+			log.Printf("economics: compute: %v", err)
+		} else {
+			stats.AggregateUsage.Economics = economics
+			stats.AggregateUsage.TotalAPICost = economics.APIValue
+			stats.AggregateUsage.TotalSubscriptionCost = economics.SubscriptionSpend
+			stats.AggregateUsage.TotalSubscriptionMonthly = economics.CurrentMonthly
+			stats.AggregateUsage.OverallROI = 0
+			if economics.SubscriptionSpend > 0 && economics.UnknownAccounts == 0 && economics.UncoveredValue == 0 {
+				stats.AggregateUsage.OverallROI = economics.APIValue / economics.SubscriptionSpend
+			}
 		}
 
 		// Daily cost trend for chart
