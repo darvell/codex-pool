@@ -15,7 +15,9 @@ first observation an account's **current plan price is backfilled as an
 estimate** from its recorded `added_at` (or first usage if admission metadata
 is unavailable). Later plan-price changes add a rate event and affect only
 subsequent cycles. The sparse `subscription_rates` table persists after account
-removal; absence from a pool snapshot closes its last rate. A removed account
+removal; absence from a pool snapshot closes its last rate. A cycle already billed
+before removal still counts as paid for the full cycle; it is not refunded by
+removing the account. A removed account
 that was never observed by this code has no rate history: its API value is
 shown as uncovered, not silently treated as free. Zero/unknown-priced plans (including API-key accounts with separate bills) also
 make the comparison incomplete unless an operator records the cost explicitly. List prices are **not proof of payment**.

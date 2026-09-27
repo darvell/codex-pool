@@ -240,9 +240,6 @@ func (s *AnalyticsStore) economics(now time.Time) ([]SignalEconomicsPoint, econo
 			if end.After(now) {
 				end = now
 			}
-			if !history[len(history)-1].end.IsZero() && end.After(history[len(history)-1].end) {
-				end = history[len(history)-1].end
-			}
 			overlapStart := cycle
 			if overlapStart.Before(recentStart) {
 				overlapStart = recentStart
