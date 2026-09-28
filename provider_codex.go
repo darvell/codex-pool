@@ -75,6 +75,7 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	}
 	claims := parseCodexClaims(aj.Tokens.IDToken)
 	acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
+	acc.ChatGPTUserID = claims.ChatGPTUserID
 	if acc.AccountID == "" && acc.IDTokenChatGPTAccountID != "" {
 		acc.AccountID = acc.IDTokenChatGPTAccountID
 	}
@@ -191,6 +192,9 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 			if acc.AccountID == "" {
 				acc.AccountID = claims.ChatGPTAccountID
 			}
+		}
+		if claims.ChatGPTUserID != "" {
+			acc.ChatGPTUserID = claims.ChatGPTUserID
 		}
 		if claims.PlanType != "" {
 			acc.PlanType = claims.PlanType
@@ -444,6 +448,9 @@ func parseCodexClaims(idToken string) codexJWTClaims {
 		if acc, ok := auth["chatgpt_account_id"].(string); ok && acc != "" {
 			out.ChatGPTAccountID = acc
 		}
+		if user, ok := auth["chatgpt_user_id"].(string); ok {
+			out.ChatGPTUserID = user
+		}
 		if plan, ok := auth["chatgpt_plan_type"].(string); ok {
 			out.PlanType = normalizeCodexPlanType(plan)
 		}
@@ -457,5 +464,6 @@ func parseCodexClaims(idToken string) codexJWTClaims {
 type codexJWTClaims struct {
 	ExpiresAt        time.Time
 	ChatGPTAccountID string
+	ChatGPTUserID    string
 	PlanType         string
 }

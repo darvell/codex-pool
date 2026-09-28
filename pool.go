@@ -54,6 +54,9 @@ type Account struct {
 	// IDTokenChatGPTAccountID is the `chatgpt_account_id` claim extracted from the ID token.
 	// We keep it for debugging/fallback but prefer AccountID when present.
 	IDTokenChatGPTAccountID string
+	// ChatGPTUserID is the `chatgpt_user_id` claim. Together with AccountID it
+	// identifies one paid ChatGPT seat across repeated pool logins.
+	ChatGPTUserID           string
 	PlanType                string
 	RateLimitTier           string
 	Disabled                bool

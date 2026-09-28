@@ -8,12 +8,22 @@ import (
 // Subscription history is deliberately sparse: one row per account and rate
 // change, not one row per day. A payment replaces the estimate for its cycle.
 // Neither an OAuth plan claim nor a published list price is proof of payment.
+//
+// Several pool accounts can be logins to one paid subscription (a re-login
+// creates a new account file). Rows sharing a subscription_id are billed as
+// one subscription; rows without one are their own subscription.
 type subscriptionRate struct {
 	id         string
 	start, end time.Time
 	monthly    float64
 	known      bool
 }
+
+const billingCycle = 30 * 24 * time.Hour
+
+// subscriptionGroupSQL names the subscription a subscription_rates row bills.
+const subscriptionGroupSQL = `CASE WHEN subscription_id = '' THEN 'account:' || account_id ELSE subscription_id END`
+
 type economicsSummary struct {
 	Since                  string  `json:"since"`
 	APIValue               float64 `json:"api_value"`
@@ -43,16 +53,23 @@ func (s *AnalyticsStore) syncSubscriptionRates(accounts []*Account, now time.Tim
 	for _, a := range accounts {
 		a.mu.Lock()
 		id, typ, plan, added := a.ID, a.Type, a.PlanType, a.AddedAt
+		identity := subscriptionIdentityLocked(a)
 		a.mu.Unlock()
 		seen[id] = true
 		amount, _ := getSubscriptionCost(typ, accountPlanForSubscription(plan))
 		// A zero lookup may mean a free plan, an unknown paid tier, or an
 		// API-key account with separate billing. None proves zero spend.
 		known := amount > 0
-		var start, source string
+		if identity != "" {
+			// Rows linked by an operator keep their subscription.
+			if _, err := tx.Exec(`UPDATE subscription_rates SET subscription_id = ? WHERE account_id = ? AND subscription_id = ''`, identity, id); err != nil {
+				return err
+			}
+		}
+		var start, source, subscription string
 		var oldAmount float64
 		var oldKnown bool
-		err := tx.QueryRow(`SELECT start_at, monthly_usd, known, source FROM subscription_rates WHERE account_id = ? AND end_at IS NULL ORDER BY start_at DESC LIMIT 1`, id).Scan(&start, &oldAmount, &oldKnown, &source)
+		err := tx.QueryRow(`SELECT start_at, monthly_usd, known, source, subscription_id FROM subscription_rates WHERE account_id = ? AND end_at IS NULL ORDER BY start_at DESC LIMIT 1`, id).Scan(&start, &oldAmount, &oldKnown, &source, &subscription)
 		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
@@ -67,13 +84,13 @@ func (s *AnalyticsStore) syncSubscriptionRates(accounts []*Account, now time.Tim
 			if added.After(now) {
 				added = now
 			}
-			_, err = tx.Exec(`INSERT INTO subscription_rates(account_id, start_at, monthly_usd, known, source) VALUES(?, ?, ?, ?, 'plan-estimate')`, id, added.UTC().Format(time.RFC3339Nano), amount, flag)
+			_, err = tx.Exec(`INSERT INTO subscription_rates(account_id, start_at, monthly_usd, known, source, subscription_id) VALUES(?, ?, ?, ?, 'plan-estimate', ?)`, id, added.UTC().Format(time.RFC3339Nano), amount, flag, identity)
 		} else if source != "manual" && (oldAmount != amount || oldKnown != flag) {
 			// Keep the account's original billing anchor: a changed rate applies to
 			// the next cycle, not retroactively to already accrued cycles.
 			_, err = tx.Exec(`UPDATE subscription_rates SET end_at = ? WHERE account_id = ? AND end_at IS NULL`, now.UTC().Format(time.RFC3339Nano), id)
 			if err == nil {
-				_, err = tx.Exec(`INSERT INTO subscription_rates(account_id, start_at, monthly_usd, known, source) VALUES(?, ?, ?, ?, 'plan-estimate')`, id, now.UTC().Format(time.RFC3339Nano), amount, flag)
+				_, err = tx.Exec(`INSERT INTO subscription_rates(account_id, start_at, monthly_usd, known, source, subscription_id) VALUES(?, ?, ?, ?, 'plan-estimate', ?)`, id, now.UTC().Format(time.RFC3339Nano), amount, flag, subscription)
 			}
 		}
 		if err != nil {
@@ -110,19 +127,31 @@ func (s *AnalyticsStore) syncSubscriptionRates(accounts []*Account, now time.Tim
 	return tx.Commit()
 }
 
+// subscriptionIdentityLocked returns the provider identity shared by every
+// login to one paid seat, or "" when the credential does not expose one.
+// A ChatGPT workspace holds many seats, so the user ID is part of the key.
+func subscriptionIdentityLocked(a *Account) string {
+	if a.Type == AccountTypeCodex && a.AccountID != "" && a.ChatGPTUserID != "" {
+		return "codex:" + a.AccountID + ":" + a.ChatGPTUserID
+	}
+	return ""
+}
+
+// subscriptionRates returns rate history grouped by subscription, each group
+// ordered by start.
 func (s *AnalyticsStore) subscriptionRates() (map[string][]subscriptionRate, error) {
-	rows, err := s.db.Query(`SELECT account_id, start_at, end_at, monthly_usd, known FROM subscription_rates ORDER BY account_id, start_at`)
+	rows, err := s.db.Query(`SELECT ` + subscriptionGroupSQL + `, account_id, start_at, end_at, monthly_usd, known FROM subscription_rates ORDER BY start_at, account_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := make(map[string][]subscriptionRate)
 	for rows.Next() {
-		var id, start string
+		var group, id, start string
 		var end sql.NullString
 		var amount float64
 		var known bool
-		if err := rows.Scan(&id, &start, &end, &amount, &known); err != nil {
+		if err := rows.Scan(&group, &id, &start, &end, &amount, &known); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339Nano, start)
@@ -136,29 +165,63 @@ func (s *AnalyticsStore) subscriptionRates() (map[string][]subscriptionRate, err
 				return nil, err
 			}
 		}
-		result[id] = append(result[id], r)
+		result[group] = append(result[group], r)
 	}
 	return result, rows.Err()
 }
 
-func rateAt(rates []subscriptionRate, at time.Time) (subscriptionRate, bool) {
-	for i := len(rates) - 1; i >= 0; i-- {
-		r := rates[i]
-		if !at.Before(r.start) && (r.end.IsZero() || at.Before(r.end)) {
+// cycleRate picks the rate that bills a subscription cycle: the interval in
+// force at the cycle start, else the first interval that begins within it.
+// Concurrent logins to the same seat do not add charges.
+func cycleRate(rates []subscriptionRate, cycle, next time.Time) (subscriptionRate, bool) {
+	var chosen subscriptionRate
+	found := false
+	for _, r := range rates {
+		covers := !cycle.Before(r.start) && (r.end.IsZero() || cycle.Before(r.end))
+		if covers && (!found || !r.start.Before(chosen.start)) {
+			chosen, found = r, true
+		}
+	}
+	if found {
+		return chosen, true
+	}
+	for _, r := range rates {
+		if r.start.After(cycle) && r.start.Before(next) {
 			return r, true
 		}
 	}
 	return subscriptionRate{}, false
 }
 
-// A 30-day cycle follows the original account admission date. Rates change
+func lastCoverage(rates []subscriptionRate) (time.Time, bool) {
+	var last time.Time
+	for _, r := range rates {
+		if r.end.IsZero() {
+			return time.Time{}, true
+		}
+		if r.end.After(last) {
+			last = r.end
+		}
+	}
+	return last, false
+}
+
+// A 30-day cycle follows the subscription's first recorded start. Rates change
 // prospectively at the following billing boundary; payment overrides are keyed
 // by account ID and cycle start and are never synthesized by OAuth claims.
 func (s *AnalyticsStore) economics(now time.Time) ([]SignalEconomicsPoint, economicsSummary, error) {
 	var summary economicsSummary
-	rates, err := s.subscriptionRates()
+	subscriptions, err := s.subscriptionRates()
 	if err != nil {
 		return nil, summary, err
+	}
+	covered := map[string]time.Time{}
+	for _, history := range subscriptions {
+		for _, r := range history {
+			if first, ok := covered[r.id]; !ok || r.start.Before(first) {
+				covered[r.id] = r.start
+			}
+		}
 	}
 	costs, err := s.getAllAccountDailyCosts()
 	if err != nil {
@@ -206,26 +269,36 @@ func (s *AnalyticsStore) economics(now time.Time) ([]SignalEconomicsPoint, econo
 		if !day.Before(recentStart) {
 			summary.RecentAPIValue += row.CostUSD
 		}
-		if history := rates[row.AccountID]; len(history) == 0 || day.Before(time.Date(history[0].start.Year(), history[0].start.Month(), history[0].start.Day(), 0, 0, 0, 0, time.UTC)) {
+		if first, ok := covered[row.AccountID]; !ok || day.Before(time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, time.UTC)) {
 			summary.UncoveredValue += row.CostUSD
 		}
 	}
 	spend := map[string]float64{}
 	recentSpend := 0.0
-	for id, history := range rates {
+	for _, history := range subscriptions {
 		anchor := history[0].start
 		if first.IsZero() || anchor.Before(first) {
 			first = anchor
 		}
-		for cycle := anchor; !cycle.After(now); cycle = cycle.Add(30 * 24 * time.Hour) {
-			if !history[len(history)-1].end.IsZero() && !cycle.Before(history[len(history)-1].end) {
+		last, open := lastCoverage(history)
+		for cycle := anchor; !cycle.After(now); cycle = cycle.Add(billingCycle) {
+			if !open && !cycle.Before(last) {
 				break
 			}
-			// Start on a missing-rate cycle still counts as unknown; do not assert $0.
-			r, exists := rateAt(history, cycle)
+			r, exists := cycleRate(history, cycle, cycle.Add(billingCycle))
+			if !exists {
+				continue
+			}
 			key := cycle.UTC().Format(time.RFC3339Nano)
-			charge, recorded := payments[id+"|"+key]
-			if !recorded && (!exists || !r.known) {
+			charge, recorded := 0.0, false
+			for _, member := range history {
+				if amount, ok := payments[member.id+"|"+key]; ok {
+					charge, recorded = amount, true
+					break
+				}
+			}
+			// Start on a missing-rate cycle still counts as unknown; do not assert $0.
+			if !recorded && !r.known {
 				summary.UnknownAccounts++
 				continue
 			}
@@ -236,7 +309,7 @@ func (s *AnalyticsStore) economics(now time.Time) ([]SignalEconomicsPoint, econo
 				summary.EstimatedCycles++
 			}
 			spend[cycle.Format("2006-01-02")] += charge
-			end := cycle.Add(30 * 24 * time.Hour)
+			end := cycle.Add(billingCycle)
 			if end.After(now) {
 				end = now
 			}
@@ -245,12 +318,16 @@ func (s *AnalyticsStore) economics(now time.Time) ([]SignalEconomicsPoint, econo
 				overlapStart = recentStart
 			}
 			if end.After(overlapStart) {
-				recentSpend += charge * end.Sub(overlapStart).Hours() / (30 * 24)
+				recentSpend += charge * end.Sub(overlapStart).Hours() / billingCycle.Hours()
 			}
 		}
-		if history[len(history)-1].end.IsZero() && history[len(history)-1].known {
-			summary.CurrentMonthly += history[len(history)-1].monthly
+		current := 0.0
+		for _, r := range history {
+			if r.end.IsZero() && r.known && r.monthly > current {
+				current = r.monthly
+			}
 		}
+		summary.CurrentMonthly += current
 	}
 	summary.RecentSubscriptionCost = recentSpend
 	if first.IsZero() {

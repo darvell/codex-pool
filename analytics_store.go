@@ -166,7 +166,9 @@ func createAnalyticsTables(db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	// Empty means the account is its own subscription (rows written before
+	// subscriptions were tracked).
+	return ensureAnalyticsColumn(db, "subscription_rates", "subscription_id", "TEXT NOT NULL DEFAULT ''")
 }
 
 func ensureAnalyticsColumn(db *sql.DB, table, column, definition string) error {
