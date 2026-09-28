@@ -19,10 +19,9 @@ type analyticsPricingAgg struct {
 	cost                                                   float64
 }
 
-// rebuildPricingFromBoltDB rebuilds both cost tables when pricing semantics
-// change. BoltDB retains the complete RequestUsage record, including cache
-// creation tokens that older SQLite schemas discarded, so it is the only
-// source capable of producing an honest historical reprice.
+// rebuildPricingFromBoltDB fills missing daily aggregates from retained
+// requests, but NEVER overwrites recorded history: Bolt requests are pruned
+// and a later catalog cannot reconstruct the price originally observed.
 func (s *AnalyticsStore) rebuildPricingFromBoltDB(store *usageStore, pricing *PricingData) error {
 	if s == nil || s.db == nil || store == nil || store.db == nil || pricing == nil {
 		return nil
@@ -36,7 +35,10 @@ func (s *AnalyticsStore) rebuildPricingFromBoltDB(store *usageStore, pricing *Pr
 
 	log.Printf("analytics: rebuilding historical costs for pricing version %s...", analyticsPricingVersion)
 	started := time.Now()
-	cutoff := time.Now().UTC().AddDate(0, 0, -30)
+	// Skip the partially retained boundary day rather than replacing its full
+	// daily aggregate with only the requests remaining in Bolt.
+	cutoffDate := time.Now().UTC().AddDate(0, 0, -29).Format("2006-01-02")
+	cutoff, _ := time.Parse("2006-01-02", cutoffDate)
 	agg := make(map[analyticsPricingAggKey]*analyticsPricingAgg)
 
 	s.mu.Lock()
@@ -46,7 +48,7 @@ func (s *AnalyticsStore) rebuildPricingFromBoltDB(store *usageStore, pricing *Pr
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM request_costs; DELETE FROM daily_costs`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM request_costs`); err != nil {
 		return err
 	}
 
@@ -70,7 +72,7 @@ func (s *AnalyticsStore) rebuildPricingFromBoltDB(store *usageStore, pricing *Pr
 			if err := decodeRequestUsage(value, &ru); err != nil {
 				return nil
 			}
-			if ru.InputTokens == 0 && ru.CachedInputTokens == 0 && ru.CacheCreationTokens == 0 && ru.OutputTokens == 0 {
+			if ru.Timestamp.Before(cutoff) || (ru.InputTokens == 0 && ru.CachedInputTokens == 0 && ru.CacheCreationTokens == 0 && ru.OutputTokens == 0) {
 				return nil
 			}
 			cost := pricing.calculateCost(ru)
@@ -116,7 +118,8 @@ func (s *AnalyticsStore) rebuildPricingFromBoltDB(store *usageStore, pricing *Pr
 	dailyStmt, err := tx.Prepare(`INSERT INTO daily_costs
 		(date, account_id, account_type, model, input_tokens, cached_tokens,
 		 cache_creation_tokens, output_tokens, reasoning_tokens, request_count, cost_usd)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date, account_id, model) DO NOTHING`)
 	if err != nil {
 		return err
 	}

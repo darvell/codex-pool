@@ -129,7 +129,16 @@ func createAnalyticsTables(db *sql.DB) error {
 	DROP INDEX IF EXISTS idx_request_costs_type_ts;
 	CREATE INDEX IF NOT EXISTS idx_request_costs_ts ON request_costs(timestamp);
 
-	CREATE TABLE IF NOT EXISTS analytics_metadata (
+	CREATE TABLE IF NOT EXISTS subscription_rates (
+        account_id TEXT NOT NULL, start_at TEXT NOT NULL, end_at TEXT,
+        monthly_usd REAL NOT NULL CHECK(monthly_usd >= 0), known INTEGER NOT NULL,
+        source TEXT NOT NULL, PRIMARY KEY(account_id, start_at)
+    );
+    CREATE TABLE IF NOT EXISTS subscription_payments (
+        account_id TEXT NOT NULL, cycle_at TEXT NOT NULL, amount_usd REAL NOT NULL CHECK(amount_usd >= 0),
+        note TEXT NOT NULL DEFAULT '', PRIMARY KEY(account_id, cycle_at)
+    );
+    CREATE TABLE IF NOT EXISTS analytics_metadata (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);

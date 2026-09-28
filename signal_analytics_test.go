@@ -73,10 +73,10 @@ func TestSignalAnalyticsLinksWeeklyOriginDrainAndCurrentAccountEconomics(t *test
 		t.Fatal("economics timeline is empty")
 	}
 	latest := response.Economics[len(response.Economics)-1]
-	if latest.CumulativeAPIValue != 100 {
-		t.Fatalf("cumulative API value = %v, want current-account value 100", latest.CumulativeAPIValue)
+	if latest.CumulativeAPIValue != 1000 {
+		t.Fatalf("cumulative API value = %v, want full history 1000", latest.CumulativeAPIValue)
 	}
-	if latest.CumulativeSubscriptionSpend != 200 {
-		t.Fatalf("cumulative subscription spend = %v, want 200", latest.CumulativeSubscriptionSpend)
+	if latest.CumulativeSubscriptionSpend != 200 || response.EconomicsSummary.UncoveredValue != 900 {
+		t.Fatalf("spend / uncovered value = %v / %v", latest.CumulativeSubscriptionSpend, response.EconomicsSummary.UncoveredValue)
 	}
 }

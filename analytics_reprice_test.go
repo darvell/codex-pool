@@ -64,3 +64,40 @@ func TestRebuildPricingFromBoltDBRestoresCacheCreationAndCosts(t *testing.T) {
 		t.Fatalf("second rebuild produced %d rows, want 1", count)
 	}
 }
+
+func TestRebuildPricingPreservesDailyHistoryOutsideRetainedRequests(t *testing.T) {
+	usage, err := newUsageStore(filepath.Join(t.TempDir(), "usage.db"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer usage.Close()
+	analytics, err := newAnalyticsStore(filepath.Join(t.TempDir(), "analytics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer analytics.Close()
+	old := time.Now().UTC().AddDate(0, 0, -60).Format("2006-01-02")
+	if _, err = analytics.db.Exec(`INSERT INTO daily_costs(date,account_id,account_type,model,cost_usd) VALUES(?,?,?,?,?)`, old, "retired", "codex", "gpt-5.4", 120.0); err != nil {
+		t.Fatal(err)
+	}
+	recent := time.Now().UTC().Format("2006-01-02")
+	if _, err = analytics.db.Exec(`INSERT INTO daily_costs(date,account_id,account_type,model,cost_usd) VALUES(?,?,?,?,?)`, recent, "retired", "codex", "gpt-5.4", 60.0); err != nil {
+		t.Fatal(err)
+	}
+	if err = analytics.rebuildPricingFromBoltDB(usage, newPricingData()); err != nil {
+		t.Fatal(err)
+	}
+	var cost float64
+	if err = analytics.db.QueryRow(`SELECT cost_usd FROM daily_costs WHERE date=?`, old).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 120 {
+		t.Fatalf("historical value was lost: %v", cost)
+	}
+	if err = analytics.db.QueryRow(`SELECT cost_usd FROM daily_costs WHERE date=?`, recent).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != 60 {
+		t.Fatalf("recorded recent value was lost: %v", cost)
+	}
+}
