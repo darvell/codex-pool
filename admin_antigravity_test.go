@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -128,6 +129,52 @@ func TestAntigravityOnboardProjectRequiresCompletion(t *testing.T) {
 	}
 	if got := antigravityOnboardProjectID(map[string]any{"done": true, "response": response}); got != "project" {
 		t.Fatalf("completed onboarding returned %q", got)
+	}
+}
+
+func TestAntigravityOAuthSurfacesVerificationLink(t *testing.T) {
+	antigravityModels.Reset()
+	t.Cleanup(antigravityModels.Reset)
+	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "test-client-id")
+	daily, _ := url.Parse("https://daily.example.test")
+	production, _ := url.Parse("https://prod.example.test")
+	poolDir := t.TempDir()
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Host == "oauth2.googleapis.com":
+			return antigravityTestResponse(http.StatusOK, `{"access_token":"access","refresh_token":"refresh","expires_in":3600}`), nil
+		case strings.HasSuffix(req.URL.Path, "/userinfo"):
+			return antigravityTestResponse(http.StatusOK, `{"email":"new@example.com"}`), nil
+		case strings.HasSuffix(req.URL.Path, ":loadCodeAssist"):
+			return antigravityTestResponse(http.StatusOK, `{"cloudaicompanionProject":"project","currentTier":{"id":"free-tier"}}`), nil
+		case strings.HasSuffix(req.URL.Path, ":fetchAvailableModels"):
+			return antigravityTestResponse(http.StatusOK, `{"models":{"gemini-live":{}}}`), nil
+		default:
+			return antigravityTestResponse(http.StatusForbidden, antigravityVerifyFixture), nil
+		}
+	})
+	h := &proxyHandler{
+		cfg:       &config{poolDir: poolDir, antigravityProdBase: production},
+		pool:      newPoolState(nil, false),
+		transport: transport,
+		registry:  NewProviderRegistry(NewCodexProvider(daily, daily, nil), NewClaudeProvider(daily), NewGeminiProvider(daily, daily), NewAntigravityProvider(daily, production)),
+	}
+	session, err := newAntigravityOAuthSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accountID, err := h.completeAntigravityOAuth(context.Background(), session, "code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != "complete" || session.VerifyURL != "https://accounts.google.com/verify" {
+		t.Fatalf("session status=%q verify=%q", session.Status, session.VerifyURL)
+	}
+	var saved AntigravityAuthJSON
+	raw, _ := os.ReadFile(filepath.Join(poolDir, "antigravity", accountID+".json"))
+	if err := json.Unmarshal(raw, &saved); err != nil || !saved.NeedsVerification || saved.VerificationURL != "https://accounts.google.com/verify" {
+		t.Fatalf("saved account must carry the verification state: %v %#v", err, saved)
 	}
 }
 

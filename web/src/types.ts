@@ -93,7 +93,7 @@ export interface AccountStats {
   id: string;
   type: Provider;
   plan_type: string;
-  status: "healthy" | "degraded" | "cooldown" | "dead";
+  status: "healthy" | "degraded" | "cooldown" | "verify" | "dead";
   penalty: number;
   primary_window_used_pct: number;
   secondary_window_used_pct: number;
@@ -125,6 +125,14 @@ export interface AccountStats {
   reset_credits_available?: number;
   reset_credit_expirations?: string[];
   reset_credits_known?: boolean;
+  quota_windows?: QuotaWindow[];
+}
+
+export interface QuotaWindow {
+  label: string;
+  used_pct: number;
+  reset_minutes: number;
+  window_minutes: number;
 }
 
 export interface PoolStats {
@@ -320,6 +328,8 @@ export interface AdminAccount {
   score: number;
   score_tooltip?: string;
   is_primary: boolean;
+  needs_verification?: boolean;
+  verification_url?: string;
   usage: Record<string, unknown>;
   totals: Record<string, number>;
 }

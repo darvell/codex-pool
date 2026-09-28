@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -42,6 +43,7 @@ type AntigravityAccountSnapshot struct {
 	FetchedAt  time.Time                       `json:"fetched_at"`
 	Models     map[string]AntigravityModelInfo `json:"models"`
 	Deprecated map[string]string               `json:"deprecated_model_ids,omitempty"`
+	Quota      *AntigravityQuotaSummary        `json:"quota_summary,omitempty"`
 	Raw        map[string]json.RawMessage      `json:"raw,omitempty"`
 }
 
@@ -130,8 +132,15 @@ func (r *antigravityModelRegistry) DiscoveryAvailability(accountID, model string
 	if !ok {
 		return false, time.Time{}
 	}
-	if info.Quota.RemainingFraction != nil && *info.Quota.RemainingFraction <= 0 && info.Quota.ResetTime.After(now) {
-		return false, info.Quota.ResetTime
+	var reset time.Time
+	if info.Quota.RemainingFraction != nil && *info.Quota.RemainingFraction <= 0 {
+		reset = info.Quota.ResetTime
+	}
+	if groupReset := snapshot.Quota.exhaustedUntil(model, now); groupReset.After(reset) {
+		reset = groupReset
+	}
+	if reset.After(now) {
+		return false, reset
 	}
 	return true, time.Time{}
 }
@@ -362,6 +371,9 @@ func parseAntigravityModelSnapshot(body []byte, fetchedAt time.Time) (Antigravit
 		if json.Unmarshal(raw["quotaInfo"], &quota) == nil {
 			model.Quota.RemainingFraction = quota.RemainingFraction
 			model.Quota.ResetTime, _ = time.Parse(time.RFC3339Nano, quota.ResetTime)
+			if quota.RemainingFraction == nil && !model.Quota.ResetTime.IsZero() {
+				model.Quota.RemainingFraction = new(float64)
+			}
 		}
 		snapshot.Models[id] = model
 	}
@@ -425,34 +437,18 @@ func decodeRaw(raw map[string]json.RawMessage, key string, target any) {
 }
 
 func fetchAntigravityModels(ctx context.Context, transport http.RoundTripper, account *Account, bases ...*url.URL) (AntigravityAccountSnapshot, error) {
-	body := []byte(`{}`)
 	var lastErr error
 	for _, base := range bases {
 		if base == nil {
 			continue
 		}
-		u := *base
-		u.Path = singleJoin(u.Path, "/v1internal:fetchAvailableModels")
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
-		if err != nil {
-			return AntigravityAccountSnapshot{}, err
-		}
-		req.Header.Set("Authorization", "Bearer "+account.AccessToken)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", antigravityUserAgent())
-		resp, err := transport.RoundTrip(req)
+		status, responseBody, err := postAntigravityInternal(ctx, transport, account, base, "fetchAvailableModels", []byte(`{}`))
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-		_ = resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("fetchAvailableModels failed: %s: %s", resp.Status, safeText(responseBody))
+		if status < 200 || status >= 300 {
+			lastErr = fmt.Errorf("fetchAvailableModels failed: %d: %s", status, safeText(responseBody))
 			continue
 		}
 		return parseAntigravityModelSnapshot(responseBody, time.Now())
@@ -463,22 +459,80 @@ func fetchAntigravityModels(ctx context.Context, transport http.RoundTripper, ac
 	return AntigravityAccountSnapshot{}, lastErr
 }
 
-func syncAntigravityModels(ctx context.Context, transport http.RoundTripper, account *Account, bases ...*url.URL) error {
-	snapshot, err := fetchAntigravityModels(ctx, transport, account, bases...)
+func postAntigravityInternal(ctx context.Context, transport http.RoundTripper, account *Account, base *url.URL, operation string, body []byte) (int, []byte, error) {
+	u := *base
+	u.Path = singleJoin(u.Path, "/v1internal:"+operation)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	account.mu.Lock()
+	accessToken := account.AccessToken
+	account.mu.Unlock()
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", antigravityUserAgent())
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, responseBody, nil
+}
+
+// syncAntigravityModels refreshes one account's model inventory and quota.
+// The quota summary doubles as the account health probe: it is the endpoint
+// that enforces Google's account verification, and the daily host that
+// serves generation is the one whose answer decides the account state.
+func syncAntigravityModels(ctx context.Context, transport http.RoundTripper, account *Account, daily, production *url.URL) error {
+	snapshot, err := fetchAntigravityModels(ctx, transport, account, daily, production)
 	if err != nil {
 		return err
 	}
 	previous, hadPrevious := antigravityModels.AccountSnapshot(account.ID)
-	antigravityModels.ReplaceAccount(account.ID, snapshot)
-	if hadPrevious && antigravitySnapshotsEquivalent(previous, snapshot) {
-		return nil
+	snapshot.Quota = previous.Quota
+
+	quota, quotaErr := fetchAntigravityQuota(ctx, transport, account, daily, production)
+	var forbidden *antigravityForbiddenError
+	switch {
+	case quotaErr == nil:
+		snapshot.Quota = &quota
+		clearAntigravityHealth(account)
+	case errors.As(quotaErr, &forbidden):
+		if needsVerification, banned, _ := classifyAntigravityForbidden(forbidden.body); needsVerification || banned {
+			recordAntigravityForbidden(account, forbidden.body)
+		}
 	}
-	return saveAccount(account)
+
+	antigravityModels.ReplaceAccount(account.ID, snapshot)
+	if !hadPrevious || !antigravitySnapshotsEquivalent(previous, snapshot) {
+		if err := saveAccount(account); err != nil {
+			return err
+		}
+	}
+	if quotaErr != nil {
+		return fmt.Errorf("quota summary: %w", quotaErr)
+	}
+	return nil
 }
 
 func antigravitySnapshotsEquivalent(left, right AntigravityAccountSnapshot) bool {
 	left.FetchedAt, right.FetchedAt = time.Time{}, time.Time{}
+	left.Quota, right.Quota = withoutQuotaFetchTime(left.Quota), withoutQuotaFetchTime(right.Quota)
 	return reflect.DeepEqual(left, right)
+}
+
+func withoutQuotaFetchTime(summary *AntigravityQuotaSummary) *AntigravityQuotaSummary {
+	if summary == nil {
+		return nil
+	}
+	copy := *summary
+	copy.FetchedAt = time.Time{}
+	return &copy
 }
 
 func isAntigravityModel(model string) bool {
@@ -582,9 +636,13 @@ func (h *proxyHandler) startAntigravityModelPoller() {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if h.needsRefresh(account) {
-				_ = h.refreshAccount(ctx, account)
+				if err := h.refreshAccount(ctx, account); err != nil {
+					log.Printf("antigravity refresh %s failed: %v", account.ID, err)
+				}
 			}
-			_ = syncAntigravityModels(ctx, h.transport, account, provider.DailyURL(), provider.ProductionURL())
+			if err := syncAntigravityModels(ctx, h.transport, account, provider.DailyURL(), provider.ProductionURL()); err != nil {
+				log.Printf("antigravity sync %s failed: %v", account.ID, err)
+			}
 			cancel()
 		}
 	}

@@ -1751,44 +1751,45 @@ type CyberPolicyStats struct {
 }
 
 type AccountStats struct {
-	ID                        string   `json:"id"` // hashed
-	Type                      string   `json:"type"`
-	PlanType                  string   `json:"plan_type"`
-	Status                    string   `json:"status"` // healthy, degraded, dead
-	Penalty                   float64  `json:"penalty"`
-	PrimaryWindowUsed         float64  `json:"primary_window_used_pct"`
-	SecondaryWindowUsed       float64  `json:"secondary_window_used_pct"`
-	PrimaryWindowAvailable    bool     `json:"primary_window_available"`
-	SecondaryWindowAvailable  bool     `json:"secondary_window_available"`
-	PrimaryResetMinutes       int      `json:"primary_reset_minutes"`
-	SecondaryResetMinutes     int      `json:"secondary_reset_minutes"`
-	PrimaryWindowMinutes      int      `json:"primary_window_minutes"`
-	SecondaryWindowMinutes    int      `json:"secondary_window_minutes"`
-	PrimaryPaceRatio          float64  `json:"primary_pace_ratio"`
-	SecondaryPaceRatio        float64  `json:"secondary_pace_ratio"`
-	AccountAddedAt            string   `json:"account_added_at,omitempty"`
-	TotalInputTokens          int64    `json:"total_input_tokens"`
-	TotalCachedTokens         int64    `json:"total_cached_tokens"`
-	TotalOutputTokens         int64    `json:"total_output_tokens"`
-	TotalReasoningTokens      int64    `json:"total_reasoning_tokens"`
-	TotalBillableTokens       int64    `json:"total_billable_tokens"`
-	CacheHitRate              float64  `json:"cache_hit_rate_pct"`
-	CreditsBalance            float64  `json:"credits_balance,omitempty"`
-	HasCredits                bool     `json:"has_credits"`
-	Score                     float64  `json:"score"`
-	ScoreTooltip              string   `json:"score_tooltip,omitempty"`
-	IsPrimary                 bool     `json:"is_primary"` // highest score for this provider type
-	SubscriptionCostMonthly   float64  `json:"subscription_cost_monthly"`
-	SubscriptionSpend         float64  `json:"subscription_spend"`
-	SubscriptionBillingCycles int      `json:"subscription_billing_cycles"`
-	CostTrackingStartedAt     string   `json:"cost_tracking_started_at,omitempty"`
-	SubscriptionLabel         string   `json:"subscription_label"`
-	APICostEstimate           float64  `json:"api_cost_estimate"` // all-time
-	APICostLast30d            float64  `json:"api_cost_last_30d"` // last 30 days
-	ROI                       float64  `json:"roi"`               // all-time API value / subscription spend
-	ResetCreditsAvailable     int      `json:"reset_credits_available"`
-	ResetCreditExpirations    []string `json:"reset_credit_expirations,omitempty"`
-	ResetCreditsKnown         bool     `json:"reset_credits_known"`
+	ID                        string               `json:"id"` // hashed
+	Type                      string               `json:"type"`
+	PlanType                  string               `json:"plan_type"`
+	Status                    string               `json:"status"` // healthy, degraded, dead
+	Penalty                   float64              `json:"penalty"`
+	PrimaryWindowUsed         float64              `json:"primary_window_used_pct"`
+	SecondaryWindowUsed       float64              `json:"secondary_window_used_pct"`
+	PrimaryWindowAvailable    bool                 `json:"primary_window_available"`
+	SecondaryWindowAvailable  bool                 `json:"secondary_window_available"`
+	PrimaryResetMinutes       int                  `json:"primary_reset_minutes"`
+	SecondaryResetMinutes     int                  `json:"secondary_reset_minutes"`
+	PrimaryWindowMinutes      int                  `json:"primary_window_minutes"`
+	SecondaryWindowMinutes    int                  `json:"secondary_window_minutes"`
+	PrimaryPaceRatio          float64              `json:"primary_pace_ratio"`
+	SecondaryPaceRatio        float64              `json:"secondary_pace_ratio"`
+	AccountAddedAt            string               `json:"account_added_at,omitempty"`
+	TotalInputTokens          int64                `json:"total_input_tokens"`
+	TotalCachedTokens         int64                `json:"total_cached_tokens"`
+	TotalOutputTokens         int64                `json:"total_output_tokens"`
+	TotalReasoningTokens      int64                `json:"total_reasoning_tokens"`
+	TotalBillableTokens       int64                `json:"total_billable_tokens"`
+	CacheHitRate              float64              `json:"cache_hit_rate_pct"`
+	CreditsBalance            float64              `json:"credits_balance,omitempty"`
+	HasCredits                bool                 `json:"has_credits"`
+	Score                     float64              `json:"score"`
+	ScoreTooltip              string               `json:"score_tooltip,omitempty"`
+	IsPrimary                 bool                 `json:"is_primary"` // highest score for this provider type
+	SubscriptionCostMonthly   float64              `json:"subscription_cost_monthly"`
+	SubscriptionSpend         float64              `json:"subscription_spend"`
+	SubscriptionBillingCycles int                  `json:"subscription_billing_cycles"`
+	CostTrackingStartedAt     string               `json:"cost_tracking_started_at,omitempty"`
+	SubscriptionLabel         string               `json:"subscription_label"`
+	APICostEstimate           float64              `json:"api_cost_estimate"` // all-time
+	APICostLast30d            float64              `json:"api_cost_last_30d"` // last 30 days
+	ROI                       float64              `json:"roi"`               // all-time API value / subscription spend
+	ResetCreditsAvailable     int                  `json:"reset_credits_available"`
+	ResetCreditExpirations    []string             `json:"reset_credit_expirations,omitempty"`
+	ResetCreditsKnown         bool                 `json:"reset_credits_known"`
+	QuotaWindows              []AccountQuotaWindow `json:"quota_windows,omitempty"`
 }
 
 type AggregateStats struct {
@@ -1869,6 +1870,8 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		status := "healthy"
 		if acc.Dead || acc.Disabled {
 			status = "dead"
+		} else if acc.NeedsVerification {
+			status = "verify"
 		} else if accountCoolingDownLocked(acc, stats.GeneratedAt) || accountUsageExhaustedLocked(acc) {
 			status = "cooldown"
 		} else if acc.Penalty > 2.0 {
@@ -1943,6 +1946,9 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, credit := range acc.RateLimitResetCredits {
 			as.ResetCreditExpirations = append(as.ResetCreditExpirations, credit.ExpiresAt.UTC().Format(time.RFC3339Nano))
+		}
+		if acc.Type == AccountTypeAntigravity {
+			as.QuotaWindows = antigravityQuotaWindows(acc.ID, stats.GeneratedAt)
 		}
 
 		totalInput += acc.Totals.TotalInputTokens

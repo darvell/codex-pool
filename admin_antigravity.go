@@ -45,6 +45,7 @@ type antigravityOAuthSession struct {
 	Status       string
 	AccountID    string
 	Error        string
+	VerifyURL    string
 	RedirectURI  string
 	TargetOrigin string
 }
@@ -143,9 +144,9 @@ func (h *proxyHandler) handleAntigravityStatus(w http.ResponseWriter, r *http.Re
 	}
 	antigravityOAuthSessions.Lock()
 	session := antigravityOAuthSessions.byID[input.SessionID]
-	var status, accountID, sessionError string
+	var status, accountID, sessionError, verifyURL string
 	if session != nil {
-		status, accountID, sessionError = session.Status, session.AccountID, session.Error
+		status, accountID, sessionError, verifyURL = session.Status, session.AccountID, session.Error, session.VerifyURL
 	}
 	antigravityOAuthSessions.Unlock()
 	if session == nil || time.Since(session.CreatedAt) > 30*time.Minute {
@@ -156,7 +157,7 @@ func (h *proxyHandler) handleAntigravityStatus(w http.ResponseWriter, r *http.Re
 		respondJSONError(w, http.StatusForbidden, "OAuth session belongs to another principal")
 		return
 	}
-	respondJSON(w, map[string]any{"status": status, "account_id": accountID, "error": sessionError})
+	respondJSON(w, map[string]any{"status": status, "account_id": accountID, "error": sessionError, "verification_url": verifyURL})
 }
 
 func (h *proxyHandler) handleAntigravityExchange(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +203,10 @@ func (h *proxyHandler) handleAntigravityExchange(w http.ResponseWriter, r *http.
 		respondJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	respondJSON(w, map[string]any{"success": true, "account_id": accountID})
+	antigravityOAuthSessions.Lock()
+	verifyURL := session.VerifyURL
+	antigravityOAuthSessions.Unlock()
+	respondJSON(w, map[string]any{"success": true, "account_id": accountID, "verification_url": verifyURL})
 }
 
 func (h *proxyHandler) handleAntigravityCallback(w http.ResponseWriter, r *http.Request) {
@@ -234,16 +238,19 @@ func (h *proxyHandler) handleAntigravityCallback(w http.ResponseWriter, r *http.
 }
 
 func (h *proxyHandler) renderAntigravityCallback(w http.ResponseWriter, session *antigravityOAuthSession, status, accountID, message string) {
-	sessionID, targetOrigin := "", "*"
+	sessionID, targetOrigin, verifyURL := "", "*", ""
 	if session != nil {
 		sessionID = session.ID
 		if session.TargetOrigin != "" {
 			targetOrigin = session.TargetOrigin
 		}
+		antigravityOAuthSessions.Lock()
+		verifyURL = session.VerifyURL
+		antigravityOAuthSessions.Unlock()
 	}
 	payload, _ := json.Marshal(map[string]string{
 		"type": "codex-pool-antigravity-oauth", "session_id": sessionID,
-		"status": status, "account_id": accountID, "error": message,
+		"status": status, "account_id": accountID, "error": message, "verification_url": verifyURL,
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -371,10 +378,22 @@ func (h *proxyHandler) completeAntigravityOAuth(ctx context.Context, session *an
 		return fail(errors.New("Antigravity provider is not configured"))
 	}
 	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	snapshot, err := fetchAntigravityModels(syncCtx, h.transport, account, provider.DailyURL(), provider.ProductionURL())
-	cancel()
 	if err != nil {
 		return fail(fmt.Errorf("model discovery failed: %w", err))
+	}
+	// Google can gate a new account behind identity verification. Probing
+	// quota now surfaces that link while the contributor is still present.
+	quota, quotaErr := fetchAntigravityQuota(syncCtx, h.transport, account, provider.DailyURL(), provider.ProductionURL())
+	var forbidden *antigravityForbiddenError
+	switch {
+	case quotaErr == nil:
+		snapshot.Quota = &quota
+	case errors.As(quotaErr, &forbidden):
+		applyAntigravityForbidden(account, forbidden.body)
+	default:
+		log.Printf("antigravity quota probe for new account %s failed: %v", accountID, quotaErr)
 	}
 	antigravityModels.ReplaceAccount(account.ID, snapshot)
 	if err := saveAntigravityAccount(account); err != nil {
@@ -388,6 +407,9 @@ func (h *proxyHandler) completeAntigravityOAuth(ctx context.Context, session *an
 	}
 	antigravityOAuthSessions.Lock()
 	session.Status, session.AccountID, session.Error = "complete", accountID, ""
+	if account.NeedsVerification {
+		session.VerifyURL = account.VerificationURL
+	}
 	antigravityOAuthSessions.Unlock()
 	return accountID, nil
 }

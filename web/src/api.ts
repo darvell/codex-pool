@@ -228,6 +228,7 @@ export interface AccountContributionResult {
 	  session_id?: string;
 	  status?: "pending" | "exchanging" | "complete" | "error";
 	  error?: string;
+	  verification_url?: string;
 }
 
 export async function contributeAPIKey(provider: "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go", apiKey: string) {

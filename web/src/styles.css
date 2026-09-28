@@ -475,7 +475,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .account-identity small em { flex: 0 0 auto; color: var(--muted); font-style: normal; }
 .account-identity small span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .state { color: var(--muted); }
-.state.degraded, .state.cooldown { color: #ffb23f; }
+.state.degraded, .state.cooldown, .state.verify { color: #ffb23f; }
 .state.dead { color: var(--danger); }
 .quota-limit { display: grid; gap: 2px; font-family: "IBM Plex Mono", monospace; }
 .quota-limit b { color: var(--gold-hot); font-size: .71rem; font-weight: 600; white-space: nowrap; }
@@ -496,6 +496,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .reset-window.compact strong { color: var(--gold-hot); font-weight: 600; text-align: right; }
 .reset-window.compact small { color: var(--ink); text-align: right; text-overflow: clip; }
 .reset-window.compact.unavailable small { grid-column: 2 / 4; color: var(--faint); text-align: right; }
+.reset-window.compact.quota { grid-template-columns: 92px 34px minmax(0,1fr); }
 .reset-credit { position: relative; display: inline-flex; align-items: center; gap: 5px; color: var(--gold-hot); font: .68rem "IBM Plex Mono", monospace; }
 .reset-credit > b { font-size: 1rem; font-weight: 400; }
 .reset-credit > strong { padding: 0; color: var(--gold-hot); font-weight: 600; }
@@ -516,6 +517,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .inspector-windows { display: grid; gap: 4px; margin-top: 24px; }
 .inspector-windows .reset-window { min-height: 38px; padding: 0; font-size: .7rem; }
 .inspector-windows .reset-window small { color: var(--muted); }
+.verification-link { display: inline-block; margin-top: 12px; color: #ffb23f; font: .72rem "IBM Plex Mono", monospace; }
 .inspector-reset-credits { margin-top: 24px; font-family: "IBM Plex Mono", monospace; }
 .inspector-reset-credits header { min-height: 38px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: .75rem; }
 .inspector-reset-credits header strong { color: var(--ink); font-size: .9rem; }

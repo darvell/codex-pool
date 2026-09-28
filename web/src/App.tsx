@@ -87,6 +87,7 @@ import {
 import type {
   AccountStats,
   AdminAccount,
+  QuotaWindow,
   GuestPass,
   PasskeyCredential,
   PassportPrincipal,
@@ -220,10 +221,30 @@ function WeeklyPace({ account }: { account: AccountStats }) {
   );
 }
 
-function ResetWindow({ label, available, used, resetMinutes, paceRatio, showPace = false, compact = false }: { label: string; available: boolean; used: number; resetMinutes: number; paceRatio?: number; showPace?: boolean; compact?: boolean }) {
-  if (!available) return <span className={classNames("reset-window unavailable", compact && "compact")}><b>{label}</b><small>NOT REPORTED</small></span>;
-  if (compact) return <span className="reset-window compact" aria-label={`${label} ${used.toFixed(0)}%, resets in ${formatReset(resetMinutes)}`}><b>{label}</b><strong>{used.toFixed(0)}%</strong><small>{formatReset(resetMinutes)}</small></span>;
+function ResetWindow({ label, available, used, resetMinutes, paceRatio, showPace = false, compact = false, className }: { label: string; available: boolean; used: number; resetMinutes: number; paceRatio?: number; showPace?: boolean; compact?: boolean; className?: string }) {
+  if (!available) return <span className={classNames("reset-window unavailable", compact && "compact", className)}><b>{label}</b><small>NOT REPORTED</small></span>;
+  if (compact) return <span className={classNames("reset-window compact", className)} aria-label={`${label} ${used.toFixed(0)}%, resets in ${formatReset(resetMinutes)}`}><b>{label}</b><strong>{used.toFixed(0)}%</strong><small>{formatReset(resetMinutes)}</small></span>;
   return <span className="reset-window"><b>{label} {used.toFixed(0)}%</b><small>Resets in {formatReset(resetMinutes)}{showPace ? ` · ${paceLabel(paceRatio)}` : ""}</small></span>;
+}
+
+function AccountWindows({ account, compact = false }: { account: AccountStats; compact?: boolean }) {
+  if (account.quota_windows?.length) {
+    return <>{account.quota_windows.map((window) => (
+      <ResetWindow key={window.label} className="quota" label={window.label} available used={window.used_pct} resetMinutes={window.reset_minutes} paceRatio={compact ? undefined : quotaPace(window)} showPace={!compact} compact={compact} />
+    ))}</>;
+  }
+  return (
+    <>
+      <ResetWindow label={compact ? "Primary" : "Primary window"} available={account.primary_window_available} used={account.primary_window_used_pct} resetMinutes={account.primary_reset_minutes} paceRatio={account.primary_pace_ratio} showPace={!compact} compact={compact} />
+      <ResetWindow label={compact ? "Weekly" : "Weekly window"} available={account.secondary_window_available} used={account.secondary_window_used_pct} resetMinutes={account.secondary_reset_minutes} paceRatio={account.secondary_pace_ratio} showPace={!compact} compact={compact} />
+    </>
+  );
+}
+
+function quotaPace(window: QuotaWindow) {
+  const elapsed = window.window_minutes - window.reset_minutes;
+  if (elapsed < window.window_minutes / 100) return 0;
+  return window.used_pct / (100 * elapsed / window.window_minutes);
 }
 
 function formatResetCreditExpiry(value: string) {
@@ -2560,8 +2581,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                 <span className={`state ${account.status}`} data-label="State">{account.status === "dead" ? "offline" : account.status}</span>
                 <span className="account-pace" data-label="Weekly pace"><WeeklyPace account={account} /></span>
                 <span className="account-windows" data-label="Reset windows">
-                  <ResetWindow label="Primary" available={account.primary_window_available} used={account.primary_window_used_pct} resetMinutes={account.primary_reset_minutes} compact />
-                  <ResetWindow label="Weekly" available={account.secondary_window_available} used={account.secondary_window_used_pct} resetMinutes={account.secondary_reset_minutes} compact />
+                  <AccountWindows account={account} compact />
                 </span>
                 <span data-label="24h burn">{formatTokens(accountThroughput(account))}</span>
                 <strong data-label="Return">{account.subscription_spend ? `${account.roi.toFixed(2)}×` : "—"}</strong>
@@ -2587,8 +2607,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                 <div className="inspector-provider" style={{ color: providerDisplay(selectedAccount.type).color }}>{providerDisplay(selectedAccount.type).label} · {selectedAccount.plan_type}</div>
                 <div className="account-admission">Added {formatAdmission(selectedAccount.account_added_at)} · Spend {money.format(selectedAccount.subscription_spend)}</div>
                 <div className="inspector-windows" aria-label="Account usage reset windows">
-                  <ResetWindow label="Primary window" available={selectedAccount.primary_window_available} used={selectedAccount.primary_window_used_pct} resetMinutes={selectedAccount.primary_reset_minutes} paceRatio={selectedAccount.primary_pace_ratio} showPace />
-                  <ResetWindow label="Weekly window" available={selectedAccount.secondary_window_available} used={selectedAccount.secondary_window_used_pct} resetMinutes={selectedAccount.secondary_reset_minutes} paceRatio={selectedAccount.secondary_pace_ratio} showPace />
+                  <AccountWindows account={selectedAccount} />
                 </div>
                 {selectedAccount.type === "codex" && (
                   <section className="inspector-reset-credits" aria-label="Banked usage resets">
@@ -2613,6 +2632,9 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
                       <Instrument label="Primary" value={selectedAdmin.is_primary ? "Yes" : "No"} />
                     </div>
                     <pre className="score-trace">{selectedAdmin.score_tooltip || "No score detail is available."}</pre>
+                    {selectedAdmin.needs_verification && selectedAdmin.verification_url && (
+                      <a className="verification-link" href={selectedAdmin.verification_url} target="_blank" rel="noreferrer">Verify Google account</a>
+                    )}
                     <div className="operator-actions">
                       {toggleAction && <button disabled={busy} className={isArmedAccountAction(action, selectedAdmin.id, toggleAction) ? "confirm" : ""} onClick={() => perform(toggleAction)}>{isArmedAccountAction(action, selectedAdmin.id, toggleAction) ? `Confirm ${selectedAdmin.disabled ? "enable" : "disable"}` : selectedAdmin.disabled ? "Enable account" : "Disable account"}</button>}
                       <button disabled={busy || !selectedAdmin.dead} className={isArmedAccountAction(action, selectedAdmin.id, "resurrect") ? "confirm" : ""} onClick={() => perform("resurrect")}>{isArmedAccountAction(action, selectedAdmin.id, "resurrect") ? "Confirm restore" : "Restore offline account"}</button>
@@ -2666,26 +2688,28 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
 	  const oauthCompleted = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [verifyURL, setVerifyURL] = useState("");
   const selected = CONTRIBUTION_PROVIDERS.find((candidate) => candidate.id === provider)!;
 
 	  useEffect(() => {
 	    if (provider !== "antigravity" || !oauth?.sessionID) return;
 	    let stopped = false;
-	    const complete = async () => {
+	    const complete = async (verificationURL?: string) => {
 	      if (stopped || oauthCompleted.current) return;
 	      oauthCompleted.current = true;
+	      if (verificationURL) { setVerifyURL(verificationURL); return; }
 	      await onAdded();
 	    };
 	    const onMessage = (event: MessageEvent) => {
 	      if (event.origin !== window.location.origin || event.data?.type !== "codex-pool-antigravity-oauth" || event.data?.session_id !== oauth.sessionID) return;
-	      if (event.data.status === "complete") void complete();
+	      if (event.data.status === "complete") void complete(event.data.verification_url);
 	      if (event.data.status === "error") setError(event.data.error || "Google sign-in failed");
 	    };
 	    window.addEventListener("message", onMessage);
 	    const timer = window.setInterval(async () => {
 	      try {
 	        const status = await antigravityOAuthStatus(oauth.sessionID!);
-	        if (status.status === "complete") { window.clearInterval(timer); await complete(); }
+	        if (status.status === "complete") { window.clearInterval(timer); await complete(status.verification_url); }
 	        if (status.status === "error") { window.clearInterval(timer); setError(status.error || "Google sign-in failed"); }
 	      } catch { /* polling is only a fallback for a missed popup message */ }
 	    }, 1200);
@@ -2698,6 +2722,7 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
     setCredential("");
     setOAuth(null);
     setError("");
+    setVerifyURL("");
   };
 
   const startOAuth = async () => {
@@ -2733,7 +2758,9 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
         }
 	        if (provider === "antigravity") {
 	          if (!oauth.sessionID || !credential.trim()) throw new Error("Paste the authorization code or callback URL");
-	          await exchangeAntigravityOAuth(oauth.sessionID, credential, oauth.state || "");
+	          const result = await exchangeAntigravityOAuth(oauth.sessionID, credential, oauth.state || "");
+	          oauthCompleted.current = true;
+	          if (result.verification_url) { setVerifyURL(result.verification_url); return; }
 	        } else {
 	          const code = oauthCode(credential);
 	          if (!code || !oauth.verifier) throw new Error("Paste the authorization code or callback URL");
@@ -2751,6 +2778,19 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
       setBusy(false);
     }
   };
+
+  if (verifyURL) {
+    return (
+      <div className="operator-backdrop" role="presentation">
+        <div className="operator-dialog contribution-dialog" role="dialog" aria-modal="true" aria-labelledby="contribution-title">
+          <h2 id="contribution-title">Verify this Google account</h2>
+          <p>The account was added, but Google requires verification before it can serve every request. Open the link while signed in to the same Google account.</p>
+          <a className="verification-link" href={verifyURL} target="_blank" rel="noreferrer">Verify Google account</a>
+          <div><button type="button" className="gold-button" onClick={() => void onAdded()}>Done</button></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="operator-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
