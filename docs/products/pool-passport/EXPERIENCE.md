@@ -22,9 +22,9 @@ Surface ownership for concepts that appear more than once:
 
 | Concept | Primary surface | Secondary appearances |
 |---|---|---|
-| A principal's internal note | Console detail | Passes list — *Summarized*, note and status only. Never shown to the guest. |
-| A principal's visible identity | Mine and command rail | Optional nickname plus a real uploaded avatar image. Upload accepts PNG/JPEG up to 2 MB, validates 16–4096 px dimensions and at most 16 million decoded pixels, center-crops, and normalizes to 128×128 PNG. Members fall back to email initials; guests fall back to `GUEST <short-id>`. Analytics roster, tooltips, and detail use the same live profile owner. |
-| A principal's usage series | Mine, for oneself; Console detail, for others | Mine client filter — *Partitioned* by labelled credential. Console list — *Summarized*, 7-day sparkline and totals. Pulse — *Complementary*, pool-wide aggregate answering a capacity question, not a per-person one. |
+| A principal's internal note | Console detail | Passes list — *Summarized*, note and status only. Never shown to the guest. It is never substituted for a member name. |
+| A principal's visible identity | Mine and command rail | Optional nickname plus a real uploaded avatar image. Upload accepts PNG/JPEG up to 2 MB, validates 16–4096 px dimensions and at most 16 million decoded pixels, center-crops, and normalizes to 128×128 PNG. Members fall back to email initials; guests fall back to `GUEST <short-id>`. Console roster leads with display name, falls back to username for members or private note for guests, and shows role or unclaimed legacy state underneath; username, email, source and private note are labelled in detail. Pulse’s trailing-seven-day heavy pool users list uses the same names and role labels. Origin/IP concentration remains a separate Insights question. |
+| A principal's usage series | Mine, for oneself; Console detail, for others | Mine client filter — *Partitioned* by labelled credential. Console list — *Summarized*, selected-window billable tokens and API-equivalent value. Pulse — *Complementary*, top ten principals over the trailing seven days, ranked by billable tokens and linked to Console. Origin concentration in Insights remains a separate IP-based demand metric. |
 | Pool capacity | Pulse and Insights, unchanged | Console — *Suppressed*. The console answers "who", not "how much is left". |
 | Provider setup instructions | Setup | Join success — *Summarized*, the single most relevant one-liner with a link to Setup. |
 
@@ -131,11 +131,11 @@ Place: Passes
 ```text
 Place: Console, sorted by tokens over the selected window
   Action: select a row -> detail panel
-  Shows: note, kind, created, last seen, distinct origins, hourly series, model mix, cost
+  Shows: display name, role, source, username, email, private note, created, last seen, selected-window requests/tokens/value, hourly series. Filter: All (default), Members & operator, Guests, Unclaimed legacy; legacy accounts remain in the all-account total.
   Action: Suspend
-      -> two-click confirm naming the person by their note
+      -> confirm naming the person by display name or the best available account label
       -> credential cutoff advanced, download URL rotated, sessions killed, next proxy request denied
-      -> row moves to SUSPENDED, retains history, audit entry written
+      -> row shows SUSPENDED, retains history, audit entry written
   Action: Restore -> reverses status. The credential cutoff does not roll back, so previously issued
           credentials and download URLs stay dead; the principal receives a new download link. The confirm says so.
 ```
@@ -225,7 +225,7 @@ Reference: the live Signal Room at commit `82d3104` — `web/src/App.tsx`, `web/
 | Credentials in `localStorage` | Session persistence | Exclude | Replaced by an HttpOnly cookie | Plaintext provider credentials readable by any injected script |
 | Operator unlock modal probing `/admin/accounts` | Elevation | Adapt | Authority comes from the session's principal kind; no separate unlock, no second token in `sessionStorage` | Two parallel auth systems in one dashboard is the current confusion |
 | `YOUR HANDLE` derived from a hashed IP | Weak self-identity | Adapt | Becomes the optional display name, member email, or guest short ID; private notes never appear here | The hash was a stand-in for identity the system did not have |
-| Global-only charts | Pool capacity | Preserve | Pulse and Insights keep answering the capacity question unchanged | Still the right question for a member; per-person lives on Mine and Console |
+| Global-only charts | Pool capacity | Preserve | Pulse retains capacity metrics and links its seven-day top users to Console; Insights retains hashed-origin demand metrics | Origin and account identity answer different questions |
 
 ### Category expectation behavior
 

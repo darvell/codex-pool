@@ -17,6 +17,7 @@ type ConsolePrincipal struct {
 	Kind                 PrincipalKind   `json:"kind"`
 	Status               PrincipalStatus `json:"status"`
 	Note                 string          `json:"note"`
+	Source               PrincipalSource `json:"source,omitempty"`
 	DisplayName          string          `json:"display_name,omitempty"`
 	Username             string          `json:"username,omitempty"`
 	Email                string          `json:"email,omitempty"`
@@ -51,7 +52,7 @@ func (p *PassportStore) consolePrincipals(usage []PrincipalUsageSummary) []Conso
 			lastSeenCopy := lastSeen
 			lastSeenAt = &lastSeenCopy
 		}
-		out = append(out, ConsolePrincipal{ID: principal.ID, Kind: principal.Kind, Status: principal.Status, Note: principal.Note, DisplayName: principal.DisplayName, Username: principal.Username, Email: principal.Email, AvatarURL: avatar, ExpiresAt: principal.ExpiresAt, CreatedAt: principal.CreatedAt, LastSeenAt: lastSeenAt, BillableTokens: item.BillableTokens, RequestCount: item.RequestCount, APIEquivalentCostUSD: item.APIEquivalentCostUSD})
+		out = append(out, ConsolePrincipal{ID: principal.ID, Kind: principal.Kind, Status: principal.Status, Note: principal.Note, Source: principal.Source, DisplayName: principal.DisplayName, Username: principal.Username, Email: principal.Email, AvatarURL: avatar, ExpiresAt: principal.ExpiresAt, CreatedAt: principal.CreatedAt, LastSeenAt: lastSeenAt, BillableTokens: item.BillableTokens, RequestCount: item.RequestCount, APIEquivalentCostUSD: item.APIEquivalentCostUSD})
 	}
 	p.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool {

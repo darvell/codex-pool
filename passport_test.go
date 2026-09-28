@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 func testUsageStore(t *testing.T) *usageStore {
@@ -29,7 +31,7 @@ func TestPassportMigratesLegacyUserAndClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.principal(u.ID); got == nil || got.Note != "legacy: friend@pool.local" {
+	if got := p.principal(u.ID); got == nil || got.Note != "legacy: friend@pool.local" || got.Source != SourceMigratedCredential {
 		t.Fatalf("principal=%+v", got)
 	}
 	p.mu.RLock()
@@ -63,7 +65,7 @@ func TestMemberOnboardingAndRecoveryLinksAreSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if member.Kind != PrincipalMember || member.PasswordHash == "" {
+	if member.Kind != PrincipalMember || member.PasswordHash == "" || member.Source != SourceOperatorInvite {
 		t.Fatalf("member=%+v", member)
 	}
 	if _, _, _, err := passport.redeemMemberLink(onboarding.Token, "another correct password"); err == nil {
@@ -114,7 +116,7 @@ func TestLegacySignupClaimsExistingPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal2.Kind != PrincipalMember {
+	if principal2.Kind != PrincipalMember || principal2.Source != SourceLegacyCodeSignup {
 		t.Fatalf("second signup should be member, got %s", principal2.Kind)
 	}
 }
@@ -330,5 +332,58 @@ func TestConsoleUsageHoursFollowsQuery(t *testing.T) {
 
 	if got := consoleUsageHours(request); got != 24 {
 		t.Fatalf("hours = %d, want 24", got)
+	}
+}
+
+func TestPrincipalSourceBackfillPreservesMigratedIdentityAfterClaim(t *testing.T) {
+	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
+	store := testUsageStore(t)
+	legacy := &PoolUserStore{users: map[string]*PoolUser{}, byTok: map[string]*PoolUser{}}
+	user := &PoolUser{ID: "migrated-person", Token: "old-download", Email: "old@pool.local", CreatedAt: time.Now()}
+	legacy.users[user.ID] = user
+	legacy.byTok[user.Token] = user
+	passport, err := newPassportStore(store.db, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if passport.principal(user.ID).Source != SourceMigratedCredential {
+		t.Fatal("migration source missing")
+	}
+	// Simulate records created before the source field existed, including a
+	// claimed principal whose note/role no longer describe its original origin.
+	old := *passport.principal(user.ID)
+	old.Source = ""
+	old.Kind = PrincipalMember
+	old.Username = "friend"
+	old.Note = "edited note"
+	if err := store.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketPrincipals)), old.ID, &old) }); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := newPassportStore(store.db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.principal(user.ID); got.Source != SourceMigratedCredential || got.Kind != PrincipalMember || got.Note != "edited note" {
+		t.Fatalf("backfilled=%+v", got)
+	}
+}
+
+func TestPrincipalSourceBackfillDoesNotGuessFromLegacyNote(t *testing.T) {
+	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
+	store := testUsageStore(t)
+	_, err := newPassportStore(store.db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &Principal{ID: "unknown-person", Kind: PrincipalGuest, Status: PrincipalActive, Note: "legacy: unknown", CreatedAt: time.Now()}
+	if err := store.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketPrincipals)), old.ID, old) }); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := newPassportStore(store.db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.principal(old.ID).Source; got != "" {
+		t.Fatalf("guessed source: %q", got)
 	}
 }

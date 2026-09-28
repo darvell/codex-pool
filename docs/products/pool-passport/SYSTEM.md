@@ -153,8 +153,8 @@ Added in-process background work: one analytics writer, one lightweight reconcil
 | Principal rotates/revokes a client | `POST /api/me/clients/{id}/rotate` / `DELETE` | Client cutoff/status and download token change | Other clients unaffected | `TestCredentialRotation` |
 | Anyone reads own usage | `GET /api/me/usage?window=&client=` | None | Self-scoped series, optionally partitioned by client credential | `TestSelfUsageScoping`, `TestPerClientAnalytics` |
 | Anyone exports own usage | `GET /api/me/usage/export.csv` | None | CSV; the ordinary usage endpoint remains the JSON API | `TestSelfExportScoped` |
-| Member reads the roster | `GET /api/principals?window=` | None | Ranked list with sparklines | `TestConsoleRequiresMember` |
-| Member inspects a principal | `GET /api/principals/{id}/usage` | None | Full series | `TestGuestCannotReadOtherPrincipal` |
+| Member reads the roster | `GET /api/console/principals?hours=` | None | Ranked all-principal list with selected-window totals, role and persisted creation source | `TestConsoleRequiresMember` |
+| Member inspects a principal | `GET /api/console/principals/{id}/usage?hours=` | None | Full series | `TestGuestCannotReadOtherPrincipal` |
 | Operator suspends a member | `POST /api/principals/{id}/suspend` | Status + issue-time cutoff + download-token rotation + sessions + audit | Row moves | `TestMemberCannotSuspendMember` |
 | CLI sends a request | `proxyRequest` → `recordUsage` | Immutable fact and cost provenance committed to Bolt outbox | Completion is not blocked on DuckDB | `TestUsageOutboxCommitted` |
 | Analytics writer drains | outbox worker | Batch inserted into DuckDB in one explicit transaction; outbox rows acknowledged after commit | Charts include the new facts | `TestOutboxCrashReplay` |

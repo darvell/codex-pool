@@ -132,7 +132,7 @@ The sign-in flow uses Antigravity's shipped Google OAuth client and its fixed `h
 
 ## Pool Passport
 
-Members sign in with a username or email and may add a passkey. Members and operators can create revocable guest passes whose magic links open the pool directly. Each principal can keep separately labelled client credentials and inspect token usage over time; operators can manage principals, provider accounts, passes, audit events, and analytics health from the Signal Room.
+Members sign in with a username or email and may add a passkey. Members and operators can create revocable guest passes whose magic links open the pool directly. Each principal can keep separately labelled client credentials and inspect token usage over time; operators can manage principals, provider accounts, passes, audit events, and analytics health from the Signal Room. Pulse ranks the ten heaviest pool users over the last seven days by billable tokens and links into Members; the roster shows display names with roles, distinguishes unclaimed migrated credentials, and filters account categories without removing them from pool-wide totals. Hashed origin analytics remain available in Insights for IP-based demand analysis.
 
 Existing pool-user IDs and credentials migrate into guest principals. During the migration window, the former `friend_code` lets an existing holder choose a username and password; when the browser still has its old setup token, Passport claims the same principal ID and preserves its history. The code never authorizes ordinary API or provider requests. Clear it after migration to disable further account claims while the independently persisted analytics salt keeps historical origin hashes stable.
 

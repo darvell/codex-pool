@@ -113,7 +113,7 @@ func (p *PassportStore) createGuest(actorID, note, displayName string, expires *
 		return nil, nil, nil, "", err
 	}
 	now := time.Now().UTC()
-	pr := &Principal{ID: id, Kind: PrincipalGuest, Status: PrincipalActive, Note: note, DisplayName: strings.TrimSpace(displayName), ExpiresAt: expires, CreatedBy: actorID, CreatedAt: now}
+	pr := &Principal{ID: id, Kind: PrincipalGuest, Status: PrincipalActive, Source: SourceGuestPass, Note: note, DisplayName: strings.TrimSpace(displayName), ExpiresAt: expires, CreatedBy: actorID, CreatedAt: now}
 	linkDigest := hashToken(token)
 	link := &JoinLink{ID: linkID, PrincipalID: id, CreatedBy: actorID, TokenDigest: hex.EncodeToString(linkDigest[:]), CreatedAt: now, ExpiresAt: expires}
 	link.TokenCiphertext, err = p.seal("join", link.ID, id, token)

@@ -1,3 +1,4 @@
+import { isUnclaimedLegacy, memberName as accountDisplayName, memberOrigin, memberRole } from "./memberIdentity";
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { browserSupportsWebAuthn, startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import {
@@ -459,7 +460,7 @@ export function App() {
         <Navigation view={view} principal={passport} onChange={goToView} onSignOut={signOut} />
         <main className="signal-main" id="main-content">
           {error && <div className="signal-error" role="alert"> {error}</div>}
-          {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => goToView("accounts", { accounts: "attention" })} />}
+          {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => goToView("accounts", { accounts: "attention" })} onMember={(id) => goToView("console", { member: id })} />}
           {view === "insights" && <Insights stats={stats} signal={signal} onAccounts={() => goToView("accounts", { accounts: null })} />}
           {view === "mine" && <PassportMine principal={passport} onPrincipal={setPassport} />}
           {view === "passes" && passport && passport.kind !== "guest" && <Passes />}
@@ -1277,6 +1278,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
   const [health, setHealth] = useState<Awaited<ReturnType<typeof loadAnalyticsHealth>> | null>(null);
   const [hours, setHours] = useState(168);
   const [memberQuery, setMemberQuery] = useState("");
+  const [memberFilter, setMemberFilter] = useState<"all" | "members" | "guests" | "legacy">("all");
   const [memberEmail, setMemberEmail] = useState("");
   const [memberName, setMemberName] = useState("");
   const [memberLink, setMemberLink] = useState<{ label: string; link: string } | null>(null);
@@ -1294,7 +1296,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
       setError("");
       setSelected((current) => {
         const requestedID = queryValue("member") || current?.id;
-        return requestedID ? ranking.principals.find((item) => item.id === requestedID) || ranking.principals[0] || null : ranking.principals[0] || null;
+        return requestedID ? ranking.principals.find((item) => item.id === requestedID) || null : null;
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to load console");
@@ -1308,7 +1310,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
   useEffect(() => {
     const restoreMember = () => {
       const requestedID = queryValue("member");
-      setSelected(requestedID ? principals.find((item) => item.id === requestedID) || principals[0] || null : principals[0] || null);
+      setSelected(requestedID ? principals.find((item) => item.id === requestedID) || null : null);
     };
     window.addEventListener("popstate", restoreMember);
     return () => window.removeEventListener("popstate", restoreMember);
@@ -1339,7 +1341,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
 
   const changeStatus = async (target: ConsolePrincipal) => {
     const status = target.status === "active" ? "suspended" : "active";
-    if (!window.confirm(`${status === "suspended" ? "Suspend" : "Restore"} ${target.note || target.display_name || target.id}? ${status === "suspended" ? "Their clients will lose pool access until restored." : "Their active clients will regain pool access."}`)) return;
+    if (!window.confirm(`${status === "suspended" ? "Suspend" : "Restore"} ${accountDisplayName(target)}? ${status === "suspended" ? "Their clients will lose pool access until restored." : "Their active clients will regain pool access."}`)) return;
 
     setBusy(`status:${target.id}`);
     try {
@@ -1379,7 +1381,7 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
     setBusy(`recover:${target.id}`);
     try {
       const result = await createMemberLink(target.email, target.display_name ?? "", "recover");
-      setMemberLink({ label: `Recovery link for ${target.display_name || target.email}`, link: result.link });
+      setMemberLink({ label: `Recovery link for ${accountDisplayName(target)}`, link: result.link });
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to create recovery link");
@@ -1390,7 +1392,11 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
 
   const total = principals.reduce((sum, item) => sum + item.billable_tokens, 0);
   const normalizedMemberQuery = memberQuery.trim().toLowerCase();
-  const filteredPrincipals = principals.filter((item) => !normalizedMemberQuery || [item.note, item.display_name, item.email, item.username, item.id, item.kind, item.status].some((value) => value?.toLowerCase().includes(normalizedMemberQuery)));
+  const filteredPrincipals = principals.filter((item) => {
+    const category = isUnclaimedLegacy(item) ? "legacy" : item.kind === "guest" ? "guests" : "members";
+    return (memberFilter === "all" || memberFilter === category) &&
+      (!normalizedMemberQuery || [accountDisplayName(item), memberRole(item), item.note, item.email, item.username, item.id, item.status, memberOrigin(item)].some((value) => value?.toLowerCase().includes(normalizedMemberQuery)));
+  });
   const chartData = usage.map((row) => ({ hour: row.hour, tokens: row.billable_tokens, cost: row.api_equivalent_cost_usd }));
   const windowLabel = hours === 24 ? "24 hours" : hours === 168 ? "7 days" : hours === 720 ? "30 days" : "1 year";
   const auditLabel = (action: string) => action.split(".").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
@@ -1411,39 +1417,39 @@ function PassportConsole({ principal }: { principal: PassportPrincipal }) {
     </div>}
     {memberLink && <div className="setup-secret member-link-result" role="status"><span>{memberLink.label}</span><code>{memberLink.link}</code><CopyButton text={memberLink.link} label="Copy link" /><small>Expires in 30 minutes. Send privately; it works once.</small></div>}
     <div className="console-toolbar">
-      <div><strong>{principals.length}</strong><span>Members and guests</span></div>
-      <div><strong>{formatTokens(total)}</strong><span>Tokens in window</span></div>
+      <div><strong>{principals.length}</strong><span>Accounts (all)</span></div>
+      <div><strong>{formatTokens(total)}</strong><span>All accounts · billable tokens in window</span></div>
       <label><span>Window</span><select value={hours} onChange={(event) => setHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={168}>7 days</option><option value={720}>30 days</option><option value={8760}>1 year</option></select></label>
       <div className={classNames("analytics-health", health?.health.state.toLowerCase())}><strong>{health?.health.state || "…"}</strong><span>Outbox {health?.health.outbox_depth ?? "–"}</span></div>
     </div>
     {health?.active_gap && <div className="accounting-gap" role="alert"><strong>Accounting gap open since {new Date(health.active_gap.started_at).toLocaleString()}</strong><span>Traffic is still being served. Totals spanning this interval are incomplete.</span></div>}
     {health?.health.state === "FAULTED" && <div className="accounting-gap" role="alert"><strong>Analytics reconciliation failed</strong><span>{health.health.fault || health.health.last_reconciliation?.detail}</span></div>}
     <label className="member-search"><span>Search members</span><input value={memberQuery} onChange={(event) => setMemberQuery(event.target.value)} placeholder="Name, email, role, or status" /></label>
+    <label className="member-filter"><span>Show accounts</span><select value={memberFilter} onChange={(event) => { setMemberFilter(event.target.value as typeof memberFilter); setSelected(null); updateURL({ member: null }, "replace"); }}><option value="all">All</option><option value="members">Members &amp; operator</option><option value="guests">Guests</option><option value="legacy">Unclaimed legacy</option></select></label>
     <div className="console-layout">
-      <div className="principal-roster" role="list" aria-label="Members and guests ranked by usage">
-        {filteredPrincipals.length === 0 && <div className="empty-state">{principals.length === 0 ? "No members or guests yet." : "No members match this search."}</div>}
+      <div className="principal-roster" role="list" aria-label="Accounts ranked by billable tokens in selected window">
+        {filteredPrincipals.length === 0 && <div className="empty-state">{principals.length === 0 ? "No accounts yet." : "No accounts match this filter or search."}</div>}
         {filteredPrincipals.map((item, index) => {
-          const primary = item.note || item.display_name || item.email || item.id;
-          const secondary = item.email && item.email !== primary ? item.email : `${item.kind} · ${item.id.slice(0, 8)}`;
+          const primary = accountDisplayName(item);
           return <button className={classNames("principal-row", selected?.id === item.id && "selected", item.status !== "active" && "inactive")} key={item.id} onClick={() => { updateURL({ member: item.id }, "push"); setSelected(item); }} aria-label={`Open ${primary}`}>
             <span className="rank">{String(index + 1).padStart(2, "0")}</span>
-            <span className="passport-avatar small">{item.avatar_url ? <img src={item.avatar_url} alt="" /> : (item.display_name || item.email || "G").slice(0, 2).toUpperCase()}</span>
-            <span className="principal-copy"><strong>{primary}</strong><small>{secondary}</small></span>
+            <span className="passport-avatar small">{item.avatar_url ? <img src={item.avatar_url} alt="" /> : primary.slice(0, 2).toUpperCase()}</span>
+            <span className="principal-copy"><strong>{primary}</strong><small>{memberRole(item)}</small></span>
             <span className="principal-usage"><strong>{formatTokens(item.billable_tokens)}</strong><small>{preciseMoney.format(item.api_equivalent_cost_usd)}</small></span>
             <span className={classNames("pass-status", item.status !== "active" && "inactive")}>{item.status !== "active" ? item.status : ""}</span>
           </button>;
         })}
       </div>
       <aside className="principal-detail">
-        {!selected ? <div className="empty-state">Select a member or guest to view usage.</div> : <>
+        {!selected ? <div className="empty-state">Select a person or pass to view usage.</div> : <>
           <div className="detail-heading">
-            <div><span>{selected.kind}</span><h3>{selected.note || selected.display_name || selected.id}</h3><p>{selected.display_name || selected.email || selected.id}</p></div>
+            <div><span>{memberRole(selected)}</span><h3>{accountDisplayName(selected)}</h3><p>{selected.status !== "active" ? selected.status : memberOrigin(selected)}</p></div>
             {principal.kind === "operator" && selected.kind !== "operator" && <div className="detail-actions">
               {selected.kind === "member" && <button className="quiet-button" disabled={busy === `recover:${selected.id}`} onClick={() => issueRecovery(selected)}>{busy === `recover:${selected.id}` ? "Creating…" : "Recovery link"}</button>}
               <button className={selected.status === "active" ? "danger-action" : "quiet-button"} disabled={busy === `status:${selected.id}`} onClick={() => changeStatus(selected)}>{busy === `status:${selected.id}` ? "Updating…" : selected.status === "active" ? "Suspend" : "Restore"}</button>
             </div>}
           </div>
-          <div className="detail-facts"><span>Last seen <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleDateString() : "Never"}</b></span><span>Requests <b>{selected.request_count.toLocaleString()}</b></span><span>Value <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span>{selected.expires_at && <span>Expires <b>{new Date(selected.expires_at).toLocaleDateString()}</b></span>}</div>
+          <div className="detail-facts"><span>Account type <b>{memberRole(selected)}</b></span><span>Origin <b>{memberOrigin(selected)}</b></span><span>Status <b>{selected.status}</b></span><span>Created <b>{new Date(selected.created_at).toLocaleDateString()}</b></span><span>Username <b>{selected.username || "Not set"}</b></span><span>Display name <b>{selected.display_name || "Not set"}</b></span><span>Email <b>{selected.email || "Not set"}</b></span><span>Private note <b>{selected.note || "Not set"}</b></span><span>Last seen <b>{selected.last_seen_at ? new Date(selected.last_seen_at).toLocaleDateString() : "Never"}</b></span><span>Requests · {windowLabel} <b>{selected.request_count.toLocaleString()}</b></span><span>Billable tokens · {windowLabel} <b>{formatTokens(selected.billable_tokens)}</b></span><span>API-equivalent value · {windowLabel} <b>{preciseMoney.format(selected.api_equivalent_cost_usd)}</b></span>{selected.expires_at && <span>Expires <b>{new Date(selected.expires_at).toLocaleDateString()}</b></span>}</div>
           <SignalPanel title={`Usage · ${windowLabel}`}>{usageLoading ? <div className="empty-state">Loading usage…</div> : chartData.length ? <div className="chart-stage medium"><AreaChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Area dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(5, 13)} maxTicks={7} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></AreaChart></div> : <div className="empty-state">No usage in this period.</div>}</SignalPanel>
         </>}
       </aside>
@@ -1531,7 +1537,7 @@ function Navigation({ view, principal, onChange, onSignOut }: { view: View; prin
   );
 }
 
-function Pulse({ stats, signal, onAccounts }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void }) {
+function Pulse({ stats, signal, onAccounts, onMember }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void; onMember: (id: string) => void }) {
   if (!stats || !signal) return <SignalSkeleton />;
   const economics = signal.economics_summary ?? stats.aggregate.economics;
   const historical = economics ?? { ...stats.aggregate, since: "", estimated_cycles: 0, recorded_cycles: 0, unknown_accounts: 0, uncovered_value: 0, api_value: stats.aggregate.total_api_cost, subscription_spend: stats.aggregate.total_subscription_cost, recent_api_value: 0, recent_subscription_cost: 0, current_monthly: stats.aggregate.total_subscription_monthly };
@@ -1604,8 +1610,8 @@ function Pulse({ stats, signal, onAccounts }: { stats: PoolStats | null; signal:
         <SignalPanel title="Token mix, 14 days">
           <TokenComposition hourly={signal.hourly} />
         </SignalPanel>
-        <SignalPanel title="Heavy users this week">
-          <OriginDrain rows={signal.origin_weekly} />
+        <SignalPanel title="Heavy pool users · last 7 days">
+          <HeavyAccounts onMember={onMember} />
         </SignalPanel>
       </section>
     </div>
@@ -1752,41 +1758,32 @@ function TokenComposition({ hourly }: { hourly: HourlyUsage[] }) {
   );
 }
 
-function OriginDrain({ rows }: { rows: OriginWeeklyUsage[] }) {
-  const latestWeek = rows.reduce((latest, row) => row.week_start > latest ? row.week_start : latest, "");
-  const originMap = new Map<string, { id: string; total: number; requests: number; providers: Partial<Record<Provider, number>> }>();
-  for (const row of rows.filter((item) => item.week_start === latestWeek)) {
-    const aggregate = originMap.get(row.origin_id) ?? { id: row.origin_id, total: 0, requests: 0, providers: {} };
-    const throughput = tokenThroughput(row);
-    aggregate.total += throughput;
-    aggregate.requests += row.request_count;
-    if (row.account_type in PROVIDERS) {
-      const provider = row.account_type as Provider;
-      aggregate.providers[provider] = (aggregate.providers[provider] ?? 0) + throughput;
-    }
-    originMap.set(row.origin_id, aggregate);
-  }
-  const origins = [...originMap.values()].sort((a, b) => b.total - a.total).slice(0, 10);
-  const poolTotal = origins.reduce((sum, origin) => sum + origin.total, 0);
-  return (
-    <div className="origin-drain">
-      <div className="origin-head"><span>HASHED IP</span><span>TOKENS</span><span>SHARE</span><span>ACCOUNT FOOTPRINT</span></div>
-      {origins.length === 0 && <div className="empty-signal">No origin activity has been recorded for this period.</div>}
-      {origins.map((origin, index) => (
-        <div className="origin-row" key={origin.id}>
-          <span><i>{String(index + 1).padStart(2, "0")}</i>{originHandle(origin.id)}</span>
-          <b>{formatTokens(origin.total)}</b>
-          <span>{poolTotal ? `${((origin.total / poolTotal) * 100).toFixed(1)}%` : "0%"}</span>
-          <div className="footprint" aria-label="Provider footprint">
-            {Object.entries(origin.providers).map(([provider, value]) => (
-              <i key={provider} title={`${PROVIDERS[provider as Provider].label}: ${formatTokens(value ?? 0)}`} style={{ background: PROVIDERS[provider as Provider].color, flex: value }} />
-            ))}
-          </div>
-        </div>
-      ))}
-      <footer>{latestWeek ? `Week of ${latestWeek}` : "No weekly data"} · origin IDs are hashed at ingest · {origins.length} active</footer>
-    </div>
-  );
+function HeavyAccounts({ onMember }: { onMember: (id: string) => void }) {
+  const [rows, setRows] = useState<ConsolePrincipal[] | null>(null);
+  const [health, setHealth] = useState<Awaited<ReturnType<typeof loadAnalyticsHealth>> | null>(null);
+  const [error, setError] = useState("");
+  const refresh = useCallback(() => {
+    Promise.all([loadConsolePrincipals(168), loadAnalyticsHealth()])
+      .then(([ranking, status]) => { setRows(ranking.principals); setHealth(status); setError(""); })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to load accounts"));
+  }, []);
+  useEffect(() => { refresh(); const timer = window.setInterval(refresh, 30_000); return () => window.clearInterval(timer); }, [refresh]);
+  const top = (rows ?? []).filter((item) => item.billable_tokens > 0).slice(0, 10);
+  const total = (rows ?? []).reduce((sum, item) => sum + item.billable_tokens, 0);
+  return <div className="origin-drain">
+    {health?.health.state !== "CURRENT" && health && <p className="accounting-gap" role="status">Analytics {health.health.state.toLowerCase()}: rankings may be incomplete or delayed.</p>}
+    {error && <p role="alert">{error} <button onClick={refresh}>Retry</button></p>}
+    <div className="origin-head heavy-account-head"><span>PERSON / PASS</span><span>BILLABLE TOKENS</span><span>POOL SHARE</span><span>ROLE</span></div>
+    {!rows && !error && <div className="empty-signal">Loading account usage…</div>}
+    {rows && !top.length && <div className="empty-signal">No account usage in the last 7 days.</div>}
+    {top.map((item, index) => <button className="origin-row heavy-account-row" key={item.id} onClick={() => onMember(item.id)} aria-label={`Open ${accountDisplayName(item)} in Members`}>
+      <span><i>{String(index + 1).padStart(2, "0")}</i>{accountDisplayName(item)}</span>
+      <b>{formatTokens(item.billable_tokens)}</b>
+      <span>{total ? `${(item.billable_tokens / total * 100).toFixed(1)}%` : "0%"}</span>
+      <span>{memberRole(item)}</span>
+    </button>)}
+    <footer>Trailing 7 days · share of all attributed billable tokens · excludes passthrough</footer>
+  </div>;
 }
 
 function ProviderCapitalChart({ accounts }: { accounts: AccountStats[] }) {
