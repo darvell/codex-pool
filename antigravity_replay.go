@@ -18,12 +18,13 @@ const (
 )
 
 type antigravityReplayScope struct {
+	Tenant  string
 	Model   string
 	Session string
 }
 
 func (s antigravityReplayScope) valid() bool {
-	return strings.TrimSpace(s.Model) != "" && strings.TrimSpace(s.Session) != ""
+	return strings.TrimSpace(s.Tenant) != "" && strings.TrimSpace(s.Model) != "" && strings.TrimSpace(s.Session) != ""
 }
 
 type antigravityReplayPart struct {
@@ -58,6 +59,10 @@ func newAntigravityReplayCache(ttl time.Duration, maxEntries int) *antigravityRe
 var antigravityNativeReplay = newAntigravityReplayCache(antigravityReplayTTL, antigravityReplayMaxEntries)
 
 func antigravityReplayScopeFromBody(body []byte) antigravityReplayScope {
+	return antigravityReplayScopeFromBodyForTenant(body, "legacy")
+}
+
+func antigravityReplayScopeFromBodyForTenant(body []byte, tenant string) antigravityReplayScope {
 	var root map[string]any
 	if json.Unmarshal(body, &root) != nil {
 		return antigravityReplayScope{}
@@ -77,7 +82,11 @@ func antigravityReplayScopeFromBody(body []byte) antigravityReplayScope {
 	if model == "" || session == "" {
 		return antigravityReplayScope{}
 	}
-	return antigravityReplayScope{Model: model, Session: "session:" + session}
+	tenant = strings.TrimSpace(tenant)
+	if tenant == "" {
+		return antigravityReplayScope{}
+	}
+	return antigravityReplayScope{Tenant: tenant, Model: model, Session: "session:" + session}
 }
 
 func antigravityStableReplaySession(request map[string]any) string {
@@ -100,7 +109,11 @@ func antigravityStableReplaySession(request map[string]any) string {
 // antigravityApplyNativeReplay restores native Gemini signatures and function
 // call parts before a translated request is sent upstream.
 func antigravityApplyNativeReplay(body []byte) ([]byte, antigravityReplayScope, bool) {
-	scope := antigravityReplayScopeFromBody(body)
+	return antigravityApplyNativeReplayForTenant(body, "legacy")
+}
+
+func antigravityApplyNativeReplayForTenant(body []byte, tenant string) ([]byte, antigravityReplayScope, bool) {
+	scope := antigravityReplayScopeFromBodyForTenant(body, tenant)
 	updated, changed := antigravityNativeReplay.apply(scope, body)
 	return updated, scope, changed
 }
@@ -121,7 +134,7 @@ func (c *antigravityReplayCache) key(scope antigravityReplayScope) string {
 	if !scope.valid() {
 		return ""
 	}
-	return strings.TrimSpace(scope.Model) + "\x00" + strings.TrimSpace(scope.Session)
+	return strings.TrimSpace(scope.Tenant) + "\x00" + strings.TrimSpace(scope.Model) + "\x00" + strings.TrimSpace(scope.Session)
 }
 
 func (c *antigravityReplayCache) get(scope antigravityReplayScope, now time.Time) (antigravityReplayEntry, bool) {

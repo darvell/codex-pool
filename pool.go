@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -89,11 +90,19 @@ type Account struct {
 	Email                   string
 	ProjectID               string
 	ModelRateLimits         map[string]time.Time
+	ModelBackoffLevels      map[string]int
 	Models                  map[string]DiscoveredModel
 	ModelsFetchedAt         time.Time
 	NeedsVerification       bool
 	VerificationURL         string
 	HealthError             string
+
+	// fileFingerprint detects external credential edits before a state-only save.
+	fileFingerprint string
+
+	// antigravitySnapshot is staged while loading account files. Publishing it
+	// to the live registry is part of the pool commit, never file parsing.
+	antigravitySnapshot *AntigravityAccountSnapshot
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -304,24 +313,26 @@ type GeminiAuthJSON struct {
 // The optional model snapshot keeps the public catalog stable when Google's
 // discovery endpoint is temporarily unavailable.
 type AntigravityAuthJSON struct {
-	Type              string                      `json:"type"`
-	AccessToken       string                      `json:"access_token"`
-	RefreshToken      string                      `json:"refresh_token"`
-	TokenType         string                      `json:"token_type,omitempty"`
-	Scope             string                      `json:"scope,omitempty"`
-	ExpiresAt         string                      `json:"expired,omitempty"`
-	ExpiryDate        int64                       `json:"expiry_date,omitempty"`
-	Email             string                      `json:"email,omitempty"`
-	ProjectID         string                      `json:"project_id"`
-	PlanType          string                      `json:"plan_type,omitempty"`
-	LastRefresh       string                      `json:"last_refresh,omitempty"`
-	Disabled          bool                        `json:"disabled,omitempty"`
-	Dead              bool                        `json:"dead,omitempty"`
-	ModelSnapshot     *AntigravityAccountSnapshot `json:"model_snapshot,omitempty"`
-	ModelCooldowns    map[string]string           `json:"model_rate_limits,omitempty"`
-	NeedsVerification bool                        `json:"needs_verification,omitempty"`
-	VerificationURL   string                      `json:"verification_url,omitempty"`
-	HealthError       string                      `json:"health_error,omitempty"`
+	Type                 string                      `json:"type"`
+	AccessToken          string                      `json:"access_token"`
+	RefreshToken         string                      `json:"refresh_token"`
+	TokenType            string                      `json:"token_type,omitempty"`
+	Scope                string                      `json:"scope,omitempty"`
+	ExpiresAt            string                      `json:"expired,omitempty"`
+	ExpiryDate           int64                       `json:"expiry_date,omitempty"`
+	Email                string                      `json:"email,omitempty"`
+	ProjectID            string                      `json:"project_id"`
+	PlanType             string                      `json:"plan_type,omitempty"`
+	LastRefresh          string                      `json:"last_refresh,omitempty"`
+	Disabled             bool                        `json:"disabled,omitempty"`
+	Dead                 bool                        `json:"dead,omitempty"`
+	ModelSnapshot        *AntigravityAccountSnapshot `json:"model_snapshot,omitempty"`
+	ModelCooldowns       map[string]string           `json:"model_rate_limits,omitempty"`
+	ModelBackoffLevels   map[string]int              `json:"model_backoff_levels,omitempty"`
+	AccountCooldownUntil string                      `json:"account_cooldown_until,omitempty"`
+	NeedsVerification    bool                        `json:"needs_verification,omitempty"`
+	VerificationURL      string                      `json:"verification_url,omitempty"`
+	HealthError          string                      `json:"health_error,omitempty"`
 }
 
 // ClaudeAuthJSON is the format for Claude auth files.
@@ -355,7 +366,6 @@ type ClaudeOAuthData struct {
 
 func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	var accs []*Account
-	antigravityModels.Reset()
 
 	// Load accounts from provider subdirectories: pool/codex/, pool/claude/, pool/gemini/
 	providerDirs := map[string]AccountType{
@@ -454,25 +464,126 @@ func applyCommonAccountFileState(account *Account, data []byte) {
 
 // poolState wraps accounts with a mutex.
 type poolState struct {
+	// Lock order for Antigravity lifecycle operations is stateMu -> mu ->
+	// Account.mu. Registry locks are taken only while stateMu is held and never
+	// nested with Account.mu. Network I/O occurs outside all locks; persistence
+	// never occurs while the selection, account, or registry locks are held.
+	// A guarded poll may retain stateMu so reload cannot pass its final check.
+	stateMu       sync.RWMutex
 	mu            sync.RWMutex
 	accounts      []*Account
 	convPin       map[string]string // conversation_id -> account ID
 	debug         bool
 	rr            uint64
 	tierThreshold float64 // secondary usage % at which we stop preferring a tier (default 0.50)
+	generation    uint64  // increments on every successful account/registry commit
 }
 
 func newPoolState(accs []*Account, debug bool) *poolState {
-	return &poolState{accounts: accs, convPin: map[string]string{}, debug: debug, tierThreshold: 0.50}
+	return &poolState{accounts: accs, convPin: map[string]string{}, debug: debug, tierThreshold: 0.50, generation: 1}
 }
 
-// replace swaps the pool accounts (used on reload).
+// replace swaps the pool accounts (used on reload). Generic callers retain
+// this behavior; reloadAccounts uses replaceWithAntigravityRegistry so the
+// Antigravity account set and model registry publish as one transaction.
 func (p *poolState) replace(accs []*Account) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.accounts = accs
 	p.convPin = map[string]string{}
 	p.rr = 0
+	p.generation++
+}
+
+func (p *poolState) initializeAntigravityRegistry(accounts []*Account) {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	antigravityModels.ReplaceAll(antigravityRegistryStateFromAccounts(accounts))
+}
+
+var errAntigravityReloadChanged = errors.New("Antigravity account files changed while reload was staged")
+
+// validateStagedAntigravityAccounts verifies the exact credential contents that
+// produced the staged accounts. Callers hold stateMu exclusively so a guarded
+// refresh cannot commit between validation and publication.
+func validateStagedAntigravityAccounts(accs []*Account) error {
+	for _, account := range accs {
+		if account == nil || account.Type != AccountTypeAntigravity {
+			continue
+		}
+		account.mu.Lock()
+		path, fingerprint := account.File, account.fileFingerprint
+		account.mu.Unlock()
+		// Accounts constructed in tests or before their first durable write have
+		// no loaded-file precondition to validate.
+		if path == "" || fingerprint == "" {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("%w: read %s: %v", errAntigravityReloadChanged, filepath.Base(path), err)
+		}
+		if antigravityFileFingerprint(raw) != fingerprint {
+			return fmt.Errorf("%w: %s", errAntigravityReloadChanged, filepath.Base(path))
+		}
+	}
+	return nil
+}
+
+func (p *poolState) replaceWithAntigravityRegistry(accs []*Account) error {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
+	if err := validateStagedAntigravityAccounts(accs); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	// Replace account pointers rather than copying durable state into objects
+	// that may still be serving requests. Old reservations release their old
+	// objects; generation checks prevent their outcomes from mutating current
+	// state or persisting over a reload.
+	p.accounts = accs
+	preservedPins := make(map[string]string)
+	currentIDs := make(map[string]bool)
+	for _, account := range accs {
+		if account.Type == AccountTypeAntigravity {
+			currentIDs[account.ID] = true
+		}
+	}
+	for key, accountID := range p.convPin {
+		if strings.HasPrefix(key, "antigravity:") && currentIDs[accountID] {
+			preservedPins[key] = accountID
+		}
+	}
+	p.convPin = preservedPins
+	p.rr = 0
+	p.generation++
+	antigravityModels.ReplaceAll(antigravityRegistryStateFromAccounts(accs))
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *poolState) generationAndAccounts() (uint64, []*Account) {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.generation, append([]*Account(nil), p.accounts...)
+}
+
+func (p *poolState) currentAccount(generation uint64, account *Account) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.generation != generation {
+		return false
+	}
+	for _, current := range p.accounts {
+		if current == account {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *poolState) count() int {

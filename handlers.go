@@ -119,13 +119,30 @@ func (h *proxyHandler) reloadAccounts() {
 	defer h.usagePollMu.Unlock()
 
 	log.Printf("reloading pool from %s", h.cfg.poolDir)
-	accs, err := loadPool(h.cfg.poolDir, h.registry)
-	if err != nil {
-		log.Printf("load pool: %v", err)
+	const maxReloadAttempts = 3
+	published := false
+	for attempt := 1; attempt <= maxReloadAttempts; attempt++ {
+		accs, err := loadPool(h.cfg.poolDir, h.registry)
+		if err != nil {
+			// Parsing errors retain the previous pool and registry exactly as before.
+			log.Printf("load pool: %v", err)
+			return
+		}
+		preserveUsageSnapshots(h.pool.allAccounts(), accs)
+		if err := h.pool.replaceWithAntigravityRegistry(accs); err != nil {
+			if attempt < maxReloadAttempts {
+				log.Printf("pool reload staging changed before publication (attempt %d/%d), retrying: %v", attempt, maxReloadAttempts, err)
+				continue
+			}
+			log.Printf("pool reload aborted after %d attempts: %v", maxReloadAttempts, err)
+			return
+		}
+		published = true
+		break
+	}
+	if !published {
 		return
 	}
-	preserveUsageSnapshots(h.pool.allAccounts(), accs)
-	h.pool.replace(accs)
 	if h.pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", h.cfg.poolDir)
 	}

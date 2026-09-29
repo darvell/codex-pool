@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,21 +52,23 @@ func (p *AntigravityProvider) LoadAccount(name, path string, data []byte) (*Acco
 		return nil, nil
 	}
 	acc := &Account{
-		Type:              AccountTypeAntigravity,
-		ID:                strings.TrimSuffix(name, filepath.Ext(name)),
-		File:              path,
-		AccessToken:       auth.AccessToken,
-		RefreshToken:      auth.RefreshToken,
-		PlanType:          auth.PlanType,
-		Email:             auth.Email,
-		ProjectID:         auth.ProjectID,
-		Disabled:          auth.Disabled,
-		Dead:              auth.Dead,
-		ModelRateLimits:   make(map[string]time.Time),
-		NeedsVerification: auth.NeedsVerification,
-		VerificationURL:   auth.VerificationURL,
-		HealthError:       auth.HealthError,
+		Type:               AccountTypeAntigravity,
+		ID:                 strings.TrimSuffix(name, filepath.Ext(name)),
+		File:               path,
+		AccessToken:        auth.AccessToken,
+		RefreshToken:       auth.RefreshToken,
+		PlanType:           auth.PlanType,
+		Email:              auth.Email,
+		ProjectID:          auth.ProjectID,
+		Disabled:           auth.Disabled,
+		Dead:               auth.Dead,
+		ModelRateLimits:    make(map[string]time.Time),
+		ModelBackoffLevels: make(map[string]int),
+		NeedsVerification:  auth.NeedsVerification,
+		VerificationURL:    auth.VerificationURL,
+		HealthError:        auth.HealthError,
 	}
+	acc.fileFingerprint = antigravityFileFingerprint(data)
 	if acc.PlanType == "" {
 		acc.PlanType = "antigravity"
 	}
@@ -81,16 +85,23 @@ func (p *AntigravityProvider) LoadAccount(name, path string, data []byte) (*Acco
 			acc.ModelRateLimits[model] = until
 		}
 	}
-	if auth.ModelSnapshot != nil {
-		antigravityModels.ReplaceAccount(acc.ID, *auth.ModelSnapshot)
-	} else {
-		antigravityModels.MarkAccount(acc.ID)
+	for model, level := range auth.ModelBackoffLevels {
+		if level > 0 {
+			acc.ModelBackoffLevels[model] = level
+		}
 	}
+	if until, err := time.Parse(time.RFC3339Nano, auth.AccountCooldownUntil); err == nil && until.After(time.Now()) {
+		acc.RateLimitUntil = until
+	}
+	acc.antigravitySnapshot = auth.ModelSnapshot
 	return acc, nil
 }
 
 func (p *AntigravityProvider) SetAuthHeaders(req *http.Request, acc *Account) {
-	req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+	acc.mu.Lock()
+	accessToken := acc.AccessToken
+	acc.mu.Unlock()
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", antigravityUserAgent())
 	req.Header.Set("Accept-Encoding", "identity")
@@ -135,16 +146,22 @@ func antigravityClientVersion() string {
 	return antigravityVersions.current(time.Now())
 }
 
-func (p *AntigravityProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+type antigravityTokenResult struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    time.Time
+}
+
+func (p *AntigravityProvider) refreshTokenValues(ctx context.Context, acc *Account, transport http.RoundTripper) (antigravityTokenResult, error) {
 	acc.mu.Lock()
 	refreshToken := acc.RefreshToken
 	acc.mu.Unlock()
 	if refreshToken == "" {
-		return errors.New("antigravity account has no refresh token")
+		return antigravityTokenResult{}, errors.New("antigravity account has no refresh token")
 	}
 	clientID := antigravityOAuthClientID()
 	if clientID == "" {
-		return errors.New("antigravity OAuth client ID is not configured")
+		return antigravityTokenResult{}, errors.New("antigravity OAuth client ID is not configured")
 	}
 	form := url.Values{
 		"client_id":     {clientID},
@@ -156,22 +173,22 @@ func (p *AntigravityProvider) RefreshToken(ctx context.Context, acc *Account, tr
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, antigravityOAuthTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return err
+		return antigravityTokenResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Go-http-client/2.0")
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		return err
+		return antigravityTokenResult{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return err
+		return antigravityTokenResult{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("antigravity token refresh failed: %s: %s", resp.Status, safeText(body))
+		return antigravityTokenResult{}, fmt.Errorf("antigravity token refresh failed: %s: %s", resp.Status, safeText(body))
 	}
 	var token struct {
 		AccessToken  string `json:"access_token"`
@@ -179,21 +196,33 @@ func (p *AntigravityProvider) RefreshToken(ctx context.Context, acc *Account, tr
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &token); err != nil {
-		return err
+		return antigravityTokenResult{}, err
 	}
 	if token.AccessToken == "" {
-		return errors.New("antigravity token refresh returned an empty access token")
+		return antigravityTokenResult{}, errors.New("antigravity token refresh returned an empty access token")
+	}
+	return antigravityTokenResult{
+		AccessToken:  token.AccessToken,
+		RefreshToken: token.RefreshToken,
+		ExpiresAt:    time.Now().Add(time.Duration(token.ExpiresIn) * time.Second),
+	}, nil
+}
+
+func (p *AntigravityProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+	result, err := p.refreshTokenValues(ctx, acc, transport)
+	if err != nil {
+		return err
 	}
 	acc.mu.Lock()
-	acc.AccessToken = token.AccessToken
-	if token.RefreshToken != "" {
-		acc.RefreshToken = token.RefreshToken
+	acc.AccessToken = result.AccessToken
+	if result.RefreshToken != "" {
+		acc.RefreshToken = result.RefreshToken
 	}
-	acc.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
+	acc.ExpiresAt = result.ExpiresAt
 	acc.LastRefresh = time.Now().UTC()
 	acc.Dead = false
 	acc.mu.Unlock()
-	return saveAccount(acc)
+	return saveAntigravityAccount(acc)
 }
 
 func (p *AntigravityProvider) ParseUsage(obj map[string]any) *RequestUsage {
@@ -231,6 +260,11 @@ func (p *AntigravityProvider) DetectsSSE(path, contentType string) bool {
 	return strings.Contains(path, "streamGenerateContent") || strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }
 
+func antigravityFileFingerprint(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func saveAntigravityAccount(acc *Account) error {
 	lockValue, _ := antigravityAccountSaveLocks.LoadOrStore(acc.File, &sync.Mutex{})
 	fileLock := lockValue.(*sync.Mutex)
@@ -245,6 +279,12 @@ func saveAntigravityAccount(acc *Account) error {
 		if err := json.Unmarshal(raw, &root); err != nil {
 			return fmt.Errorf("parse existing antigravity account: %w", err)
 		}
+	}
+	acc.mu.Lock()
+	fingerprint := acc.fileFingerprint
+	acc.mu.Unlock()
+	if fingerprint != "" && antigravityFileFingerprint(raw) != fingerprint {
+		return fmt.Errorf("antigravity account file changed externally")
 	}
 	acc.mu.Lock()
 	root["type"] = string(AccountTypeAntigravity)
@@ -262,6 +302,11 @@ func saveAntigravityAccount(acc *Account) error {
 	root["needs_verification"] = acc.NeedsVerification
 	root["verification_url"] = acc.VerificationURL
 	root["health_error"] = acc.HealthError
+	if acc.RateLimitUntil.After(time.Now()) {
+		root["account_cooldown_until"] = acc.RateLimitUntil.UTC().Format(time.RFC3339Nano)
+	} else {
+		delete(root, "account_cooldown_until")
+	}
 	cooldowns := make(map[string]string, len(acc.ModelRateLimits))
 	for model, until := range acc.ModelRateLimits {
 		if until.After(time.Now()) {
@@ -269,13 +314,46 @@ func saveAntigravityAccount(acc *Account) error {
 		}
 	}
 	root["model_rate_limits"] = cooldowns
+	backoffs := make(map[string]int, len(acc.ModelBackoffLevels))
+	for model, level := range acc.ModelBackoffLevels {
+		if level > 0 {
+			backoffs[model] = level
+		}
+	}
+	if len(backoffs) > 0 {
+		root["model_backoff_levels"] = backoffs
+	} else {
+		delete(root, "model_backoff_levels")
+	}
+	stagedSnapshot := acc.antigravitySnapshot
 	persistAccountAddedAt(root, acc)
 	acc.mu.Unlock()
-	if snapshot, ok := antigravityModels.AccountSnapshot(acc.ID); ok {
+	if stagedSnapshot != nil {
+		root["model_snapshot"] = stagedSnapshot
+	} else if snapshot, ok := antigravityModels.AccountSnapshot(acc.ID); ok {
 		root["model_snapshot"] = snapshot
 	}
 	if err := os.MkdirAll(filepath.Dir(acc.File), 0o700); err != nil {
 		return err
 	}
-	return atomicWriteJSON(acc.File, root)
+	// Recheck immediately before the atomic replacement so an external
+	// credential edit observed during serialization cannot be clobbered.
+	latest, err := os.ReadFile(acc.File)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if fingerprint != "" && antigravityFileFingerprint(latest) != fingerprint {
+		return fmt.Errorf("antigravity account file changed externally")
+	}
+	if err := atomicWriteJSON(acc.File, root); err != nil {
+		return err
+	}
+	written, err := os.ReadFile(acc.File)
+	if err != nil {
+		return err
+	}
+	acc.mu.Lock()
+	acc.fileFingerprint = antigravityFileFingerprint(written)
+	acc.mu.Unlock()
+	return nil
 }

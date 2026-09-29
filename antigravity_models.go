@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -65,6 +64,49 @@ type antigravityModelRegistry struct {
 }
 
 var antigravityModels = &antigravityModelRegistry{accounts: make(map[string]AntigravityAccountSnapshot), known: make(map[string]bool)}
+
+type antigravityRegistryState struct {
+	accounts map[string]AntigravityAccountSnapshot
+	known    map[string]bool
+}
+
+func antigravityRegistryStateFromAccounts(accounts []*Account) antigravityRegistryState {
+	state := antigravityRegistryState{accounts: make(map[string]AntigravityAccountSnapshot), known: make(map[string]bool)}
+	for _, account := range accounts {
+		if account == nil || account.Type != AccountTypeAntigravity {
+			continue
+		}
+		state.known[account.ID] = true
+		if account.antigravitySnapshot != nil && len(account.antigravitySnapshot.Models) > 0 {
+			state.accounts[account.ID] = *account.antigravitySnapshot
+		}
+	}
+	return state
+}
+
+func (r *antigravityModelRegistry) ReplaceAll(state antigravityRegistryState) {
+	accounts := make(map[string]AntigravityAccountSnapshot, len(state.accounts))
+	known := make(map[string]bool, len(state.known))
+	for id, snapshot := range state.accounts {
+		accounts[id] = snapshot
+	}
+	for id, value := range state.known {
+		known[id] = value
+	}
+	r.mu.Lock()
+	r.accounts, r.known = accounts, known
+	r.mu.Unlock()
+}
+
+func (r *antigravityModelRegistry) Snapshots() map[string]AntigravityAccountSnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]AntigravityAccountSnapshot, len(r.accounts))
+	for id, snapshot := range r.accounts {
+		out[id] = snapshot
+	}
+	return out
+}
 
 func (r *antigravityModelRegistry) Reset() {
 	r.mu.Lock()
@@ -173,6 +215,10 @@ func (r *antigravityModelRegistry) Canonical(model string) (string, bool) {
 }
 
 func (r *antigravityModelRegistry) Models(pool *poolState) []AntigravityCatalogModel {
+	if pool != nil {
+		pool.stateMu.RLock()
+		defer pool.stateMu.RUnlock()
+	}
 	r.mu.RLock()
 	snapshots := make(map[string]AntigravityAccountSnapshot, len(r.accounts))
 	for id, snapshot := range r.accounts {
@@ -217,7 +263,7 @@ func (r *antigravityModelRegistry) Models(pool *poolState) []AntigravityCatalogM
 				metadataTime[id] = snapshot.FetchedAt
 			}
 			entry.SupportingAccounts++
-			available, reset := antigravityAccountModelAvailable(pool, accountID, id)
+			available, reset := antigravityAccountModelAvailable(pool, accountID, id, snapshot)
 			if available {
 				entry.AvailableAccounts++
 				entry.AvailableNow = true
@@ -250,28 +296,20 @@ func (r *antigravityModelRegistry) Models(pool *poolState) []AntigravityCatalogM
 	return result
 }
 
-func antigravityAccountModelAvailable(pool *poolState, accountID, model string) (bool, time.Time) {
+func antigravityAccountModelAvailable(pool *poolState, accountID, model string, snapshot AntigravityAccountSnapshot) (bool, time.Time) {
 	if pool == nil {
 		return false, time.Time{}
 	}
+	model = antigravityCanonicalModel(model)
+	now := time.Now()
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
 	for _, account := range pool.accounts {
 		if account.Type != AccountTypeAntigravity || account.ID != accountID {
 			continue
 		}
-		account.mu.Lock()
-		defer account.mu.Unlock()
-		if account.Dead || account.Disabled || account.NeedsVerification {
-			return false, time.Time{}
-		}
-		now := time.Now()
-		until := account.ModelRateLimits[model]
-		discoveryAvailable, discoveryReset := antigravityModels.DiscoveryAvailability(accountID, model, now)
-		if discoveryReset.After(until) {
-			until = discoveryReset
-		}
-		return !until.After(now) && discoveryAvailable, until
+		decision := antigravityEvaluateAccount(account, snapshot, true, model, "", false, now)
+		return decision.eligible, decision.retryAt
 	}
 	return false, time.Time{}
 }
@@ -484,40 +522,79 @@ func postAntigravityInternal(ctx context.Context, transport http.RoundTripper, a
 	return resp.StatusCode, responseBody, nil
 }
 
-// syncAntigravityModels refreshes one account's model inventory and quota.
-// The quota summary doubles as the account health probe: it is the endpoint
-// that enforces Google's account verification, and the daily host that
-// serves generation is the one whose answer decides the account state.
-func syncAntigravityModels(ctx context.Context, transport http.RoundTripper, account *Account, daily, production *url.URL) error {
+type antigravitySyncResult struct {
+	snapshot AntigravityAccountSnapshot
+	quota    *AntigravityQuotaSummary
+	quotaErr error
+}
+
+func fetchAntigravitySync(ctx context.Context, transport http.RoundTripper, account *Account, daily, production *url.URL) (antigravitySyncResult, error) {
 	snapshot, err := fetchAntigravityModels(ctx, transport, account, daily, production)
 	if err != nil {
-		return err
+		return antigravitySyncResult{}, err
 	}
-	previous, hadPrevious := antigravityModels.AccountSnapshot(account.ID)
-	snapshot.Quota = previous.Quota
-
 	quota, quotaErr := fetchAntigravityQuota(ctx, transport, account, daily, production)
+	result := antigravitySyncResult{snapshot: snapshot, quotaErr: quotaErr}
+	if quotaErr == nil {
+		result.quota = &quota
+	}
+	return result, nil
+}
+
+// commitAntigravitySync contains all mutation after the network-only fetch.
+func commitAntigravitySync(account *Account, result antigravitySyncResult) error {
+	previous, hadPrevious := antigravityModels.AccountSnapshot(account.ID)
+	result.snapshot.Quota = previous.Quota
 	var forbidden *antigravityForbiddenError
 	switch {
-	case quotaErr == nil:
-		snapshot.Quota = &quota
+	case result.quotaErr == nil:
+		result.snapshot.Quota = result.quota
 		clearAntigravityHealth(account)
-	case errors.As(quotaErr, &forbidden):
+	case errors.As(result.quotaErr, &forbidden):
 		if needsVerification, banned, _ := classifyAntigravityForbidden(forbidden.body); needsVerification || banned {
 			recordAntigravityForbidden(account, forbidden.body)
 		}
 	}
-
-	antigravityModels.ReplaceAccount(account.ID, snapshot)
-	if !hadPrevious || !antigravitySnapshotsEquivalent(previous, snapshot) {
+	account.mu.Lock()
+	account.antigravitySnapshot = &result.snapshot
+	account.mu.Unlock()
+	antigravityModels.ReplaceAccount(account.ID, result.snapshot)
+	if !hadPrevious || !antigravitySnapshotsEquivalent(previous, result.snapshot) {
 		if err := saveAccount(account); err != nil {
 			return err
 		}
 	}
-	if quotaErr != nil {
-		return fmt.Errorf("quota summary: %w", quotaErr)
+	if result.quotaErr != nil {
+		return fmt.Errorf("quota summary: %w", result.quotaErr)
 	}
 	return nil
+}
+
+// syncAntigravityModels is retained for direct/admin tests. Background and
+// request-driven syncs use the generation-guarded handler method below.
+func syncAntigravityModels(ctx context.Context, transport http.RoundTripper, account *Account, daily, production *url.URL) error {
+	result, err := fetchAntigravitySync(ctx, transport, account, daily, production)
+	if err != nil {
+		return err
+	}
+	return commitAntigravitySync(account, result)
+}
+
+var errStaleAntigravityAccount = errors.New("stale Antigravity account generation")
+
+func (h *proxyHandler) syncAntigravityModelsGuarded(ctx context.Context, generation uint64, account *Account, daily, production *url.URL) error {
+	result, err := fetchAntigravitySync(ctx, h.transport, account, daily, production)
+	if err != nil {
+		return err
+	}
+	// stateMu prevents a reload between validation and persistence. No account
+	// or registry lock is held while saveAccount writes the atomic JSON file.
+	h.pool.stateMu.Lock()
+	defer h.pool.stateMu.Unlock()
+	if !h.pool.currentAccount(generation, account) {
+		return errStaleAntigravityAccount
+	}
+	return commitAntigravitySync(account, result)
 }
 
 func antigravitySnapshotsEquivalent(left, right AntigravityAccountSnapshot) bool {
@@ -546,49 +623,13 @@ func antigravityCanonicalModel(model string) string {
 }
 
 func (p *poolState) candidateForAntigravityModel(conversationID string, exclude map[string]bool, model, clientIP string) *Account {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	model = antigravityCanonicalModel(model)
-	now := time.Now()
-	pinKey := "antigravity:" + model + ":" + conversationID
-	if conversationID != "" {
-		if pinnedID := p.convPin[pinKey]; pinnedID != "" && (exclude == nil || !exclude[pinnedID]) {
-			for _, account := range p.accounts {
-				if account.ID != pinnedID || account.Type != AccountTypeAntigravity || !antigravityModels.Supports(account.ID, model) {
-					continue
-				}
-				account.mu.Lock()
-				until := account.ModelRateLimits[model]
-				discoveryAvailable, _ := antigravityModels.DiscoveryAvailability(account.ID, model, now)
-				eligible := !account.Dead && !account.Disabled && !account.NeedsVerification && accountAllowsClientIPLocked(account, clientIP) && !until.After(now) && discoveryAvailable
-				account.mu.Unlock()
-				if eligible {
-					return account
-				}
-			}
-			delete(p.convPin, pinKey)
-		}
+	reservation, _ := p.reserveAntigravityModel(conversationID, exclude, model, clientIP)
+	if reservation == nil {
+		return nil
 	}
-	var best *Account
-	bestScore := -1e9
-	for _, account := range p.accounts {
-		if account.Type != AccountTypeAntigravity || (exclude != nil && exclude[account.ID]) || !antigravityModels.Supports(account.ID, model) {
-			continue
-		}
-		account.mu.Lock()
-		until := account.ModelRateLimits[model]
-		discoveryAvailable, _ := antigravityModels.DiscoveryAvailability(account.ID, model, now)
-		eligible := !account.Dead && !account.Disabled && !account.NeedsVerification && accountAllowsClientIPLocked(account, clientIP) && !until.After(now) && discoveryAvailable
-		score := scoreAccountLocked(account, now) - float64(atomic.LoadInt64(&account.Inflight))*0.02
-		account.mu.Unlock()
-		if eligible && (best == nil || score > bestScore) {
-			best, bestScore = account, score
-		}
-	}
-	if best != nil && conversationID != "" {
-		p.convPin[pinKey] = best.ID
-	}
-	return best
+	account := reservation.Account
+	reservation.Release()
+	return account
 }
 
 func setAntigravityModelCooldown(account *Account, model string, until time.Time) {
@@ -608,17 +649,7 @@ func setAntigravityModelCooldown(account *Account, model string, until time.Time
 }
 
 func clearAntigravityModelCooldown(account *Account, model string) {
-	if account == nil {
-		return
-	}
-	account.mu.Lock()
-	canonical := antigravityCanonicalModel(model)
-	_, existed := account.ModelRateLimits[canonical]
-	delete(account.ModelRateLimits, canonical)
-	account.mu.Unlock()
-	if existed {
-		_ = saveAccount(account)
-	}
+	clearAntigravityRuntimeState(account, model)
 }
 
 func (h *proxyHandler) startAntigravityModelPoller() {
@@ -630,17 +661,16 @@ func (h *proxyHandler) startAntigravityModelPoller() {
 		if provider == nil {
 			return
 		}
-		for _, account := range h.pool.allAccounts() {
+		generation, accounts := h.pool.generationAndAccounts()
+		for _, account := range accounts {
 			if account.Type != AccountTypeAntigravity {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if h.needsRefresh(account) {
-				if err := h.refreshAccount(ctx, account); err != nil {
-					log.Printf("antigravity refresh %s failed: %v", account.ID, err)
-				}
-			}
-			if err := syncAntigravityModels(ctx, h.transport, account, provider.DailyURL(), provider.ProductionURL()); err != nil {
+			// Proactive refresh is owned by the generic usage poller, which is
+			// serialized with reloadAccounts. Keeping it out of this independent
+			// poller prevents a stale generation from persisting credentials.
+			if err := h.syncAntigravityModelsGuarded(ctx, generation, account, provider.DailyURL(), provider.ProductionURL()); err != nil && !errors.Is(err, errStaleAntigravityAccount) {
 				log.Printf("antigravity sync %s failed: %v", account.ID, err)
 			}
 			cancel()
