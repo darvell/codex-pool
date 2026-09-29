@@ -371,7 +371,7 @@ func (h *proxyHandler) completeAntigravityOAuth(ctx context.Context, session *an
 		Type: AccountTypeAntigravity, ID: accountID, File: file, Email: email,
 		ProjectID: projectID, AccessToken: token.AccessToken, RefreshToken: token.RefreshToken,
 		PlanType: planType, ExpiresAt: time.Now().Add(time.Duration(token.ExpiresIn) * time.Second),
-		LastRefresh: time.Now().UTC(), AddedAt: time.Now().UTC(), ModelRateLimits: make(map[string]time.Time),
+		LastRefresh: time.Now().UTC(), AddedAt: time.Now().UTC(), ModelRateLimits: make(map[string]time.Time), ModelBackoffLevels: make(map[string]int),
 	}
 	provider, _ := h.registry.ForType(AccountTypeAntigravity).(*AntigravityProvider)
 	if provider == nil {
@@ -395,7 +395,7 @@ func (h *proxyHandler) completeAntigravityOAuth(ctx context.Context, session *an
 	default:
 		log.Printf("antigravity quota probe for new account %s failed: %v", accountID, quotaErr)
 	}
-	antigravityModels.ReplaceAccount(account.ID, snapshot)
+	account.antigravitySnapshot = &snapshot
 	if err := saveAntigravityAccount(account); err != nil {
 		return fail(fmt.Errorf("save Antigravity account: %w", err))
 	}
@@ -609,12 +609,13 @@ func (h *proxyHandler) handleAntigravityModelSync(w http.ResponseWriter, r *http
 		Error     string `json:"error,omitempty"`
 	}
 	results := make([]result, 0)
-	for _, account := range h.pool.allAccounts() {
+	generation, accounts := h.pool.generationAndAccounts()
+	for _, account := range accounts {
 		if account.Type != AccountTypeAntigravity {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		err := syncAntigravityModels(ctx, h.transport, account, provider.DailyURL(), provider.ProductionURL())
+		err := h.syncAntigravityModelsGuarded(ctx, generation, account, provider.DailyURL(), provider.ProductionURL())
 		cancel()
 		entry := result{AccountID: account.ID}
 		if err != nil {
@@ -646,12 +647,13 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 			continue
 		}
 		entry := verification{Model: model.ID}
-		account := h.pool.candidateForAntigravityModel("", nil, model.ID, getClientIP(r))
-		if account == nil {
-			entry.Error = "no available account supports this model"
+		reservation, eligibility := h.pool.reserveAntigravityModel("", nil, model.ID, getClientIP(r))
+		if reservation == nil {
+			entry.Error = eligibility.publicMessage(model.ID)
 			results = append(results, entry)
 			continue
 		}
+		account := reservation.Account
 		entry.AccountID = account.ID
 		account.mu.Lock()
 		projectID := account.ProjectID
@@ -660,6 +662,7 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		prepared, err := prepareAntigravityRequest("/v1beta/models/"+model.ID+":generateContent", requestBody, "antigravity/"+model.ID, projectID, "")
 		if err != nil {
 			entry.Error = err.Error()
+			reservation.Release()
 			results = append(results, entry)
 			continue
 		}
@@ -670,24 +673,32 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		if err != nil {
 			entry.Error = err.Error()
 			cancel()
+			reservation.Release()
 			results = append(results, entry)
 			continue
 		}
 		entry.Status = resp.StatusCode
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			_, _, err = collectAntigravitySSE(resp.Body)
-			clearAntigravityModelCooldown(account, model.ID)
+			_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+				clearAntigravityModelCooldown(current, model.ID)
+				return nil
+			})
 		} else {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			entry.Error = strings.TrimSpace(string(body))
 			if resp.StatusCode == http.StatusTooManyRequests {
 				if until, ok := parseAntigravityRetry(body, time.Now()); ok {
-					setAntigravityModelCooldown(account, model.ID, until)
+					_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+						setAntigravityModelCooldown(current, model.ID, until)
+						return nil
+					})
 				}
 			}
 		}
 		resp.Body.Close()
 		cancel()
+		reservation.Release()
 		if err != nil {
 			entry.Error = err.Error()
 		}

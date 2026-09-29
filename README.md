@@ -221,6 +221,16 @@ OpenCode Go models are namespaced as `opencode-go/<model-id>` (e.g. `opencode-go
 
 Antigravity model names come from Google's live `fetchAvailableModels` response. Use `antigravity/<model-id>` to force this provider. `/api/pool/models`, `/v1/models`, `/v1beta/models`, Pi, Cute Code, and the Codex catalog consume the same registry. Temporary quota exhaustion changes `available_now` without removing a supported model from the catalog.
 
+### Antigravity routing and failover
+
+Each account attempt tries the daily generation host first. The production host is used as a fallback for daily transport errors, 404s, 429s, and 5xx responses; other daily responses remain authoritative for that attempt. If the host pair ends in a transport failure, authentication failure after one token refresh, a 429, or a 5xx response, the request rotates to another eligible account. Non-retryable request errors such as 400 stop immediately, and streaming responses are never replayed after bytes have been committed downstream.
+
+Routing reserves an account before releasing the scheduler lock, favors usable quota headroom, and spreads equal candidates. Conversation affinity is recorded only after an upstream 2xx response. Native function-call replay is scoped to the pool user/origin while remaining independent of the selected account, so ordinary account failover can preserve a turn without sharing signed state between users.
+
+Live 429s normally cool only the requested model. They become family-wide only when Google's error identifies a known shared quota bucket; authoritative quota polling can independently mark the Gemini or Claude/GPT family exhausted. The proxy honors both `Retry-After` forms and Google retry metadata, using the later precise deadline. If otherwise-usable accounts are all temporarily cooling or quota-exhausted, the response is 429 with the earliest pool-wide `Retry-After`; 503 means there is no currently usable supply for a non-quota reason. Public diagnostics contain aggregate exclusion reasons, not account identities or credential data.
+
+Model inventory, quota snapshots, verification health, and active cooldowns are persisted in each Antigravity account JSON. `model_rate_limits`, `model_backoff_levels`, and `account_cooldown_until` are proxy-managed compatibility fields. Account reload stages the full model registry before publishing it with the account set, and late quota polls from an older pool generation are discarded rather than overwriting refreshed credentials.
+
 ---
 
 ## Disclaimer

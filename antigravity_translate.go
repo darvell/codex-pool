@@ -1234,6 +1234,66 @@ func sanitizeAntigravityFunctionName(name string) string {
 
 func stringValue(value any) string { text, _ := value.(string); return text }
 
+func (h *proxyHandler) refreshAntigravityReservation(ctx context.Context, reservation *antigravityReservation) error {
+	if reservation == nil || reservation.Account == nil {
+		return errStaleAntigravityAccount
+	}
+	// Include the pool generation so a replacement credential with the same ID
+	// never joins an obsolete refresh, while concurrent callers for the same
+	// live account share one refresh-token rotation.
+	key := fmt.Sprintf("%s:%s:%d", AccountTypeAntigravity, reservation.Account.ID, reservation.generation)
+	h.refreshCallsMu.Lock()
+	if h.refreshCalls == nil {
+		h.refreshCalls = map[string]*refreshCall{}
+	}
+	if existing, ok := h.refreshCalls[key]; ok {
+		h.refreshCallsMu.Unlock()
+		select {
+		case <-existing.done:
+			return existing.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	h.refreshCalls[key] = call
+	h.refreshCallsMu.Unlock()
+
+	call.err = h.refreshAntigravityReservationOnce(ctx, reservation)
+	h.refreshCallsMu.Lock()
+	delete(h.refreshCalls, key)
+	close(call.done)
+	h.refreshCallsMu.Unlock()
+	return call.err
+}
+
+func (h *proxyHandler) refreshAntigravityReservationOnce(ctx context.Context, reservation *antigravityReservation) error {
+	provider, _ := h.registry.ForType(AccountTypeAntigravity).(*AntigravityProvider)
+	if provider == nil {
+		return errors.New("Antigravity provider is not configured")
+	}
+	if err := h.waitForRefreshSlot(ctx); err != nil {
+		return err
+	}
+	result, err := provider.refreshTokenValues(ctx, reservation.Account, h.refreshTransport)
+	if err != nil {
+		return err
+	}
+	return h.pool.withCurrentAntigravityReservation(reservation, func(account *Account) error {
+		account.mu.Lock()
+		account.AccessToken = result.AccessToken
+		if result.RefreshToken != "" {
+			account.RefreshToken = result.RefreshToken
+		}
+		account.ExpiresAt = result.ExpiresAt
+		account.LastRefresh = time.Now().UTC()
+		account.Dead = false
+		account.RefreshBlocked = false
+		account.mu.Unlock()
+		return saveAntigravityAccount(account)
+	})
+}
+
 func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Request, body []byte, requestedModel, conversationID, userID, originID, clientIP, reqID string) bool {
 	if !shouldRouteAntigravityModel(requestedModel) {
 		return false
@@ -1244,118 +1304,245 @@ func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Req
 		respondJSONError(w, http.StatusServiceUnavailable, "Antigravity provider is not configured")
 		return true
 	}
-	exclude := make(map[string]bool)
-	var lastError error
-	var lastRateLimitBody []byte
-	var lastRateLimitUntil time.Time
 	attempts := h.cfg.maxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
 	if accountCount := h.pool.countByType(AccountTypeAntigravity); accountCount > attempts {
 		attempts = accountCount
 	}
+
+	exclude := make(map[string]bool)
+	var sawNonQuotaFailure bool
+	tenant := strings.TrimSpace(userID) + "\x00" + strings.TrimSpace(originID)
+	if tenant == "\x00" {
+		tenant = "anonymous:" + strings.TrimSpace(clientIP) + "\x00" + strings.TrimSpace(conversationID)
+	}
+
 	for attempt := 0; attempt < attempts; attempt++ {
-		account := h.pool.candidateForAntigravityModel(conversationID, exclude, canonical, clientIP)
-		if account == nil {
+		reservation, _ := h.pool.reserveAntigravityModel(conversationID, exclude, canonical, clientIP)
+		if reservation == nil {
 			break
 		}
+		account := reservation.Account
 		exclude[account.ID] = true
+		atomic.AddInt64(&h.inflight, 1)
+		release := func() {
+			reservation.Release()
+			atomic.AddInt64(&h.inflight, -1)
+		}
+
 		if h.needsRefresh(account) {
-			_ = h.refreshAccount(r.Context(), account)
+			if err := h.refreshAntigravityReservation(r.Context(), reservation); err != nil {
+				if errors.Is(err, errStaleAntigravityAccount) {
+					sawNonQuotaFailure = true
+					release()
+					continue
+				}
+				cooldownErr := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+					current.mu.Lock()
+					current.RateLimitUntil = time.Now().Add(backoffDuration(current.BackoffLevel))
+					current.BackoffLevel++
+					current.mu.Unlock()
+					return saveAntigravityAccount(current)
+				})
+				_ = cooldownErr
+				sawNonQuotaFailure = true
+				release()
+				continue
+			}
 		}
 		account.mu.Lock()
 		projectID := account.ProjectID
 		account.mu.Unlock()
 		prepared, err := prepareAntigravityRequest(r.URL.Path, body, requestedModel, projectID, conversationID)
 		if err != nil {
+			release()
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return true
 		}
+		bodyWithoutReplay := append([]byte(nil), prepared.Body...)
 		var replayScope antigravityReplayScope
-		prepared.Body, replayScope, _ = antigravityApplyNativeReplay(prepared.Body)
-		atomic.AddInt64(&account.Inflight, 1)
+		prepared.Body, replayScope, _ = antigravityApplyNativeReplayForTenant(prepared.Body, tenant)
+
 		resp, err := h.doAntigravityRequestWithTransientRetry(r.Context(), r.Header, account, provider, prepared)
-		atomic.AddInt64(&account.Inflight, -1)
 		if err != nil {
-			lastError = err
+			sawNonQuotaFailure = true
+			release()
 			continue
 		}
+
 		if resp.StatusCode == http.StatusUnauthorized {
-			_ = resp.Body.Close()
-			if err := h.refreshAccountAfterAuthFailure(r.Context(), account); err == nil {
-				atomic.AddInt64(&account.Inflight, 1)
-				resp, err = h.doAntigravityRequestWithTransientRetry(r.Context(), r.Header, account, provider, prepared)
-				atomic.AddInt64(&account.Inflight, -1)
-				if err != nil {
-					lastError = err
-					continue
-				}
+			_, _ = readAndCloseAntigravityError(resp)
+			if refreshErr := h.refreshAntigravityReservation(r.Context(), reservation); refreshErr != nil {
+				sawNonQuotaFailure = true
+				release()
+				continue
+			}
+			resp, err = h.doAntigravityRequestWithTransientRetry(r.Context(), r.Header, account, provider, prepared)
+			if err != nil {
+				sawNonQuotaFailure = true
+				release()
+				continue
+			}
+			if resp.StatusCode == http.StatusUnauthorized {
+				_, _ = readAndCloseAntigravityError(resp)
+				sawNonQuotaFailure = true
+				release()
+				continue
 			}
 		}
+
 		if resp.StatusCode == http.StatusTooManyRequests {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
+			errBody, _ := readAndCloseAntigravityError(resp)
 			antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody)
-			until, ok := parseAntigravityRetry(errBody, time.Now())
-			if !ok {
-				until = time.Now().Add(backoffDuration(attempt))
+			if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+				applyAntigravityRateLimit(current, canonical, resp.Header, errBody, time.Now())
+				return nil
+			}); err != nil {
+				sawNonQuotaFailure = true
 			}
-			setAntigravityModelCooldown(account, canonical, until)
-			lastRateLimitBody = append(lastRateLimitBody[:0], errBody...)
-			lastRateLimitUntil = until
-			lastError = fmt.Errorf("Antigravity %s is rate limited until %s", canonical, until.Format(time.RFC3339))
+			release()
 			continue
 		}
 		if resp.StatusCode == http.StatusForbidden {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
+			errBody, _ := readAndCloseAntigravityError(resp)
 			antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody)
-			recordAntigravityForbidden(account, errBody)
-			lastError = fmt.Errorf("Antigravity account %s was rejected: %s", account.ID, safeText(errBody))
+			if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+				recordAntigravityForbidden(current, errBody)
+				return nil
+			}); err != nil {
+				sawNonQuotaFailure = true
+			}
+			sawNonQuotaFailure = true
+			release()
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			_, _ = readAndCloseAntigravityError(resp)
+			if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+				current.mu.Lock()
+				until := time.Now().Add(backoffDuration(current.BackoffLevel))
+				current.BackoffLevel++
+				if until.After(current.RateLimitUntil) {
+					current.RateLimitUntil = until
+				}
+				current.mu.Unlock()
+				return saveAntigravityAccount(current)
+			}); err != nil {
+				sawNonQuotaFailure = true
+			}
+			sawNonQuotaFailure = true
+			release()
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
-			antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody)
-			antigravityWriteError(w, prepared.Format, resp.StatusCode, errBody)
-			return true
+			errBody, _ := readAndCloseAntigravityError(resp)
+			if resp.StatusCode == http.StatusBadRequest && antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody) {
+				// Invalid signed replay is safely classifiable. Retry this account
+				// once with the tenant-scoped replay removed, never across accounts.
+				prepared.Body = bodyWithoutReplay
+				retry, retryErr := h.doAntigravityRequestWithTransientRetry(r.Context(), r.Header, account, provider, prepared)
+				if retryErr != nil || retry == nil {
+					sawNonQuotaFailure = true
+					release()
+					continue
+				}
+				if retry.StatusCode >= 200 && retry.StatusCode < 300 {
+					resp = retry
+				} else {
+					retryBody, _ := readAndCloseAntigravityError(retry)
+					switch {
+					case retry.StatusCode == http.StatusTooManyRequests:
+						_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+							applyAntigravityRateLimit(current, canonical, retry.Header, retryBody, time.Now())
+							return nil
+						})
+						release()
+						continue
+					case retry.StatusCode == http.StatusForbidden:
+						_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+							recordAntigravityForbidden(current, retryBody)
+							return nil
+						})
+						sawNonQuotaFailure = true
+						release()
+						continue
+					case retry.StatusCode >= 500:
+						sawNonQuotaFailure = true
+						release()
+						continue
+					default:
+						antigravityWriteError(w, prepared.Format, retry.StatusCode, retryBody)
+						release()
+						return true
+					}
+				}
+			} else {
+				antigravityWriteError(w, prepared.Format, resp.StatusCode, errBody)
+				release()
+				return true
+			}
 		}
-		clearAntigravityModelCooldown(account, canonical)
-		clearAntigravityHealth(account)
+
+		// A successful upstream response belongs to this client even if a reload
+		// replaced the account while the request was in flight. Staleness only
+		// suppresses mutations and pinning; it must never trigger duplicate work
+		// on another account or abandon the live response body.
+		if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
+			clearAntigravityRuntimeState(current, canonical)
+			clearAntigravityHealth(current)
+			return nil
+		}); err == nil {
+			h.pool.pinAntigravityModel(reservation, conversationID, canonical)
+		}
 		if prepared.Operation == "countTokens" {
-			defer resp.Body.Close()
 			responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+			_ = resp.Body.Close()
 			if readErr != nil {
+				release()
 				antigravityWriteError(w, prepared.Format, http.StatusBadGateway, []byte(readErr.Error()))
 				return true
 			}
 			unwrapped, unwrapErr := unwrapAntigravityResponse(responseBody)
 			if unwrapErr != nil {
+				release()
 				antigravityWriteError(w, prepared.Format, http.StatusBadGateway, []byte(unwrapErr.Error()))
 				return true
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(unwrapped)
+			release()
 			return true
 		}
 		h.writeAntigravityResponse(w, resp, prepared, replayScope, account, userID, originID, reqID)
+		release()
 		return true
 	}
-	if len(lastRateLimitBody) > 0 {
-		if !lastRateLimitUntil.IsZero() {
-			seconds := int64(time.Until(lastRateLimitUntil).Seconds())
-			if seconds < 1 {
-				seconds = 1
-			}
-			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-		}
-		antigravityWriteError(w, antigravityFormatForPath(r.URL.Path), http.StatusTooManyRequests, lastRateLimitBody)
+
+	decisions := h.pool.antigravityDecisions(nil, canonical, clientIP, time.Now())
+	report := buildAntigravityReport(decisions)
+	message := report.publicMessage(requestedModel)
+	format := antigravityFormatForPath(r.URL.Path)
+	if !sawNonQuotaFailure && report.temporaryOnly() {
+		antigravitySetRetryAfter(w.Header(), report.NextRetryAt, time.Now())
+		antigravityWriteError(w, format, http.StatusTooManyRequests, antigravityPublicErrorBody(message))
 		return true
 	}
-	if lastError == nil {
-		lastError = fmt.Errorf("no Antigravity account currently supports %s", requestedModel)
-	}
-	antigravityWriteError(w, antigravityFormatForPath(r.URL.Path), http.StatusServiceUnavailable, []byte(lastError.Error()))
+	antigravityWriteError(w, format, http.StatusServiceUnavailable, antigravityPublicErrorBody(message))
 	return true
+}
+
+func readAndCloseAntigravityError(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	return body, closeErr
 }
 
 var antigravityVerificationURLPattern = regexp.MustCompile(`https://[^\s"'<>]+`)

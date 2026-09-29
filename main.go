@@ -330,6 +330,7 @@ func main() {
 		log.Fatalf("load pool: %v", err)
 	}
 	pool := newPoolState(accounts, cfg.debug.Load())
+	pool.initializeAntigravityRegistry(accounts)
 	pool.tierThreshold = cfg.tierThreshold
 	codexCount := pool.countByType(AccountTypeCodex)
 	claudeCount := pool.countByType(AccountTypeClaude)
@@ -5729,6 +5730,15 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	if a == nil {
 		return errors.New("nil account")
 	}
+	if a.Type == AccountTypeAntigravity {
+		generation, accounts := h.pool.generationAndAccounts()
+		for _, current := range accounts {
+			if current == a {
+				return h.refreshAntigravityReservation(ctx, &antigravityReservation{Account: a, generation: generation})
+			}
+		}
+		return errStaleAntigravityAccount
+	}
 	key := fmt.Sprintf("%s:%s", a.Type, a.ID)
 
 	h.refreshCallsMu.Lock()
@@ -5775,6 +5785,9 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 func (h *proxyHandler) refreshAccountAfterAuthFailure(ctx context.Context, a *Account) error {
 	if a == nil {
 		return errors.New("nil account")
+	}
+	if a.Type == AccountTypeAntigravity {
+		return h.refreshAccount(ctx, a)
 	}
 	if a.Type == AccountTypeCodex {
 		// A 401 with a still-valid access JWT is not permission to spend the

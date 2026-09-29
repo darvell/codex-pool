@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -45,9 +46,7 @@ func (h *proxyHandler) pollUpstreamUsage() {
 	defer h.usagePollMu.Unlock()
 
 	now := time.Now()
-	h.pool.mu.RLock()
-	accs := append([]*Account{}, h.pool.accounts...)
-	h.pool.mu.RUnlock()
+	generation, accs := h.pool.generationAndAccounts()
 
 	for i, a := range accs {
 		// Stagger requests to avoid rate limiting
@@ -130,15 +129,23 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
-		// Gemini accounts don't have WHAM usage endpoint, but still need refresh
+		// Google accounts don't have WHAM usage endpoint, but still need refresh.
 		if accType == AccountTypeGemini || accType == AccountTypeAntigravity {
 			if !h.cfg.disableRefresh && h.needsRefresh(a) {
-				if err := h.refreshAccount(context.Background(), a); err != nil {
-					if isRateLimitError(err) {
+				var err error
+				if accType == AccountTypeAntigravity {
+					err = h.refreshAntigravityReservation(context.Background(), &antigravityReservation{Account: a, generation: generation})
+				} else {
+					err = h.refreshAccount(context.Background(), a)
+				}
+				if err != nil {
+					if isRateLimitError(err) && accType == AccountTypeGemini {
 						h.applyRateLimit(a, nil)
 						continue
 					}
-					log.Printf("proactive refresh for %s failed: %v", a.ID, err)
+					if !errors.Is(err, errStaleAntigravityAccount) {
+						log.Printf("proactive refresh for %s failed: %v", a.ID, err)
+					}
 				} else {
 					a.mu.Lock()
 					if a.Dead {

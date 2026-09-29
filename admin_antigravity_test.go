@@ -181,7 +181,10 @@ func TestAntigravityOAuthSurfacesVerificationLink(t *testing.T) {
 func TestSaveAntigravityAccountIsOwnerOnlyAndDurable(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "account.json")
-	account := &Account{Type: AccountTypeAntigravity, ID: "account", File: file, AccessToken: "access", RefreshToken: "refresh", Email: "a@example.com", ProjectID: "project", PlanType: "pro", ExpiresAt: time.Now().Add(time.Hour), ModelRateLimits: make(map[string]time.Time)}
+	if err := os.WriteFile(file, []byte(`{"future_field":"preserved"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account := &Account{Type: AccountTypeAntigravity, ID: "account", File: file, AccessToken: "access", RefreshToken: "refresh", Email: "a@example.com", ProjectID: "project", PlanType: "pro", ExpiresAt: time.Now().Add(time.Hour), RateLimitUntil: time.Now().Add(5 * time.Minute), ModelRateLimits: map[string]time.Time{"gemini-test": time.Now().Add(time.Minute)}, ModelBackoffLevels: map[string]int{"gemini-test": 3}}
 	antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-test": {ID: "gemini-test"}}})
 	if err := saveAntigravityAccount(account); err != nil {
 		t.Fatal(err)
@@ -195,7 +198,17 @@ func TestSaveAntigravityAccountIsOwnerOnlyAndDurable(t *testing.T) {
 	}
 	var saved AntigravityAuthJSON
 	raw, _ := os.ReadFile(file)
-	if err := json.Unmarshal(raw, &saved); err != nil || saved.ProjectID != "project" || saved.ModelSnapshot == nil {
+	if err := json.Unmarshal(raw, &saved); err != nil || saved.ProjectID != "project" || saved.ModelSnapshot == nil || saved.ModelBackoffLevels["gemini-test"] != 3 || saved.AccountCooldownUntil == "" {
 		t.Fatalf("bad saved credential: %v %#v", err, saved)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil || root["future_field"] != "preserved" {
+		t.Fatalf("unknown fields were not preserved: %v %s", err, raw)
+	}
+	if err := os.WriteFile(file, []byte(`{"access_token":"external-edit","refresh_token":"external-refresh"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAntigravityAccount(account); err == nil || !strings.Contains(err.Error(), "changed externally") {
+		t.Fatalf("external edit was overwritten, err=%v", err)
 	}
 }
