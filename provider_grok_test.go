@@ -35,7 +35,7 @@ func TestServeGrokModelsReturnsGrokClientCatalog(t *testing.T) {
 	}
 	for _, model := range body.Data {
 		if model.ID == "grok-4.5" {
-			if model.Model != "grok-4.5" || model.APIBackend != "responses" || model.ContextWindow != 500000 || len(model.ReasoningEfforts) != 3 {
+			if model.Model != "grok-4.5" || model.APIBackend != "responses" || model.ContextWindow != 256000 || !slices.Equal(model.ContextWindows, []int{256000, 500000}) || model.CompactionsRemaining != 1 || len(model.ReasoningEfforts) != 3 {
 				t.Fatalf("grok-4.5 catalog entry = %#v", model)
 			}
 			return
@@ -260,6 +260,7 @@ func TestSaveGrokAccountPreservesPiGrokCliShape(t *testing.T) {
 }
 
 func TestGrokProviderSetsBearerHeaders(t *testing.T) {
+	t.Setenv("GROK_CLIENT_VERSION", "")
 	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
 	req := httptest.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
 	req.Header.Set("X-Api-Key", "wrong")
@@ -273,7 +274,7 @@ func TestGrokProviderSetsBearerHeaders(t *testing.T) {
 	if got := req.Header.Get("x-grok-client-identifier"); got != "grok-cli" {
 		t.Fatalf("x-grok-client-identifier = %q", got)
 	}
-	if got := req.Header.Get("x-grok-client-version"); got != "0.2.93" {
+	if got := req.Header.Get("x-grok-client-version"); got != "1.0.13" {
 		t.Fatalf("x-grok-client-version = %q", got)
 	}
 	if got := req.Header.Get("X-Api-Key"); got != "" {
@@ -281,6 +282,16 @@ func TestGrokProviderSetsBearerHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("x-grok-source"); got != "" {
 		t.Fatalf("x-grok-source = %q", got)
+	}
+}
+
+func TestGrokClientVersionOverride(t *testing.T) {
+	t.Setenv("GROK_CLIENT_VERSION", " 1.0.14 ")
+	provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
+	req := httptest.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
+	provider.SetAuthHeaders(req, &Account{AccessToken: "token"})
+	if got := req.Header.Get("x-grok-client-version"); got != "1.0.14" {
+		t.Fatalf("x-grok-client-version = %q", got)
 	}
 }
 
@@ -314,6 +325,31 @@ func TestNormalizeResponsesSchemaBodyAcrossProviders(t *testing.T) {
 	}
 	if !strings.Contains(string(rewritten), `"required":null`) {
 		t.Fatalf("non-schema field was unexpectedly normalized: %s", rewritten)
+	}
+}
+
+func TestGrokFastRoutingAndReasoning(t *testing.T) {
+	for _, id := range []string{"grok-4.7-build-fast", "grok-4.6"} {
+		provider := NewGrokProvider(mustParse("https://cli-chat-proxy.grok.com/v1"))
+		h := &proxyHandler{registry: NewProviderRegistry(nil, nil, nil, provider)}
+		body := []byte(`{"model":"` + id + `","input":"hello","reasoning":{"effort":"xhigh"}}`)
+		gotProvider, _, rewritten := h.modelRouteOverride("/v1/responses", id, body)
+		if gotProvider == nil || gotProvider.Type() != AccountTypeGrok {
+			t.Fatalf("%s did not route to Grok", id)
+		}
+		if !strings.Contains(string(rewritten), `"model":"`+id+`"`) || !strings.Contains(string(rewritten), `"reasoning":{"effort":"xhigh"}`) {
+			t.Fatalf("%s model or reasoning changed: %s", id, rewritten)
+		}
+	}
+	prices := publishedModelPricing(time.Now())
+	regular, fast := prices["grok-4.7"], prices["grok-4.7-build-fast"]
+	if fast.InputCostPerToken != 2*regular.InputCostPerToken || fast.OutputCostPerToken != 2*regular.OutputCostPerToken || fast.CacheReadCost != 2*regular.CacheReadCost {
+		t.Fatalf("Fast pricing does not double regular pricing: %+v / %+v", fast, regular)
+	}
+	for _, model := range grokCLIModelCatalog {
+		if model.ContextWindow != 256000 || !slices.Equal(model.ContextWindows, []int{256000, 500000}) || model.CompactionsRemaining != 1 {
+			t.Fatalf("outdated CLI metadata: %+v", model)
+		}
 	}
 }
 

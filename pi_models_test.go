@@ -258,11 +258,14 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	if grok.BaseURL != "https://pool.example.com" {
 		t.Fatalf("grok baseUrl = %q", grok.BaseURL)
 	}
-	if len(grok.Models) != 3 {
+	if len(grok.Models) != 4 {
 		t.Fatalf("grok model count = %d", len(grok.Models))
 	}
 	if grok.Models[0].ID != "grok-4.7" || grok.Models[0].ContextWindow != 500000 || grok.Models[0].MaxTokens != 1000000 {
 		t.Fatalf("current grok model = %#v", grok.Models[0])
+	}
+	if grok.Models[1].ID != "grok-4.7-build-fast" || grok.Models[1].ContextWindow != 500000 || grok.Models[1].Cost.Input != 4 || grok.Models[1].Cost.Output != 12 {
+		t.Fatalf("fast grok model = %#v", grok.Models[1])
 	}
 }
 

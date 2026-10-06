@@ -21,6 +21,7 @@ var forcePublishedPricing = map[string]bool{
 	"mimo-v2.5-pro":             true,
 	"mimo-v2.5":                 true,
 	"grok-4.7":                  true,
+	"grok-4.7-build-fast":       true,
 	"grok-4.6":                  true,
 	"grok-4.5":                  true,
 	"lordx64/cyberkimi":         true,
@@ -81,6 +82,8 @@ func publishedModelPricing(now time.Time) map[string]ModelPricing {
 		"mimo-v2.5-pro":             flatPricing(0.435, 0.87, 0.0036, 0),
 		"mimo-v2.5":                 flatPricing(0.14, 0.28, 0.0028, 0),
 		"grok-4.7":                  flatPricing(2, 6, 0.3, 0),
+		// CLI model discovery lists Fast at twice the regular 4.7 price.
+		"grok-4.7-build-fast": flatPricing(4, 12, 0.6, 0),
 		"grok-4.6":                  flatPricing(2, 6, 0.3, 0),
 		"grok-4.5":                  flatPricing(2, 6, 0.3, 0),
 		"lordx64/cyberkimi":         flatPricing(8, 30, 0.8, 0), // billing.adverserial.ai rate card, 2026-09-15

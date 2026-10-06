@@ -20,8 +20,8 @@ const (
 	grokOAuthClientID    = "b1a00492-073a-47ea-816f-4c329264a828"
 	grokDefaultTokenURL  = "https://auth.x.ai/oauth2/token"
 	grokClientIdentifier = "grok-cli"
-	// Matches current Grok Build CLI (0.2.93 as of 2026-07-09).
-	grokDefaultClientVersion = "0.2.93"
+	// Minimum version accepted by Grok's CLI proxy as of 2026-10-06.
+	grokDefaultClientVersion = "1.0.13"
 )
 
 // GrokProvider handles xAI Grok Code OAuth accounts through Grok's OpenAI-compatible Responses API.
@@ -420,6 +420,9 @@ type grokClientModel struct {
 	Name                        string                `json:"name"`
 	Description                 string                `json:"description"`
 	ContextWindow               int                   `json:"context_window"`
+	ContextWindows              []int                 `json:"context_windows,omitempty"`
+	ModelFamily                 string                `json:"model_family,omitempty"`
+	CompactionsRemaining        int                   `json:"compactions_remaining,omitempty"`
 	AutoCompactThresholdPercent int                   `json:"auto_compact_threshold_percent"`
 	SystemPromptLabel           string                `json:"system_prompt_label,omitempty"`
 	APIBackend                  string                `json:"api_backend"`
@@ -449,17 +452,45 @@ var grokCLIModelCatalog = []grokClientModel{
 		Model:                       "grok-4.7",
 		Name:                        "Grok 4.7",
 		Description:                 "SpaceXAI's latest frontier model",
-		ContextWindow:               500000,
+		ContextWindow:               256000,
+		ContextWindows:              []int{256000, 500000},
+		ModelFamily:                 "xai",
+		CompactionsRemaining:        1,
 		AutoCompactThresholdPercent: 80,
 		SystemPromptLabel:           "Grok 4.7",
 		APIBackend:                  "responses",
 		ReasoningEffort:             "high",
 		SupportsReasoningEffort:     true,
 		ReasoningEfforts: []grokReasoningEffort{
-			{ID: "xhigh", Value: "xhigh", Label: "Extra High Effort", Description: "Maximum reasoning for the hardest tasks."},
-			{ID: "high", Value: "high", Label: "High Effort", Description: "Thorough reasoning and quality. Recommended.", Default: true},
-			{ID: "medium", Value: "medium", Label: "Medium Effort", Description: "Strong quality with a faster turnaround."},
-			{ID: "low", Value: "low", Label: "Low Effort", Description: "Fastest responses. Best for simple tasks."},
+			{ID: "xhigh", Value: "xhigh", Label: "Extra High", Description: "Maximum reasoning for the hardest tasks."},
+			{ID: "high", Value: "high", Label: "High", Description: "Thorough reasoning and quality. Recommended.", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium", Description: "Strong quality with a faster turnaround."},
+			{ID: "low", Value: "low", Label: "Low", Description: "Fastest responses. Best for simple tasks."},
+		},
+		SupportsBackendSearch: true,
+		CompactionAtTokens:    true,
+	},
+	{
+		ID:                          "grok-4.7-build-fast",
+		Object:                      "model",
+		OwnedBy:                     "xAI",
+		Model:                       "grok-4.7-build-fast",
+		Name:                        "Grok 4.7 Fast",
+		Description:                 "Fast variant. 2x the price.",
+		ContextWindow:               256000,
+		ContextWindows:              []int{256000, 500000},
+		ModelFamily:                 "xai",
+		CompactionsRemaining:        1,
+		AutoCompactThresholdPercent: 80,
+		SystemPromptLabel:           "Grok 4.7",
+		APIBackend:                  "responses",
+		ReasoningEffort:             "high",
+		SupportsReasoningEffort:     true,
+		ReasoningEfforts: []grokReasoningEffort{
+			{ID: "xhigh", Value: "xhigh", Label: "Extra High", Description: "Maximum reasoning for the hardest tasks."},
+			{ID: "high", Value: "high", Label: "High", Description: "Thorough reasoning and quality. Recommended.", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium", Description: "Strong quality with a faster turnaround."},
+			{ID: "low", Value: "low", Label: "Low", Description: "Fastest responses. Best for simple tasks."},
 		},
 		SupportsBackendSearch: true,
 		CompactionAtTokens:    true,
@@ -470,22 +501,23 @@ var grokCLIModelCatalog = []grokClientModel{
 		OwnedBy:                     "xAI",
 		Model:                       "grok-4.6",
 		Name:                        "Grok 4.6",
-		Description:                 "SpaceXAI's latest frontier model",
-		ContextWindow:               500000,
+		ContextWindow:               256000,
+		ContextWindows:              []int{256000, 500000},
+		ModelFamily:                 "xai",
+		CompactionsRemaining:        1,
 		AutoCompactThresholdPercent: 80,
 		SystemPromptLabel:           "Grok 4.6",
 		APIBackend:                  "responses",
 		ReasoningEffort:             "high",
 		SupportsReasoningEffort:     true,
 		ReasoningEfforts: []grokReasoningEffort{
-			{ID: "xhigh", Value: "xhigh", Label: "Extra High Effort", Description: "Highest effort and reasoning level"},
-			{ID: "high", Value: "high", Label: "High Effort", Description: "Higher implementation quality with extensive reasoning", Default: true},
-			{ID: "medium", Value: "medium", Label: "Medium Effort", Description: "Balanced effort with standard implementation and testing"},
-			{ID: "low", Value: "low", Label: "Low Effort", Description: "Quick, fast implementations"},
+			{ID: "xhigh", Value: "xhigh", Label: "Extra High", Description: "Highest effort and reasoning level"},
+			{ID: "high", Value: "high", Label: "High", Description: "Higher implementation quality with extensive reasoning", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium", Description: "Balanced effort with standard implementation and testing"},
+			{ID: "low", Value: "low", Label: "Low", Description: "Quick, fast implementations"},
 		},
 		SupportsBackendSearch: true,
 		CompactionAtTokens:    true,
-		ShowModelFingerprint:  true,
 	},
 	{
 		ID:                          "grok-4.5",
@@ -493,21 +525,22 @@ var grokCLIModelCatalog = []grokClientModel{
 		OwnedBy:                     "xAI",
 		Model:                       "grok-4.5",
 		Name:                        "Grok 4.5",
-		Description:                 "SpaceXAI's new frontier model",
-		ContextWindow:               500000,
+		ContextWindow:               256000,
+		ContextWindows:              []int{256000, 500000},
+		ModelFamily:                 "xai",
+		CompactionsRemaining:        1,
 		AutoCompactThresholdPercent: 80,
 		SystemPromptLabel:           "Grok 4.5",
 		APIBackend:                  "responses",
 		ReasoningEffort:             "high",
 		SupportsReasoningEffort:     true,
 		ReasoningEfforts: []grokReasoningEffort{
-			{ID: "high", Value: "high", Label: "High Effort", Description: "Highest implementation quality with extensive reasoning", Default: true},
-			{ID: "medium", Value: "medium", Label: "Medium Effort", Description: "Balanced effort with standard implementation and testing"},
-			{ID: "low", Value: "low", Label: "Low Effort", Description: "Quick, fast implementations"},
+			{ID: "high", Value: "high", Label: "High", Description: "Highest implementation quality with extensive reasoning", Default: true},
+			{ID: "medium", Value: "medium", Label: "Medium", Description: "Balanced effort with standard implementation and testing"},
+			{ID: "low", Value: "low", Label: "Low", Description: "Quick, fast implementations"},
 		},
 		SupportsBackendSearch: true,
 		CompactionAtTokens:    true,
-		ShowModelFingerprint:  true,
 	},
 }
 
@@ -574,6 +607,7 @@ func grokSetupModels() []grokSetupModel {
 // Catalog sourced from cli-chat-proxy GET /v1/models.
 var grokModelCatalog = []grokModelInfo{
 	{ID: "grok-4.7", Name: "Grok 4.7", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 1000000, Aliases: []string{"grok-4.7-build"}},
+	{ID: "grok-4.7-build-fast", Name: "Grok 4.7 Fast", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 1000000},
 	{ID: "grok-4.6", Name: "Grok 4.6", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-build-latest", "grok-4.6-build"}},
 	{ID: "grok-4.5", Name: "Grok 4.5", Reasoning: true, WebSearch: true, ContextWindow: 500000, MaxTokens: 30000, Aliases: []string{"grok-4.5-build"}},
 }
@@ -640,8 +674,8 @@ func grokModelMaxCompletionTokens(model string) int {
 }
 
 func grokModelSupportsReasoningEffort(model string) bool {
-	canonical := grokCanonicalModel(model)
-	return strings.EqualFold(canonical, "grok-4.5") || strings.EqualFold(canonical, "grok-4.7")
+	info, ok := grokModelByName(model)
+	return ok && info.Reasoning
 }
 
 func sanitizeSpooledGrokRequest(spooled *streamedResponsesRequest) error {
