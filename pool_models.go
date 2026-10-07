@@ -86,21 +86,47 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 		case AccountTypeOpencodeGo:
 			protocol = opencodeGoClientProtocol(model.ID)
 		}
-		capabilities := map[string]bool{"reasoning": model.Reasoning, "tools": true}
+		displayName := model.DisplayName
+		description := model.Description
+		contextWindow := model.ContextWindow
+		maxOutputTokens := model.MaxTokens
+		reasoning := model.Reasoning
+		tools := true
+		modalities := append([]string(nil), model.Input...)
+		upstreamID := model.ID
+		if model.AccountType == AccountTypeMistral {
+			upstreamID = mistralCanonicalModel(model.ID)
+			tools = false
+			if discovered, ok := discoveredMetadataForPool(pool, model.AccountType, model.ID); ok {
+				displayName = discovered.DisplayName
+				description = discovered.Description
+				contextWindow = discovered.ContextWindow
+				reasoning = discovered.Reasoning
+				tools = discovered.Tools
+				modalities = append([]string(nil), discovered.Modalities...)
+			}
+			adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
+			if strings.TrimSpace(description) == "" {
+				description = adapter
+			} else {
+				description += ". " + adapter
+			}
+		}
+		capabilities := map[string]bool{"reasoning": reasoning, "tools": tools}
 		if model.WebSearch {
 			capabilities["web_search"] = true
 		}
 		models = append(models, poolModelDescriptor{
 			ID:                 model.ID,
-			Name:               model.DisplayName,
+			Name:               displayName,
 			Protocol:           protocol,
-			ContextWindow:      model.ContextWindow,
-			Description:        model.Description,
+			ContextWindow:      contextWindow,
+			Description:        description,
 			Provider:           string(model.AccountType),
-			UpstreamID:         model.ID,
-			MaxOutputTokens:    model.MaxTokens,
+			UpstreamID:         upstreamID,
+			MaxOutputTokens:    maxOutputTokens,
 			Protocols:          []string{protocol},
-			Modalities:         append([]string(nil), model.Input...),
+			Modalities:         modalities,
 			Capabilities:       capabilities,
 			NativeTools:        nativeWebSearchTools(model.AccountType, model.WebSearch),
 			Aliases:            append([]string(nil), model.Aliases...),
@@ -186,6 +212,24 @@ func optionalModelReset(reset time.Time) *time.Time {
 		return nil
 	}
 	return &reset
+}
+
+func discoveredMetadataForPool(pool *poolState, accountType AccountType, model string) (DiscoveredModel, bool) {
+	if pool == nil {
+		return DiscoveredModel{}, false
+	}
+	for _, account := range pool.allAccounts() {
+		if account.Type != accountType {
+			continue
+		}
+		account.mu.Lock()
+		discovered, ok := accountDiscoveredModel(account, model)
+		account.mu.Unlock()
+		if ok {
+			return discovered, true
+		}
+	}
+	return DiscoveredModel{}, false
 }
 
 func poolModelAvailability(pool *poolState, accountType AccountType, modelIDs ...string) (int, int, bool) {

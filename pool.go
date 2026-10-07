@@ -29,6 +29,7 @@ const (
 	AccountTypeGrok        AccountType = "grok"
 	AccountTypeAdverserial AccountType = "adverserial"
 	AccountTypeOpencodeGo  AccountType = "opencode_go"
+	AccountTypeMistral     AccountType = "mistral"
 
 	// For ordinary Codex traffic, cyber-approved accounts receive twice the
 	// routing weight of non-cyber accounts when their quota health is
@@ -380,6 +381,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		"grok":        AccountTypeGrok,
 		"adverserial": AccountTypeAdverserial,
 		"opencode_go": AccountTypeOpencodeGo,
+		"mistral":     AccountTypeMistral,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -808,6 +810,13 @@ func accountSupportsDiscoveredModel(account *Account, model string) bool {
 func accountDiscoveredModel(account *Account, model string) (DiscoveredModel, bool) {
 	if upstream, ok := defaultModelAliases[strings.ToLower(model)]; ok {
 		model = upstream
+	}
+	if account != nil && account.Type == AccountTypeMistral {
+		var ok bool
+		model, ok = mistralBareID(model)
+		if !ok {
+			return DiscoveredModel{}, false
+		}
 	}
 	for id, discovered := range account.Models {
 		if strings.EqualFold(id, model) {
@@ -1515,6 +1524,8 @@ func saveAccount(a *Account) error {
 	case AccountTypeAdverserial:
 		return saveAPIKeyAccount(a)
 	case AccountTypeOpencodeGo:
+		return saveAPIKeyAccount(a)
+	case AccountTypeMistral:
 		return saveAPIKeyAccount(a)
 	case AccountTypeGrok:
 		return saveGrokAccount(a)

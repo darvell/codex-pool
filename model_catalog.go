@@ -64,6 +64,14 @@ var poolModels = []poolModel{
 	{AccountType: AccountTypeMinimax, ID: "MiniMax-M2.7", DisplayName: "MiniMax-M2.7", ContextWindow: 204800, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}},
 	{AccountType: AccountTypeMinimax, ID: "MiniMax-M2.7-highspeed", DisplayName: "MiniMax-M2.7-Highspeed", ContextWindow: 204800, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}},
 
+	// Pinned Mistral chat entries keep generated Pi/Cute configs useful before
+	// dynamic catalogs are consumed. Routing still requires per-key discovery,
+	// and the public IDs stay namespaced to avoid collisions with other pools.
+	{AccountType: AccountTypeMistral, ID: "mistral/mistral-large-latest", DisplayName: "Mistral Large (latest)", ContextWindow: 128000, MaxTokens: 32768, Reasoning: false, Input: []string{"text"}, RequiresDiscovery: true},
+	{AccountType: AccountTypeMistral, ID: "mistral/mistral-small-latest", DisplayName: "Mistral Small (latest)", ContextWindow: 128000, MaxTokens: 32768, Reasoning: false, Input: []string{"text"}, RequiresDiscovery: true},
+	{AccountType: AccountTypeMistral, ID: "mistral/codestral-latest", DisplayName: "Codestral (latest)", ContextWindow: 256000, MaxTokens: 32768, Reasoning: false, Input: []string{"text"}, RequiresDiscovery: true},
+	{AccountType: AccountTypeMistral, ID: "mistral/devstral-small-latest", DisplayName: "Devstral Small (latest)", ContextWindow: 128000, MaxTokens: 32768, Reasoning: false, Input: []string{"text"}, RequiresDiscovery: true},
+
 	// GLM-5.3 replaces GLM-5.2 for Coding Plan users. Keep the previous ID as
 	// an alias so existing installed configurations migrate at the proxy.
 	{AccountType: AccountTypeZAI, ID: "glm-5.3", DisplayName: "GLM-5.3", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, WebSearch: true, Input: []string{"text"}, Aliases: []string{"glm-5.2"}},

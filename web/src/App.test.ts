@@ -51,6 +51,15 @@ describe("providerDisplay", () => {
     });
   });
 
+  it("defines display metadata for mistral accounts returned by the pool API", () => {
+    expect(providerDisplay("mistral")).toEqual({
+      label: "Mistral",
+      color: "#fa5b30",
+      dither: "orange",
+      glyph: "✥",
+    });
+  });
+
   it("falls back safely when the API returns a provider newer than the frontend", () => {
     expect(providerDisplay("future-provider")).toEqual({
       label: "Unknown",

@@ -246,12 +246,12 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 	if authData.Tokens != nil {
 		codexAccessToken = authData.Tokens.AccessToken
 	}
-	piModelsJSON, err := generatePiModelsJSON(h.getEffectivePublicURL(r), codexAccessToken, claudeAuthData.AccessToken)
+	piModelsJSON, err := generatePiModelsJSON(h.getEffectivePublicURL(r), codexAccessToken, claudeAuthData.AccessToken, h.pool)
 	if err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "Failed to generate pi models config.")
 		return
 	}
-	cuteCodeSettingsJSON, err := generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuthData.AccessToken)
+	cuteCodeSettingsJSON, err := generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuthData.AccessToken, h.pool)
 	if err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "Failed to generate cute-code config.")
 		return
@@ -293,7 +293,7 @@ func (h *proxyHandler) generateCuteCodeSettingsForToken(token string, r *http.Re
 	if err != nil {
 		return nil, err
 	}
-	return generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuth.AccessToken)
+	return generateCuteCodeSettingsJSON(h.getEffectivePublicURL(r), claudeAuth.AccessToken, h.pool)
 }
 
 func (h *proxyHandler) serveCuteCodeSettingsConfig(w http.ResponseWriter, r *http.Request) {

@@ -60,7 +60,7 @@ Share your pool with others using a friend code.
 ### 1. Add your accounts
 
 ```bash
-mkdir -p pool/codex pool/claude pool/gemini pool/antigravity pool/opencode_go
+mkdir -p pool/codex pool/claude pool/gemini pool/antigravity pool/opencode_go pool/mistral
 
 # Codex accounts
 cp ~/.codex/auth.json pool/codex/work.json
@@ -77,6 +77,12 @@ cat > pool/opencode_go/main.json <<'EOF'
 {"api_key": "sk-..."}
 EOF
 chmod 600 pool/opencode_go/main.json
+
+# Mistral paid API key (from https://console.mistral.ai)
+cat > pool/mistral/main.json <<'EOF'
+{"api_key": "..."}
+EOF
+chmod 600 pool/mistral/main.json
 ```
 
 Structure:
@@ -218,6 +224,15 @@ Native-tool endpoints are same-origin relative paths. The `native_tools` map key
 ```
 
 OpenCode Go models are namespaced as `opencode-go/<model-id>` (e.g. `opencode-go/longcat-2.0`), matching OpenCode's own config convention. Bare IDs also route to Go unless another provider already claims them (`kimi-k3` is Go-only; bare `mimo-v2.5-pro` stays on Xiaomi, bare `grok-4.6` stays on Grok). Go quota (rolling/weekly/monthly from `GET /zen/go/v1/usage`) is polled every 15 minutes; the weekly window drives routing score. Configure a different endpoint with `UPSTREAM_OPENCODE_GO_BASE`.
+
+**Mistral** - `pool/mistral/*.json`
+```json
+{"api_key": "..."}
+```
+
+Mistral is an ordinary paid API-key account, like Kimi/MiniMax/Z.ai/Xiaomi. Each key's chat-capable catalog is discovered from `GET /v1/models` and refreshed on the same 15-minute poll as other dynamic providers; models that don't advertise `capabilities.completion_chat` (embeddings, moderation, OCR, etc.) are filtered out. Public model IDs are always namespaced `mistral/<upstream-id>` (e.g. `mistral/mistral-large-latest`) — bare IDs are never claimed, since Mistral's catalog can overlap other pools. A small set of well-known chat models ships pre-pinned so Pi/Cute Code configs are useful before the first discovery poll completes; routing itself still requires a key that has actually advertised the model.
+
+Pi sees Mistral as `pool-mistral`, an `openai-completions` provider at `/v1` (distinct from Pi's built-in `mistral` Conversations provider). Cute Code's own `openai` protocol speaks the Responses API, which Mistral's Chat Completions backend does not implement, so Mistral is exported to Cute Code as an `anthropic` Messages adapter instead — the pool translates `/v1/messages` requests to Mistral's Chat Completions format and back. Reasoning effort is read from whichever carrier the client sent (`reasoning_effort`, `reasoning.effort`, `thinking.effort`/`budget_tokens`) and collapsed to the two-value enum Mistral's API accepts: `low`/`minimal` becomes `none`, and `medium`/`high`/`max` all become `high`, matching Mistral's own Vibe CLI. Usage is parsed from `usage.prompt_tokens`/`completion_tokens`/`prompt_tokens_details.cached_tokens` on both buffered and streamed (SSE, including a usage-only terminal chunk) responses; rate-limit headers reflect short per-minute windows and are intentionally not treated as monthly quota. 429s cool the requesting key; 402s apply a heavy penalty and rotate to another key without being marked permanently dead unless the body indicates a deactivated workspace. Configure a different endpoint with `UPSTREAM_MISTRAL_BASE` (default `https://api.mistral.ai`).
 
 Antigravity model names come from Google's live `fetchAvailableModels` response. Use `antigravity/<model-id>` to force this provider. `/api/pool/models`, `/v1/models`, `/v1beta/models`, Pi, Cute Code, and the Codex catalog consume the same registry. Temporary quota exhaustion changes `available_now` without removing a supported model from the catalog.
 

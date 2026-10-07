@@ -65,8 +65,12 @@ type cuteCodeModelConfig struct {
 	Description   string `json:"description,omitempty"`
 }
 
-func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byte, error) {
+func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools ...*poolState) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	var pool *poolState
+	if len(pools) > 0 {
+		pool = pools[0]
+	}
 	cfg := piModelsConfig{
 		Providers: map[string]piProviderConfig{
 			"codex": {
@@ -129,14 +133,26 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string) ([]byt
 				API:     "openai-completions",
 				Models:  opencodeGoPiModels(),
 			},
+			// The built-in Pi `mistral` provider speaks Mistral Conversations,
+			// not Chat Completions. Use a distinct key so Pi loads this config.
+			"pool-mistral": {
+				BaseURL: baseURL + "/v1",
+				APIKey:  codexAPIKey,
+				API:     "openai-completions",
+				Models:  mistralPiModels(pool),
+			},
 		},
 	}
 
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
+func generateCuteCodeSettingsJSON(publicURL, apiKey string, pools ...*poolState) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	var pool *poolState
+	if len(pools) > 0 {
+		pool = pools[0]
+	}
 	settings := cuteCodeSettings{
 		Model:            defaultCodexModel,
 		OpenAIBaseURL:    baseURL,
@@ -151,6 +167,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string) ([]byte, error) {
 		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType)...)
 	}
 	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey)...)
+	settings.CustomModels = append(settings.CustomModels, mistralCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
 	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey)...)
 	return json.MarshalIndent(settings, "", "  ")
@@ -375,6 +392,45 @@ func opencodeGoCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 			continue
 		}
 		result = append(result, cuteAnthropicModel(baseURL, apiKey, model.ID, model.DisplayName, model.ContextWindow, model.Description))
+	}
+	return result
+}
+
+func mistralPiModels(pool *poolState) []piModelConfig {
+	descriptors := poolModelDescriptors(pool)
+	result := make([]piModelConfig, 0)
+	for _, model := range descriptors {
+		if model.Provider != string(AccountTypeMistral) {
+			continue
+		}
+		maxTokens := model.MaxOutputTokens
+		if maxTokens == 0 {
+			maxTokens = 32768
+		}
+		result = append(result, piModelConfig{
+			ID: model.ID, Name: model.Name, Reasoning: boolPtr(model.Capabilities["reasoning"]),
+			Input: append([]string(nil), model.Modalities...), ContextWindow: model.ContextWindow,
+			MaxTokens: maxTokens, Cost: advertisedModelCost(model.UpstreamID, time.Now()),
+		})
+	}
+	return result
+}
+
+func mistralCuteModels(baseURL, apiKey string, pool *poolState) []cuteCodeModelConfig {
+	descriptors := poolModelDescriptors(pool)
+	result := make([]cuteCodeModelConfig, 0)
+	for _, model := range descriptors {
+		if model.Provider != string(AccountTypeMistral) {
+			continue
+		}
+		description := strings.TrimSpace(model.Description)
+		adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
+		if description == "" {
+			description = adapter
+		} else {
+			description += ". " + adapter
+		}
+		result = append(result, cuteAnthropicModel(baseURL, apiKey, model.ID, model.Name, model.ContextWindow, description))
 	}
 	return result
 }

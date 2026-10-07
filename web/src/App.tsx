@@ -150,6 +150,7 @@ const PROVIDERS: Record<Provider, { label: string; color: string; dither: Dither
   grok: { label: "Grok", color: "#86efff", dither: "cyan", glyph: "⌁" },
   adverserial: { label: "Adverserial", color: "#ff5454", dither: "red", glyph: "◬" },
   opencode_go: { label: "OpenCode Go", color: "#ffd23f", dither: "gold", glyph: "⬢" },
+  mistral: { label: "Mistral", color: "#fa5b30", dither: "orange", glyph: "✥" },
 };
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
@@ -2655,7 +2656,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
   );
 }
 
-type ContributableProvider = "codex" | "claude" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "opencode_go";
+type ContributableProvider = "codex" | "claude" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "opencode_go" | "mistral";
 
 const CONTRIBUTION_PROVIDERS: Array<{ id: ContributableProvider; label: string; mode: "oauth" | "key" | "json" }> = [
   { id: "codex", label: "Codex", mode: "oauth" },
@@ -2667,6 +2668,7 @@ const CONTRIBUTION_PROVIDERS: Array<{ id: ContributableProvider; label: string; 
   { id: "xiaomi", label: "Xiaomi", mode: "key" },
   { id: "grok", label: "Grok", mode: "json" },
   { id: "opencode_go", label: "OpenCode Go", mode: "key" },
+  { id: "mistral", label: "Mistral", mode: "key" },
 ];
 
 function oauthCode(value: string) {
@@ -2769,7 +2771,7 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
       } else if (selected.mode === "json") {
         await contributeGrok(credential);
       } else {
-        await contributeAPIKey(provider as "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go", credential);
+        await contributeAPIKey(provider as "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go" | "mistral", credential);
       }
       await onAdded();
     } catch (cause) {
