@@ -465,7 +465,9 @@ func convertClaudeMsgToOpenAI(m map[string]any) []map[string]any {
 			}
 			msgs = append(msgs, toolMsg)
 		}
-		return msgs
+		if len(contentParts) == 0 {
+			return msgs
+		}
 	}
 
 	// Plain text or multimodal message

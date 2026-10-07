@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func (h *proxyHandler) serveMistralAdmin(w http.ResponseWriter, r *http.Request) {
@@ -48,11 +49,14 @@ func (h *proxyHandler) handleMistralAdd(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Validate against the same free GET /v1/models endpoint used for per-key
-	// chat-model discovery: 200 proves the key is live and also seeds the
-	// account's model catalog on the very next discovery poll. No spend.
+	// Persist the validated catalog with the key so admission makes the
+	// models routable immediately, rather than waiting for the next poll.
 	validationURL := strings.TrimRight(h.cfg.mistralBase.String(), "/") + "/v1/models"
-	validReq, _ := http.NewRequest(http.MethodGet, validationURL, nil)
+	validReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, validationURL, nil)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "invalid Mistral validation URL")
+		return
+	}
 	validReq.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := h.transport.RoundTrip(validReq)
@@ -60,8 +64,12 @@ func (h *proxyHandler) handleMistralAdd(w http.ResponseWriter, r *http.Request) 
 		respondJSONError(w, http.StatusBadGateway, "failed to validate key: "+err.Error())
 		return
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	resp.Body.Close()
+	if err != nil {
+		respondJSONError(w, http.StatusBadGateway, "failed to read Mistral catalog")
+		return
+	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		respondJSONError(w, http.StatusBadRequest, "invalid API key (authentication failed)")
@@ -71,10 +79,12 @@ func (h *proxyHandler) handleMistralAdd(w http.ResponseWriter, r *http.Request) 
 		respondJSONError(w, http.StatusBadGateway, fmt.Sprintf("key validation returned status %d", resp.StatusCode))
 		return
 	}
-	if _, err := parseMistralModels(body); err != nil {
+	models, err := parseMistralModels(body)
+	if err != nil {
 		respondJSONError(w, http.StatusBadGateway, "key validation returned an unexpected catalog: "+err.Error())
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, r, AccountTypeMistral, "mistral", apiKey)
+	snapshot := &providerModelSnapshot{FetchedAt: time.Now().UTC(), Models: models}
+	h.saveAPIKeySnapshot(w, r, AccountTypeMistral, "mistral", apiKey, snapshot)
 }

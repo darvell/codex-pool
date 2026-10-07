@@ -72,6 +72,15 @@ func TestMistralAdminAddValidatesAndSavesAccount(t *testing.T) {
 	if h.pool.countByType(AccountTypeMistral) != 1 {
 		t.Fatalf("pool Mistral count = %d, want 1", h.pool.countByType(AccountTypeMistral))
 	}
+	reloaded, err := loadPool(poolDir, h.registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pool := range []*poolState{h.pool, newPoolState(reloaded, false)} {
+		if account := pool.candidateForModel("", nil, AccountTypeMistral, "", "", "mistral/mistral-large-latest"); account == nil {
+			t.Fatal("validated Mistral model must be routable immediately and after reload")
+		}
+	}
 }
 
 func TestMistralAdminRejectsUnauthorizedKeyWithoutSaving(t *testing.T) {

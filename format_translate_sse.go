@@ -29,6 +29,8 @@ type streamTranslationState struct {
 	messageFinished   bool
 	contentBlockIndex int
 	toolCallIndex     int
+	toolBlocks        map[int]int
+	toolBlockOrder    []int
 	currentToolID     string
 	currentToolName   string
 	sentRole          bool
@@ -91,7 +93,7 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 	if bytes.Equal(data, []byte("[DONE]")) {
 		// Emit final events if not already done
 		if sw.state.messageStarted && !sw.state.messageFinished {
-			sw.emitClaudeContentBlockStop()
+			sw.stopClaudeBlocks()
 			sw.emitClaudeMessageDelta()
 			sw.emitClaudeEvent("message_stop", `{"type":"message_stop"}`)
 			sw.state.messageFinished = true
@@ -139,7 +141,7 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 			if !sw.finishOnReason || !sw.state.messageStarted || sw.state.messageFinished {
 				return
 			}
-			sw.emitClaudeContentBlockStop()
+			sw.stopClaudeBlocks()
 			sw.emitClaudeMessageDelta()
 			sw.emitClaudeEvent("message_stop", `{"type":"message_stop"}`)
 			sw.state.messageFinished = true
@@ -220,42 +222,41 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 				continue
 			}
 			fn, _ := call["function"].(map[string]any)
-
-			// New tool call (has name)
-			if fn != nil {
-				if name, ok := fn["name"].(string); ok && name != "" {
-					if !sw.state.messageStarted {
-						sw.state.messageStarted = true
-						sw.emitClaudeMessageStart()
-					}
-					// Close previous content block if any
-					if sw.state.sentRole {
-						sw.emitClaudeContentBlockStop()
-						sw.state.contentBlockIndex++
-					}
-					sw.state.sentRole = true
-
-					toolID := ""
-					if id, ok := call["id"].(string); ok {
-						toolID = id
-					}
-					sw.state.currentToolID = toolID
-					sw.state.currentToolName = name
-					sw.state.toolCallIndex++
-
-					sw.emitClaudeEvent("content_block_start", fmt.Sprintf(
-						`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s,"input":{}}}`,
-						sw.state.contentBlockIndex, mustMarshalString(toolID), mustMarshalString(name)))
-				}
+			if fn == nil {
+				continue
 			}
-
-			// Tool call arguments delta
-			if fn != nil {
-				if args, ok := fn["arguments"].(string); ok && args != "" {
-					sw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
-						`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
-						sw.state.contentBlockIndex, mustMarshalString(args)))
+			upstreamIndex := int(toInt64(call["index"]))
+			blockIndex, started := sw.state.toolBlocks[upstreamIndex]
+			name, _ := fn["name"].(string)
+			if !started && name != "" {
+				if !sw.state.messageStarted {
+					sw.state.messageStarted = true
+					sw.emitClaudeMessageStart()
 				}
+				if sw.state.sentRole {
+					// Parallel tools remain open: later deltas can target any index.
+					if len(sw.state.toolBlocks) == 0 {
+						sw.emitClaudeContentBlockStop()
+					}
+					sw.state.contentBlockIndex++
+				}
+				sw.state.sentRole = true
+				blockIndex = sw.state.contentBlockIndex
+				if sw.state.toolBlocks == nil {
+					sw.state.toolBlocks = make(map[int]int)
+				}
+				sw.state.toolBlocks[upstreamIndex] = blockIndex
+				sw.state.toolBlockOrder = append(sw.state.toolBlockOrder, blockIndex)
+				started = true
+				toolID, _ := call["id"].(string)
+				sw.emitClaudeEvent("content_block_start", fmt.Sprintf(
+					`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s,"input":{}}}`,
+					blockIndex, mustMarshalString(toolID), mustMarshalString(name)))
+			}
+			if args, _ := fn["arguments"].(string); started && args != "" {
+				sw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
+					`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
+					blockIndex, mustMarshalString(args)))
 			}
 		}
 	}
@@ -295,6 +296,19 @@ func (sw *sseTranslateWriter) emitClaudeMessageStart() {
 	msg := fmt.Sprintf(`{"type":"message_start","message":{"id":%s,"type":"message","role":"assistant","model":%s,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`,
 		mustMarshalString(id), mustMarshalString(model))
 	sw.emitClaudeEvent("message_start", msg)
+}
+
+func (sw *sseTranslateWriter) stopClaudeBlocks() {
+	if len(sw.state.toolBlockOrder) > 0 {
+		for _, index := range sw.state.toolBlockOrder {
+			sw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
+				`{"type":"content_block_stop","index":%d}`, index))
+		}
+		return
+	}
+	if sw.state.sentRole {
+		sw.emitClaudeContentBlockStop()
+	}
 }
 
 func (sw *sseTranslateWriter) emitClaudeContentBlockStop() {

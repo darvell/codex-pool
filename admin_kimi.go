@@ -153,6 +153,10 @@ func (h *proxyHandler) handleAPIKeyRemove(w http.ResponseWriter, acctType Accoun
 
 // saveAPIKeyAccountFile creates a new API key account file and reloads accounts.
 func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, r *http.Request, acctType AccountType, subdir, apiKey string) {
+	h.saveAPIKeySnapshot(w, r, acctType, subdir, apiKey, nil)
+}
+
+func (h *proxyHandler) saveAPIKeySnapshot(w http.ResponseWriter, r *http.Request, acctType AccountType, subdir, apiKey string, snapshot *providerModelSnapshot) {
 	accountID := subdir + "_" + randomHex(4)
 
 	poolDir := filepath.Join(h.cfg.poolDir, subdir)
@@ -177,6 +181,9 @@ func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, r *http.Requ
 	authJSON := map[string]any{
 		"api_key":  apiKey,
 		"added_at": time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if snapshot != nil {
+		authJSON["provider_model_snapshot"] = snapshot
 	}
 
 	data, err := json.MarshalIndent(authJSON, "", "  ")
