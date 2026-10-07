@@ -31,6 +31,7 @@ const (
 	AccountTypeAdverserial AccountType = "adverserial"
 	AccountTypeOpencodeGo  AccountType = "opencode_go"
 	AccountTypeMistral     AccountType = "mistral"
+	AccountTypeMistralVibe AccountType = "mistral_vibe"
 
 	// For ordinary Codex traffic, cyber-approved accounts receive twice the
 	// routing weight of non-cyber accounts when their quota health is
@@ -109,6 +110,7 @@ type Account struct {
 	// antigravitySnapshot is staged while loading account files. Publishing it
 	// to the live registry is part of the pool commit, never file parsing.
 	antigravitySnapshot *AntigravityAccountSnapshot
+	vibeAccount         *vibeAccountInfo
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -377,18 +379,19 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 
 	// Load accounts from provider subdirectories: pool/codex/, pool/claude/, pool/gemini/
 	providerDirs := map[string]AccountType{
-		"codex":       AccountTypeCodex,
-		"claude":      AccountTypeClaude,
-		"gemini":      AccountTypeGemini,
-		"antigravity": AccountTypeAntigravity,
-		"kimi":        AccountTypeKimi,
-		"minimax":     AccountTypeMinimax,
-		"zai":         AccountTypeZAI,
-		"xiaomi":      AccountTypeXiaomi,
-		"grok":        AccountTypeGrok,
-		"adverserial": AccountTypeAdverserial,
-		"opencode_go": AccountTypeOpencodeGo,
-		"mistral":     AccountTypeMistral,
+		"codex":        AccountTypeCodex,
+		"claude":       AccountTypeClaude,
+		"gemini":       AccountTypeGemini,
+		"antigravity":  AccountTypeAntigravity,
+		"kimi":         AccountTypeKimi,
+		"minimax":      AccountTypeMinimax,
+		"zai":          AccountTypeZAI,
+		"xiaomi":       AccountTypeXiaomi,
+		"grok":         AccountTypeGrok,
+		"adverserial":  AccountTypeAdverserial,
+		"opencode_go":  AccountTypeOpencodeGo,
+		"mistral":      AccountTypeMistral,
+		"mistral_vibe": AccountTypeMistralVibe,
 	}
 
 	for subdir, accountType := range providerDirs {
@@ -753,7 +756,7 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 			continue
 		}
 		a.mu.Lock()
-		if  a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) || a.RateLimitUntil.After(now) {
+		if a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) || a.RateLimitUntil.After(now) {
 			a.mu.Unlock()
 			continue
 		}
@@ -823,7 +826,12 @@ func accountDiscoveredModel(account *Account, model string) (DiscoveredModel, bo
 	if upstream, ok := defaultModelAliases[strings.ToLower(model)]; ok {
 		model = upstream
 	}
-	if account != nil && account.Type == AccountTypeMistral {
+	if account != nil && account.Type == AccountTypeMistralVibe {
+		if !account.vibeAccount.current() || !isMistralVibeModel(model) {
+			return DiscoveredModel{}, false
+		}
+		model = mistralCanonicalModel(model)
+	} else if account != nil && account.Type == AccountTypeMistral {
 		var ok bool
 		model, ok = mistralBareID(model)
 		if !ok {
@@ -860,6 +868,9 @@ func (p *poolState) discoveredModelKnown(accountType AccountType, model string) 
 }
 
 func (p *poolState) discoveredModelRequiresEntitlement(accountType AccountType, model string) bool {
+	if accountType == AccountTypeMistralVibe {
+		return true
+	}
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return false
@@ -1547,7 +1558,7 @@ func saveAccount(a *Account) error {
 		return saveAPIKeyAccount(a)
 	case AccountTypeOpencodeGo:
 		return saveAPIKeyAccount(a)
-	case AccountTypeMistral:
+	case AccountTypeMistral, AccountTypeMistralVibe:
 		return saveAPIKeyAccount(a)
 	case AccountTypeGrok:
 		return saveGrokAccount(a)
@@ -1557,6 +1568,9 @@ func saveAccount(a *Account) error {
 }
 
 func persistAccountAddedAt(root map[string]any, a *Account) {
+	if a.Type == AccountTypeMistralVibe {
+		root["vibe_account"] = a.vibeAccount
+	}
 	if len(a.Models) > 0 {
 		root["provider_model_snapshot"] = providerModelSnapshot{FetchedAt: a.ModelsFetchedAt, Models: a.Models}
 	}

@@ -65,7 +65,7 @@ func providerTargetFormat(accountType AccountType) RequestFormat {
 		return FormatClaude
 	case AccountTypeZAI:
 		return FormatClaude
-	case AccountTypeMistral:
+	case AccountTypeMistral, AccountTypeMistralVibe:
 		return FormatOpenAI
 	case AccountTypeCodex:
 		return FormatOpenAI

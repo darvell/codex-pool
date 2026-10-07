@@ -1,4 +1,16 @@
-export type Provider = "codex" | "claude" | "gemini" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "adverserial" | "opencode_go" | "mistral";
+export type Provider = "codex" | "claude" | "gemini" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "adverserial" | "opencode_go" | "mistral" | "mistral_vibe";
+
+export interface VibeLoginSession {
+  session_id: string;
+  oauth_url: string;
+  expires_at: string;
+}
+
+export interface VibeLoginStatus {
+  status: "pending" | "complete" | "expired" | "denied" | "error";
+  account_id?: string;
+  error?: string;
+}
 
 export interface PassportPrincipal {
   id: string;

@@ -685,6 +685,10 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.handleOpencodeGoAdd(w, r)
 		case "/api/pool/accounts/mistral/add":
 			h.handleMistralAdd(w, r)
+		case "/api/pool/accounts/mistral-vibe/start":
+			h.startVibeSignIn(w, r)
+		case "/api/pool/accounts/mistral-vibe/status":
+			h.vibeSignInStatus(w, r)
 		default:
 			http.NotFound(w, r)
 		}

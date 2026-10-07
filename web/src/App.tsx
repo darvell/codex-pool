@@ -67,6 +67,8 @@ import {
   storedAdminToken,
   storedFriendSession,
   startAccountOAuth,
+  startVibeLogin,
+  vibeLoginStatus,
 	  startAntigravityOAuth,
   unlockOperator,
   loadAuthConfig,
@@ -105,6 +107,7 @@ import type {
   QuotaCapacityPoint,
   ResetObservation,
   SignalAnalytics,
+  VibeLoginSession,
 } from "./types";
 
 type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "setup";
@@ -150,7 +153,8 @@ const PROVIDERS: Record<Provider, { label: string; color: string; dither: Dither
   grok: { label: "Grok", color: "#86efff", dither: "cyan", glyph: "⌁" },
   adverserial: { label: "Adverserial", color: "#ff5454", dither: "red", glyph: "◬" },
   opencode_go: { label: "OpenCode Go", color: "#ffd23f", dither: "gold", glyph: "⬢" },
-  mistral: { label: "Mistral", color: "#fa5b30", dither: "orange", glyph: "✥" },
+  mistral: { label: "Mistral API", color: "#fa5b30", dither: "orange", glyph: "✥" },
+  mistral_vibe: { label: "Mistral Vibe", color: "#fa5b30", dither: "orange", glyph: "✥" },
 };
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
@@ -2656,9 +2660,9 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
   );
 }
 
-type ContributableProvider = "codex" | "claude" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "opencode_go" | "mistral";
+type ContributableProvider = "codex" | "claude" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "opencode_go" | "mistral" | "mistral_vibe";
 
-const CONTRIBUTION_PROVIDERS: Array<{ id: ContributableProvider; label: string; mode: "oauth" | "key" | "json" }> = [
+const CONTRIBUTION_PROVIDERS: Array<{ id: ContributableProvider; label: string; mode: "oauth" | "device" | "key" | "json" }> = [
   { id: "codex", label: "Codex", mode: "oauth" },
   { id: "claude", label: "Claude", mode: "oauth" },
 	  { id: "antigravity", label: "Google Antigravity", mode: "oauth" },
@@ -2668,7 +2672,8 @@ const CONTRIBUTION_PROVIDERS: Array<{ id: ContributableProvider; label: string; 
   { id: "xiaomi", label: "Xiaomi", mode: "key" },
   { id: "grok", label: "Grok", mode: "json" },
   { id: "opencode_go", label: "OpenCode Go", mode: "key" },
-  { id: "mistral", label: "Mistral", mode: "key" },
+  { id: "mistral", label: "Mistral API", mode: "key" },
+  { id: "mistral_vibe", label: "Mistral Vibe", mode: "device" },
 ];
 
 function oauthCode(value: string) {
@@ -2683,6 +2688,52 @@ function oauthCode(value: string) {
   }
 }
 
+const VIBE_POLL_MS = 3000;
+const VIBE_EXPIRED = "Sign-in expired. Try again.";
+
+export function watchVibeSession(session: VibeLoginSession, onComplete: () => void, onError: (message: string) => void) {
+  const remaining = Date.parse(session.expires_at) - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    onError(VIBE_EXPIRED);
+    return () => {};
+  }
+
+  const controller = new AbortController();
+  let stopped = false;
+  let inFlight = false;
+  const stop = () => {
+    stopped = true;
+    window.clearInterval(interval);
+    window.clearTimeout(expiry);
+    controller.abort();
+  };
+  const fail = (message: string) => {
+    stop();
+    onError(message);
+  };
+  const interval = window.setInterval(async () => {
+    if (stopped) return;
+    if (Date.now() >= Date.parse(session.expires_at)) { fail(VIBE_EXPIRED); return; }
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const result = await vibeLoginStatus(session.session_id, controller.signal);
+      if (stopped) return;
+      if (Date.now() >= Date.parse(session.expires_at)) { fail(VIBE_EXPIRED); return; }
+      if (result.status === "pending") return;
+      stop();
+      if (result.status === "complete") { onComplete(); return; }
+      onError(result.status === "expired" ? VIBE_EXPIRED : result.error || (result.status === "denied" ? "Sign-in denied. Try again." : "Couldn't finish sign-in. Try again."));
+    } catch {
+      if (!stopped) fail("Couldn't check sign-in. Try again.");
+    } finally {
+      inFlight = false;
+    }
+  }, VIBE_POLL_MS);
+  const expiry = window.setTimeout(() => fail(VIBE_EXPIRED), remaining);
+  return stop;
+}
+
 function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdded: () => Promise<void> }) {
   const [provider, setProvider] = useState<ContributableProvider>("codex");
   const [credential, setCredential] = useState("");
@@ -2691,6 +2742,12 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [verifyURL, setVerifyURL] = useState("");
+  const [vibe, setVibe] = useState<VibeLoginSession | null>(null);
+  const [vibeComplete, setVibeComplete] = useState(false);
+  const vibeStart = useRef<AbortController | null>(null);
+  const vibePopup = useRef<Window | null>(null);
+  const addedRef = useRef(onAdded);
+  addedRef.current = onAdded;
   const selected = CONTRIBUTION_PROVIDERS.find((candidate) => candidate.id === provider)!;
 
 	  useEffect(() => {
@@ -2718,7 +2775,28 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
 	    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("message", onMessage); };
 	  }, [oauth?.sessionID, onAdded, provider]);
 
+  useEffect(() => () => {
+    vibeStart.current?.abort();
+    vibePopup.current?.close();
+  }, []);
+
+  useEffect(() => {
+    if (provider !== "mistral_vibe" || !vibe) return;
+    return watchVibeSession(vibe, () => {
+      setVibe(null);
+      setVibeComplete(true);
+      void addedRef.current().catch(() => setError("Account added, but the list couldn't refresh. Close and reopen Accounts."));
+    }, (message) => {
+      setVibe(null);
+      setError(message);
+    });
+  }, [provider, vibe]);
+
 	  const choose = (next: ContributableProvider) => {
+    vibeStart.current?.abort();
+    vibePopup.current?.close();
+    setVibe(null);
+    setVibeComplete(false);
 	    oauthCompleted.current = false;
     setProvider(next);
     setCredential("");
@@ -2748,8 +2826,45 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
     }
   };
 
+  const startVibe = async () => {
+    if (vibeStart.current || vibe || vibeComplete) return;
+    const authorizationWindow = window.open("about:blank", "_blank");
+    if (!authorizationWindow) {
+      setError("Allow popups, then try again.");
+      return;
+    }
+    authorizationWindow.opener = null;
+    vibePopup.current = authorizationWindow;
+    const controller = new AbortController();
+    vibeStart.current = controller;
+    setBusy(true);
+    setError("");
+    try {
+      const session = await startVibeLogin(controller.signal);
+      if (controller.signal.aborted) return;
+      if (!session.session_id || !session.oauth_url || !Number.isFinite(Date.parse(session.expires_at))) {
+        throw new Error("Couldn't start sign-in. Try again.");
+      }
+      if (Date.parse(session.expires_at) <= Date.now()) throw new Error(VIBE_EXPIRED);
+      authorizationWindow.location.replace(session.oauth_url);
+      setVibe(session);
+      vibePopup.current = null;
+    } catch {
+      authorizationWindow.close();
+      if (!controller.signal.aborted) setError("Couldn't start sign-in. Try again.");
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+      if (vibeStart.current === controller) vibeStart.current = null;
+      if (vibePopup.current === authorizationWindow) vibePopup.current = null;
+    }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (selected.mode === "device") {
+      await startVibe();
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -2802,7 +2917,19 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
         <div className="contribution-providers" aria-label="Provider">
           {CONTRIBUTION_PROVIDERS.map((candidate) => <button type="button" key={candidate.id} className={provider === candidate.id ? "active" : ""} disabled={busy} aria-pressed={provider === candidate.id} onClick={() => choose(candidate.id)}>{candidate.label}</button>)}
         </div>
-        {selected.mode === "oauth" ? (
+        {selected.mode === "device" ? (
+          <div className="contribution-oauth">
+            <p>Use your Pro or Team account. Disable pay-as-you-go to avoid extra charges.</p>
+            {vibeComplete ? <p role="status">Mistral Vibe account added.</p> : vibe ? (
+              <>
+                <p role="status">Finish signing in to Mistral Vibe in the other tab.</p>
+                <a href={vibe.oauth_url} target="_blank" rel="noreferrer">Open sign-in page</a>
+              </>
+            ) : (
+              <button type="button" className="oauth-launch" disabled={busy} onClick={startVibe}>{busy ? "Opening…" : error ? "Try sign-in again" : "Sign in to Mistral Vibe"}</button>
+            )}
+          </div>
+        ) : selected.mode === "oauth" ? (
           <div className="contribution-oauth">
             {!oauth ? (
               <button type="button" className="oauth-launch" disabled={busy} onClick={startOAuth}>{busy ? "Opening…" : `Sign in to ${selected.label}`}</button>
@@ -2816,10 +2943,10 @@ function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdde
         ) : selected.mode === "json" ? (
           <label className="contribution-field"><span>Grok auth JSON</span><textarea value={credential} onChange={(event) => setCredential(event.target.value)} autoFocus spellCheck={false} required /></label>
         ) : (
-          <label className="contribution-field"><span>{selected.label} API key</span><input type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoFocus autoComplete="off" required /></label>
+          <label className="contribution-field"><span>{selected.id === "mistral" ? "Mistral API key" : `${selected.label} API key`}</span><input type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoFocus autoComplete="off" required /></label>
         )}
         {error && <div className="access-error" role="alert">{error}</div>}
-        <div><button type="button" onClick={onClose}>Cancel</button>{(selected.mode !== "oauth" || oauth) && <button className="gold-button" disabled={busy}>{busy ? "Adding…" : "Add to pool"}</button>}</div>
+        <div><button type="button" onClick={onClose}>Cancel</button>{selected.mode !== "device" && (selected.mode !== "oauth" || oauth) && <button className="gold-button" disabled={busy}>{busy ? "Adding…" : "Add to pool"}</button>}</div>
       </form>
     </div>
   );

@@ -157,12 +157,26 @@ func (h *proxyHandler) saveAPIKeyAccountFile(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *proxyHandler) saveAPIKeySnapshot(w http.ResponseWriter, r *http.Request, acctType AccountType, subdir, apiKey string, snapshot *providerModelSnapshot) {
+	extra := make(map[string]any)
+	if snapshot != nil {
+		extra["provider_model_snapshot"] = snapshot
+	}
+	accountID, err := h.writeAPIKeyAccount(acctType, subdir, apiKey, extra)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "failed to save account: "+err.Error())
+		return
+	}
+	h.reloadAccounts()
+	h.auditProviderContribution(r, string(acctType), accountID)
+	respondJSON(w, map[string]any{"success": true, "account_id": accountID})
+}
+
+func (h *proxyHandler) writeAPIKeyAccount(acctType AccountType, subdir, apiKey string, extra map[string]any) (string, error) {
 	accountID := subdir + "_" + randomHex(4)
 
 	poolDir := filepath.Join(h.cfg.poolDir, subdir)
 	if err := os.MkdirAll(poolDir, 0755); err != nil {
-		respondJSONError(w, http.StatusInternalServerError, "failed to create pool dir: "+err.Error())
-		return
+		return "", fmt.Errorf("create pool directory: %w", err)
 	}
 
 	filePath := filepath.Join(poolDir, accountID+".json")
@@ -182,28 +196,14 @@ func (h *proxyHandler) saveAPIKeySnapshot(w http.ResponseWriter, r *http.Request
 		"api_key":  apiKey,
 		"added_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
-	if snapshot != nil {
-		authJSON["provider_model_snapshot"] = snapshot
+	for key, value := range extra {
+		authJSON[key] = value
 	}
 
-	data, err := json.MarshalIndent(authJSON, "", "  ")
-	if err != nil {
-		respondJSONError(w, http.StatusInternalServerError, "failed to marshal json: "+err.Error())
-		return
-	}
-
-	if err := os.WriteFile(filePath, data, 0600); err != nil {
-		respondJSONError(w, http.StatusInternalServerError, "failed to write file: "+err.Error())
-		return
+	if err := atomicWriteJSON(filePath, authJSON); err != nil {
+		return "", fmt.Errorf("write account: %w", err)
 	}
 
 	log.Printf("saved new %s account: %s -> %s", acctType, accountID, filePath)
-
-	h.reloadAccounts()
-	h.auditProviderContribution(r, string(acctType), accountID)
-
-	respondJSON(w, map[string]any{
-		"success":    true,
-		"account_id": accountID,
-	})
+	return accountID, nil
 }

@@ -141,6 +141,12 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools 
 				API:     "openai-completions",
 				Models:  mistralPiModels(pool),
 			},
+			"pool-mistral-vibe": {
+				BaseURL: baseURL + "/v1",
+				APIKey:  codexAPIKey,
+				API:     "openai-completions",
+				Models:  mistralPiModels(pool, AccountTypeMistralVibe),
+			},
 		},
 	}
 
@@ -396,11 +402,15 @@ func opencodeGoCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 	return result
 }
 
-func mistralPiModels(pool *poolState) []piModelConfig {
+func mistralPiModels(pool *poolState, kinds ...AccountType) []piModelConfig {
+	kind := AccountTypeMistral
+	if len(kinds) > 0 {
+		kind = kinds[0]
+	}
 	descriptors := poolModelDescriptors(pool)
 	result := make([]piModelConfig, 0)
 	for _, model := range descriptors {
-		if model.Provider != string(AccountTypeMistral) {
+		if model.Provider != string(kind) {
 			continue
 		}
 		maxTokens := model.MaxOutputTokens
@@ -420,7 +430,7 @@ func mistralCuteModels(baseURL, apiKey string, pool *poolState) []cuteCodeModelC
 	descriptors := poolModelDescriptors(pool)
 	result := make([]cuteCodeModelConfig, 0)
 	for _, model := range descriptors {
-		if model.Provider != string(AccountTypeMistral) {
+		if !isMistralType(AccountType(model.Provider)) {
 			continue
 		}
 		description := strings.TrimSpace(model.Description)

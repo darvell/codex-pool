@@ -248,7 +248,7 @@ func providerModelsURL(provider Provider) (*url.URL, bool) {
 		}
 		target = *base
 		target.Path = singleJoin(target.Path, "/models")
-	case *KimiProvider, *MinimaxProvider, *ZAIProvider, *MistralProvider:
+	case *KimiProvider, *MinimaxProvider, *ZAIProvider, *MistralProvider, *mistralVibeProvider:
 		base := provider.UpstreamURL("/v1/models")
 		if base == nil {
 			return nil, false
@@ -297,7 +297,7 @@ func fetchProviderModels(ctx context.Context, transport http.RoundTripper, provi
 		return providerModelSnapshot{}, fmt.Errorf("model discovery failed: %s: %s", resp.Status, safeText(body))
 	}
 	var models map[string]DiscoveredModel
-	if provider.Type() == AccountTypeMistral {
+	if isMistralType(provider.Type()) {
 		models, err = parseMistralModels(body)
 	} else {
 		models, err = parseProviderModels(body)
@@ -402,8 +402,8 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 		account.mu.Lock()
 		for id, model := range account.Models {
 			publicID := id
-			if account.Type == AccountTypeMistral {
-				publicID = mistralCatalogID(id)
+			if isMistralType(account.Type) {
+				publicID = mistralPublicID(account.Type, id)
 			}
 			if poolModelIDExists(publicID) {
 				continue
@@ -443,8 +443,8 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 		publicID := entry.model.ID
 		upstreamID := entry.model.ID
 		description := entry.model.Description
-		if entry.provider == AccountTypeMistral {
-			publicID = mistralCatalogID(entry.model.ID)
+		if isMistralType(entry.provider) {
+			publicID = mistralPublicID(entry.provider, entry.model.ID)
 			adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
 			if strings.TrimSpace(description) == "" {
 				description = adapter
@@ -453,7 +453,7 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 			}
 		}
 		tools := true
-		if entry.provider == AccountTypeMistral {
+		if isMistralType(entry.provider) {
 			protocol = "anthropic"
 			tools = entry.model.Tools
 		}

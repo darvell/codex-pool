@@ -59,6 +59,7 @@ func (h *proxyHandler) pollUpstreamUsage() {
 		}
 		a.mu.Lock()
 		dead := a.Dead
+		disabled := a.Disabled
 		hasToken := a.AccessToken != ""
 		retrievedAt := a.Usage.RetrievedAt
 		accType := a.Type
@@ -193,6 +194,13 @@ func (h *proxyHandler) pollUpstreamUsage() {
 
 		// Xiaomi doesn't document a proactive usage endpoint; request usage is parsed from responses.
 		if accType == AccountTypeXiaomi {
+			continue
+		}
+
+		if accType == AccountTypeMistralVibe {
+			if !dead && !disabled {
+				h.syncVibeAccount(now, a)
+			}
 			continue
 		}
 

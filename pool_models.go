@@ -94,7 +94,7 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 		tools := true
 		modalities := append([]string(nil), model.Input...)
 		upstreamID := model.ID
-		if model.AccountType == AccountTypeMistral {
+		if isMistralType(model.AccountType) {
 			upstreamID = mistralCanonicalModel(model.ID)
 			tools = false
 			if discovered, ok := discoveredMetadataForPool(pool, model.AccountType, model.ID); ok {

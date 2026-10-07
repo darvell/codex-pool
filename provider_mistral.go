@@ -122,6 +122,9 @@ func isMistralModel(model string) bool {
 }
 
 func mistralCanonicalModel(model string) string {
+	if isMistralVibeModel(model) {
+		return strings.TrimSpace(strings.TrimSpace(model)[len("mistral-vibe/"):])
+	}
 	if bare, ok := mistralBareID(model); ok {
 		return bare
 	}

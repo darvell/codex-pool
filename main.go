@@ -325,7 +325,7 @@ func main() {
 	adverserialProvider := NewAdverserialProvider(cfg.adverserialBase)
 	opencodeGoProvider := NewOpencodeGoProvider(cfg.opencodeGoBase)
 	mistralProvider := NewMistralProvider(cfg.mistralBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider, opencodeGoProvider, mistralProvider)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider, opencodeGoProvider, mistralProvider, newMistralVibeProvider(cfg.mistralBase))
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -1432,8 +1432,12 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		rewritten := rewriteAndSanitizeGrokRequestBody(body, canonical)
 		return p, p.UpstreamURL(path), rewritten
 	}
-	if isMistralModel(model) {
-		p := h.registry.ForType(AccountTypeMistral)
+	if isMistralModel(model) || isMistralVibeModel(model) {
+		kind := AccountTypeMistral
+		if isMistralVibeModel(model) {
+			kind = AccountTypeMistralVibe
+		}
+		p := h.registry.ForType(kind)
 		if p == nil {
 			return nil, nil, nil
 		}
@@ -1561,6 +1565,7 @@ func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, 
 		{AccountTypeGrok, isGrokModel, grokCanonicalModel},
 		{AccountTypeAdverserial, isAdverserialModel, adverserialCanonicalModel},
 		{AccountTypeMistral, isMistralModel, mistralCanonicalModel},
+		{AccountTypeMistralVibe, isMistralVibeModel, mistralCanonicalModel},
 		{AccountTypeOpencodeGo, isOpencodeGoModel, opencodeGoStreamCanonicalModel},
 	}
 	for _, candidate := range routes {
@@ -2053,7 +2058,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// need buffered body transformations: effort normalization for Adverserial
 	// and Grok, and Messages-to-Chat translation, reasoning normalization, and
 	// usage injection for Mistral. Chunked requests must take the same path.
-	if accountType == AccountTypeAdverserial || accountType == AccountTypeGrok || accountType == AccountTypeMistral {
+	if accountType == AccountTypeAdverserial || accountType == AccountTypeGrok || isMistralType(accountType) {
 		streamBody = false
 	}
 	if streamBody {
@@ -2385,7 +2390,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if accountType == AccountTypeGrok {
 		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
 	}
-	if accountType == AccountTypeMistral {
+	if isMistralType(accountType) {
 		// Model-route override deliberately left the body untouched (see its
 		// isMistralModel branch); this is the single place that canonicalizes the
 		// model, restores generic replayed reasoning to native content, enables
@@ -3214,7 +3219,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					writer = &sseTranslateWriter{
 						w:              writer,
 						direction:      responseDir,
-						finishOnReason: accountType == AccountTypeMistral,
+						finishOnReason: isMistralType(accountType),
 						debug:          h.cfg.debug.Load(),
 						reqID:          reqID,
 					}
@@ -3228,7 +3233,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if accountType == AccountTypeCodex {
 					writer = &hostedMCPResponseFilterWriter{w: writer}
 				}
-				if accountType == AccountTypeMistral {
+				if isMistralType(accountType) {
 					writer = &mistralSSEWriter{w: writer}
 				}
 				// Inspect received bytes even if translation or filtering stops on a write error.

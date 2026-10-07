@@ -1,5 +1,5 @@
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
-import type { AdminAccount, ClientCredential, ConsolePrincipal, FriendSession, GuestPass, ModelCatalog, PasskeyCredential, PassportAuditEntry, PassportPrincipal, PassportUsagePoint, PoolStats, SignalAnalytics } from "./types";
+import type { AdminAccount, ClientCredential, ConsolePrincipal, FriendSession, GuestPass, ModelCatalog, PasskeyCredential, PassportAuditEntry, PassportPrincipal, PassportUsagePoint, PoolStats, SignalAnalytics, VibeLoginSession, VibeLoginStatus } from "./types";
 
 const FRIEND_SESSION_KEY = "friendSession";
 const ADMIN_TOKEN_KEY = "operatorToken";
@@ -262,6 +262,24 @@ export async function exchangeAccountOAuth(provider: "codex" | "claude", code: s
     method: "POST",
     credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
     body: JSON.stringify({ code, verifier }),
+  }));
+}
+
+export async function startVibeLogin(signal?: AbortSignal) {
+  return decode<VibeLoginSession>(await fetch("/api/pool/accounts/mistral-vibe/start", {
+    method: "POST",
+    credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+    body: "{}",
+    signal,
+  }));
+}
+
+export async function vibeLoginStatus(sessionID: string, signal?: AbortSignal) {
+  return decode<VibeLoginStatus>(await fetch("/api/pool/accounts/mistral-vibe/status", {
+    method: "POST",
+    credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
+    body: JSON.stringify({ session_id: sessionID }),
+    signal,
   }));
 }
 

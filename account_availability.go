@@ -66,7 +66,7 @@ func accountAvailableForRoutingLocked(a *Account, now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if a.Dead || a.Disabled {
+	if a.Dead || a.Disabled || (a.Type == AccountTypeMistralVibe && !a.vibeAccount.current()) {
 		return false
 	}
 	if accountCoolingDownLocked(a, now) {
