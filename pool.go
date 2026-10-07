@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +72,10 @@ type Account struct {
 	// current access token was still usable. Do not keep refreshing proactively;
 	// clear it only after an auth failure or a successful refresh.
 	RefreshBlocked          bool
+	refreshAttemptAt        time.Time
+	codexTokenHash          string
+	codexLoadedDead         bool
+	codexLoadedDisabled     bool
 	AddedAt                 time.Time
 	Usage                   UsageSnapshot
 	Penalty                 float64
@@ -280,14 +285,16 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 
 // CodexAuthJSON is the format for Codex auth.json files.
 type CodexAuthJSON struct {
-	OpenAIKey        *string           `json:"OPENAI_API_KEY"`
-	Tokens           *TokenData        `json:"tokens"`
-	LastRefresh      *time.Time        `json:"last_refresh"`
-	Dead             bool              `json:"dead"`
-	AllowedIP        string            `json:"allowed_ip"`
-	AllowedSourceIPs []string          `json:"allowed_source_ips"`
-	CyberAccess      bool              `json:"cyber_access"`
-	CodexCookies     map[string]string `json:"cookies"`
+	OpenAIKey        *string            `json:"OPENAI_API_KEY"`
+	Tokens           *TokenData         `json:"tokens"`
+	LastRefresh      *time.Time         `json:"last_refresh"`
+	Dead             bool               `json:"dead"`
+	AllowedIP        string             `json:"allowed_ip"`
+	AllowedSourceIPs []string           `json:"allowed_source_ips"`
+	CyberAccess      bool               `json:"cyber_access"`
+	CodexCookies     map[string]string  `json:"cookies"`
+	Disabled         bool               `json:"disabled"`
+	RefreshGuard     *codexRefreshGuard `json:"refresh_guard,omitempty"`
 }
 
 type TokenData struct {
@@ -1534,45 +1541,24 @@ func persistAccountAddedAt(root map[string]any, a *Account) {
 }
 
 func saveCodexAccount(a *Account) error {
-	// Preserve ALL fields in the original auth.json by modifying only token fields that
-	// refresh updates. If we can't parse the existing file, fail closed to avoid
-	// clobbering user-provided auth.json content.
-	raw, err := os.ReadFile(a.File)
+	ctx, cancel := context.WithTimeout(context.Background(), codexRefreshTimeout)
+	defer cancel()
+	unlock, err := lockCodexFile(ctx, a.File)
 	if err != nil {
 		return err
 	}
-	var root map[string]any
-	if err := json.Unmarshal(raw, &root); err != nil {
-		return fmt.Errorf("parse %s: %w", a.File, err)
+	defer unlock()
+	root, auth, err := readCodexFile(a.File)
+	if err != nil {
+		return err
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !codexFileMatches(a, auth) || a.codexLoadedDead != auth.Dead || a.codexLoadedDisabled != auth.Disabled {
+		return errCodexStale
+	}
+	// Metadata writes never own tokens, last_refresh, or the refresh guard.
 	persistAccountAddedAt(root, a)
-
-	tokensAny := root["tokens"]
-	tokens, ok := tokensAny.(map[string]any)
-	if !ok || tokens == nil {
-		tokens = map[string]any{}
-		root["tokens"] = tokens
-	}
-
-	// Only update the minimum set of fields we own.
-	if a.AccessToken != "" {
-		tokens["access_token"] = a.AccessToken
-	}
-	if a.RefreshToken != "" {
-		tokens["refresh_token"] = a.RefreshToken
-	}
-	if a.IDToken != "" {
-		tokens["id_token"] = a.IDToken
-	}
-
-	// Preserve tokens.account_id unless it is missing and we have a value.
-	if _, exists := tokens["account_id"]; !exists && strings.TrimSpace(a.AccountID) != "" {
-		tokens["account_id"] = strings.TrimSpace(a.AccountID)
-	}
-
-	if !a.LastRefresh.IsZero() {
-		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
-	}
 	if len(a.AllowedSourceIPs) > 0 {
 		root["allowed_source_ips"] = a.AllowedSourceIPs
 		if len(a.AllowedSourceIPs) == 1 {
@@ -1608,7 +1594,11 @@ func saveCodexAccount(a *Account) error {
 		delete(root, "disabled")
 	}
 
-	return atomicWriteJSON(a.File, root)
+	if err := writeCodexFile(a.File, root); err != nil {
+		return err
+	}
+	a.codexLoadedDead, a.codexLoadedDisabled = a.Dead, a.Disabled
+	return nil
 }
 
 func saveGeminiAccount(a *Account) error {

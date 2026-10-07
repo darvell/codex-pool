@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -442,19 +447,20 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	acc := &Account{
-		ID:               "a1",
-		File:             path,
-		AccessToken:      "new-access",
-		RefreshToken:     "new-refresh",
-		IDToken:          "new-id",
-		AccountID:        "acct_123",
-		AllowedSourceIPs: []string{"199.45.144.95"},
-		CyberAccess:      true,
-		LastRefresh:      time.Date(2025, 12, 17, 0, 0, 0, 0, time.UTC),
+	base, _ := url.Parse("https://fixture.invalid")
+	provider := NewCodexProvider(base, base, base)
+	acc, err := provider.LoadAccount("a1.json", path, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","id_token":"new-id"}`))}, nil
+	})
+	if err := provider.RefreshToken(context.Background(), acc, transport); err != nil {
+		t.Fatalf("refresh persistence: %v", err)
 	}
 	if err := saveAccount(acc); err != nil {
-		t.Fatalf("saveAccount: %v", err)
+		t.Fatalf("metadata persistence: %v", err)
 	}
 
 	afterRaw, err := os.ReadFile(path)

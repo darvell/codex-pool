@@ -2411,6 +2411,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	defer cancel()
 
+	var prelude *claudePrelude
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" && accountType == AccountTypeClaude && translateDir == TranslateNone && originalStream {
+		prelude = newClaudePrelude(w, cancel)
+		defer prelude.stopWait()
+	}
+
 	attempts := h.cfg.maxAttempts
 	if attempts <= 0 {
 		attempts = 1
@@ -2490,12 +2496,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 			}
 			if lastErr != nil {
-				http.Error(w, lastErr.Error(), http.StatusServiceUnavailable)
+				prelude.httpError(w, lastErr.Error(), http.StatusServiceUnavailable)
 			} else {
 				if requiredPlan != "" {
-					http.Error(w, fmt.Sprintf("no live %s %s accounts for model %s", accountType, requiredPlan, requestedModel), http.StatusServiceUnavailable)
+					prelude.httpError(w, fmt.Sprintf("no live %s %s accounts for model %s", accountType, requiredPlan, requestedModel), http.StatusServiceUnavailable)
 				} else {
-					http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
+					prelude.httpError(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 				}
 			}
 			return
@@ -2505,14 +2511,20 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
 
+		prelude.startWait()
 		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID, originID, conversationID)
+		prelude.stopWait()
 
 		atomic.AddInt64(&acc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
 
 		if err != nil {
 			if isContextError(err) {
-				writeContextError(w, err)
+				if prelude.started() {
+					prelude.writeError(w, contextErrorStatus(err), contextErrorBody(err))
+				} else {
+					writeContextError(w, err)
+				}
 				return
 			}
 			lastErr = err
@@ -2651,6 +2663,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				continue
 			}
 
+			if prelude.started() {
+				prelude.writeError(w, resp.StatusCode, errBody)
+				h.metrics.inc(strconv.Itoa(resp.StatusCode), acc.ID)
+				return
+			}
+
 			// Non-retryable error (400, unknown) — return to client.
 			// Translate error body if format translation is active.
 			if translateDir != TranslateNone {
@@ -2684,9 +2702,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		acc.mu.Unlock()
 
 		// Prepare response headers.
-		copyHeader(w.Header(), resp.Header)
-		removeHopByHopHeaders(w.Header())
-		h.replaceUsageHeaders(w.Header())
+		if !prelude.started() {
+			copyHeader(w.Header(), resp.Header)
+			removeHopByHopHeaders(w.Header())
+			h.replaceUsageHeaders(w.Header())
+		}
 
 		// Inject Claude models into model catalog response
 		if strings.Contains(r.URL.Path, "codex/models") && resp.StatusCode == 200 {
@@ -2724,7 +2744,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
 		}
-		if isSSE {
+		if prelude.started() && !isSSE {
+			resp.Body.Close()
+			prelude.httpError(w, "upstream did not return an event stream", http.StatusBadGateway)
+			return
+		}
+		if isSSE && !prelude.started() {
 			applyStreamingResponseHeaders(w.Header())
 		}
 		if h.cfg.debug.Load() {
@@ -3042,7 +3067,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				w.Header().Del("Content-Length")
 				w.Header().Set("Content-Type", "text/event-stream")
 			}
-			w.WriteHeader(resp.StatusCode)
+			if !prelude.started() {
+				w.WriteHeader(resp.StatusCode)
+			}
 
 			var writer io.Writer = w
 			var fw *flushWriter
@@ -3282,6 +3309,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	// All attempts failed.
 	if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && prelude.started() {
+			prelude.httpError(w, "upstream request timed out", http.StatusGatewayTimeout)
+		}
 		// Client disconnected — no point sending an error response.
 		return
 	}
@@ -3292,7 +3322,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if lastErr == nil {
 		lastErr = errors.New("all attempts failed")
 	}
-	http.Error(w, lastErr.Error(), status)
+	prelude.httpError(w, lastErr.Error(), status)
 }
 
 func (h *proxyHandler) proxyRequestWebSocket(
@@ -4528,6 +4558,9 @@ func isRateLimitError(err error) bool {
 // returns code refresh_token_invalidated ("Your session has ended") rather
 // than classic invalid_grant; both (and reuse) must retire the account.
 func isPermanentRefreshTokenError(err error) bool {
+	if errors.Is(err, errCodexBlocked) {
+		return true
+	}
 	if err == nil {
 		return false
 	}
@@ -5678,7 +5711,10 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.RefreshToken == "" || a.RefreshBlocked {
+	if a.Dead || a.Disabled || a.RefreshToken == "" || a.RefreshBlocked {
+		return false
+	}
+	if !a.refreshAttemptAt.IsZero() && time.Since(a.refreshAttemptAt) < refreshPerAccountInterval {
 		return false
 	}
 	now := time.Now()
@@ -5749,6 +5785,9 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 		h.refreshCallsMu.Unlock()
 		select {
 		case <-existing.done:
+			if existing.err == nil && a.Type == AccountTypeCodex {
+				return syncCodexAuth(a)
+			}
 			return existing.err
 		case <-ctx.Done():
 			return ctx.Err()
@@ -5766,6 +5805,10 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	}()
 
 	err := h.refreshAccountOnce(ctx, a)
+	if a.Type == AccountTypeCodex {
+		call.err = err
+		return err
+	}
 	if err == nil {
 		a.mu.Lock()
 		a.RefreshBlocked = false
@@ -5827,6 +5870,9 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	}
 	err := provider.RefreshToken(ctx, a, h.refreshTransport)
 
+	if accType == AccountTypeCodex {
+		return err
+	}
 	if err == nil {
 		a.mu.Lock()
 		a.LastRefresh = time.Now().UTC()

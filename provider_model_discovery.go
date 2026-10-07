@@ -261,6 +261,12 @@ func syncProviderModels(ctx context.Context, transport http.RoundTripper, regist
 	if registry == nil || account == nil {
 		return errors.New("missing provider model discovery dependency")
 	}
+	account.mu.Lock()
+	unavailable := account.Dead || account.Disabled
+	account.mu.Unlock()
+	if unavailable {
+		return nil
+	}
 	provider := registry.ForType(account.Type)
 	if provider == nil {
 		return errors.New("provider not registered")
@@ -302,6 +308,12 @@ func (h *proxyHandler) startProviderModelPoller() {
 	}
 	syncAll := func() {
 		for _, account := range h.pool.allAccounts() {
+			account.mu.Lock()
+			unavailable := account.Dead || account.Disabled
+			account.mu.Unlock()
+			if unavailable {
+				continue
+			}
 			if _, ok := providerModelsURL(h.registry.ForType(account.Type)); !ok {
 				continue
 			}

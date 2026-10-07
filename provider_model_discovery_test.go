@@ -87,7 +87,14 @@ func TestSyncCodexModelsSetsCyberFromDaybreak(t *testing.T) {
 	wham, _ := url.Parse("https://chatgpt.com/backend-api")
 	codex := NewCodexProvider(wham, wham, nil)
 	registry := &ProviderRegistry{byType: map[AccountType]Provider{AccountTypeCodex: codex}}
-	account := &Account{ID: "cont", Type: AccountTypeCodex, File: path, AccessToken: "a"}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := codex.LoadAccount("cont.json", path, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Query().Get("client_version") != currentCodexFingerprint().AppVersion {
 			t.Fatalf("client_version = %q", req.URL.Query().Get("client_version"))

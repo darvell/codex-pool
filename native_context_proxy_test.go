@@ -280,7 +280,8 @@ func TestNativeContextHTTPRefresh(t *testing.T) {
 			a, b := contextTestAccount("a", "user-a"), contextTestAccount("b", "user-b")
 			a.RefreshToken = "refresh-test"
 			a.File = filepath.Join(t.TempDir(), "account.json")
-			if err := os.WriteFile(a.File, []byte(`{}`), 0o600); err != nil {
+			credential, _ := json.Marshal(CodexAuthJSON{Tokens: &TokenData{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, AccountID: &a.AccountID}})
+			if err := os.WriteFile(a.File, credential, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			originalToken := a.AccessToken

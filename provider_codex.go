@@ -91,6 +91,8 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		acc.LastRefresh = *aj.LastRefresh
 	}
 	acc.Dead = aj.Dead
+	acc.Disabled = aj.Disabled
+	applyCodexGuard(acc, aj)
 	acc.CyberAccess = aj.CyberAccess
 	if len(aj.CodexCookies) > 0 {
 		acc.CodexCookies = aj.CodexCookies
@@ -99,12 +101,14 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 }
 
 func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
-	req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
-	// ChatGPT Account ID needed for some endpoints
+	acc.mu.Lock()
+	access := acc.AccessToken
 	chatgptAccID := acc.AccountID
 	if chatgptAccID == "" {
 		chatgptAccID = acc.IDTokenChatGPTAccountID
 	}
+	acc.mu.Unlock()
+	req.Header.Set("Authorization", "Bearer "+access)
 	if chatgptAccID != "" {
 		req.Header.Set("ChatGPT-Account-ID", chatgptAccID)
 	}
@@ -112,13 +116,53 @@ func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 }
 
 func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+	ctx, cancel := context.WithTimeout(ctx, codexRefreshTimeout)
+	defer cancel()
+	unlock, err := lockCodexFile(ctx, acc.File)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	root, auth, err := readCodexFile(acc.File)
+	if err != nil {
+		return err
+	}
 	acc.mu.Lock()
-	refreshTok := acc.RefreshToken
+	unavailable := acc.Dead || acc.Disabled || auth.Dead || auth.Disabled
+	matches := codexFileMatches(acc, auth)
 	acc.mu.Unlock()
-
+	if unavailable {
+		return errors.New("Codex account is retired or disabled")
+	}
+	if !matches {
+		// Another request already rotated, or this path received a fresh login.
+		// Adopt only the same seat; never send the stale object's refresh token.
+		return adoptCodexAuth(acc, auth)
+	}
+	guard := auth.RefreshGuard
+	if guard != nil && guard.TokenHash == codexTokenHash(auth.Tokens) {
+		if guard.Blocked {
+			return errCodexBlocked
+		}
+		if time.Since(guard.AttemptAt) < refreshPerAccountInterval {
+			return errors.New("Codex account refresh rate limited")
+		}
+	}
+	refreshTok := auth.Tokens.RefreshToken
 	if refreshTok == "" {
 		return errors.New("no refresh token")
 	}
+	// A transport failure or crash may lose the rotated token. Record the
+	// one-use boundary before sending; only a definitive retryable HTTP error
+	// clears the block. A fresh credential file naturally resets this guard.
+	guard = &codexRefreshGuard{TokenHash: codexTokenHash(auth.Tokens), AttemptAt: time.Now().UTC(), Blocked: true}
+	root["refresh_guard"] = guard
+	if err := writeCodexFile(acc.File, root); err != nil {
+		return err
+	}
+	acc.mu.Lock()
+	acc.RefreshBlocked, acc.refreshAttemptAt = true, guard.AttemptAt
+	acc.mu.Unlock()
 
 	// Match Codex behavior: JSON body, Content-Type: application/json
 	body := map[string]string{
@@ -153,7 +197,24 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 		}
 		return fmt.Errorf("refresh unauthorized: %s", resp.Status)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			current, currentAuth, err := readCodexFile(acc.File)
+			if err != nil {
+				return err
+			}
+			if codexTokenHash(currentAuth.Tokens) != guard.TokenHash {
+				return errCodexStale
+			}
+			guard.Blocked = false
+			current["refresh_guard"] = guard
+			if err := writeCodexFile(acc.File, current); err != nil {
+				return err
+			}
+			acc.mu.Lock()
+			acc.RefreshBlocked = false
+			acc.mu.Unlock()
+		}
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		if len(bytes.TrimSpace(msg)) > 0 {
 			return fmt.Errorf("refresh failed: %s: %s", resp.Status, safeText(msg))
@@ -173,38 +234,33 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 		return errors.New("empty access token after refresh")
 	}
 
-	acc.mu.Lock()
-	acc.AccessToken = payload.AccessToken
-	if payload.RefreshToken != "" {
-		acc.RefreshToken = payload.RefreshToken
+	current, currentAuth, err := readCodexFile(acc.File)
+	if err != nil {
+		return err
 	}
-	if accessExp := parseCodexClaims(payload.AccessToken).ExpiresAt; !accessExp.IsZero() {
-		acc.ExpiresAt = accessExp
+	if codexTokenHash(currentAuth.Tokens) != guard.TokenHash || currentAuth.Dead || currentAuth.Disabled {
+		return errCodexStale
+	}
+	tokens := current["tokens"].(map[string]any)
+	tokens["access_token"] = payload.AccessToken
+	if payload.RefreshToken != "" {
+		tokens["refresh_token"] = payload.RefreshToken
 	}
 	if payload.IDToken != "" {
-		acc.IDToken = payload.IDToken
-		claims := parseCodexClaims(payload.IDToken)
-		if acc.ExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
-			acc.ExpiresAt = claims.ExpiresAt
-		}
-		if claims.ChatGPTAccountID != "" {
-			acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
-			if acc.AccountID == "" {
-				acc.AccountID = claims.ChatGPTAccountID
-			}
-		}
-		if claims.ChatGPTUserID != "" {
-			acc.ChatGPTUserID = claims.ChatGPTUserID
-		}
-		if claims.PlanType != "" {
-			acc.PlanType = claims.PlanType
-		}
+		tokens["id_token"] = payload.IDToken
 	}
-	acc.LastRefresh = time.Now().UTC()
-	acc.Dead = false
-	acc.mu.Unlock()
-
-	return saveAccount(acc)
+	current["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+	delete(current, "refresh_guard")
+	// Publish credentials to disk before any account pointer can expose them.
+	// A failed commit leaves the old token blocked rather than replaying it.
+	if err := writeCodexFile(acc.File, current); err != nil {
+		return err
+	}
+	_, committed, err := readCodexFile(acc.File)
+	if err != nil {
+		return err
+	}
+	return adoptCodexAuth(acc, committed)
 }
 
 func (p *CodexProvider) ParseUsage(obj map[string]any) *RequestUsage {

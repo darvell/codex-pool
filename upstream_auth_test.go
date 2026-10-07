@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +81,8 @@ func TestStreamedPoolAuthRecovery(t *testing.T) {
 				defer upstream.Close()
 				base, _ := url.Parse(upstream.URL)
 				account := &Account{ID: "expired", Type: AccountTypeCodex, AccessToken: "old-access", RefreshToken: "refresh", AccountID: "upstream", PlanType: "pro", File: filepath.Join(t.TempDir(), "account.json")}
-				if err := os.WriteFile(account.File, []byte(`{"tokens":{"access_token":"old-access"}}`), 0o600); err != nil {
+				credential, _ := json.Marshal(CodexAuthJSON{Tokens: &TokenData{AccessToken: account.AccessToken, RefreshToken: account.RefreshToken, AccountID: &account.AccountID}})
+				if err := os.WriteFile(account.File, credential, 0o600); err != nil {
 					t.Fatal(err)
 				}
 				fx := newCodexProxyFixture(t, base, []*Account{account})
@@ -168,14 +170,15 @@ func TestWebSocketPoolAuthRecovery(t *testing.T) {
 			defer upstream.Close()
 			base, _ := url.Parse(upstream.URL)
 			expired := &Account{ID: "expired", Type: AccountTypeCodex, AccessToken: "old-access", AccountID: "upstream", PlanType: "pro", File: filepath.Join(t.TempDir(), "account.json")}
-			if err := os.WriteFile(expired.File, []byte(`{"tokens":{"access_token":"old-access"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
 			accounts := []*Account{expired}
 			if recovery == "refresh" {
 				expired.RefreshToken = "refresh"
 			} else {
 				accounts = append(accounts, &Account{ID: "healthy", Type: AccountTypeCodex, AccessToken: "fresh-access", AccountID: "other-upstream", PlanType: "pro"})
+			}
+			credential, _ := json.Marshal(CodexAuthJSON{Tokens: &TokenData{AccessToken: expired.AccessToken, RefreshToken: expired.RefreshToken, AccountID: &expired.AccountID}})
+			if err := os.WriteFile(expired.File, credential, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			fx := newCodexProxyFixture(t, base, accounts)
 			fx.handler.cfg.disableRefresh = false
