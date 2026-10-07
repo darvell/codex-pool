@@ -630,9 +630,11 @@ func accountTier(accType AccountType, planType string) int {
 	return 2
 }
 
+const codexPlanProMax = "promax"
+
 func isCodexProAccessPlan(planType string) bool {
 	switch normalizeCodexPlanType(planType) {
-	case "pro", "prolite":
+	case "pro", codexPlanProMax, "prolite":
 		return true
 	default:
 		return false
@@ -743,12 +745,13 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 	now := time.Now()
 	var best *Account
 	bestScore := -1e9
+	bestProMax := false
 	for _, a := range p.accounts {
 		if exclude != nil && exclude[a.ID] {
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
+		if  a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) || a.RateLimitUntil.After(now) {
 			a.mu.Unlock()
 			continue
 		}
@@ -766,11 +769,13 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 			continue
 		}
 		score := scoreAccountLocked(a, now)
+		proMax := accountType == AccountTypeCodex && normalizeCodexPlanType(a.PlanType) == codexPlanProMax
 		a.mu.Unlock()
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		if best == nil || score > bestScore {
+		if best == nil || (proMax && !bestProMax) || (proMax == bestProMax && score > bestScore) {
 			best = a
 			bestScore = score
+			bestProMax = proMax
 		}
 	}
 	if best != nil {
@@ -935,6 +940,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		tier         int
 		secondaryPct float64
 		score        float64
+		proMax       bool
 	}
 	var eligible []scoredAccount
 	var rateLimited []scoredAccount
@@ -984,19 +990,24 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		}
 		tier := accountTier(a.Type, a.PlanType)
 		score := scoreAccountLocked(a, now)
+		proMax := accountType == AccountTypeCodex && normalizeCodexPlanType(a.PlanType) == codexPlanProMax
 		a.mu.Unlock()
 		// Prefer less-loaded accounts
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score})
+		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score, proMax: proMax})
 	}
 
 	selectCandidate := func(accounts []scoredAccount) *Account {
 		threshold := p.tierThreshold
+		var proMaxAny []*scoredAccount
 		var tier1Below, tier1Any []*scoredAccount
 		var tier2Below, tier2Any []*scoredAccount
 		var tier3Below, tier3Any []*scoredAccount
 		for i := range accounts {
 			sa := &accounts[i]
+			if sa.proMax {
+				proMaxAny = append(proMaxAny, sa)
+			}
 			switch sa.tier {
 			case 1:
 				tier1Any = append(tier1Any, sa)
@@ -1067,6 +1078,10 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			}
 			p.rr++
 			return selected.acc
+		}
+
+		if len(proMaxAny) > 0 {
+			return choose(proMaxAny)
 		}
 
 		// Try Tier 1 accounts below threshold.
