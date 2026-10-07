@@ -25,6 +25,8 @@ type DiscoveredModel struct {
 	ContextWindow   int      `json:"context_window,omitempty"`
 	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
 	Reasoning       bool     `json:"reasoning,omitempty"`
+	Tools           bool     `json:"tools,omitempty"`
+	CompletionChat  bool     `json:"completion_chat,omitempty"`
 	WebSearch       bool     `json:"web_search,omitempty"`
 	Modalities      []string `json:"modalities,omitempty"`
 }
@@ -60,7 +62,7 @@ func parseProviderModels(body []byte) (map[string]DiscoveredModel, error) {
 		}
 		decodeFirstString(row, &model.DisplayName, "display_name", "name")
 		decodeFirstString(row, &model.Description, "description")
-		decodeFirstInt(row, &model.ContextWindow, "context_window", "context_length", "inputTokenLimit", "max_input_tokens")
+		decodeFirstInt(row, &model.ContextWindow, "context_window", "context_length", "max_context_length", "inputTokenLimit", "max_input_tokens")
 		decodeFirstInt(row, &model.MaxOutputTokens, "max_output_tokens", "outputTokenLimit", "max_tokens")
 		decodeFirstBool(row, &model.Reasoning, "supports_reasoning", "supports_thinking", "supports_reasoning_effort", "reasoning")
 		if !model.Reasoning {
@@ -176,6 +178,50 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func parseMistralModels(body []byte) (map[string]DiscoveredModel, error) {
+	var response struct {
+		Data []struct {
+			ID               string `json:"id"`
+			Name             string `json:"name"`
+			Description      string `json:"description"`
+			MaxContextLength int    `json:"max_context_length"`
+			Capabilities     struct {
+				CompletionChat  bool `json:"completion_chat"`
+				FunctionCalling bool `json:"function_calling"`
+				Reasoning       bool `json:"reasoning"`
+				Vision          bool `json:"vision"`
+			} `json:"capabilities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+	models := make(map[string]DiscoveredModel)
+	for _, row := range response.Data {
+		id := strings.TrimSpace(row.ID)
+		if id == "" || !row.Capabilities.CompletionChat {
+			continue
+		}
+		modalities := []string{"text"}
+		if row.Capabilities.Vision {
+			modalities = append(modalities, "image")
+		}
+		name := strings.TrimSpace(row.Name)
+		if name == "" {
+			name = id
+		}
+		models[id] = DiscoveredModel{
+			ID: id, DisplayName: name, Description: row.Description,
+			ContextWindow: row.MaxContextLength, Reasoning: row.Capabilities.Reasoning,
+			Tools: row.Capabilities.FunctionCalling, CompletionChat: true, Modalities: modalities,
+		}
+	}
+	if len(models) == 0 {
+		return nil, errors.New("Mistral model endpoint returned no chat-completion models")
+	}
+	return models, nil
+}
+
 func providerModelsURL(provider Provider) (*url.URL, bool) {
 	var target url.URL
 	switch typed := provider.(type) {
@@ -202,7 +248,7 @@ func providerModelsURL(provider Provider) (*url.URL, bool) {
 		}
 		target = *base
 		target.Path = singleJoin(target.Path, "/models")
-	case *KimiProvider, *MinimaxProvider, *ZAIProvider:
+	case *KimiProvider, *MinimaxProvider, *ZAIProvider, *MistralProvider:
 		base := provider.UpstreamURL("/v1/models")
 		if base == nil {
 			return nil, false
@@ -250,7 +296,12 @@ func fetchProviderModels(ctx context.Context, transport http.RoundTripper, provi
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return providerModelSnapshot{}, fmt.Errorf("model discovery failed: %s: %s", resp.Status, safeText(body))
 	}
-	models, err := parseProviderModels(body)
+	var models map[string]DiscoveredModel
+	if provider.Type() == AccountTypeMistral {
+		models, err = parseMistralModels(body)
+	} else {
+		models, err = parseProviderModels(body)
+	}
 	if err != nil {
 		return providerModelSnapshot{}, err
 	}
@@ -350,7 +401,11 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 	for _, account := range pool.allAccounts() {
 		account.mu.Lock()
 		for id, model := range account.Models {
-			if poolModelIDExists(id) {
+			publicID := id
+			if account.Type == AccountTypeMistral {
+				publicID = mistralCatalogID(id)
+			}
+			if poolModelIDExists(publicID) {
 				continue
 			}
 			key := string(account.Type) + "\x00" + strings.ToLower(id)
@@ -385,13 +440,30 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 			// and every request fails on the upstream's /messages route.
 			protocol = opencodeGoClientProtocol(entry.model.ID)
 		}
-		capabilities := map[string]bool{"reasoning": entry.model.Reasoning, "tools": true}
+		publicID := entry.model.ID
+		upstreamID := entry.model.ID
+		description := entry.model.Description
+		if entry.provider == AccountTypeMistral {
+			publicID = mistralCatalogID(entry.model.ID)
+			adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
+			if strings.TrimSpace(description) == "" {
+				description = adapter
+			} else {
+				description += ". " + adapter
+			}
+		}
+		tools := true
+		if entry.provider == AccountTypeMistral {
+			protocol = "anthropic"
+			tools = entry.model.Tools
+		}
+		capabilities := map[string]bool{"reasoning": entry.model.Reasoning, "tools": tools}
 		if entry.model.WebSearch {
 			capabilities["web_search"] = true
 		}
 		descriptors = append(descriptors, poolModelDescriptor{
-			ID: entry.model.ID, Name: entry.model.DisplayName, Description: entry.model.Description,
-			Protocol: protocol, Protocols: []string{protocol}, Provider: string(entry.provider), UpstreamID: entry.model.ID,
+			ID: publicID, Name: entry.model.DisplayName, Description: description,
+			Protocol: protocol, Protocols: []string{protocol}, Provider: string(entry.provider), UpstreamID: upstreamID,
 			ContextWindow: entry.model.ContextWindow, MaxOutputTokens: entry.model.MaxOutputTokens,
 			Modalities: append([]string(nil), entry.model.Modalities...), Capabilities: capabilities,
 			NativeTools:        nativeWebSearchTools(entry.provider, entry.model.WebSearch),

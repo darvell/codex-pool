@@ -65,6 +65,8 @@ func providerTargetFormat(accountType AccountType) RequestFormat {
 		return FormatClaude
 	case AccountTypeZAI:
 		return FormatClaude
+	case AccountTypeMistral:
+		return FormatOpenAI
 	case AccountTypeCodex:
 		return FormatOpenAI
 	default:
@@ -327,6 +329,13 @@ func translateClaudeReqToOpenAI(body []byte) ([]byte, error) {
 	// tool_choice
 	if tc, ok := claude["tool_choice"]; ok {
 		oai["tool_choice"] = convertClaudeToolChoiceToOpenAI(tc)
+	}
+
+	// Cute Code and recent Messages clients may send several reasoning
+	// carriers. Use the same explicit precedence as the Responses adapter and
+	// emit only the OpenAI-compatible field understood by chat providers.
+	if effort := extractClaudeReasoningEffort(claude); effort != "" {
+		oai["reasoning_effort"] = effort
 	}
 
 	return json.Marshal(oai)
@@ -999,9 +1008,31 @@ func translateOpenAIRespToClaude(body []byte, requestModel string) ([]byte, erro
 					}
 				}
 
-				// Text content
-				if c, ok := msg["content"].(string); ok && c != "" {
-					content = append(content, map[string]any{"type": "text", "text": c})
+				// Text content. Some OpenAI-compatible APIs return typed content;
+				// accept only the two lossless shapes we can map to Messages and
+				// ignore unknown typed blocks rather than misrepresenting them.
+				switch value := msg["content"].(type) {
+				case string:
+					if value != "" {
+						content = append(content, map[string]any{"type": "text", "text": value})
+					}
+				case []any:
+					for _, raw := range value {
+						part, ok := raw.(map[string]any)
+						if !ok {
+							continue
+						}
+						switch partType, _ := part["type"].(string); partType {
+						case "text":
+							if text, _ := part["text"].(string); text != "" {
+								content = append(content, map[string]any{"type": "text", "text": text})
+							}
+						case "thinking", "reasoning":
+							if thinking := mistralThinkingText(part["thinking"]); thinking != "" {
+								content = append(content, map[string]any{"type": "thinking", "thinking": thinking})
+							}
+						}
+					}
 				}
 				// Tool calls
 				if tcs, ok := msg["tool_calls"].([]any); ok {

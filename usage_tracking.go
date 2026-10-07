@@ -196,8 +196,10 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
-		// Adverserial exposes no quota endpoint; usage comes from response bodies.
-		if accType == AccountTypeAdverserial {
+		// Adverserial and Mistral have no usage endpoint accessible with an
+		// inference key. Their request usage is captured from responses. Falling
+		// through to Codex WHAM would incorrectly retire these static keys.
+		if accType == AccountTypeAdverserial || accType == AccountTypeMistral {
 			continue
 		}
 

@@ -12,19 +12,21 @@ import (
 // target format, and writes the translated events to the client. It also
 // forwards original event data to a usage callback for usage tracking.
 type sseTranslateWriter struct {
-	framer    sseFramer
-	err       error
-	w         io.Writer          // underlying writer (flushWriter)
-	direction TranslateDirection // which way to translate
-	state     streamTranslationState
-	buf       []byte
-	callback  func([]byte) // called with original event data for usage parsing
-	debug     bool
-	reqID     string
+	framer         sseFramer
+	err            error
+	w              io.Writer          // underlying writer (flushWriter)
+	direction      TranslateDirection // which way to translate
+	finishOnReason bool               // Mistral may omit the [DONE] sentinel
+	state          streamTranslationState
+	buf            []byte
+	callback       func([]byte) // called with original event data for usage parsing
+	debug          bool
+	reqID          string
 }
 
 type streamTranslationState struct {
 	messageStarted    bool
+	messageFinished   bool
 	contentBlockIndex int
 	toolCallIndex     int
 	currentToolID     string
@@ -88,10 +90,11 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 	}
 	if bytes.Equal(data, []byte("[DONE]")) {
 		// Emit final events if not already done
-		if sw.state.messageStarted {
+		if sw.state.messageStarted && !sw.state.messageFinished {
 			sw.emitClaudeContentBlockStop()
 			sw.emitClaudeMessageDelta()
 			sw.emitClaudeEvent("message_stop", `{"type":"message_stop"}`)
+			sw.state.messageFinished = true
 		}
 		return
 	}
@@ -130,6 +133,17 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 	// Check finish reason
 	if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
 		sw.state.finishReason = oaiFinishReasonToClaude(fr)
+		// Mistral's last chunk carries both finish_reason and usage. Close the
+		// Messages stream here; some upstream relays omit the optional [DONE].
+		defer func() {
+			if !sw.finishOnReason || !sw.state.messageStarted || sw.state.messageFinished {
+				return
+			}
+			sw.emitClaudeContentBlockStop()
+			sw.emitClaudeMessageDelta()
+			sw.emitClaudeEvent("message_stop", `{"type":"message_stop"}`)
+			sw.state.messageFinished = true
+		}()
 	}
 
 	delta, _ := choice["delta"].(map[string]any)
@@ -143,14 +157,22 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 		sw.emitClaudeMessageStart()
 	}
 
-	// Reasoning/thinking content (o1/o3 models, OpenRouter)
+	// Reasoning/thinking content (o1/o3 models and typed Mistral chunks).
 	reasoningText := ""
 	if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
 		reasoningText = rc
 	} else if rc, ok := delta["reasoning"].(string); ok && rc != "" {
 		reasoningText = rc
 	}
+	typedText, typedThinking := openAITypedDeltaContent(delta["content"])
+	if reasoningText == "" {
+		reasoningText = typedThinking
+	}
 	if reasoningText != "" {
+		if !sw.state.messageStarted {
+			sw.state.messageStarted = true
+			sw.emitClaudeMessageStart()
+		}
 		if !sw.state.sentThinking {
 			sw.state.sentThinking = true
 			sw.state.sentRole = true
@@ -164,7 +186,15 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 	}
 
 	// Text content
-	if content, ok := delta["content"].(string); ok && content != "" {
+	textContent, _ := delta["content"].(string)
+	if textContent == "" {
+		textContent = typedText
+	}
+	if textContent != "" {
+		if !sw.state.messageStarted {
+			sw.state.messageStarted = true
+			sw.emitClaudeMessageStart()
+		}
 		if !sw.state.sentText {
 			// Close thinking block if it was open, then start text block
 			if sw.state.sentThinking {
@@ -179,7 +209,7 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 		}
 		sw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
 			`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
-			sw.state.contentBlockIndex, mustMarshalString(content)))
+			sw.state.contentBlockIndex, mustMarshalString(textContent)))
 	}
 
 	// Tool calls
@@ -194,6 +224,10 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 			// New tool call (has name)
 			if fn != nil {
 				if name, ok := fn["name"].(string); ok && name != "" {
+					if !sw.state.messageStarted {
+						sw.state.messageStarted = true
+						sw.emitClaudeMessageStart()
+					}
 					// Close previous content block if any
 					if sw.state.sentRole {
 						sw.emitClaudeContentBlockStop()
@@ -225,6 +259,28 @@ func (sw *sseTranslateWriter) translateOAIEventToClaude(eventType string, data [
 			}
 		}
 	}
+}
+
+func openAITypedDeltaContent(value any) (text, thinking string) {
+	parts, ok := value.([]any)
+	if !ok {
+		return "", ""
+	}
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch partType, _ := part["type"].(string); partType {
+		case "text":
+			if value, _ := part["text"].(string); value != "" {
+				text += value
+			}
+		case "thinking", "reasoning":
+			thinking += mistralThinkingText(part["thinking"])
+		}
+	}
+	return text, thinking
 }
 
 func (sw *sseTranslateWriter) emitClaudeMessageStart() {

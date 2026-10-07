@@ -683,6 +683,8 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.handleGrokImport(w, r)
 		case "/api/pool/accounts/opencode-go/add":
 			h.handleOpencodeGoAdd(w, r)
+		case "/api/pool/accounts/mistral/add":
+			h.handleMistralAdd(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -802,6 +804,14 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveOpencodeGoAdmin(w, r)
+		return
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/admin/mistral") {
+		if !h.checkAdminAuth(w, r) {
+			return
+		}
+		h.serveMistralAdmin(w, r)
 		return
 	}
 

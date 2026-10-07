@@ -48,6 +48,7 @@ type config struct {
 	grokBase               *url.URL // Grok Code OpenAI-compatible endpoint
 	adverserialBase        *url.URL // api.adverserial.ai wallet shim (Anthropic + OpenAI)
 	opencodeGoBase         *url.URL // OpenCode Go subscription endpoint (zen/go/v1)
+	mistralBase            *url.URL // Mistral paid API endpoint
 	poolDir                string
 
 	disableRefresh  bool
@@ -158,6 +159,7 @@ func buildConfig() *config {
 	// chat product and returns 403 "Use of API key is not enabled".
 	cfg.adverserialBase = mustParse(getenv("UPSTREAM_ADVERSERIAL_BASE", "https://api.adverserial.ai"))
 	cfg.opencodeGoBase = mustParse(getenv("UPSTREAM_OPENCODE_GO_BASE", "https://opencode.ai/zen/go/v1"))
+	cfg.mistralBase = mustParse(getenv("UPSTREAM_MISTRAL_BASE", "https://api.mistral.ai"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
@@ -322,7 +324,8 @@ func main() {
 	grokProvider := NewGrokProvider(cfg.grokBase)
 	adverserialProvider := NewAdverserialProvider(cfg.adverserialBase)
 	opencodeGoProvider := NewOpencodeGoProvider(cfg.opencodeGoBase)
-	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider, opencodeGoProvider)
+	mistralProvider := NewMistralProvider(cfg.mistralBase)
+	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider, opencodeGoProvider, mistralProvider)
 
 	log.Printf("loading pool from %s", cfg.poolDir)
 	accounts, err := loadPool(cfg.poolDir, registry)
@@ -343,6 +346,7 @@ func main() {
 	grokCount := pool.countByType(AccountTypeGrok)
 	adverserialCount := pool.countByType(AccountTypeAdverserial)
 	opencodeGoCount := pool.countByType(AccountTypeOpencodeGo)
+	mistralCount := pool.countByType(AccountTypeMistral)
 	if pool.count() == 0 {
 		log.Printf("warning: loaded 0 accounts from %s", cfg.poolDir)
 	}
@@ -610,8 +614,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, opencode_go=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, opencodeGoCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, opencode_go=%d, mistral=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, opencodeGoCount, mistralCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -1428,6 +1432,19 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		rewritten := rewriteAndSanitizeGrokRequestBody(body, canonical)
 		return p, p.UpstreamURL(path), rewritten
 	}
+	if isMistralModel(model) {
+		p := h.registry.ForType(AccountTypeMistral)
+		if p == nil {
+			return nil, nil, nil
+		}
+		// Body rewriting (model canonicalization, stream_options, reasoning_effort
+		// collapse) is deferred to the unconditional post-translation pass later in
+		// proxyRequest. Doing it here too, before a Claude-origin request has been
+		// translated to OpenAI shape, would corrupt reasoning_effort: Mistral's
+		// collapsed "none"/"high" values are not valid Claude-side carrier values,
+		// so extractClaudeReasoningEffort would silently drop them.
+		return p, p.UpstreamURL(path), nil
+	}
 	if isOpencodeGoModel(model) {
 		p := h.registry.ForType(AccountTypeOpencodeGo)
 		if p == nil {
@@ -1543,6 +1560,7 @@ func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, 
 		{AccountTypeXiaomi, isXiaomiModel, xiaomiCanonicalModel},
 		{AccountTypeGrok, isGrokModel, grokCanonicalModel},
 		{AccountTypeAdverserial, isAdverserialModel, adverserialCanonicalModel},
+		{AccountTypeMistral, isMistralModel, mistralCanonicalModel},
 		{AccountTypeOpencodeGo, isOpencodeGoModel, opencodeGoStreamCanonicalModel},
 	}
 	for _, candidate := range routes {
@@ -2031,11 +2049,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			streamBody = false
 		}
 	}
-	// Adverserial rejects any effort outside low/high/max with a 400, and the
-	// streamed path rewrites only the model name. Buffer the body so the effort
-	// clamp runs for chunked and oversized requests too; otherwise the clamp is
-	// advisory and a large request fails upstream instead.
-	if accountType == AccountTypeAdverserial || accountType == AccountTypeGrok {
+	// The streamed-body path only rewrites the model name. These providers also
+	// need buffered body transformations: effort normalization for Adverserial
+	// and Grok, and Messages-to-Chat translation, reasoning normalization, and
+	// usage injection for Mistral. Chunked requests must take the same path.
+	if accountType == AccountTypeAdverserial || accountType == AccountTypeGrok || accountType == AccountTypeMistral {
 		streamBody = false
 	}
 	if streamBody {
@@ -2366,6 +2384,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	bodyBytes = normalizeResponsesSchemaBody(bodyBytes)
 	if accountType == AccountTypeGrok {
 		bodyBytes = rewriteAndSanitizeGrokRequestBody(bodyBytes, requestedModel)
+	}
+	if accountType == AccountTypeMistral {
+		// Model-route override deliberately left the body untouched (see its
+		// isMistralModel branch); this is the single place that canonicalizes the
+		// model, enables stream_options.include_usage, and collapses
+		// reasoning_effort, applied after any Claude->OpenAI translation above so
+		// it sees the actual OpenAI-shaped body headed to Mistral.
+		bodyBytes = rewriteMistralRequestBody(bodyBytes, requestedModel)
 	}
 
 	if h.cfg.debug.Load() {
@@ -3185,10 +3211,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 						responseDir = TranslateOAIToClaude
 					}
 					writer = &sseTranslateWriter{
-						w:         writer,
-						direction: responseDir,
-						debug:     h.cfg.debug.Load(),
-						reqID:     reqID,
+						w:              writer,
+						direction:      responseDir,
+						finishOnReason: accountType == AccountTypeMistral,
+						debug:          h.cfg.debug.Load(),
+						reqID:          reqID,
 					}
 				} else if accountType == AccountTypeCodex && !acc.CyberAccess {
 					suppressor := &cyberPolicyHTTPSuppressor{
@@ -3199,6 +3226,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 				if accountType == AccountTypeCodex {
 					writer = &hostedMCPResponseFilterWriter{w: writer}
+				}
+				if accountType == AccountTypeMistral {
+					writer = &mistralSSEWriter{w: writer}
 				}
 				// Inspect received bytes even if translation or filtering stops on a write error.
 				writer = &sseInterceptWriter{w: writer, callback: usageCallback}

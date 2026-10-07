@@ -231,7 +231,7 @@ export interface AccountContributionResult {
 	  verification_url?: string;
 }
 
-export async function contributeAPIKey(provider: "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go", apiKey: string) {
+export async function contributeAPIKey(provider: "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go" | "mistral", apiKey: string) {
   // The backend route uses a hyphen (opencode-go); the pool type uses an underscore.
   const route = provider === "opencode_go" ? "opencode-go" : provider;
   return decode<AccountContributionResult>(await fetch(`/api/pool/accounts/${route}/add`, {
