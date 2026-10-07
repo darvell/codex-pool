@@ -146,10 +146,71 @@ func mistralReasoningEffort(effort string) (string, bool) {
 	}
 }
 
+// normalizeMistralAssistantReasoning converts the generic reasoning fields
+// used by OpenAI-compatible clients back into Mistral's native Chat
+// Completions content block. Mistral returns that block on the preceding tool
+// call turn, so it must survive a client round trip when the tool result is
+// submitted. Existing content blocks and tool-call fields remain untouched.
+func normalizeMistralAssistantReasoning(message map[string]any) {
+	if message["role"] != "assistant" {
+		return
+	}
+
+	// Gather before mutating: if content has an unexpected shape, retaining the
+	// generic fields is safer than silently discarding reasoning or content.
+	var thinking []any
+	var converted []string
+	for _, key := range []string{"reasoning_content", "reasoning", "reasoning_text"} {
+		value, present := message[key]
+		if !present {
+			continue
+		}
+		if value == nil {
+			converted = append(converted, key)
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
+		converted = append(converted, key)
+		if text != "" {
+			thinking = append(thinking, map[string]any{"type": "text", "text": text})
+		}
+	}
+	if len(converted) == 0 {
+		return
+	}
+	if len(thinking) == 0 {
+		for _, key := range converted {
+			delete(message, key)
+		}
+		return
+	}
+
+	var content []any
+	if rawContent, present := message["content"]; present && rawContent != nil {
+		switch value := rawContent.(type) {
+		case string:
+			content = []any{map[string]any{"type": "text", "text": value}}
+		case []any:
+			content = value
+		default:
+			return
+		}
+	}
+	content = append([]any{map[string]any{"type": "thinking", "thinking": thinking}}, content...)
+	message["content"] = content
+	for _, key := range converted {
+		delete(message, key)
+	}
+}
+
 // rewriteMistralRequestBody keeps the OpenAI-compatible request conservative.
 // The Messages adapter has already dropped Anthropic-only fields; this final
-// pass canonicalizes the model, asks Mistral to include stream usage, and
-// collapses any four-level reasoning_effort onto Mistral's accepted enum.
+// pass canonicalizes the model, restores replayed reasoning to Mistral's
+// native content shape, asks Mistral to include stream usage, and collapses
+// any four-level reasoning_effort onto Mistral's accepted enum.
 func rewriteMistralRequestBody(body []byte, model string) []byte {
 	var obj map[string]any
 	if len(body) == 0 || json.Unmarshal(body, &obj) != nil {
@@ -162,8 +223,11 @@ func rewriteMistralRequestBody(body []byte, model string) []byte {
 	delete(obj, "store")
 	if messages, ok := obj["messages"].([]any); ok {
 		for _, raw := range messages {
-			if message, ok := raw.(map[string]any); ok && message["role"] == "developer" {
-				message["role"] = "system"
+			if message, ok := raw.(map[string]any); ok {
+				if message["role"] == "developer" {
+					message["role"] = "system"
+				}
+				normalizeMistralAssistantReasoning(message)
 			}
 		}
 	}

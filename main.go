@@ -2388,9 +2388,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if accountType == AccountTypeMistral {
 		// Model-route override deliberately left the body untouched (see its
 		// isMistralModel branch); this is the single place that canonicalizes the
-		// model, enables stream_options.include_usage, and collapses
-		// reasoning_effort, applied after any Claude->OpenAI translation above so
-		// it sees the actual OpenAI-shaped body headed to Mistral.
+		// model, restores generic replayed reasoning to native content, enables
+		// stream_options.include_usage, and collapses reasoning_effort, applied
+		// after any Claude->OpenAI translation above so it sees the actual
+		// OpenAI-shaped body headed to Mistral.
 		bodyBytes = rewriteMistralRequestBody(bodyBytes, requestedModel)
 	}
 

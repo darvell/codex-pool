@@ -295,6 +295,99 @@ func TestRewriteMistralRequestBodyCanonicalizesModelStreamAndReasoning(t *testin
 	}
 }
 
+func TestRewriteMistralRequestBodyRestoresNativeReasoningForToolReplay(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"model":"mistral/magistral-medium-latest","messages":[{"role":"assistant","content":"I will inspect it.","reasoning_content":"check the file","tool_calls":[{"id":"call_7","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"notes.txt\"}"}}]},{"role":"tool","tool_call_id":"call_7","content":"hello"},{"role":"assistant","reasoning":"compare ","reasoning_text":"the result","content":[{"type":"thinking","thinking":[{"type":"text","text":"native thought"}]},{"type":"text","text":"done"},{"type":"image_url","image_url":{"url":"https://example.test/image.png"}}]},{"role":"assistant","content":null,"reasoning_content":"","reasoning_text":null}]}`)
+	rewritten := rewriteMistralRequestBody(body, "mistral/magistral-medium-latest")
+
+	var obj map[string]any
+	if err := json.Unmarshal(rewritten, &obj); err != nil {
+		t.Fatal(err)
+	}
+	messages := obj["messages"].([]any)
+	toolCallMessage := messages[0].(map[string]any)
+	for _, key := range []string{"reasoning_content", "reasoning", "reasoning_text"} {
+		if _, present := toolCallMessage[key]; present {
+			t.Fatalf("generic reasoning field %q was forwarded: %#v", key, toolCallMessage)
+		}
+	}
+	content := toolCallMessage["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("tool-call content = %#v, want thinking and text blocks", content)
+	}
+	thinking := content[0].(map[string]any)
+	thinkingParts := thinking["thinking"].([]any)
+	if thinking["type"] != "thinking" || thinkingParts[0].(map[string]any)["text"] != "check the file" {
+		t.Fatalf("native thinking block = %#v", thinking)
+	}
+	if text := content[1].(map[string]any); text["type"] != "text" || text["text"] != "I will inspect it." {
+		t.Fatalf("text block = %#v", text)
+	}
+	calls := toolCallMessage["tool_calls"].([]any)
+	if calls[0].(map[string]any)["id"] != "call_7" {
+		t.Fatalf("tool call ID changed: %#v", calls)
+	}
+	if result := messages[1].(map[string]any); result["tool_call_id"] != "call_7" || result["content"] != "hello" {
+		t.Fatalf("tool result linkage changed: %#v", result)
+	}
+
+	structured := messages[2].(map[string]any)
+	for _, key := range []string{"reasoning_content", "reasoning", "reasoning_text"} {
+		if _, present := structured[key]; present {
+			t.Fatalf("generic reasoning alias %q was forwarded: %#v", key, structured)
+		}
+	}
+	structuredContent := structured["content"].([]any)
+	if len(structuredContent) != 4 {
+		t.Fatalf("structured content = %#v, want added thinking plus all three existing blocks", structuredContent)
+	}
+	aliasThinking := structuredContent[0].(map[string]any)["thinking"].([]any)
+	if len(aliasThinking) != 2 || aliasThinking[0].(map[string]any)["text"] != "compare " || aliasThinking[1].(map[string]any)["text"] != "the result" {
+		t.Fatalf("reasoning aliases were not preserved: %#v", aliasThinking)
+	}
+	if structuredContent[1].(map[string]any)["type"] != "thinking" || structuredContent[2].(map[string]any)["text"] != "done" || structuredContent[3].(map[string]any)["type"] != "image_url" {
+		t.Fatalf("existing native/multimodal content changed: %#v", structuredContent)
+	}
+	if empty := messages[3].(map[string]any); empty["content"] != nil {
+		t.Fatalf("empty reasoning should leave null content alone: %#v", empty)
+	} else {
+		for _, key := range []string{"reasoning_content", "reasoning_text"} {
+			if _, present := empty[key]; present {
+				t.Fatalf("empty generic reasoning field %q should be removed: %#v", key, empty)
+			}
+		}
+	}
+
+	// The generic fields are gone after the first pass, so replay normalization
+	// is idempotent and cannot add a duplicate thinking block.
+	twice := rewriteMistralRequestBody(rewritten, "mistral/magistral-medium-latest")
+	if string(twice) != string(rewritten) {
+		t.Fatalf("second rewrite changed normalized body:\nfirst:  %s\nsecond: %s", rewritten, twice)
+	}
+}
+
+func TestMistralAssistantReasoningLeavesUnsupportedShapesUntouched(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"role":"user","content":"input","reasoning_content":"not assistant history"}`,
+		`{"role":"tool","tool_call_id":"abcdef123","content":"result","reasoning":"not assistant history"}`,
+		`{"role":"assistant","content":"answer","reasoning_content":{"opaque":"metadata"}}`,
+		`{"role":"assistant","content":123,"reasoning_content":"retain reasoning"}`,
+	} {
+		var message map[string]any
+		if err := json.Unmarshal([]byte(body), &message); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := json.Marshal(message)
+		normalizeMistralAssistantReasoning(message)
+		after, _ := json.Marshal(message)
+		if string(before) != string(after) {
+			t.Fatalf("unsupported input mutated: %s -> %s", before, after)
+		}
+	}
+}
+
 func TestModelRouteOverrideMistralUsesConfiguredBaseAndCanonicalModel(t *testing.T) {
 	t.Parallel()
 
@@ -309,9 +402,10 @@ func TestModelRouteOverrideMistralUsesConfiguredBaseAndCanonicalModel(t *testing
 	}
 
 	// modelRouteOverride only selects the provider/base; body rewriting (model
-	// canonicalization, stream_options, reasoning_effort collapse) is deferred
-	// to the unconditional post-translation pass in proxyRequest, since at this
-	// point a Claude-origin request has not been translated to OpenAI shape yet.
+	// canonicalization, reasoning replay, stream_options, reasoning_effort
+	// collapse) is deferred to the unconditional post-translation pass in
+	// proxyRequest, since at this point a Claude-origin request has not been
+	// translated to OpenAI shape yet.
 	original := []byte(`{"model":"mistral/mistral-large-latest","stream":true,"reasoning_effort":"max"}`)
 	provider, base, rewritten := handler.modelRouteOverride("/v1/chat/completions", "mistral/mistral-large-latest", original)
 	if provider == nil || provider.Type() != AccountTypeMistral {
@@ -389,6 +483,72 @@ func TestProxyRequestAppliesMistralReasoningCollapseAfterClaudeTranslation(t *te
 	}
 	if upstreamBody["reasoning_effort"] != "none" {
 		t.Fatalf("upstream reasoning_effort = %v, want none (collapsed from low after Claude->OpenAI translation)", upstreamBody["reasoning_effort"])
+	}
+}
+
+func TestProxyRequestRestoresMistralNativeReasoningOnToolReplay(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	mistralBase, _ := url.Parse("https://api.mistral.ai")
+	claudeBase, _ := url.Parse("https://api.anthropic.com")
+	codexBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	acc := &Account{Type: AccountTypeMistral, ID: "mistral", AccessToken: "sk-upstream", PlanType: "mistral_api", Models: map[string]DiscoveredModel{
+		"magistral-medium-latest": {ID: "magistral-medium-latest", DisplayName: "Magistral Medium", CompletionChat: true},
+	}}
+
+	var upstreamBody map[string]any
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 16 * 1024 * 1024},
+		pool:    newPoolState([]*Account{acc}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(codexBase, codexBase, nil),
+			NewClaudeProvider(claudeBase),
+			NewGeminiProvider(claudeBase, claudeBase),
+			NewMistralProvider(mistralBase),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			if err := json.Unmarshal(body, &upstreamBody); err != nil {
+				t.Fatalf("upstream body is not JSON: %v: %s", err, body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"x","model":"magistral-medium-latest","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)),
+			}, nil
+		}),
+	}
+
+	reqBody := []byte(`{"model":"mistral/magistral-medium-latest","messages":[{"role":"user","content":"read notes"},{"role":"assistant","content":null,"reasoning_content":"I should inspect the file","tool_calls":[{"id":"call_notes","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"notes.txt\"}"}}]},{"role":"tool","tool_call_id":"call_notes","content":"hello"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "mistral-user"))
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-mistral-tool-replay")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	messages := upstreamBody["messages"].([]any)
+	assistant := messages[1].(map[string]any)
+	for _, key := range []string{"reasoning_content", "reasoning", "reasoning_text"} {
+		if _, present := assistant[key]; present {
+			t.Fatalf("unsupported generic field %q reached Mistral: %#v", key, assistant)
+		}
+	}
+	content := assistant["content"].([]any)
+	thinking := content[0].(map[string]any)
+	parts := thinking["thinking"].([]any)
+	if thinking["type"] != "thinking" || parts[0].(map[string]any)["type"] != "text" || parts[0].(map[string]any)["text"] != "I should inspect the file" {
+		t.Fatalf("upstream native thinking block = %#v", content)
+	}
+	calls := assistant["tool_calls"].([]any)
+	if calls[0].(map[string]any)["id"] != "call_notes" || messages[2].(map[string]any)["tool_call_id"] != "call_notes" {
+		t.Fatalf("upstream tool linkage changed: %#v", messages)
 	}
 }
 
