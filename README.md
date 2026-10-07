@@ -16,10 +16,6 @@ The setup dashboard configures **Codex CLI**, **Claude Code**, **Gemini CLI**, *
 
 For browser, mobile, or CLI speech-to-speech agents, see [Realtime voice agents through codex-pool](docs/realtime-voice-agent.md). It uses a pooled ephemeral secret followed by a direct WebRTC session.
 
-<p align="center">
-  <img src="screenshots/analytics-dashboard.png" alt="Pool Analytics" width="700">
-</p>
-
 ---
 
 ## Why
@@ -35,23 +31,6 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 - Auto-refreshes tokens before they expire
 - Proxies WebSocket upgrades (including Codex Responses WS and realtime `/ws` flows)
 - Tracks usage so you can see who's burning through quota
-
----
-
-## Screenshots
-
-### Setup Dashboard
-
-<p align="center">
-  <img src="screenshots/local-mode.png" alt="Local Mode" width="700">
-</p>
-
-### Friends Mode
-Share your pool with others using a friend code.
-
-<p align="center">
-  <img src="screenshots/friends-mode-login.png" alt="Friends Mode" width="500">
-</p>
 
 ---
 

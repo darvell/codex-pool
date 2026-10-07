@@ -12,7 +12,16 @@
 # Testing / automation
 .playwright-mcp/
 test-results/
+.impeccable/
 web/.impeccable/
+screenshots/
+scorecard.png
+
+# Generated research and workflow artifacts
+.product-factory/
+autoresearch/
+predict/
+security/
 
 # Desloppify
 .desloppify/
@@ -46,6 +55,7 @@ tmp/
 bin/
 dist/
 coverage.out
+web/*.tsbuildinfo
 
 # Python
 __pycache__/

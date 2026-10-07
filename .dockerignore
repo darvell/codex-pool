@@ -5,10 +5,15 @@
 .localnotes
 .playwright-mcp
 .impeccable
+.product-factory
+autoresearch
+predict
+security
+scorecard.png
 web/.impeccable
 web/node_modules
 web/dist
-web/tsconfig.app.tsbuildinfo
+web/*.tsbuildinfo
 pool
 data
 tmp

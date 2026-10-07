@@ -13,39 +13,6 @@ browser, mobile app, or CLI <============== WebRTC audio + events =============>
 
 The pool chooses and authenticates a Codex account while issuing the secret. That binds the direct WebRTC session to the selected pooled account without exposing its OAuth token.
 
-## Use the verified CLI
-
-`cmd/realtime-voice-smoke` is a real end-to-end probe, not a mock. It:
-
-1. creates a Realtime client secret through the pool;
-2. creates a direct WebRTC offer to `api.openai.com`;
-3. synthesizes a short prompt with macOS `say` and streams it as Opus RTP;
-4. waits for `response.done` and counts the returned audio RTP packets.
-
-```bash
-export POOL_URL=https://codex.ppflix.net
-export POOL_TOKEN='pool user JWT'
-
-go run ./cmd/realtime-voice-smoke \
-  -say 'Hello. Please say the word verified and nothing else.'
-```
-
-The default input path needs macOS `say` and `ffmpeg`. On another platform, pass an audio file and let `ffmpeg` transcode it:
-
-```bash
-go run ./cmd/realtime-voice-smoke -audio ./prompt.wav
-```
-
-If the machine running the CLI has no `ffmpeg`, pre-encode the audio on another machine and use the `-opus-ogg` fallback:
-
-```bash
-ffmpeg -i prompt.wav -ac 2 -ar 48000 -c:a libopus \
-  -frame_duration 20 -page_duration 20000 prompt.ogg
-go run ./cmd/realtime-voice-smoke -opus-ogg prompt.ogg
-```
-
-The probe was validated against the production pool with a synthesized prompt: it received a pooled ephemeral secret, completed the direct WebRTC session, and received model audio before `response.done`.
-
 ## Application-server endpoint
 
 Keep the long-lived pool credential on your server. Return only the `value` from the client-secret response to an already-authenticated application user.
@@ -132,5 +99,5 @@ Codex posts its SDP offer to the call base URL and joins the returned call throu
 
 - Use the current GA Realtime shape. Do not send the legacy `OpenAI-Beta: responses_websockets=...` header; the pool strips it for native Realtime WebSockets.
 - Browser-native WebSockets cannot attach an `Authorization` header. Prefer WebRTC plus a client secret for browser and mobile clients.
-- `gpt-realtime-2.1` is the current official guide's model choice. Use `-model` on the probe to test another eligible Realtime model.
+- Use a Realtime model available to the selected pooled account.
 - A `401` from `/v1/realtime/client_secrets` means the application server's pool JWT is invalid or disabled. A `4xx` from `api.openai.com/v1/realtime/calls` after a successful secret means the SDP/session payload is invalid, not that the pool failed to select an account.
