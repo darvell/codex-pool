@@ -32,16 +32,26 @@ func TestProMaxRequestRouting(t *testing.T) {
 				{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", AccessToken: "fixture-pro", AccountID: "pro-seat", CyberAccess: true},
 				{ID: "max", Type: AccountTypeCodex, PlanType: "promax", AccessToken: "fixture-max", AccountID: "max-seat", CyberAccess: true},
 			}, false)
-			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"Reply OK"}`))
-			req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("promax-test-secret", "promax-user"))
-			req.Header.Set("Content-Type", "application/json")
-			if mode == "chunked" {
-				req.ContentLength = -1
-			}
-			w := httptest.NewRecorder()
-			h.proxyRequest(w, req, "promax-routing")
-			if w.Code != http.StatusOK || dispatched != "max-seat" || !strings.Contains(w.Body.String(), "response.completed") {
-				t.Fatalf("status=%d seat=%q body=%s", w.Code, dispatched, w.Body.String())
+			for _, used := range []float64{0, 0.15} {
+				max := h.pool.accounts[1]
+				max.Usage = UsageSnapshot{SecondaryUsedPercent: used, SecondaryWindowMinutes: codexWeeklyWindowMinutes,
+					SecondaryResetAt: time.Now().Add(6*24*time.Hour + time.Hour)}
+				h.pool.pin("paced-conversation", max.ID)
+				req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"Reply OK","conversation_id":"paced-conversation"}`))
+				req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("promax-test-secret", "promax-user"))
+				req.Header.Set("Content-Type", "application/json")
+				if mode == "chunked" {
+					req.ContentLength = -1
+				}
+				w := httptest.NewRecorder()
+				h.proxyRequest(w, req, "promax-routing")
+				wantSeat := "max-seat"
+				if used > 0 {
+					wantSeat = "pro-seat"
+				}
+				if w.Code != http.StatusOK || dispatched != wantSeat || !strings.Contains(w.Body.String(), "response.completed") {
+					t.Fatalf("usage=%v status=%d seat=%q want=%q body=%s", used, w.Code, dispatched, wantSeat, w.Body.String())
+				}
 			}
 		})
 	}
@@ -62,20 +72,32 @@ func TestProMaxWebSocketRouting(t *testing.T) {
 		{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", AccessToken: "fixture-pro", AccountID: "pro-seat"},
 		{ID: "max", Type: AccountTypeCodex, PlanType: "promax", AccessToken: "fixture-max", AccountID: "max-seat"},
 	}, false)
-	r := httptest.NewRequest(http.MethodGet, "/v1/responses", nil).WithContext(context.Background())
-	r.Header.Set("Connection", "Upgrade")
-	r.Header.Set("Upgrade", "websocket")
-	r.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("promax-test-secret", "promax-user"))
-	w := httptest.NewRecorder()
-	h.proxyRequest(w, r, "promax-ws")
-	if dispatched != "max-seat" || w.Code != http.StatusBadRequest {
-		t.Fatalf("handshake status=%d seat=%q", w.Code, dispatched)
+	for _, used := range []float64{0, 0.15} {
+		max := h.pool.accounts[1]
+		max.Usage = UsageSnapshot{SecondaryUsedPercent: used, SecondaryWindowMinutes: codexWeeklyWindowMinutes,
+			SecondaryResetAt: time.Now().Add(6*24*time.Hour + time.Hour)}
+		h.pool.pin("paced-conversation", max.ID)
+		r := httptest.NewRequest(http.MethodGet, "/v1/responses?session_id=paced-conversation", nil).WithContext(context.Background())
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		r.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("promax-test-secret", "promax-user"))
+		w := httptest.NewRecorder()
+		h.proxyRequest(w, r, "promax-ws")
+		wantSeat := "max-seat"
+		if used > 0 {
+			wantSeat = "pro-seat"
+		}
+		if dispatched != wantSeat || w.Code != http.StatusBadRequest {
+			t.Fatalf("usage=%v handshake status=%d seat=%q want=%q", used, w.Code, dispatched, wantSeat)
+		}
 	}
 }
 
 func TestProMaxRoutesFirst(t *testing.T) {
 	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true}
-	max := &Account{ID: "max", Type: AccountTypeCodex, PlanType: "promax", CyberAccess: true, Usage: UsageSnapshot{SecondaryUsedPercent: 0.7}}
+	max := &Account{ID: "max", Type: AccountTypeCodex, PlanType: "promax", CyberAccess: true,
+		Usage: UsageSnapshot{SecondaryUsedPercent: 0.7, SecondaryWindowMinutes: codexWeeklyWindowMinutes,
+			SecondaryResetAt: time.Now().Add(time.Hour)}}
 	p := newPoolState([]*Account{pro, max}, false)
 	for range 12 {
 		if got := p.candidate("", nil, AccountTypeCodex, "pro", ""); got != max {

@@ -637,6 +637,29 @@ func accountTier(accType AccountType, planType string) int {
 
 const codexPlanProMax = "promax"
 
+func proMaxOverBudgetLocked(a *Account, now time.Time) bool {
+	if a.Type != AccountTypeCodex || normalizeCodexPlanType(a.PlanType) != codexPlanProMax {
+		return false
+	}
+
+	const quotaDay = 24 * time.Hour
+	windowMinutes := a.Usage.SecondaryWindowMinutes
+	if windowMinutes <= 0 {
+		windowMinutes = codexWeeklyWindowMinutes
+	}
+	window := time.Duration(windowMinutes) * time.Minute
+	budget := float64(quotaDay) / float64(window)
+	if a.Usage.SecondaryResetAt.After(now) {
+		elapsed := now.Sub(a.Usage.SecondaryResetAt.Add(-window))
+		if elapsed > 0 {
+			// Release one day's allowance at a time, aligned to the upstream
+			// window rather than midnight. Unused allowance carries forward.
+			budget *= float64(elapsed/quotaDay + 1)
+		}
+	}
+	return accountSecondaryUsageLocked(a) >= budget
+}
+
 func isCodexProAccessPlan(planType string) bool {
 	switch normalizeCodexPlanType(planType) {
 	case "pro", codexPlanProMax, "prolite":
@@ -750,7 +773,12 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 	now := time.Now()
 	var best *Account
 	bestScore := -1e9
-	bestProMax := false
+	const (
+		deferredProMax = iota
+		ordinaryAccount
+		preferredProMax
+	)
+	bestPriority := deferredProMax
 	for _, a := range p.accounts {
 		if exclude != nil && exclude[a.ID] {
 			continue
@@ -774,13 +802,19 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 			continue
 		}
 		score := scoreAccountLocked(a, now)
-		proMax := accountType == AccountTypeCodex && normalizeCodexPlanType(a.PlanType) == codexPlanProMax
+		priority := ordinaryAccount
+		if accountType == AccountTypeCodex && normalizeCodexPlanType(a.PlanType) == codexPlanProMax {
+			priority = preferredProMax
+			if proMaxOverBudgetLocked(a, now) {
+				priority = deferredProMax
+			}
+		}
 		a.mu.Unlock()
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		if best == nil || (proMax && !bestProMax) || (proMax == bestProMax && score > bestScore) {
+		if best == nil || priority > bestPriority || (priority == bestPriority && score > bestScore) {
 			best = a
 			bestScore = score
-			bestProMax = proMax
+			bestPriority = priority
 		}
 	}
 	if best != nil {
@@ -892,7 +926,9 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 
 	now := time.Now()
 
-	// Conversation pinning — keep using the same account unless at hard limits
+	var pacedPin *Account
+
+	// Keep pins unless at hard limits or a Pro Max daily handoff is due.
 	if conversationID != "" {
 		if id, ok := p.convPin[conversationID]; ok {
 			if exclude != nil && exclude[id] {
@@ -941,9 +977,13 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 							conversationID, id)
 					}
 				}
+				overBudget := accountType == AccountTypeCodex && proMaxOverBudgetLocked(a, now)
 				a.mu.Unlock()
-				if ok {
+				if ok && !overBudget {
 					return a
+				}
+				if ok {
+					pacedPin = a
 				}
 			}
 		}
@@ -961,6 +1001,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		secondaryPct float64
 		score        float64
 		proMax       bool
+		overBudget   bool
 	}
 	var eligible []scoredAccount
 	var rateLimited []scoredAccount
@@ -1011,20 +1052,25 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		tier := accountTier(a.Type, a.PlanType)
 		score := scoreAccountLocked(a, now)
 		proMax := accountType == AccountTypeCodex && normalizeCodexPlanType(a.PlanType) == codexPlanProMax
+		overBudget := proMax && proMaxOverBudgetLocked(a, now)
 		a.mu.Unlock()
 		// Prefer less-loaded accounts
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score, proMax: proMax})
+		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score, proMax: proMax, overBudget: overBudget})
 	}
 
 	selectCandidate := func(accounts []scoredAccount) *Account {
 		threshold := p.tierThreshold
-		var proMaxAny []*scoredAccount
+		var proMaxAny, proMaxDeferred []*scoredAccount
 		var tier1Below, tier1Any []*scoredAccount
 		var tier2Below, tier2Any []*scoredAccount
 		var tier3Below, tier3Any []*scoredAccount
 		for i := range accounts {
 			sa := &accounts[i]
+			if sa.overBudget {
+				proMaxDeferred = append(proMaxDeferred, sa)
+				continue
+			}
 			if sa.proMax {
 				proMaxAny = append(proMaxAny, sa)
 			}
@@ -1134,6 +1180,15 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		}
 		if len(tier3Any) > 0 {
 			return choose(tier3Any)
+		}
+
+		// Pacing changes preference, not availability. Preserve a deferred
+		// pin when no eligible alternative can serve the request.
+		if pacedPin != nil {
+			return pacedPin
+		}
+		if len(proMaxDeferred) > 0 {
+			return choose(proMaxDeferred)
 		}
 
 		// Absolute fallback — use weighted fairness among competitive accounts.
