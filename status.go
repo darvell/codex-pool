@@ -25,6 +25,8 @@ type StatusData struct {
 	Accounts        []AccountStatus
 	TokenAnalytics  *TokenAnalytics
 	PoolUtilization []PoolUtilization `json:"pool_utilization,omitempty"`
+
+	MistralVibeCount int
 }
 
 // TokenAnalytics contains capacity estimation data for the status page.
@@ -72,6 +74,9 @@ type AccountStatus struct {
 	ScoreTooltip       string
 	Inflight           int64
 	TotalTokens        int64
+
+	PrimaryNotReported   bool
+	SecondaryNotReported bool
 }
 
 func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +112,8 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 			data.ZAICount++
 		case AccountTypeGrok:
 			data.GrokCount++
+		case AccountTypeMistralVibe:
+			data.MistralVibeCount++
 		}
 
 		primaryUsed := a.Usage.PrimaryUsedPercent
@@ -138,6 +145,11 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 			ScoreTooltip:       scoreTooltipFromBreakdownLocked(a, now, scoreBreakdown),
 			Inflight:           a.Inflight,
 			TotalTokens:        a.Totals.TotalBillableTokens,
+		}
+
+		if a.Type == AccountTypeMistral || a.Type == AccountTypeMistralVibe {
+			status.PrimaryNotReported = !usagePrimaryWindowAvailable(a.Usage)
+			status.SecondaryNotReported = !usageSecondaryWindowAvailable(a.Usage)
 		}
 
 		// Format time strings
@@ -426,6 +438,12 @@ const statusHTML = `<!DOCTYPE html>
             <div class="stat-label">Grok</div>
         </div>
         {{end}}
+        {{if .MistralVibeCount}}
+        <div class="stat">
+            <div class="stat-value">{{.MistralVibeCount}}</div>
+            <div class="stat-label">Mistral Vibe</div>
+        </div>
+        {{end}}
         {{if .PoolUsers}}
         <div class="stat">
             <div class="stat-value">{{.PoolUsers}}</div>
@@ -489,27 +507,35 @@ const statusHTML = `<!DOCTYPE html>
                 {{if .CoolingDown}}<span class="tag tag-disabled">cooldown</span>{{end}}
             </td>
             <td>
-                {{if eq .Type "codex"}}<span class="tag tag-codex">codex</span>{{end}}
-                {{if eq .Type "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
-                {{if eq .Type "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+                {{if eq .Type "codex"}}<span class="tag tag-codex">codex</span>
+                {{else if eq .Type "gemini"}}<span class="tag tag-gemini">gemini</span>
+                {{else if eq .Type "claude"}}<span class="tag tag-claude">claude</span>
+                {{else if eq .Type "mistral_vibe"}}<span class="tag">Mistral Vibe</span>
+                {{else if eq .Type "mistral"}}<span class="tag">Mistral API</span>
+                {{else}}<span class="tag">{{if .Type}}{{.Type}}{{else}}Unknown{{end}}</span>{{end}}
             </td>
             <td>
-                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
-                {{if eq .PlanType "prolite"}}<span class="tag tag-prolite">prolite</span>{{end}}
-                {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
-                {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
-                {{if eq .PlanType "max"}}<span class="tag tag-claude">max</span>{{end}}
-                {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
-                {{if eq .PlanType "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>
+                {{else if eq .PlanType "prolite"}}<span class="tag tag-prolite">prolite</span>
+                {{else if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>
+                {{else if eq .PlanType "team"}}<span class="tag tag-team">team</span>
+                {{else if eq .PlanType "max"}}<span class="tag tag-claude">max</span>
+                {{else if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>
+                {{else if eq .PlanType "claude"}}<span class="tag tag-claude">claude</span>
+                {{else}}<span class="tag">{{if .PlanType}}{{.PlanType}}{{else}}Unknown{{end}}</span>{{end}}
             </td>
             <td class="usage-cell">
+                {{if .PrimaryNotReported}}Not reported{{else}}
                 {{bar .EffectivePrimary}}{{pct .PrimaryUsed}}
                 {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}{{if ne .PlanType "claude"}}{{if ne .PlanType "max"}}<span class="effective">(→{{pct .EffectivePrimary}})</span>{{end}}{{end}}{{end}}{{end}}
+                {{end}}
                 {{if .CoolingDown}}<br><small>cooldown {{.CooldownIn}}</small>{{else if .PrimaryResetIn}}<br><small>resets in {{.PrimaryResetIn}}</small>{{end}}
             </td>
             <td class="usage-cell">
+                {{if .SecondaryNotReported}}Not reported{{else}}
                 {{bar .EffectiveSecondary}}{{pct .SecondaryUsed}}
                 {{if ne .PlanType "pro"}}{{if ne .PlanType "gemini"}}{{if ne .PlanType "claude"}}{{if ne .PlanType "max"}}<span class="effective">(→{{pct .EffectiveSecondary}})</span>{{end}}{{end}}{{end}}{{end}}
+                {{end}}
                 {{if .SecondaryResetIn}}<br><small>resets in {{.SecondaryResetIn}}</small>{{end}}
             </td>
             <td class="score-cell" title="{{.ScoreTooltip}}">
