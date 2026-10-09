@@ -25,6 +25,7 @@ export default defineConfig({
       "/admin": "http://127.0.0.1:18990",
       "/setup": "http://127.0.0.1:18990",
       "/config": "http://127.0.0.1:18990",
+      "/favicon.ico": "http://127.0.0.1:18990",
       "/hero.webp": "http://127.0.0.1:18990",
     },
   },

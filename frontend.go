@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -18,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed templates/local_landing.html templates/friend_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.webp
+//go:embed templates/local_landing.html templates/friend_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.webp templates/assets/favicon.ico
 var friendContent embed.FS
 
 //go:embed web/dist/index.html web/dist/assets/*
@@ -77,6 +78,17 @@ func (h *proxyHandler) serveSignalRoomAsset(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	_, _ = w.Write(data)
+}
+
+func (h *proxyHandler) serveFavicon(w http.ResponseWriter, r *http.Request) {
+	data, err := friendContent.ReadFile("templates/assets/favicon.ico")
+	if err != nil {
+		http.Error(w, "favicon not found", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeContent(w, r, "favicon.ico", time.Time{}, bytes.NewReader(data))
 }
 
 func (h *proxyHandler) serveOGImage(w http.ResponseWriter, r *http.Request) {
