@@ -468,7 +468,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		servePoolModels(w, h.pool)
 		return
 	case "/favicon.ico":
-		http.NotFound(w, r)
+		h.serveFavicon(w, r)
 		return
 	case "/healthz":
 		h.serveHealth(w)
