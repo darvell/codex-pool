@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 func TestContextStreamedReplay(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "stream-context-secret")
 	const session = "123e4567-e89b-12d3-a456-426614174000"
-	for _, mode := range []string{"oversized", "chunked"} {
+	for _, mode := range []string{"oversized", "chunked", "gzip", "zstd"} {
 		t.Run(mode, func(t *testing.T) {
 			a, b := contextTestAccount("a", "user-a"), contextTestAccount("b", "user-b")
 			var s *nativeContext
@@ -67,12 +68,19 @@ func TestContextStreamedReplay(t *testing.T) {
 			defer proxy.Close()
 			send := func(body string, wantStatus, wantCalls int) {
 				t.Helper()
-				req, err := http.NewRequest(http.MethodPost, proxy.URL+"/backend-api/codex/responses", strings.NewReader(body))
+				wire := []byte(body)
+				if mode == "gzip" || mode == "zstd" {
+					wire = compressedResponsesBody(t, mode, wire)
+				}
+				req, err := http.NewRequest(http.MethodPost, proxy.URL+"/backend-api/codex/responses", bytes.NewReader(wire))
 				if err != nil {
 					t.Fatal(err)
 				}
-				if mode == "chunked" {
+				if mode == "chunked" || mode == "zstd" {
 					req.ContentLength = -1
+				}
+				if mode == "gzip" || mode == "zstd" {
+					req.Header.Set("Content-Encoding", mode)
 				}
 				req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("stream-context-secret", "stream-user"))
 				req.Header.Set("Content-Type", "application/json")

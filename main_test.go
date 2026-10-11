@@ -613,21 +613,22 @@ func TestOversizedResponsesModelRoutesAwayFromChatGPT(t *testing.T) {
 	defer proxy.Close()
 
 	cases := []struct {
-		name      string
-		path      string
-		model     string
-		wantAuth  string
-		wantPath  string
-		wantModel string
+		name       string
+		path       string
+		model      string
+		wantAuth   string
+		wantPath   string
+		wantModel  string
+		wantStatus int
 	}{
-		{name: "grok backend-api", path: "/backend-api/codex/responses", model: "grok-4.5", wantAuth: "grok-token", wantPath: "/responses", wantModel: "grok-4.5"},
-		{name: "grok public responses", path: "/responses", model: "grok-4.5-build", wantAuth: "grok-token", wantPath: "/responses", wantModel: "grok-4.5"},
-		{name: "kimi backend-api", path: "/backend-api/codex/responses", model: "kimi-for-coding", wantAuth: "kimi-token", wantPath: "/backend-api/codex/responses", wantModel: "kimi-for-coding"},
+		{name: "grok backend-api", path: "/backend-api/codex/responses", model: "grok-4.5", wantAuth: "grok-token", wantPath: "/responses", wantModel: "grok-4.5", wantStatus: http.StatusOK},
+		{name: "grok public responses", path: "/responses", model: "grok-4.5-build", wantAuth: "grok-token", wantPath: "/responses", wantModel: "grok-4.5", wantStatus: http.StatusOK},
+		{name: "kimi backend-api", path: "/backend-api/codex/responses", model: "kimi-for-coding", wantStatus: http.StatusRequestEntityTooLarge},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := fmt.Sprintf(`{"model":%q,"stream":true,"input":[{"type":"message","role":"user","content":%q}]}`, tc.model, strings.Repeat("x", 2048))
+			payload := fmt.Sprintf(`{"model":%q,"stream":true,"temperature":0.25,"max_output_tokens":777,"input":[{"type":"message","role":"user","content":%q}]}`, tc.model, strings.Repeat("x", 2048))
 			req, err := http.NewRequest(http.MethodPost, proxy.URL+tc.path, bytes.NewReader([]byte(payload)))
 			if err != nil {
 				t.Fatalf("new request: %v", err)
@@ -645,8 +646,14 @@ func TestOversizedResponsesModelRoutesAwayFromChatGPT(t *testing.T) {
 			}
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode != tc.wantStatus {
 				t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+			}
+			if tc.wantStatus != http.StatusOK {
+				if !bytes.Contains(body, []byte("provider-specific buffered transforms")) {
+					t.Fatalf("missing explicit provider-transform error: %s", body)
+				}
+				return
 			}
 			if bytes.Contains(body, []byte("not supported when using Codex")) {
 				t.Fatalf("ChatGPT Codex rejection leaked to client: %s", body)
@@ -662,6 +669,9 @@ func TestOversizedResponsesModelRoutesAwayFromChatGPT(t *testing.T) {
 				}
 				if !bytes.Contains(got.body, []byte(`"model":"`+tc.wantModel+`"`)) {
 					t.Fatalf("upstream body missing model %q: %s", tc.wantModel, got.body)
+				}
+				if strings.HasPrefix(tc.name, "grok") && (!bytes.Contains(got.body, []byte(`"temperature":0.25`)) || !bytes.Contains(got.body, []byte(`"max_output_tokens":777`))) {
+					t.Fatalf("Grok fields were lost during disk routing: %s", got.body)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("timed out waiting for upstream hit")

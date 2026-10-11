@@ -147,7 +147,7 @@ storage_path = "./data/pool_users.json"
 
 Set `POOL_AUTH_ENCRYPTION_KEY` to a stable 32-byte secret (hex or base64) before starting Passport. `ADMIN_TOKEN` remains the break-glass operator credential.
 
-Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly (no retries). Default is 16777216 (16 MiB).
+Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls the ordinary replay buffer ceiling. Default is 16777216 (16 MiB). Large `/v1/responses` requests use bounded temporary files instead: `PROXY_MAX_WIRE_BODY_BYTES` limits compressed/on-wire bytes and `PROXY_MAX_SPOOL_BODY_BYTES` independently limits decoded JSON (both default to 1073741824, 1 GiB); transformed output has 1 MiB of fixed headroom. `PROXY_RESPONSES_BODY_TIMEOUT_SECONDS` bounds upload/decompression time (default 120 seconds). Zstd decoding uses one worker and a 64 MiB maximum window, so frames requiring larger windows are rejected as resource admission even when their decoded byte count would fit. Disk-backed pooled Responses currently require `stream=true`; every decoded request that fits the RAM ceiling returns to the existing buffered retry/aggregation path. `/v1/responses/compact` retains its dedicated buffered validation path. Oversized model routes needing provider-specific whole-object transforms are rejected rather than forwarded in the wrong shape. See [Oversized Responses HTTP replay](docs/responses-replay.md) for architecture, limits, deployment guidance, and production uncertainties.
 
 ### Model capability discovery
 

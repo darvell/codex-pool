@@ -141,12 +141,23 @@ func filterHostedMCPResponseJSON(data []byte) (filtered []byte, drop bool, chang
 }
 
 func filterHostedMCPNonStreamingResponse(resp *http.Response) error {
+	return filterHostedMCPNonStreamingResponseLimit(resp, 0)
+}
+
+func filterHostedMCPNonStreamingResponseLimit(resp *http.Response, maxBytes int64) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
-	body, err := io.ReadAll(resp.Body)
+	reader := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		reader = io.LimitReader(resp.Body, maxBytes+1)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return err
+	}
+	if maxBytes > 0 && int64(len(body)) > maxBytes {
+		return fmt.Errorf("non-streaming Responses response exceeds %d byte hosted-MCP filter limit", maxBytes)
 	}
 	_ = resp.Body.Close()
 	filtered, drop, changed := filterHostedMCPResponseJSON(body)
