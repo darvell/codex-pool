@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isArmedAccountAction, poolSurplus, providerDisplay, shouldShowPassFormOnLoad, viewFromSearch, watchVibeSession } from "./App";
-import { startVibeLogin, vibeLoginStatus } from "./api";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { JSDOM } from "jsdom";
+import { AccessGate, isArmedAccountAction, OperatorAPIKeys, poolSurplus, providerDisplay, shouldShowPassFormOnLoad, viewFromSearch, watchVibeSession } from "./App";
+import { createOperatorAPIToken, loadOperatorAPITokens, operatorBootstrap, replaceOperatorAPIToken, revokeOperatorAPIToken, startVibeLogin, vibeLoginStatus } from "./api";
 import type { VibeLoginSession } from "./types";
 
 describe("account action confirmation", () => {
@@ -29,6 +32,7 @@ describe("guest pass form", () => {
 describe("viewFromSearch", () => {
   it("restores a valid workspace and rejects unknown values", () => {
     expect(viewFromSearch("?view=accounts")).toBe("accounts");
+    expect(viewFromSearch("?view=operator-api")).toBe("operator-api");
     expect(viewFromSearch("?view=unknown")).toBe("pulse");
     expect(viewFromSearch("")).toBe("pulse");
   });
@@ -103,6 +107,29 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("operator API key requests", () => {
+  it("uses browser credentials and CSRF without persisting the returned secret", async () => {
+    mockVibeBrowser();
+    const issued = { token: { id: "key-1", principal_id: "op", label: "diagnostics", scope: "read", status: "active", created_at: "2026-10-12T00:00:00Z", expires_at: "2027-01-10T00:00:00Z" }, secret: "poolop_key-1_secret" };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse(issued))
+      .mockResolvedValueOnce(jsonResponse(issued))
+      .mockResolvedValueOnce(jsonResponse({ success: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await loadOperatorAPITokens()).toEqual([]);
+    expect(await createOperatorAPIToken("diagnostics", "read")).toEqual(issued);
+    expect(await replaceOperatorAPIToken("key-1")).toEqual(issued);
+    await revokeOperatorAPIToken("key-1");
+    expect(fetchMock.mock.calls).toEqual([
+      ["/api/operator-tokens", { cache: "no-store", credentials: "same-origin" }],
+      ["/api/operator-tokens", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": "test-csrf" }, body: JSON.stringify({ label: "diagnostics", scope: "read", expires_at: undefined }) }],
+      ["/api/operator-tokens/key-1/replace", { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": "test-csrf" } }],
+      ["/api/operator-tokens/key-1", { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": "test-csrf" } }],
+    ]);
+  });
 });
 
 describe("Vibe contribution requests", () => {
@@ -259,5 +286,96 @@ describe("bounded Vibe sign-in polling", () => {
     expect(error).toHaveBeenCalledExactlyOnceWith("Sign-in expired. Try again.");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("OperatorAPIKeys lifecycle", () => {
+  it("blocks double issue, preserves the one-time secret, and reports clipboard failure", async () => {
+    const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "https://pool.example.test" });
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("navigator", dom.window.navigator);
+    Object.defineProperty(dom.window.document, "cookie", { value: "pool_csrf=test-csrf", configurable: true });
+    Object.defineProperty(dom.window.navigator, "clipboard", { value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) }, configurable: true });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+    let resolveIssue!: (response: Response) => void;
+    const issued = { token: { id: "key-1", principal_id: "op", label: "diagnostics", scope: "read", status: "active", created_at: "2026-10-12T00:00:00Z", expires_at: "2027-01-10T00:00:00Z" }, secret: "poolop_key-1_once" };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveIssue = resolve; }))
+      .mockResolvedValueOnce(jsonResponse([issued.token]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const container = dom.window.document.getElementById("root")!;
+    const root = createRoot(container);
+    await act(async () => { root.render(createElement(OperatorAPIKeys)); });
+    const input = container.querySelector("input[placeholder='Pool diagnostics']") as HTMLInputElement;
+    const form = input.closest("form")!;
+    await act(async () => {
+      input.value = "diagnostics";
+      input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+      form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => { resolveIssue(jsonResponse(issued)); });
+    expect(container.textContent).toContain(issued.secret);
+    expect((container.querySelector("button[type='submit']") as HTMLButtonElement).disabled).toBe(true);
+    expect(container.textContent).toContain(`created ${new Date(issued.token.created_at).toLocaleDateString()}`);
+
+    const copy = [...container.querySelectorAll("button")].find((button) => button.textContent === "Copy")!;
+    await act(async () => { copy.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+    expect(container.textContent).toContain("Select and copy it manually");
+    expect(container.textContent).toContain(issued.secret);
+    await act(async () => { root.unmount(); });
+  });
+});
+
+describe("operator bootstrap request", () => {
+  it("bootstraps and then establishes a password-authenticated browser session", async () => {
+    const dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "https://pool.example.test" });
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("navigator", dom.window.navigator);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const principal = { id: "op", kind: "operator", status: "active", username: "operator", email: "op@example.test", display_name: "Operator", avatar_url: "", expires_at: null };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ legacy_signup: false, operator_exists: false }))
+      .mockResolvedValueOnce(jsonResponse(principal))
+      .mockResolvedValueOnce(jsonResponse({ principal, csrf: "fresh-csrf" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onAccess = vi.fn();
+    const container = dom.window.document.getElementById("root")!;
+    const root = createRoot(container);
+    await act(async () => { root.render(createElement(AccessGate, { onAccess })); });
+    const inputs = container.querySelectorAll("input");
+    const values = ["op@example.test", "operator", "Operator", "long-enough-password"];
+    await act(async () => {
+      inputs.forEach((input, index) => {
+        input.value = values[index];
+        input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+      });
+    });
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(["/api/auth/config", "/api/setup/operator", "/api/auth/login"]);
+    expect(onAccess).toHaveBeenCalledWith(principal);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("uses the unauthenticated first-operator response shape without a bogus admin token", async () => {
+    mockVibeBrowser();
+    const principal = { id: "op", kind: "operator", status: "active", username: "operator", email: "op@example.test", display_name: "Operator", avatar_url: "", expires_at: null };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(principal));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await operatorBootstrap("operator", "op@example.test", "long-enough-password", "Operator")).toEqual(principal);
+    expect(fetchMock).toHaveBeenCalledWith("/api/setup/operator", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ username: "operator", email: "op@example.test", password: "long-enough-password", display_name: "Operator" }),
+    });
   });
 });

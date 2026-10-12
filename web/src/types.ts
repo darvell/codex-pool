@@ -80,6 +80,17 @@ export interface ClientCredential {
   last_seen_at?: string;
 }
 
+export interface OperatorAPIToken {
+  id: string;
+  principal_id: string;
+  label: string;
+  scope: "read" | "write";
+  status: "active" | "revoked" | "expired";
+  created_at: string;
+  expires_at: string;
+  last_used_at?: string;
+}
+
 export interface PassportUsagePoint {
   hour: string;
   account_type: string;

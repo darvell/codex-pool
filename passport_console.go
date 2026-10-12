@@ -169,5 +169,10 @@ func (h *proxyHandler) handleConsoleAudit(w http.ResponseWriter, r *http.Request
 		respondJSONError(w, 500, "audit unavailable")
 		return
 	}
+	if operatorAccessFromRequest(r) != nil {
+		for i := range entries {
+			entries[i].Detail = ""
+		}
+	}
 	respondJSON(w, entries)
 }

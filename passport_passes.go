@@ -61,12 +61,16 @@ func putJSON(bucket *bbolt.Bucket, key string, v any) error {
 	return bucket.Put([]byte(key), data)
 }
 func (p *PassportStore) audit(tx *bbolt.Tx, actor, action, subject, detail string) error {
+	bucket := tx.Bucket([]byte(bucketPassportAudit))
+	if bucket == nil {
+		return errors.New("passport audit bucket unavailable")
+	}
 	id, err := secureID(9)
 	if err != nil {
 		return err
 	}
 	e := AuditEntry{ID: id, ActorID: actor, Action: action, SubjectID: subject, At: time.Now().UTC(), Detail: detail}
-	return putJSON(tx.Bucket([]byte(bucketPassportAudit)), e.At.Format(time.RFC3339Nano)+"|"+id, e)
+	return putJSON(bucket, e.At.Format(time.RFC3339Nano)+"|"+id, e)
 }
 
 func (p *PassportStore) recordAudit(actor, action, subject, detail string) error {
@@ -228,6 +232,9 @@ func (p *PassportStore) listPasses() ([]PassView, error) {
 }
 
 func (h *proxyHandler) requireMember(w http.ResponseWriter, r *http.Request) (*Principal, *passportSession, bool) {
+	if access := operatorAccessFromRequest(r); access != nil {
+		return access.Principal, nil, true
+	}
 	pr, s := h.passport.authenticate(r)
 	if pr == nil || (pr.Kind != PrincipalMember && pr.Kind != PrincipalOperator) {
 		respondJSONError(w, 403, "member access required")
@@ -248,6 +255,11 @@ func (h *proxyHandler) handlePasses(w http.ResponseWriter, r *http.Request) {
 			respondJSONError(w, 500, "passes unavailable")
 			return
 		}
+		if operatorAccessFromRequest(r) != nil {
+			for i := range passes {
+				passes[i].Link = ""
+			}
+		}
 		respondJSON(w, passes)
 	case http.MethodPost:
 		if !h.passportCSRF(r, s) {
@@ -263,7 +275,7 @@ func (h *proxyHandler) handlePasses(w http.ResponseWriter, r *http.Request) {
 			respondJSONError(w, 400, "invalid json")
 			return
 		}
-		pr, _, client, token, err := h.passport.createGuest(actor.ID, q.Note, q.DisplayName, q.ExpiresAt)
+		pr, _, client, token, err := h.passport.createGuest(operatorActor(r, actor.ID), q.Note, q.DisplayName, q.ExpiresAt)
 		if err != nil {
 			respondJSONError(w, 400, err.Error())
 			return

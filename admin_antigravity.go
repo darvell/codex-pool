@@ -617,9 +617,16 @@ func (h *proxyHandler) handleAntigravityModelSync(w http.ResponseWriter, r *http
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		err := h.syncAntigravityModelsGuarded(ctx, generation, account, provider.DailyURL(), provider.ProductionURL())
 		cancel()
-		entry := result{AccountID: account.ID}
+		accountID := account.ID
+		if operatorAccessFromRequest(r) != nil {
+			accountID = hashAccountID(accountID)
+		}
+		entry := result{AccountID: accountID}
 		if err != nil {
 			entry.Error = err.Error()
+			if operatorAccessFromRequest(r) != nil {
+				entry.Error = "model synchronization failed"
+			}
 		}
 		results = append(results, entry)
 	}
@@ -650,11 +657,17 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		reservation, eligibility := h.pool.reserveAntigravityModel("", nil, model.ID, getClientIP(r))
 		if reservation == nil {
 			entry.Error = eligibility.publicMessage(model.ID)
+			if operatorAccessFromRequest(r) != nil {
+				entry.Error = "no eligible account"
+			}
 			results = append(results, entry)
 			continue
 		}
 		account := reservation.Account
 		entry.AccountID = account.ID
+		if operatorAccessFromRequest(r) != nil {
+			entry.AccountID = hashAccountID(entry.AccountID)
+		}
 		account.mu.Lock()
 		projectID := account.ProjectID
 		account.mu.Unlock()
@@ -662,6 +675,9 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		prepared, err := prepareAntigravityRequest("/v1beta/models/"+model.ID+":generateContent", requestBody, "antigravity/"+model.ID, projectID, "")
 		if err != nil {
 			entry.Error = err.Error()
+			if operatorAccessFromRequest(r) != nil {
+				entry.Error = "model verification failed"
+			}
 			reservation.Release()
 			results = append(results, entry)
 			continue
@@ -672,6 +688,9 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		entry.LatencyMS = time.Since(started).Milliseconds()
 		if err != nil {
 			entry.Error = err.Error()
+			if operatorAccessFromRequest(r) != nil {
+				entry.Error = "model verification failed"
+			}
 			cancel()
 			reservation.Release()
 			results = append(results, entry)
@@ -701,6 +720,9 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		reservation.Release()
 		if err != nil {
 			entry.Error = err.Error()
+		}
+		if operatorAccessFromRequest(r) != nil && entry.Error != "" {
+			entry.Error = "model verification failed"
 		}
 		results = append(results, entry)
 	}

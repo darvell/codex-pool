@@ -194,6 +194,9 @@ func serveNoopCodexAppsMCP(w http.ResponseWriter, r *http.Request) {
 // checkAdminAuth verifies the admin token from its request header.
 // Returns true if authorized, false if not (and sends 401 response).
 func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if operatorAccessFromRequest(r) != nil {
+		return true // The explicit route registry already checked this token's capability.
+	}
 	if h.passport != nil {
 		if principal, _ := h.passport.authenticate(r); principal != nil && principal.Kind == PrincipalOperator {
 			return true
@@ -235,6 +238,9 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 // checkMemberOrAdminAuth permits a live member/operator session or the
 // break-glass admin token. The retired friend code is never an authority input.
 func (h *proxyHandler) checkMemberOrAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if operatorAccessFromRequest(r) != nil {
+		return true
+	}
 	if h.passport != nil {
 		if principal, _ := h.passport.authenticate(r); principal != nil {
 			if principal.Kind == PrincipalMember || principal.Kind == PrincipalOperator {
@@ -295,6 +301,12 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID := randomID()
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] incoming %s %s", reqID, r.Method, r.URL.Path)
+	}
+	// Operator bearer credentials are accepted only by the explicit capability
+	// registry. An invalid or out-of-scope operator token never falls back to a
+	// cookie, model credential, or break-glass token.
+	if !h.authorizeOperatorBearer(w, r) {
+		return
 	}
 
 	// Profiles may contain request data and runtime internals; require admin auth.
@@ -403,6 +415,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/me/usage":
 		h.handlePassportUsage(w, r)
 		return
+	case "/api/operator-tokens":
+		h.handleOperatorTokens(w, r)
+		return
+	case "/api/operator/v1", "/api/operator/v1/whoami", "/api/operator/v1/openapi.json", "/api/operator/v1/guide", "/api/operator/v1/models", "/api/operator/v1/config/pi", "/api/operator/v1/accounting/requests":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorAPI(w, r)
+		return
 	case "/api/console/principals":
 		h.handleConsolePrincipals(w, r)
 		return
@@ -499,7 +521,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		h.serveAccounts(w)
+		h.serveAccounts(w, operatorAccessFromRequest(r) != nil)
 		return
 	case "/admin/origins":
 		if !h.checkAdminAuth(w, r) {
@@ -519,7 +541,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		h.serveTokenCapacity(w)
+		h.serveTokenCapacity(w, operatorAccessFromRequest(r) != nil)
 		return
 	case "/admin/clear-rate-limits":
 		if !h.checkAdminAuth(w, r) {
@@ -539,7 +561,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		h.purgeAnonymousUsers(w)
+		h.purgeAnonymousUsers(w, operatorAccessFromRequest(r) != nil)
 		return
 	}
 
@@ -555,8 +577,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
 		disabled := strings.HasSuffix(path, "/disable")
-		accountID := strings.TrimSuffix(strings.TrimSuffix(path, "/disable"), "/enable")
-		h.setAccountDisabled(w, accountID, disabled)
+		publicID := strings.TrimSuffix(strings.TrimSuffix(path, "/disable"), "/enable")
+		accountID := h.resolveOperatorAccountID(r, publicID)
+		h.setAccountDisabled(w, accountID, disabled, publicID)
 		return
 	}
 
@@ -571,8 +594,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Extract account ID from path
 		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-		accountID := strings.TrimSuffix(path, "/resurrect")
-		h.resurrectAccount(w, accountID)
+		publicID := strings.TrimSuffix(path, "/resurrect")
+		accountID := h.resolveOperatorAccountID(r, publicID)
+		h.resurrectAccount(w, accountID, publicID)
 		return
 	}
 
@@ -586,8 +610,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-		accountID := strings.TrimSuffix(path, "/refresh")
-		h.forceRefreshAccount(w, accountID)
+		publicID := strings.TrimSuffix(path, "/refresh")
+		accountID := h.resolveOperatorAccountID(r, publicID)
+		h.forceRefreshAccountWithSafety(w, accountID, operatorAccessFromRequest(r) != nil, publicID)
 		return
 	}
 
@@ -821,6 +846,10 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasPrefix(r.URL.Path, "/api/avatars/") {
 		h.handlePassportAvatar(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/operator-tokens/") {
+		h.handleOperatorTokenItem(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/me/passkeys/") {

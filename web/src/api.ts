@@ -1,5 +1,5 @@
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
-import type { AdminAccount, ClientCredential, ConsolePrincipal, FriendSession, GuestPass, ModelCatalog, PasskeyCredential, PassportAuditEntry, PassportPrincipal, PassportUsagePoint, PoolStats, SignalAnalytics, VibeLoginSession, VibeLoginStatus } from "./types";
+import type { AdminAccount, ClientCredential, ConsolePrincipal, FriendSession, GuestPass, ModelCatalog, OperatorAPIToken, PasskeyCredential, PassportAuditEntry, PassportPrincipal, PassportUsagePoint, PoolStats, SignalAnalytics, VibeLoginSession, VibeLoginStatus } from "./types";
 
 const FRIEND_SESSION_KEY = "friendSession";
 const ADMIN_TOKEN_KEY = "operatorToken";
@@ -22,11 +22,10 @@ export async function loadAuthConfig(): Promise<{ legacy_signup: boolean; operat
   return decode(await fetch("/api/auth/config", { credentials: "same-origin" }));
 }
 export async function operatorBootstrap(username: string, email: string, password: string, displayName = ""): Promise<PassportPrincipal> {
-  const result = await decode<{ principal: PassportPrincipal }>(await fetch("/api/setup/operator", {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": "ui-bootstrap" }, credentials: "same-origin",
+  return decode<PassportPrincipal>(await fetch("/api/setup/operator", {
+    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
     body: JSON.stringify({ username, email, password, display_name: displayName }),
   }));
-  return result.principal;
 }
 export async function passportLogin(email: string, password: string): Promise<PassportPrincipal> {
   const result = await decode<{ principal: PassportPrincipal }>(await fetch("/api/auth/login", {
@@ -95,6 +94,19 @@ export async function revealMyClient(id: string): Promise<{ setup_token: string 
 export async function revokeMyClient(id: string): Promise<void> {
   await decode(await fetch(`/api/me/clients/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } }));
 }
+export async function loadOperatorAPITokens(): Promise<OperatorAPIToken[]> {
+  return decode(await fetch("/api/operator-tokens", { cache: "no-store", credentials: "same-origin" }));
+}
+export async function createOperatorAPIToken(label: string, scope: "read" | "write", expiresAt?: string): Promise<{ token: OperatorAPIToken; secret: string }> {
+  return decode(await fetch("/api/operator-tokens", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() }, body: JSON.stringify({ label, scope, expires_at: expiresAt || undefined }) }));
+}
+export async function revokeOperatorAPIToken(id: string): Promise<void> {
+  await decode(await fetch(`/api/operator-tokens/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } }));
+}
+export async function replaceOperatorAPIToken(id: string): Promise<{ token: OperatorAPIToken; secret: string }> {
+  return decode(await fetch(`/api/operator-tokens/${encodeURIComponent(id)}/replace`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } }));
+}
+
 export async function loadPasses(): Promise<GuestPass[]> {
   return decode(await fetch("/api/passes", { cache: "no-store", credentials: "same-origin" }));
 }

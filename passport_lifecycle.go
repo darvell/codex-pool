@@ -395,6 +395,9 @@ func (p *PassportStore) rotateGuestLink(actorID, principalID string) (string, er
 }
 
 func (h *proxyHandler) requireOperator(w http.ResponseWriter, r *http.Request) (*Principal, *passportSession, bool) {
+	if access := operatorAccessFromRequest(r); access != nil {
+		return access.Principal, nil, true
+	}
 	pr, session := h.passport.authenticate(r)
 	if pr == nil || pr.Kind != PrincipalOperator {
 		respondJSONError(w, http.StatusForbidden, "operator access required")
@@ -485,27 +488,27 @@ func (h *proxyHandler) handlePassItem(w http.ResponseWriter, r *http.Request) {
 			respondJSONError(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		principal, err := h.passport.updateGuestPass(actor.ID, principalID, input.Note, input.DisplayName, input.ExpiresAt)
+		principal, err := h.passport.updateGuestPass(operatorActor(r, actor.ID), principalID, input.Note, input.DisplayName, input.ExpiresAt)
 		if err != nil {
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		respondJSON(w, publicPrincipal(principal))
 	case r.Method == http.MethodDelete && action == "":
-		if _, err := h.passport.setGuestPassStatus(actor.ID, principalID, false); err != nil {
+		if _, err := h.passport.setGuestPassStatus(operatorActor(r, actor.ID), principalID, false); err != nil {
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		respondJSON(w, map[string]any{"success": true})
 	case r.Method == http.MethodPost && action == "restore":
-		principal, err := h.passport.setGuestPassStatus(actor.ID, principalID, true)
+		principal, err := h.passport.setGuestPassStatus(operatorActor(r, actor.ID), principalID, true)
 		if err != nil {
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		respondJSON(w, publicPrincipal(principal))
 	case r.Method == http.MethodPost && action == "rotate":
-		token, err := h.passport.rotateGuestLink(actor.ID, principalID)
+		token, err := h.passport.rotateGuestLink(operatorActor(r, actor.ID), principalID)
 		if err != nil {
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -543,6 +546,10 @@ func (h *proxyHandler) handlePrincipalItem(w http.ResponseWriter, r *http.Reques
 		respondJSONError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	if operatorAccessFromRequest(r) != nil && input.Kind != nil {
+		respondJSONError(w, http.StatusForbidden, "operator role changes are browser-only")
+		return
+	}
 	// Accept a username or email in place of the principal ID.
 	if h.passport.principal(principalID) == nil {
 		if found := h.passport.byLogin(principalID); found != nil {
@@ -556,7 +563,7 @@ func (h *proxyHandler) handlePrincipalItem(w http.ResponseWriter, r *http.Reques
 	}
 	if input.Status != nil {
 		var err error
-		principal, err = h.passport.setPrincipalStatus(actor.ID, principalID, *input.Status)
+		principal, err = h.passport.setPrincipalStatus(operatorActor(r, actor.ID), principalID, *input.Status)
 		if err != nil {
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return
@@ -564,7 +571,7 @@ func (h *proxyHandler) handlePrincipalItem(w http.ResponseWriter, r *http.Reques
 	}
 	if input.Kind != nil {
 		var err error
-		principal, err = h.passport.setPrincipalKind(actor.ID, principalID, *input.Kind)
+		principal, err = h.passport.setPrincipalKind(operatorActor(r, actor.ID), principalID, *input.Kind)
 		if err != nil {
 			respondJSONError(w, http.StatusBadRequest, err.Error())
 			return

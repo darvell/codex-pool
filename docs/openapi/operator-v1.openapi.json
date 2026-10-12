@@ -1,0 +1,3718 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Codex Pool Operator API",
+    "version": "1.0.0",
+    "description": "The contract bundled with this running codex-pool binary. Every operation declares its required x-operator-capability."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "operatorBearer": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "poolop_<id>_<secret>"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Discovery": {
+        "type": "object",
+        "required": [
+          "api_version",
+          "openapi",
+          "guide",
+          "whoami",
+          "models",
+          "pi_config",
+          "accounting_requests"
+        ],
+        "properties": {
+          "api_version": {
+            "const": "v1"
+          },
+          "openapi": {
+            "type": "string"
+          },
+          "guide": {
+            "type": "string"
+          },
+          "whoami": {
+            "type": "string"
+          },
+          "models": {
+            "type": "string"
+          },
+          "pi_config": {
+            "type": "string"
+          },
+          "accounting_requests": {
+            "type": "string"
+          }
+        }
+      },
+      "WhoAmI": {
+        "type": "object",
+        "required": [
+          "principal",
+          "credential_kind",
+          "permissions"
+        ],
+        "properties": {
+          "principal": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "credential_kind": {
+            "enum": [
+              "operator_token",
+              "browser_session"
+            ]
+          },
+          "token": {
+            "$ref": "#/components/schemas/OperatorToken"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "operator.read",
+                "operator.write"
+              ]
+            }
+          }
+        }
+      },
+      "ModelManifest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "generated_at",
+          "catalog_mode",
+          "catalog_semantics",
+          "pricing",
+          "pi_export",
+          "models"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "catalog_mode": {
+            "enum": [
+              "full",
+              "configured"
+            ]
+          },
+          "catalog_semantics": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "pricing": {
+            "type": "object",
+            "required": [
+              "version",
+              "as_of",
+              "freshness"
+            ],
+            "properties": {
+              "version": {
+                "type": "string"
+              },
+              "as_of": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "freshness": {
+                "type": "string"
+              }
+            }
+          },
+          "pi_export": {
+            "type": "object",
+            "required": [
+              "endpoint",
+              "default_catalog",
+              "credential_environment_variable",
+              "limitations"
+            ],
+            "properties": {
+              "endpoint": {
+                "type": "string"
+              },
+              "default_catalog": {
+                "const": "configured"
+              },
+              "credential_environment_variable": {
+                "const": "CODEX_POOL_MODEL_API_KEY"
+              },
+              "limitations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelEntry"
+            }
+          }
+        }
+      },
+      "AccountingRecord": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "proxy_request_id",
+          "observed_at",
+          "principal_id",
+          "client_credential_id",
+          "account_public_id",
+          "account_type",
+          "normalization_version",
+          "input_tokens",
+          "cache_read_tokens",
+          "cache_creation_tokens",
+          "output_tokens",
+          "reasoning_tokens",
+          "billable_tokens",
+          "api_equivalent_cost_usd",
+          "pricing_version",
+          "pricing_provenance",
+          "usage_completeness",
+          "source",
+          "source_grain"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "proxy_request_id": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "client_credential_id": {
+            "type": "string"
+          },
+          "origin_id": {
+            "type": "string"
+          },
+          "account_public_id": {
+            "type": "string"
+          },
+          "account_type": {
+            "type": "string"
+          },
+          "plan_type": {
+            "type": "string"
+          },
+          "model_reported": {
+            "type": "string"
+          },
+          "model_normalized": {
+            "type": "string"
+          },
+          "normalization_version": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "type": "integer"
+          },
+          "cache_creation_tokens": {
+            "type": "integer"
+          },
+          "output_tokens": {
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "type": "integer"
+          },
+          "billable_tokens": {
+            "type": "integer"
+          },
+          "api_equivalent_cost_usd": {
+            "type": "number"
+          },
+          "pricing_version": {
+            "type": "string"
+          },
+          "pricing_provenance": {
+            "enum": [
+              "version_only",
+              "unavailable"
+            ]
+          },
+          "usage_completeness": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "source_grain": {
+            "const": "request"
+          }
+        }
+      },
+      "AccountingPage": {
+        "type": "object",
+        "required": [
+          "requests",
+          "next_cursor",
+          "range",
+          "pricing_provenance_note"
+        ],
+        "properties": {
+          "requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountingRecord"
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          },
+          "range": {
+            "type": "object",
+            "required": [
+              "from",
+              "to"
+            ],
+            "properties": {
+              "from": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "to": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "pricing_provenance_note": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardObject": {
+        "type": "object",
+        "description": "The exact dashboard response shape is shared with the browser handler documented by this operation.",
+        "additionalProperties": true
+      },
+      "Principal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "display_name",
+          "username",
+          "email",
+          "avatar_url"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "operator",
+              "member",
+              "guest"
+            ]
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suspended"
+            ]
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "avatar_url": {
+            "type": "string"
+          }
+        }
+      },
+      "OperatorToken": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "principal_id",
+          "label",
+          "scope",
+          "status",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "status": {
+            "enum": [
+              "active",
+              "revoked",
+              "expired"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ModelCost": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input",
+          "output",
+          "cacheRead",
+          "cacheWrite"
+        ],
+        "properties": {
+          "input": {
+            "type": "number",
+            "minimum": 0
+          },
+          "output": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cacheRead": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cacheWrite": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "PiModel": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reasoning": {
+            "type": "boolean"
+          },
+          "thinkingLevelMap": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "input": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "contextWindow": {
+            "type": "integer"
+          },
+          "maxTokens": {
+            "type": "integer"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/ModelCost"
+          },
+          "compat": {
+            "type": "object",
+            "properties": {
+              "forceAdaptiveThinking": {
+                "type": "boolean"
+              },
+              "requiresToolResultName": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PiProvider": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "baseUrl",
+          "apiKey",
+          "api",
+          "models"
+        ],
+        "properties": {
+          "baseUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "apiKey": {
+            "const": "CODEX_POOL_MODEL_API_KEY"
+          },
+          "api": {
+            "type": "string"
+          },
+          "models": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/PiModel"
+            }
+          }
+        }
+      },
+      "PiConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PiProvider"
+            }
+          }
+        }
+      },
+      "ModelEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "protocol",
+          "available_now",
+          "pricing_status",
+          "pi_supported"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "upstream_id": {
+            "type": "string"
+          },
+          "contextWindow": {
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "type": "integer"
+          },
+          "protocols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "modalities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            }
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supporting_accounts": {
+            "type": "integer"
+          },
+          "available_accounts": {
+            "type": "integer"
+          },
+          "available_now": {
+            "type": "boolean"
+          },
+          "pricing_status": {
+            "enum": [
+              "unknown",
+              "current_runtime_rate"
+            ]
+          },
+          "advertised_cost_per_million_tokens": {
+            "$ref": "#/components/schemas/ModelCost"
+          },
+          "pi_provider_key": {
+            "type": "string"
+          },
+          "pi_api": {
+            "type": "string"
+          },
+          "pi_supported": {
+            "type": "boolean"
+          },
+          "pi_configuration": {
+            "$ref": "#/components/schemas/PiModel"
+          }
+        },
+        "additionalProperties": true
+      },
+      "UsagePoint": {
+        "type": "object",
+        "properties": {
+          "hour": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer"
+          },
+          "cached_tokens": {
+            "type": "integer"
+          },
+          "cache_creation_tokens": {
+            "type": "integer"
+          },
+          "output_tokens": {
+            "type": "integer"
+          },
+          "reasoning_tokens": {
+            "type": "integer"
+          },
+          "billable_tokens": {
+            "type": "integer"
+          },
+          "request_count": {
+            "type": "integer"
+          },
+          "cost_usd": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": true
+      },
+      "HourlyResponse": {
+        "type": "object",
+        "required": [
+          "hourly",
+          "excludes_passthrough"
+        ],
+        "properties": {
+          "hourly": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          },
+          "excludes_passthrough": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PoolAccount": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Public hashed account ID"
+          },
+          "type": {
+            "type": "string"
+          },
+          "plan_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "total_billable_tokens": {
+            "type": "integer"
+          },
+          "request_count": {
+            "type": "integer"
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": true
+      },
+      "PoolStats": {
+        "type": "object",
+        "required": [
+          "total_accounts",
+          "accounts",
+          "generated_at"
+        ],
+        "properties": {
+          "total_accounts": {
+            "type": "integer"
+          },
+          "active_accounts": {
+            "type": "integer"
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PoolAccount"
+            }
+          },
+          "daily_costs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          },
+          "cyber_policy": {
+            "type": "object",
+            "properties": {
+              "counters": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              },
+              "per_account": {
+                "type": "object",
+                "description": "Keyed by public hashed account ID",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "aggregate": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "Signal": {
+        "type": "object",
+        "required": [
+          "generated_at"
+        ],
+        "properties": {
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hourly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          },
+          "model_daily": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          },
+          "economics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "economics_summary": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConsolePrincipal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "note",
+          "created_at",
+          "billable_tokens",
+          "request_count",
+          "api_equivalent_cost_usd"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "operator",
+              "member",
+              "guest"
+            ]
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suspended"
+            ]
+          },
+          "note": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "avatar_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "billable_tokens": {
+            "type": "integer"
+          },
+          "request_count": {
+            "type": "integer"
+          },
+          "api_equivalent_cost_usd": {
+            "type": "number"
+          }
+        }
+      },
+      "PrincipalsResponse": {
+        "type": "object",
+        "required": [
+          "principals",
+          "hours",
+          "excludes_passthrough"
+        ],
+        "properties": {
+          "principals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsolePrincipal"
+            }
+          },
+          "hours": {
+            "type": "integer"
+          },
+          "excludes_passthrough": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AccountInventory": {
+        "type": "object",
+        "required": [
+          "id",
+          "public_id",
+          "type",
+          "disabled",
+          "dead",
+          "inflight",
+          "penalty",
+          "score",
+          "is_primary"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Public hashed ID for operator tokens"
+          },
+          "public_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "plan_type": {
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "dead": {
+            "type": "boolean"
+          },
+          "inflight": {
+            "type": "integer"
+          },
+          "penalty": {
+            "type": "number"
+          },
+          "score": {
+            "type": "number"
+          },
+          "is_primary": {
+            "type": "boolean"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/AccountUsageSnapshot"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/AccountUsageTotals"
+          },
+          "needs_verification": {
+            "type": "boolean"
+          },
+          "cyber_access": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_refresh": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "score_tooltip": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "account": {
+            "type": "string",
+            "description": "Public hashed account ID for operator tokens"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "cleared": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "PassInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "note"
+        ],
+        "properties": {
+          "note": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "display_name": {
+            "type": "string",
+            "maxLength": 48
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "MemberInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "purpose": {
+            "const": "onboard",
+            "default": "onboard",
+            "description": "Operator bearer tokens may only onboard; browser operators may also recover."
+          }
+        }
+      },
+      "PrincipalStatusInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "active",
+              "suspended"
+            ]
+          },
+          "kind": {
+            "description": "Browser-only; forbidden for operator bearer tokens",
+            "enum": [
+              "operator",
+              "member",
+              "guest"
+            ]
+          }
+        }
+      },
+      "EconomicsInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "account_id"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "rate",
+              "payment",
+              "history",
+              "link"
+            ]
+          },
+          "account_id": {
+            "type": "string",
+            "description": "Public account ID for operator bearer credentials"
+          },
+          "effective_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "end_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "amount_usd": {
+            "type": "number",
+            "minimum": 0
+          },
+          "subscription_id": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
+      },
+      "OneTimeLinkResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "principal",
+          "link",
+          "expires_at"
+        ],
+        "properties": {
+          "principal": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "link": {
+            "type": "string",
+            "description": "One-time onboarding link returned only by this write"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PassCreateResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "principal",
+          "link",
+          "setup_token"
+        ],
+        "properties": {
+          "principal": {
+            "$ref": "#/components/schemas/Principal"
+          },
+          "link": {
+            "type": "string"
+          },
+          "setup_token": {
+            "type": "string",
+            "description": "One-time model setup credential"
+          }
+        }
+      },
+      "AntigravitySyncResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "accounts",
+          "models"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "account_id"
+              ],
+              "properties": {
+                "account_id": {
+                  "type": "string",
+                  "description": "Public hashed ID"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "AntigravityVerifyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "verified_at",
+          "models"
+        ],
+        "properties": {
+          "verified_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "model",
+                "status",
+                "latency_ms"
+              ],
+              "properties": {
+                "model": {
+                  "type": "string"
+                },
+                "account_id": {
+                  "type": "string",
+                  "description": "Public hashed ID"
+                },
+                "status": {
+                  "type": "integer"
+                },
+                "latency_ms": {
+                  "type": "integer"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "PoolUserStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "total_billable_tokens",
+          "total_input_tokens",
+          "total_output_tokens",
+          "request_count",
+          "first_seen",
+          "last_seen"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "total_billable_tokens": {
+            "type": "integer"
+          },
+          "total_input_tokens": {
+            "type": "integer"
+          },
+          "total_output_tokens": {
+            "type": "integer"
+          },
+          "request_count": {
+            "type": "integer"
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PoolOriginStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "origin_id",
+          "total_billable_tokens",
+          "total_input_tokens",
+          "total_output_tokens",
+          "request_count",
+          "first_seen",
+          "last_seen"
+        ],
+        "properties": {
+          "origin_id": {
+            "type": "string",
+            "description": "Hashed origin ID"
+          },
+          "total_billable_tokens": {
+            "type": "integer"
+          },
+          "total_input_tokens": {
+            "type": "integer"
+          },
+          "total_output_tokens": {
+            "type": "integer"
+          },
+          "request_count": {
+            "type": "integer"
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "LegacyHourlyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "hours",
+          "hourly",
+          "totals"
+        ],
+        "properties": {
+          "hours": {
+            "type": "integer"
+          },
+          "hourly": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          },
+          "totals": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "billable_tokens",
+              "input_tokens",
+              "output_tokens",
+              "cached_tokens",
+              "reasoning_tokens",
+              "request_count"
+            ],
+            "properties": {
+              "billable_tokens": {
+                "type": "integer"
+              },
+              "input_tokens": {
+                "type": "integer"
+              },
+              "output_tokens": {
+                "type": "integer"
+              },
+              "cached_tokens": {
+                "type": "integer"
+              },
+              "reasoning_tokens": {
+                "type": "integer"
+              },
+              "request_count": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "UserDailyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "days",
+          "daily"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "days": {
+            "type": "integer"
+          },
+          "daily": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          }
+        }
+      },
+      "UserHourlyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "hours",
+          "hourly"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "hours": {
+            "type": "integer"
+          },
+          "hourly": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/UsagePoint"
+            }
+          }
+        }
+      },
+      "DailyBreakdown": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "days",
+          "account_count"
+        ],
+        "properties": {
+          "account_count": {
+            "type": "integer"
+          },
+          "days": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "date",
+                "surfaces",
+                "total"
+              ],
+              "properties": {
+                "date": {
+                  "type": "string"
+                },
+                "surfaces": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "number"
+                  }
+                },
+                "total": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "AccountUsageTotals": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "total_input_tokens",
+          "total_cached_tokens",
+          "total_output_tokens",
+          "total_reasoning_tokens",
+          "total_billable_tokens",
+          "total_cost_estimate",
+          "request_count",
+          "last_primary_pct",
+          "last_secondary_pct",
+          "last_updated"
+        ],
+        "properties": {
+          "total_input_tokens": {
+            "type": "integer"
+          },
+          "total_cached_tokens": {
+            "type": "integer"
+          },
+          "total_output_tokens": {
+            "type": "integer"
+          },
+          "total_reasoning_tokens": {
+            "type": "integer"
+          },
+          "total_billable_tokens": {
+            "type": "integer"
+          },
+          "total_cost_estimate": {
+            "type": "number"
+          },
+          "request_count": {
+            "type": "integer"
+          },
+          "last_primary_pct": {
+            "type": "number"
+          },
+          "last_secondary_pct": {
+            "type": "number"
+          },
+          "last_updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AccountUsageSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "PrimaryUsed",
+          "SecondaryUsed",
+          "PrimaryUsedPercent",
+          "SecondaryUsedPercent",
+          "PrimaryWindowMinutes",
+          "SecondaryWindowMinutes",
+          "PrimaryResetAt",
+          "SecondaryResetAt",
+          "CreditsBalance",
+          "HasCredits",
+          "CreditsUnlimited",
+          "RetrievedAt",
+          "Source"
+        ],
+        "properties": {
+          "PrimaryUsed": {
+            "type": "number"
+          },
+          "SecondaryUsed": {
+            "type": "number"
+          },
+          "PrimaryUsedPercent": {
+            "type": "number"
+          },
+          "SecondaryUsedPercent": {
+            "type": "number"
+          },
+          "PrimaryWindowMinutes": {
+            "type": "integer"
+          },
+          "SecondaryWindowMinutes": {
+            "type": "integer"
+          },
+          "PrimaryResetAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "SecondaryResetAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "CreditsBalance": {
+            "type": "number"
+          },
+          "HasCredits": {
+            "type": "boolean"
+          },
+          "CreditsUnlimited": {
+            "type": "boolean"
+          },
+          "RetrievedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "Source": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/operator/v1": {
+      "get": {
+        "summary": "Discover the operator API",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Discovery links",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Discovery"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/operator/v1/whoami": {
+      "get": {
+        "summary": "Inspect effective token permissions",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Credential identity and permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/operator/v1/openapi.json": {
+      "get": {
+        "summary": "Retrieve this deployed contract",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "openapi",
+                    "info",
+                    "paths"
+                  ],
+                  "properties": {
+                    "openapi": {
+                      "type": "string"
+                    },
+                    "info": {
+                      "type": "object"
+                    },
+                    "paths": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/operator/v1/guide": {
+      "get": {
+        "summary": "Retrieve the operator workflow guide bundled with this deployment",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Markdown guide",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/operator/v1/models": {
+      "get": {
+        "summary": "Canonical model manifest with configured support and live readiness",
+        "x-operator-capability": "operator.read",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "full or configured; defaults to full",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "full",
+                "configured"
+              ],
+              "default": "full"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential-free model manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelManifest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operator/v1/config/pi": {
+      "get": {
+        "summary": "Export Pi models.json using CODEX_POOL_MODEL_API_KEY",
+        "x-operator-capability": "operator.read",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "full or configured; defaults to configured",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "full",
+                "configured"
+              ],
+              "default": "configured"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential-free Pi configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PiConfig"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "public_url is not configured"
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operator/v1/accounting/requests": {
+      "get": {
+        "summary": "Page through request-grain accounting facts",
+        "description": "No prompts, responses, upstream payloads, raw account IDs, or credentials are returned. Range is bounded to 366 days and limit to 200.",
+        "x-operator-capability": "operator.read",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "principal_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accounting page and pricing provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountingPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounds, timestamp, or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pool/stats": {
+      "get": {
+        "summary": "Pool status dashboard data",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Pool statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PoolStats"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/pool/users": {
+      "get": {
+        "summary": "Legacy usage leaderboard",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Usage by user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "users",
+                    "total_users"
+                  ],
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PoolUserStats"
+                      }
+                    },
+                    "total_users": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/pool/origins": {
+      "get": {
+        "summary": "Hashed origin usage",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Origin statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "origins",
+                    "total_origins"
+                  ],
+                  "properties": {
+                    "origins": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PoolOriginStats"
+                      }
+                    },
+                    "total_origins": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/pool/daily-breakdown": {
+      "get": {
+        "summary": "Codex upstream daily breakdown",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Daily series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyBreakdown"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/pool/hourly": {
+      "get": {
+        "summary": "Global hourly usage (hours 1..168)",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Hourly series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegacyHourlyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "hours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 168,
+              "default": 24
+            }
+          }
+        ]
+      }
+    },
+    "/api/pool/signal": {
+      "get": {
+        "summary": "All Signal Room graph series",
+        "description": "weeks defaults to 6 and is capped at 12; hourly burn is 14 days and model mix is 42 days.",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Chart-ready series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Signal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "weeks",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 12,
+              "default": 6
+            }
+          }
+        ]
+      }
+    },
+    "/api/pool/catalog": {
+      "get": {
+        "summary": "Pool model catalog",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Model catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schema_version": {
+                      "type": "integer"
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ModelEntry"
+                      }
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/pool/users/{id}/daily": {
+      "get": {
+        "summary": "User daily usage (days up to 90)",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Daily usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDailyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 30
+            }
+          }
+        ]
+      }
+    },
+    "/api/pool/users/{id}/hourly": {
+      "get": {
+        "summary": "User hourly usage (hours up to 168)",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Hourly usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserHourlyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 168,
+              "default": 24
+            }
+          }
+        ]
+      }
+    },
+    "/api/console/principals": {
+      "get": {
+        "summary": "Member ranking (hours up to 8784)",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Principals and attributed totals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "hours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8784,
+              "default": 168
+            }
+          }
+        ]
+      }
+    },
+    "/api/console/principals/{id}/usage": {
+      "get": {
+        "summary": "Selected member hourly usage",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Member hourly usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HourlyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8784,
+              "default": 720
+            }
+          }
+        ]
+      }
+    },
+    "/api/console/audit": {
+      "get": {
+        "summary": "Recent audit records with detail redacted",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Audit records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "actor_id": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "type": "string"
+                      },
+                      "subject_id": {
+                        "type": "string"
+                      },
+                      "at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "detail": {
+                        "const": "",
+                        "description": "Redacted for operator bearer tokens"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/console/analytics-health": {
+      "get": {
+        "summary": "Accounting health and gaps",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Analytics health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "health": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "accounting_gaps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "active_gap": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "additionalProperties": true
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/passes": {
+      "get": {
+        "summary": "Guest pass metadata without usable links",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Sanitized passes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "note": {
+                        "type": "string"
+                      },
+                      "display_name": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "expires_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "date-time"
+                      },
+                      "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "created_by": {
+                        "type": "string"
+                      },
+                      "link": {
+                        "const": "",
+                        "description": "Always redacted for operator bearer tokens"
+                      },
+                      "clients": {
+                        "type": "integer"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      },
+      "post": {
+        "summary": "Issue a guest pass",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "New pass; secret returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PassCreateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PassInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/accounts": {
+      "get": {
+        "summary": "Sanitized provider account inventory",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "No raw account identities, errors, or verification URLs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccountInventory"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/admin/tokens": {
+      "get": {
+        "summary": "Pool capacity counters",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "description": "Public hashed ID"
+                          }
+                        },
+                        "additionalProperties": true
+                      }
+                    },
+                    "recent_samples": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "account": {
+                            "type": "string",
+                            "description": "Public hashed ID"
+                          }
+                        },
+                        "additionalProperties": true
+                      }
+                    },
+                    "persisted": {
+                      "type": "object",
+                      "description": "Keyed by public hashed ID",
+                      "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/admin/reload": {
+      "post": {
+        "summary": "Reload provider accounts",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Reload requested",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "const": "ok"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/admin/economics": {
+      "post": {
+        "summary": "Edit economics ledger",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Ledger updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EconomicsInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/clear-rate-limits": {
+      "post": {
+        "summary": "Clear provider cooldowns",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Cooldowns cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/admin/purge-anonymous": {
+      "post": {
+        "summary": "Purge anonymous usage",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Anonymous usage purged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/admin/accounts/{id}/enable": {
+      "post": {
+        "summary": "Enable provider account",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Account enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/accounts/{id}/disable": {
+      "post": {
+        "summary": "Disable provider account",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Account disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/accounts/{id}/resurrect": {
+      "post": {
+        "summary": "Resurrect provider account",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Account resurrected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/accounts/{id}/refresh": {
+      "post": {
+        "summary": "Refresh provider account",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Refresh requested",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/admin/antigravity/models/sync": {
+      "post": {
+        "summary": "Synchronize Antigravity models",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Models synchronized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AntigravitySyncResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/admin/antigravity/models/verify": {
+      "post": {
+        "summary": "Verify Antigravity models",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Models verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AntigravityVerifyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional canonical or antigravity-prefixed model ID"
+          }
+        ]
+      }
+    },
+    "/api/console/members": {
+      "post": {
+        "summary": "Issue a member onboarding link",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Link returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OneTimeLinkResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberInput"
+              }
+            }
+          }
+        },
+        "description": "Operator bearer credentials may only create onboarding links. Recovery remains browser-session-only."
+      }
+    },
+    "/api/passes/{id}": {
+      "patch": {
+        "summary": "Update guest pass",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Pass updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Principal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PassInput"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Revoke guest pass",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Pass revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/passes/{id}/restore": {
+      "post": {
+        "summary": "Restore guest pass",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Pass restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Principal"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/passes/{id}/rotate": {
+      "post": {
+        "summary": "Replace guest pass link",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Replacement link returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "link"
+                  ],
+                  "properties": {
+                    "link": {
+                      "type": "string",
+                      "description": "New one-time join link"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/principals/{id}": {
+      "patch": {
+        "summary": "Change principal status; role changes are browser-only",
+        "x-operator-capability": "operator.write",
+        "responses": {
+          "200": {
+            "description": "Status updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Principal"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role changes unavailable to tokens"
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrincipalStatusInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me/usage": {
+      "get": {
+        "summary": "Authenticated operator principal hourly usage",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Hourly usage for the token owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HourlyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "hours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8784,
+              "default": 168
+            }
+          }
+        ]
+      }
+    }
+  }
+}

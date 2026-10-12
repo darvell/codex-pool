@@ -83,9 +83,10 @@ type ClientCredential struct {
 }
 
 type passportSession struct {
-	PrincipalID string    `json:"principal_id"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	CSRFHash    [32]byte  `json:"csrf_hash"`
+	PrincipalID     string    `json:"principal_id"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	AuthenticatedAt time.Time `json:"authenticated_at,omitempty"`
+	CSRFHash        [32]byte  `json:"csrf_hash"`
 }
 
 type PassportStore struct {
@@ -124,7 +125,7 @@ func newPassportStore(db *bbolt.DB, legacy *PoolUserStore, legacyAnalyticsSalt .
 	}
 	p := &PassportStore{db: db, principals: map[string]*Principal{}, clients: map[string]*ClientCredential{}, passwordWork: make(chan struct{}, 4), aead: aead}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, n := range []string{bucketPrincipals, bucketPassportSessions, bucketClientCredentials, bucketPassportAvatars, bucketJoinLinks, bucketMemberRecoveryLinks, bucketPassportAudit, bucketWebAuthnCredentials, bucketWebAuthnChallenges} {
+		for _, n := range []string{bucketPrincipals, bucketPassportSessions, bucketClientCredentials, bucketOperatorTokens, bucketPassportAvatars, bucketJoinLinks, bucketMemberRecoveryLinks, bucketPassportAudit, bucketWebAuthnCredentials, bucketWebAuthnChallenges} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(n)); err != nil {
 				return err
 			}
@@ -411,6 +412,17 @@ func (p *PassportStore) byLogin(login string) *Principal {
 }
 
 func (p *PassportStore) createSession(principalID string) (token, csrf string, err error) {
+	return p.createSessionWithAuthentication(principalID, time.Time{})
+}
+
+// createAuthenticatedSession is reserved for password or passkey authentication.
+// Possession-based migration, join, recovery, and setup links deliberately create
+// ordinary sessions that cannot satisfy recent-authentication gates.
+func (p *PassportStore) createAuthenticatedSession(principalID string) (token, csrf string, err error) {
+	return p.createSessionWithAuthentication(principalID, time.Now().UTC())
+}
+
+func (p *PassportStore) createSessionWithAuthentication(principalID string, authenticatedAt time.Time) (token, csrf string, err error) {
 	token, err = secureToken(32)
 	if err != nil {
 		return
@@ -419,7 +431,8 @@ func (p *PassportStore) createSession(principalID string) (token, csrf string, e
 	if err != nil {
 		return
 	}
-	s := passportSession{PrincipalID: principalID, ExpiresAt: time.Now().Add(30 * 24 * time.Hour), CSRFHash: hashToken(csrf)}
+	now := time.Now().UTC()
+	s := passportSession{PrincipalID: principalID, ExpiresAt: now.Add(30 * 24 * time.Hour), AuthenticatedAt: authenticatedAt, CSRFHash: hashToken(csrf)}
 	v, _ := json.Marshal(s)
 	h := hashToken(token)
 	err = p.db.Update(func(tx *bbolt.Tx) error { return tx.Bucket([]byte(bucketPassportSessions)).Put(h[:], v) })
@@ -494,7 +507,7 @@ func (p *PassportStore) login(email, password string) (*Principal, string, strin
 	if !ok || pr == nil || pr.Kind == PrincipalGuest {
 		return nil, "", "", errors.New("invalid credentials")
 	}
-	t, c, e := p.createSession(pr.ID)
+	t, c, e := p.createAuthenticatedSession(pr.ID)
 	return pr, t, c, e
 }
 

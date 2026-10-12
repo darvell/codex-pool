@@ -426,7 +426,7 @@ func (h *proxyHandler) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.
 		respondJSONError(w, 500, "passkey store failed")
 		return
 	}
-	token, csrf, err := h.passport.createSession(passportUser.principal.ID)
+	token, csrf, err := h.passport.createAuthenticatedSession(passportUser.principal.ID)
 	if err != nil {
 		respondJSONError(w, 500, "session unavailable")
 		return
