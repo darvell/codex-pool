@@ -152,6 +152,9 @@ func (p *PassportStore) setPrincipalKind(actorID, principalID string, kind Princ
 			return err
 		}
 		if demoteOperator {
+			if err := revokePrincipalOps(tx, principalID); err != nil {
+				return err
+			}
 			if err := deletePrincipalSessions(tx, principalID); err != nil {
 				return err
 			}

@@ -172,6 +172,9 @@ func (h *proxyHandler) handleConsoleAudit(w http.ResponseWriter, r *http.Request
 	if operatorAccessFromRequest(r) != nil {
 		for i := range entries {
 			entries[i].Detail = ""
+			if entries[i].Action == "provider.account_added" {
+				entries[i].SubjectID = hashAccountID(entries[i].SubjectID)
+			}
 		}
 	}
 	respondJSON(w, entries)

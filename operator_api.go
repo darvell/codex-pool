@@ -239,6 +239,30 @@ func (p *PassportStore) revokeOperatorToken(actorID, principalID, id string) err
 	})
 }
 
+func revokePrincipalOps(tx *bbolt.Tx, principalID string) error {
+	bucket := tx.Bucket([]byte(bucketOperatorTokens))
+	var records []operatorTokenRecord
+	if err := bucket.ForEach(func(_, value []byte) error {
+		var record operatorTokenRecord
+		if err := json.Unmarshal(value, &record); err != nil {
+			return err
+		}
+		if record.PrincipalID == principalID && record.Status == "active" {
+			record.Status = "revoked"
+			records = append(records, record)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := putJSON(bucket, record.ID, &record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func splitOperatorToken(raw string) (string, bool) {
 	if !strings.HasPrefix(raw, operatorTokenPrefix) {
 		return "", false
@@ -269,7 +293,7 @@ func (p *PassportStore) authenticateOperatorToken(raw string) (*Principal, *Oper
 		return nil, nil
 	}
 	principal := p.principal(record.PrincipalID)
-	if principal == nil || principal.Kind != PrincipalOperator || principal.Status != PrincipalActive || (principal.ExpiresAt != nil && time.Now().After(*principal.ExpiresAt)) {
+	if principal == nil || principal.Kind != PrincipalOperator || principal.Status != PrincipalActive || (principal.ExpiresAt != nil && time.Now().After(*principal.ExpiresAt)) || record.CreatedAt.Before(principal.CredentialsValidAfter) {
 		return nil, nil
 	}
 	view := record.OperatorToken
