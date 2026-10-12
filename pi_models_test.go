@@ -68,6 +68,8 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 		"gpt-6-astra[1m]":     {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-6-sol":           {contextWindow: 272000, maxTokens: 128000},
 		"gpt-6-sol[1m]":       {contextWindow: 1000000, maxTokens: 128000},
+		"gpt-6.1-sol":         {contextWindow: 500000, maxTokens: 128000},
+		"gpt-6.1-sol[1m]":     {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-6-luna":          {contextWindow: 272000, maxTokens: 128000},
 		"gpt-6-luna[1m]":      {contextWindow: 1000000, maxTokens: 128000},
 		"gpt-5.6-sol":         {contextWindow: 372000, maxTokens: 128000},

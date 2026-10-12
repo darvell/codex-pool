@@ -28,6 +28,7 @@ func TestGPT6CatalogUsesLongContextDespiteDiscoveryDefault(t *testing.T) {
 	models, err := parseProviderModels([]byte(`{"models":[
 		{"slug":"gpt-6-astra","context_window":272000},
 		{"slug":"gpt-6-sol","context_window":272000},
+		{"slug":"gpt-6.1-sol","context_window":272000},
 		{"slug":"gpt-6-luna","context_window":272000}
 	]}`))
 	if err != nil {
@@ -36,11 +37,14 @@ func TestGPT6CatalogUsesLongContextDespiteDiscoveryDefault(t *testing.T) {
 	pool := newPoolState([]*Account{{ID: "codex", Type: AccountTypeCodex, PlanType: "pro", Models: models}}, false)
 	found := make(map[string]bool)
 	for _, descriptor := range poolModelDescriptors(pool) {
-		if descriptor.Provider != string(AccountTypeCodex) || !strings.HasPrefix(descriptor.ID, "gpt-6-") {
+		if descriptor.Provider != string(AccountTypeCodex) || !strings.HasPrefix(descriptor.ID, "gpt-6") {
 			continue
 		}
 		found[descriptor.ID] = true
 		wantContext := 272000
+		if descriptor.ID == "gpt-6.1-sol" {
+			wantContext = 500000
+		}
 		if strings.HasSuffix(descriptor.ID, "[1m]") {
 			wantContext = 1000000
 		}
@@ -48,13 +52,13 @@ func TestGPT6CatalogUsesLongContextDespiteDiscoveryDefault(t *testing.T) {
 			t.Fatalf("%s descriptor = %+v", descriptor.ID, descriptor)
 		}
 	}
-	for _, id := range []string{"gpt-6-astra", "gpt-6-astra[1m]", "gpt-6-sol", "gpt-6-sol[1m]", "gpt-6-luna", "gpt-6-luna[1m]"} {
+	for _, id := range []string{"gpt-6-astra", "gpt-6-astra[1m]", "gpt-6-sol", "gpt-6-sol[1m]", "gpt-6.1-sol", "gpt-6.1-sol[1m]", "gpt-6-luna", "gpt-6-luna[1m]"} {
 		if !found[id] {
 			t.Fatalf("%s missing from pool catalog", id)
 		}
 	}
 	aliases := newModelAliases(nil)
-	for _, id := range []string{"gpt-6-sol", "gpt-6-luna"} {
+	for _, id := range []string{"gpt-6.1-sol", "gpt-6-luna"} {
 		variant := id + "[1m]"
 		if resolved, ok := aliases.resolve(variant); !ok || resolved != id {
 			t.Fatalf("%s resolves to %q, aliased=%v", variant, resolved, ok)

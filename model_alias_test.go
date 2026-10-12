@@ -19,8 +19,11 @@ func TestDefaultModelAliasGPT56ToSol(t *testing.T) {
 	if !ok || got != "gpt-5.6-sol" {
 		t.Fatalf("resolve(GPT-5.6) = (%q, %v), want (gpt-5.6-sol, true)", got, ok)
 	}
+	if got, ok = aliases.resolve("gpt-6-sol"); !ok || got != "gpt-6.1-sol" {
+		t.Fatalf("resolve(gpt-6-sol) = (%q, %v), want (gpt-6.1-sol, true)", got, ok)
+	}
 	// Real variant names pass through.
-	for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"} {
+	for _, model := range []string{"gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"} {
 		got, ok = aliases.resolve(model)
 		if ok || got != model {
 			t.Fatalf("resolve(%q) = (%q, %v), want passthrough", model, got, ok)
@@ -28,6 +31,8 @@ func TestDefaultModelAliasGPT56ToSol(t *testing.T) {
 	}
 
 	for model, want := range map[string]string{
+		"gpt-6-sol[1m]":     "gpt-6.1-sol",
+		"gpt-6.1-sol[1m]":   "gpt-6.1-sol",
 		"gpt-5.6-sol[1m]":   "gpt-5.6-sol",
 		"gpt-5.6-terra[1m]": "gpt-5.6-terra",
 		"gpt-5.6-luna[1m]":  "gpt-5.6-luna",
@@ -86,16 +91,20 @@ func TestApplyModelAliasRewritesBody(t *testing.T) {
 
 func TestGPT6LongProfilesRewriteRequests(t *testing.T) {
 	aliases := newModelAliases(nil)
-	for _, id := range []string{"gpt-6-sol", "gpt-6-luna"} {
-		variant := id + "[1m]"
-		body := []byte(`{"model":"` + variant + `","input":"hi"}`)
-		resolved, out := applyModelAlias(aliases, variant, body, false, "req")
-		if resolved != id || !bytes.Contains(out, []byte(`"model":"`+id+`"`)) {
-			t.Fatalf("%s HTTP request resolved to %q, body %s", variant, resolved, out)
+	for input, want := range map[string]string{
+		"gpt-6-sol":       "gpt-6.1-sol",
+		"gpt-6-sol[1m]":   "gpt-6.1-sol",
+		"gpt-6.1-sol[1m]": "gpt-6.1-sol",
+		"gpt-6-luna[1m]":  "gpt-6-luna",
+	} {
+		body := []byte(`{"model":"` + input + `","input":"hi"}`)
+		resolved, out := applyModelAlias(aliases, input, body, false, "req")
+		if resolved != want || !bytes.Contains(out, []byte(`"model":"`+want+`"`)) {
+			t.Fatalf("%s HTTP request resolved to %q, body %s", input, resolved, out)
 		}
-		frame := applyModelAliasToJSONFrame(&proxyHandler{aliases: aliases}, "req", []byte(`{"type":"response.create","model":"`+variant+`"}`))
-		if !bytes.Contains(frame, []byte(`"model":"`+id+`"`)) {
-			t.Fatalf("%s WebSocket frame = %s", variant, frame)
+		frame := applyModelAliasToJSONFrame(&proxyHandler{aliases: aliases}, "req", []byte(`{"type":"response.create","model":"`+input+`"}`))
+		if !bytes.Contains(frame, []byte(`"model":"`+want+`"`)) {
+			t.Fatalf("%s WebSocket frame = %s", input, frame)
 		}
 	}
 }
