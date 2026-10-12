@@ -386,7 +386,13 @@ func (h *proxyHandler) handleConsoleMembers(w http.ResponseWriter, r *http.Reque
 	if input.Purpose == "" {
 		input.Purpose = "onboard"
 	}
-	result, err := h.passport.createMemberLink(operator.ID, input.Email, input.DisplayName, input.Purpose)
+	// Recovery can replace an operator password and create a browser session.
+	// Keep that browser-only even for write-scoped automation credentials.
+	if operatorAccessFromRequest(r) != nil && input.Purpose != "onboard" {
+		respondJSONError(w, http.StatusForbidden, "operator tokens may only create onboarding links")
+		return
+	}
+	result, err := h.passport.createMemberLink(operatorActor(r, operator.ID), input.Email, input.DisplayName, input.Purpose)
 	if err != nil {
 		respondJSONError(w, http.StatusBadRequest, err.Error())
 		return

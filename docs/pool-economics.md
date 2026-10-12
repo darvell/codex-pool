@@ -37,10 +37,7 @@ invoice amount.
 
 ## Correcting rates and payments
 
-`POST /admin/economics` uses the existing operator/admin authorization. Send
-JSON with `kind` (`rate`, `payment`, `history`, or `link`), `account_id` (the
-**real**, not hashed, account ID), and the fields that kind needs. `note` is
-optional for every kind.
+`POST /admin/economics` accepts either an operator write token or the legacy break-glass credential. Send JSON with `kind` (`rate`, `payment`, `history`, or `link`) and the fields that kind needs. For an operator bearer token, `account_id` is the public hashed ID returned by `GET /admin/accounts`; the server resolves it without disclosing the underlying identifier. Browser/internal and break-glass callers use the real account ID. `note` is optional for every kind.
 
 - `rate`: `effective_at` (UTC RFC3339) is when the new monthly `amount_usd`
   took effect; it splits an existing interval. A manual rate is not
@@ -63,12 +60,12 @@ The schema has no background
 polling: OAuth claims can indicate a tier, but not a charged amount, discount,
 or invoice date. Do not send credentials or invoices in notes.
 
-For example, an operator with an admin token can use:
+For example, an operator with a read + write Operator API token can use (the legacy break-glass credential instead uses `X-Admin-Token`, not a Bearer header):
 
 ```sh
 curl -X POST http://127.0.0.1:8989/admin/economics \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"kind":"rate","account_id":"ACCOUNT_ID","effective_at":"2026-09-01T00:00:00Z","amount_usd":100,"note":"plan changed"}'
+  -H "Authorization: Bearer $POOL_OPERATOR_WRITE_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"rate","account_id":"PUBLIC_ACCOUNT_ID_FROM_ADMIN_ACCOUNTS","effective_at":"2026-09-01T00:00:00Z","amount_usd":100,"note":"plan changed"}'
 ```
 
 Keep `data/analytics.db` with its existing backup: both cost aggregates and

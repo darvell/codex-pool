@@ -12,7 +12,8 @@ debug = false
 # Max request body size to buffer in memory before streaming (bytes).
 # Set via env PROXY_MAX_INMEM_BODY_BYTES (default 16777216).
 
-# Public URL for generated configs and instructions
+# Public URL for generated configs and instructions. This is required by the
+# credential-free Operator API Pi export; request Host is never used for it.
 # Use this when behind a reverse proxy or using a custom domain
 # Example: "https://proxy.example.com" or "http://192.168.1.100:8989"
 public_url = ""

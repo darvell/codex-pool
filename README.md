@@ -147,11 +147,17 @@ storage_path = "./data/pool_users.json"
 
 Set `POOL_AUTH_ENCRYPTION_KEY` to a stable 32-byte secret (hex or base64) before starting Passport. `ADMIN_TOKEN` remains the break-glass operator credential.
 
+### Operator API
+
+Operators can issue digest-only, expiring read-only or read + write automation keys from the Signal Room's **Operator API** view. A cold client starts at authenticated `GET /api/operator/v1`, then follows links to the OpenAPI contract, effective permissions, every dashboard data source, bounded request accounting, the canonical model manifest, and a credential-free Pi configuration. Operator keys are separate from model credentials and never authorize inference, credential downloads, role elevation, or key management.
+
+See [Operator API](docs/operator-api.md) for security boundaries and diagnostic workflows. The machine-readable contract is checked in at [`docs/openapi/operator-v1.openapi.json`](docs/openapi/operator-v1.openapi.json) and served by the running binary.
+
 Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly (no retries). Default is 16777216 (16 MiB).
 
 ### Model capability discovery
 
-Authenticated clients can query `GET /api/pool/models` for the pool's model catalog, current account availability, and provider capabilities. The response includes a `schema_version`; clients should ignore fields they do not understand and treat an unknown schema version as unsupported.
+Authenticated clients can query `GET /api/pool/catalog` for the pool's model catalog, current account availability, and provider capabilities. The response includes a `schema_version`; clients should ignore fields they do not understand and treat an unknown schema version as unsupported.
 
 Models with provider-hosted web search advertise both `capabilities.web_search` and a declarative `native_tools.web_search` route:
 
@@ -222,7 +228,7 @@ Reasoning effort is read from whichever carrier the client sent (`reasoning_effo
 For acceptance, use an isolated pool and client configuration with only the test key and harmless read fixture. Test **reasoning → tool call → tool result → final answer as one complete sequence** at medium thinking; separate text, reasoning, and tool tests do not establish continuation compatibility. The October 7, 2026 fix passed this sequence with Pi 0.87.1 on `mistral/mistral-large-4`, `mistral/mistral-medium-latest`, `mistral/mistral-small-latest`, and `mistral/magistral-medium-latest`, and with Cute Code's Messages path on Medium Latest. Those are small-request canaries, not proof of maximum context, output limits, or independent-workspace failover. Repeat the canaries after deploying the fix before enabling models in downstream clients.
 
 
-Antigravity model names come from Google's live `fetchAvailableModels` response. Use `antigravity/<model-id>` to force this provider. `/api/pool/models`, `/v1/models`, `/v1beta/models`, Pi, Cute Code, and the Codex catalog consume the same registry. Temporary quota exhaustion changes `available_now` without removing a supported model from the catalog.
+Antigravity model names come from Google's live `fetchAvailableModels` response. Use `antigravity/<model-id>` to force this provider. `/api/pool/catalog`, `/v1/models`, `/v1beta/models`, Pi, Cute Code, and the Codex catalog consume the same registry. Temporary quota exhaustion changes `available_now` without removing a supported model from the catalog.
 
 ### Antigravity routing and failover
 

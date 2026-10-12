@@ -173,6 +173,10 @@ Desktop navigation is a quiet vertical index with grouped labels and one gilded 
 
 Command wells are the signature operational component. They are recessed, copyable, syntax-preserving surfaces with a small action aligned away from the command text. Long lines wrap or scroll within the well without widening the page. Copy feedback is immediate and temporary.
 
+### Operator API Keys
+
+The operator-key screen is a security ceremony, not a generic settings list. Permission and expiry are explicit before issue. The one-time secret receives a command well and an acknowledgement action; after dismissal only label, scope, status, expiry, creation and last-use metadata remain. Read-only and read + write must never be communicated by color alone. Revocation and replacement stay adjacent to the affected key, and recent-authentication errors tell the operator to sign in again rather than weakening the gate.
+
 ## Do's and Don'ts
 
 ### Do:

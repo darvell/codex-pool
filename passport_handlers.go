@@ -103,7 +103,7 @@ func (h *proxyHandler) handleAuthConfig(w http.ResponseWriter, r *http.Request) 
 	legacyAvailable := h.cfg != nil && strings.TrimSpace(h.cfg.legacyFriendCode) != ""
 	operatorExists := h.passport != nil && h.passport.hasOperator()
 	respondJSON(w, map[string]any{
-		"legacy_signup": legacyAvailable,
+		"legacy_signup":   legacyAvailable,
 		"operator_exists": operatorExists,
 	})
 }
@@ -212,6 +212,12 @@ func (h *proxyHandler) handlePassportMe(w http.ResponseWriter, r *http.Request) 
 	respondJSON(w, publicPrincipal(pr))
 }
 func (h *proxyHandler) passportCSRF(r *http.Request, s *passportSession) bool {
+	if access := operatorAccessFromRequest(r); access != nil && access.Token.Scope == operatorScopeWrite {
+		return true // Header credentials are not ambient browser authority.
+	}
+	if s == nil {
+		return false
+	}
 	c, e := r.Cookie("pool_csrf")
 	if e != nil {
 		return false
@@ -271,7 +277,12 @@ func (h *proxyHandler) handlePassportClients(w http.ResponseWriter, r *http.Requ
 }
 func (h *proxyHandler) handlePassportUsage(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	pr, _ := h.passport.authenticate(r)
+	var pr *Principal
+	if access := operatorAccessFromRequest(r); access != nil {
+		pr = access.Principal
+	} else {
+		pr, _ = h.passport.authenticate(r)
+	}
 	if pr == nil {
 		respondJSONError(w, 401, "unauthorized")
 		return

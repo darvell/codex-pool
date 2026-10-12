@@ -45,6 +45,10 @@ import {
   updateMyProfile,
   uploadMyAvatar,
   loadMyClients,
+  loadOperatorAPITokens,
+  createOperatorAPIToken,
+  revokeOperatorAPIToken,
+  replaceOperatorAPIToken,
   createMyClient,
   rotateMyClient,
   revealMyClient,
@@ -94,6 +98,7 @@ import type {
   PasskeyCredential,
   PassportPrincipal,
   ClientCredential,
+  OperatorAPIToken,
   ConsolePrincipal,
   PassportAuditEntry,
   PassportUsagePoint,
@@ -110,11 +115,11 @@ import type {
   VibeLoginSession,
 } from "./types";
 
-type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "setup";
+type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "operator-api" | "setup";
 type InsightMode = "overview" | "capacity" | "flow" | "demand";
 type HistoryMode = "push" | "replace";
 
-const VIEWS: View[] = ["pulse", "insights", "mine", "passes", "console", "accounts", "models", "setup"];
+const VIEWS: View[] = ["pulse", "insights", "mine", "passes", "console", "accounts", "models", "operator-api", "setup"];
 const INSIGHT_MODES: InsightMode[] = ["overview", "capacity", "flow", "demand"];
 
 export function viewFromSearch(search: string): View {
@@ -510,6 +515,7 @@ export function App() {
             />
           )}
 		  {view === "models" && <Models models={models} />}
+          {view === "operator-api" && passport.kind === "operator" && <OperatorAPIKeys />}
           {view === "setup" && <SetupPage />}
         </main>
       </div>
@@ -601,7 +607,7 @@ function MemberRecovery({ token, onAccess }: { token: string; onAccess: (princip
   );
 }
 
-function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => void }) {
+export function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => void }) {
   const [mode, setMode] = useState<"login" | "signup" | "bootstrap">("login");
   const [authConfig, setAuthConfig] = useState<{ legacy_signup: boolean; operator_exists: boolean } | null>(null);
   const [email, setEmail] = useState("");
@@ -625,8 +631,8 @@ function AccessGate({ onAccess }: { onAccess: (principal: PassportPrincipal) => 
     setError("");
     try {
       if (mode === "bootstrap") {
-        const principal = await operatorBootstrap(username, email, password, displayName);
-        onAccess(principal);
+        await operatorBootstrap(username, email, password, displayName);
+        onAccess(await passportLogin(email.trim(), password));
       } else if (mode === "signup") {
         const legacy = storedFriendSession();
         const principal = await legacySignup(code, username, password, legacy?.download_token || "");
@@ -1518,13 +1524,118 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
 
 type NavGroup = { label: string; items: Array<[View, string]> };
 
+export function OperatorAPIKeys() {
+  const [tokens, setTokens] = useState<OperatorAPIToken[]>([]);
+  const [label, setLabel] = useState("");
+  const [scope, setScope] = useState<"read" | "write">("read");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [secret, setSecret] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setTokens(await loadOperatorAPITokens());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to load operator API keys");
+    }
+  }, []);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const runExclusive = async (operation: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await operation();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+  const create = (event: FormEvent) => {
+    event.preventDefault();
+    if (secret) return;
+    void runExclusive(async () => {
+      try {
+        const result = await createOperatorAPIToken(label, scope, expiresAt ? new Date(`${expiresAt}T23:59:59Z`).toISOString() : undefined);
+        setSecret(result.secret);
+        setLabel("");
+        setExpiresAt("");
+        setError("");
+        await refresh();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Unable to create operator API key");
+      }
+    });
+  };
+  const copySecret = async () => {
+    try {
+      await navigator.clipboard.writeText(secret);
+      setError("");
+    } catch {
+      setError("Could not copy the key. Select and copy it manually before dismissing it.");
+    }
+  };
+  const replace = (token: OperatorAPIToken) => {
+    if (secret || !window.confirm(`Replace ${token.label}? The current key will stop working immediately.`)) return;
+    void runExclusive(async () => {
+      try {
+        const result = await replaceOperatorAPIToken(token.id);
+        setSecret(result.secret);
+        setError("");
+        await refresh();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Unable to replace key");
+      }
+    });
+  };
+  const revoke = (token: OperatorAPIToken) => {
+    if (!window.confirm(`Revoke ${token.label}? This cannot be undone.`)) return;
+    void runExclusive(async () => {
+      try {
+        await revokeOperatorAPIToken(token.id);
+        setError("");
+        await refresh();
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Unable to revoke key");
+      }
+    });
+  };
+
+  return <div className="signal-view">
+    <div className="view-title"><h1>Operator API</h1><p>Issue separate automation credentials. They never authorize model inference or reveal pool credentials.</p></div>
+    {error && <p role="alert" className="signal-error">{error}</p>}
+    {secret && <section className="setup-step">
+      <h2>Copy this key now</h2><p>This secret is stored only as a digest and cannot be shown again.</p>
+      <div className="command-well"><code>{secret}</code><button disabled={busy} onClick={() => void copySecret()}>Copy</button></div>
+      <button disabled={busy} onClick={() => setSecret("")}>I saved it</button>
+    </section>}
+    <section className="setup-step"><h2>Create API key</h2><form onSubmit={create} className="access-form">
+      <label><span>Label</span><input disabled={busy || !!secret} value={label} onChange={(event) => setLabel(event.target.value)} maxLength={80} required placeholder="Pool diagnostics" /></label>
+      <label><span>Access</span><select disabled={busy || !!secret} value={scope} onChange={(event) => setScope(event.target.value as "read" | "write")}><option value="read">Read-only · defaults to 90 days</option><option value="write">Read + write · defaults to 30 days</option></select></label>
+      <label><span>Custom expiry (optional)</span><input disabled={busy || !!secret} type="date" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label>
+      <button disabled={busy || !!secret} type="submit">{busy ? "Working…" : "Issue key"}</button><small>Creating or replacing a key requires a password or passkey sign-in from the last 15 minutes. Sign out and back in if prompted.</small>
+    </form></section>
+    <section className="setup-step"><h2>Issued keys</h2><div className="client-list">
+      {tokens.map((token) => <div className="client-row" key={token.id}>
+        <span><b>{token.label}</b><small>{token.scope === "write" ? "READ + WRITE" : "READ-ONLY"} · created {new Date(token.created_at).toLocaleDateString()} · expires {new Date(token.expires_at).toLocaleDateString()}{token.last_used_at ? ` · used ${new Date(token.last_used_at).toLocaleString()}` : " · never used"}</small></span>
+        <strong>{token.status}</strong>{token.status === "active" && <><button disabled={busy || !!secret} onClick={() => replace(token)}>Replace</button><button disabled={busy} onClick={() => revoke(token)}>Revoke</button></>}
+      </div>)}
+      {!tokens.length && <p>No operator API keys issued.</p>}
+    </div></section>
+    <section className="setup-step"><h2>Cold start</h2><p>Give an agent only the pool base URL and this path:</p><div className="command-well"><code>/api/operator/v1</code></div><p>The authenticated discovery response links the deployed OpenAPI specification, effective permissions, dashboard data, accounting records, model manifest, and credential-free Pi export.</p></section>
+  </div>;
+}
+
 function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
   const groups: NavGroup[] = principal?.kind === "guest"
     ? [{ label: "Your access", items: [["mine", "Usage"], ["setup", "Setup"]] }]
     : principal?.kind === "operator"
     ? [
         { label: "Operate", items: [["pulse", "Pool status"], ["insights", "Insights"], ["models", "Models"]] },
-        { label: "Manage", items: [["accounts", "Accounts"], ["passes", "Guest passes"], ["console", "Members"]] },
+        { label: "Manage", items: [["accounts", "Accounts"], ["passes", "Guest passes"], ["console", "Members"], ["operator-api", "Operator API"]] },
         { label: "Personal", items: [["mine", "Your usage"], ["setup", "Setup"]] },
       ]
     : [

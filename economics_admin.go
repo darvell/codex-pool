@@ -47,6 +47,7 @@ func (h *proxyHandler) handleEconomicsAdmin(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+	edit.AccountID = h.resolveOperatorAccountID(r, edit.AccountID)
 	at, end, err := validateEconomicsEdit(edit, time.Now())
 	if err != nil {
 		http.Error(w, "invalid economics edit: "+err.Error(), http.StatusBadRequest)
@@ -60,7 +61,11 @@ func (h *proxyHandler) handleEconomicsAdmin(w http.ResponseWriter, r *http.Reque
 		err = h.analyticsStore.editEconomics(edit, at)
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if operatorAccessFromRequest(r) != nil {
+			http.Error(w, "economics update failed", http.StatusBadRequest)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 	respondJSON(w, map[string]bool{"ok": true})

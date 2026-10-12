@@ -2170,6 +2170,13 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats.CyberPolicy = h.computeCyberPolicyStats(accounts)
+	if operatorAccessFromRequest(r) != nil {
+		safe := make(map[string]map[string]int64, len(stats.CyberPolicy.PerAccount))
+		for id, counters := range stats.CyberPolicy.PerAccount {
+			safe[hashAccountID(id)] = counters
+		}
+		stats.CyberPolicy.PerAccount = safe
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)

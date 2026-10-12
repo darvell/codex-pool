@@ -27,6 +27,7 @@ Do not resemble a generic AI dashboard: interchangeable rounded cards, neon grad
 3. Put the shortest working setup path first; reveal raw configuration for users who want to inspect it.
 4. Show pool limits, availability, and economics honestly, including missing or temporary upstream data.
 5. Use atmosphere as identity, not as chrome around every object.
+6. Let trusted automation inspect the same evidence as the dashboard through discoverable, scoped, revocable operator credentials—without crossing into model access or secret disclosure.
 
 ## Accessibility & Inclusion
 

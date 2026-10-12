@@ -21,7 +21,8 @@ func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 	})
 }
 
-func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
+func (h *proxyHandler) serveAccounts(w http.ResponseWriter, sanitized ...bool) {
+	operatorSafe := len(sanitized) > 0 && sanitized[0]
 	type row struct {
 		ID                      string      `json:"id"`
 		PublicID                string      `json:"public_id"`
@@ -69,9 +70,15 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		totals := a.Totals
 		a.mu.Unlock()
 
+		publicID := hashAccountID(a.ID)
+		id := a.ID
+		if operatorSafe {
+			id = publicID
+			accountID, idTokID, verificationURL, healthError = "", "", "", ""
+		}
 		out = append(out, row{
-			ID:                      a.ID,
-			PublicID:                hashAccountID(a.ID),
+			ID:                      id,
+			PublicID:                publicID,
 			Type:                    a.Type,
 			PlanType:                planType,
 			AccountID:               accountID,
@@ -195,7 +202,11 @@ func preserveUsageSnapshots(current, loaded []*Account) {
 
 // setAccountDisabled changes whether an account may receive traffic and
 // persists the state in its provider file.
-func (h *proxyHandler) setAccountDisabled(w http.ResponseWriter, accountID string, disabled bool) {
+func (h *proxyHandler) setAccountDisabled(w http.ResponseWriter, accountID string, disabled bool, responseIDs ...string) {
+	responseID := accountID
+	if len(responseIDs) > 0 {
+		responseID = responseIDs[0]
+	}
 	h.pool.mu.RLock()
 	var target *Account
 	for _, account := range h.pool.accounts {
@@ -227,11 +238,15 @@ func (h *proxyHandler) setAccountDisabled(w http.ResponseWriter, accountID strin
 		action = "disabled"
 	}
 	log.Printf("%s account %s", action, accountID)
-	respondJSON(w, map[string]any{"status": "ok", "account": accountID, "disabled": disabled})
+	respondJSON(w, map[string]any{"status": "ok", "account": responseID, "disabled": disabled})
 }
 
 // resurrectAccount marks a dead account as alive and resets its penalty.
-func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string) {
+func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string, responseIDs ...string) {
+	responseID := accountID
+	if len(responseIDs) > 0 {
+		responseID = responseIDs[0]
+	}
 	h.pool.mu.Lock()
 	defer h.pool.mu.Unlock()
 
@@ -246,7 +261,7 @@ func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string)
 			a.mu.Unlock()
 			log.Printf("resurrected account %s (was_dead=%v, was_rate_limited=%v)", accountID, wasDead, wasRateLimited)
 			w.WriteHeader(http.StatusOK)
-			respondJSON(w, map[string]any{"status": "ok", "account": accountID, "was_dead": wasDead})
+			respondJSON(w, map[string]any{"status": "ok", "account": responseID, "was_dead": wasDead})
 			return
 		}
 	}
@@ -275,7 +290,8 @@ func (h *proxyHandler) clearAllRateLimits(w http.ResponseWriter) {
 }
 
 // purgeAnonymousUsers removes all usage data for users that are not registered pool users.
-func (h *proxyHandler) purgeAnonymousUsers(w http.ResponseWriter) {
+func (h *proxyHandler) purgeAnonymousUsers(w http.ResponseWriter, operatorSafe ...bool) {
+	sanitizeErrors := len(operatorSafe) > 0 && operatorSafe[0]
 	allowed := make(map[string]bool)
 	if h.poolUsers != nil {
 		for _, u := range h.poolUsers.List() {
@@ -286,7 +302,11 @@ func (h *proxyHandler) purgeAnonymousUsers(w http.ResponseWriter) {
 	deleted, err := h.store.purgeNonPoolUsers(allowed)
 	if err != nil {
 		log.Printf("purge anonymous users failed: %v", err)
-		respondJSONError(w, http.StatusInternalServerError, "purge failed: "+err.Error())
+		message := "purge failed: " + err.Error()
+		if sanitizeErrors {
+			message = "purge failed"
+		}
+		respondJSONError(w, http.StatusInternalServerError, message)
 		return
 	}
 
@@ -295,7 +315,15 @@ func (h *proxyHandler) purgeAnonymousUsers(w http.ResponseWriter) {
 }
 
 // forceRefreshAccount forces a token refresh for a specific account, bypassing rate limits.
-func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID string) {
+func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID string, responseIDs ...string) {
+	h.forceRefreshAccountWithSafety(w, accountID, false, responseIDs...)
+}
+
+func (h *proxyHandler) forceRefreshAccountWithSafety(w http.ResponseWriter, accountID string, sanitizeErrors bool, responseIDs ...string) {
+	responseID := accountID
+	if len(responseIDs) > 0 {
+		responseID = responseIDs[0]
+	}
 	h.pool.mu.RLock()
 	var target *Account
 	for _, a := range h.pool.accounts {
@@ -327,16 +355,21 @@ func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID stri
 	err := h.refreshAccountOnce(context.Background(), target)
 	if err != nil {
 		log.Printf("force refresh %s failed: %v", accountID, err)
-		respondJSONError(w, http.StatusInternalServerError, "refresh failed: "+err.Error())
+		message := "refresh failed: " + err.Error()
+		if sanitizeErrors {
+			message = "refresh failed"
+		}
+		respondJSONError(w, http.StatusInternalServerError, message)
 		return
 	}
 
 	log.Printf("force refresh %s succeeded", accountID)
-	respondJSON(w, map[string]any{"status": "ok", "account": accountID})
+	respondJSON(w, map[string]any{"status": "ok", "account": responseID})
 }
 
 // serveTokenCapacity returns token tracking and capacity analysis data.
-func (h *proxyHandler) serveTokenCapacity(w http.ResponseWriter) {
+func (h *proxyHandler) serveTokenCapacity(w http.ResponseWriter, operatorSafe ...bool) {
+	sanitize := len(operatorSafe) > 0 && operatorSafe[0]
 	// Collect in-memory account totals
 	type accountTokens struct {
 		ID               string    `json:"id"`
@@ -399,6 +432,20 @@ func (h *proxyHandler) serveTokenCapacity(w http.ResponseWriter) {
 		if err != nil {
 			log.Printf("failed to estimate capacity: %v", err)
 		}
+	}
+
+	if sanitize {
+		for i := range accounts {
+			accounts[i].ID = hashAccountID(accounts[i].ID)
+		}
+		for i := range recentSamples {
+			recentSamples[i].AccountID = hashAccountID(recentSamples[i].AccountID)
+		}
+		safePersisted := make(map[string]AccountUsage, len(persistedUsage))
+		for id, usage := range persistedUsage {
+			safePersisted[hashAccountID(id)] = usage
+		}
+		persistedUsage = safePersisted
 	}
 
 	resp := map[string]any{
