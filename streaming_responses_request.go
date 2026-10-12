@@ -2,19 +2,44 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
-var errResponsesSpoolTooLarge = errors.New("Responses request exceeds disk spool limit")
+var (
+	errResponsesSpoolTooLarge       = errors.New("decoded Responses request exceeds disk spool limit")
+	errResponsesWireTooLarge        = errors.New("Responses request exceeds wire byte limit")
+	errResponsesOutputTooLarge      = errors.New("transformed Responses request exceeds disk spool limit")
+	errResponsesUnsupportedEncoding = errors.New("unsupported Responses request content encoding")
+)
+
+const (
+	maxResponsesJSONDepth       = 256
+	maxResponsesTopLevelFields  = 1024
+	maxResponsesZstdWindowBytes = 64 << 20
+	responsesTransformOverhead  = 1 << 20
+)
+
+func responsesOutputLimit(maxDecoded int64) int64 {
+	limit := maxDecoded + responsesTransformOverhead
+	if limit < maxDecoded {
+		return maxDecoded
+	}
+	return limit
+}
 
 type spoolLimitReader struct {
 	r         io.Reader
 	remaining int64
+	limitErr  error
 }
 
 func (r *spoolLimitReader) Read(p []byte) (int, error) {
@@ -22,6 +47,9 @@ func (r *spoolLimitReader) Read(p []byte) (int, error) {
 		var one [1]byte
 		n, err := r.r.Read(one[:])
 		if n > 0 {
+			if r.limitErr != nil {
+				return 0, r.limitErr
+			}
 			return 0, errResponsesSpoolTooLarge
 		}
 		return 0, err
@@ -34,19 +62,90 @@ func (r *spoolLimitReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.r.Read(p)
+	if err == nil {
+		if contextErr := r.ctx.Err(); contextErr != nil {
+			return n, contextErr
+		}
+	}
+	return n, err
+}
+
+type responsesDecodedReader struct {
+	io.Reader
+	close func() error
+}
+
+func (r *responsesDecodedReader) Close() error {
+	if r == nil || r.close == nil {
+		return nil
+	}
+	return r.close()
+}
+
+func decodeResponsesRequest(ctx context.Context, src io.Reader, encoding string, maxWire, maxDecoded int64) (*responsesDecodedReader, error) {
+	if maxWire <= 0 {
+		return nil, errResponsesWireTooLarge
+	}
+	wire := &spoolLimitReader{r: &contextReader{ctx: ctx, r: src}, remaining: maxWire, limitErr: errResponsesWireTooLarge}
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return &responsesDecodedReader{Reader: wire}, nil
+	case "gzip":
+		zr, err := gzip.NewReader(wire)
+		if err != nil {
+			return nil, fmt.Errorf("decode gzip Responses request: %w", err)
+		}
+		return &responsesDecodedReader{Reader: zr, close: zr.Close}, nil
+	case "zstd":
+		zr, err := zstd.NewReader(wire,
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderLowmem(true),
+			zstd.WithDecoderMaxMemory(maxResponsesZstdWindowBytes),
+			zstd.WithDecoderMaxWindow(maxResponsesZstdWindowBytes),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("decode zstd Responses request: %w", err)
+		}
+		return &responsesDecodedReader{Reader: zr, close: func() error { zr.Close(); return nil }}, nil
+	default:
+		return nil, fmt.Errorf("%w: %q", errResponsesUnsupportedEncoding, encoding)
+	}
+}
+
 type streamedResponsesRequest struct {
 	File                    *os.File
 	Size                    int64
+	OriginalFile            *os.File
+	OriginalSize            int64
 	Model                   string
 	ClientWantsNonStreaming bool
 	contextMetadata         map[string]any
 }
 
-func (s *streamedResponsesRequest) Close() {
-	if s != nil && s.File != nil {
-		n := s.File.Name()
-		_ = s.File.Close()
+func closeAndRemoveTemp(f *os.File) {
+	if f != nil {
+		n := f.Name()
+		_ = f.Close()
 		_ = os.Remove(n)
+	}
+}
+
+func (s *streamedResponsesRequest) Close() {
+	if s != nil {
+		closeAndRemoveTemp(s.File)
+		closeAndRemoveTemp(s.OriginalFile)
+		s.File = nil
+		s.OriginalFile = nil
 	}
 }
 
@@ -59,6 +158,13 @@ var codexResponsesDroppedFields = map[string]bool{
 // jsonLex copies JSON lexically. In particular it never turns payload strings
 // into Go strings: a multi-gigabyte prompt uses the fixed bufio buffer.
 type jsonLex struct{ r *bufio.Reader }
+
+type responsesStreamOptions struct {
+	ctx          context.Context
+	rewriteModel func(string) string
+	passthrough  bool
+	effortLimit  string
+}
 
 func newJSONLex(r io.Reader) *jsonLex { return &jsonLex{r: bufio.NewReaderSize(r, 64*1024)} }
 func (l *jsonLex) nonspace() (byte, error) {
@@ -100,46 +206,50 @@ func (l *jsonLex) copyString(out io.Writer, captureLimit int) (string, error) {
 	if captureLimit > 0 {
 		raw = append(raw, '"')
 	}
-	trailingSlashes := 0
+	escaped, unicodeDigits := false, 0
 	for {
 		fragment, readErr := l.r.ReadSlice('"')
-		if len(fragment) > 0 {
-			content := fragment
-			if fragment[len(fragment)-1] == '"' {
-				content = fragment[:len(fragment)-1]
-			}
-			for _, b := range content {
-				if b < 0x20 {
-					return "", fmt.Errorf("invalid control byte in JSON string")
-				}
-			}
-			if _, err := out.Write(fragment); err != nil {
-				return "", err
-			}
-			if captureLimit > 0 {
-				if len(raw)+len(fragment) > captureLimit {
-					return "", fmt.Errorf("JSON control string exceeds %d bytes", captureLimit)
-				}
-				raw = append(raw, fragment...)
-			}
-			if fragment[len(fragment)-1] == '"' {
-				slashes := 0
-				for i := len(content) - 1; i >= 0 && content[i] == '\\'; i-- {
-					slashes++
-				}
-				if len(content) == slashes {
-					slashes += trailingSlashes
-				}
-				if slashes%2 == 0 {
-					break
-				}
-				trailingSlashes = 0
+		closed := false
+		for i, b := range fragment {
+			if b == '"' && i == len(fragment)-1 && !escaped && unicodeDigits == 0 {
+				closed = true
 				continue
 			}
-			trailingSlashes = 0
-			for i := len(content) - 1; i >= 0 && content[i] == '\\'; i-- {
-				trailingSlashes++
+			if unicodeDigits > 0 {
+				if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')) {
+					return "", fmt.Errorf("invalid unicode escape in JSON string")
+				}
+				unicodeDigits--
+				continue
 			}
+			if escaped {
+				escaped = false
+				switch b {
+				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				case 'u':
+					unicodeDigits = 4
+				default:
+					return "", fmt.Errorf("invalid escape in JSON string")
+				}
+				continue
+			}
+			if b == '\\' {
+				escaped = true
+			} else if b < 0x20 {
+				return "", fmt.Errorf("invalid control byte in JSON string")
+			}
+		}
+		if _, err := out.Write(fragment); err != nil {
+			return "", err
+		}
+		if captureLimit > 0 {
+			if len(raw)+len(fragment) > captureLimit {
+				return "", fmt.Errorf("JSON control string exceeds %d bytes", captureLimit)
+			}
+			raw = append(raw, fragment...)
+		}
+		if closed {
+			break
 		}
 		if readErr != nil && readErr != bufio.ErrBufferFull {
 			return "", readErr
@@ -154,7 +264,11 @@ func (l *jsonLex) copyString(out io.Writer, captureLimit int) (string, error) {
 	}
 	return value, nil
 }
-func (l *jsonLex) copyValue(out io.Writer) error {
+func (l *jsonLex) copyValue(out io.Writer) error { return l.copyValueDepth(out, 0) }
+func (l *jsonLex) copyValueDepth(out io.Writer, depth int) error {
+	if depth > maxResponsesJSONDepth {
+		return fmt.Errorf("JSON nesting exceeds %d levels", maxResponsesJSONDepth)
+	}
 	b, e := l.nonspace()
 	if e != nil {
 		return e
@@ -200,7 +314,7 @@ func (l *jsonLex) copyValue(out io.Writer) error {
 			if _, e = io.WriteString(out, ":"); e != nil {
 				return e
 			}
-			if e = l.copyValue(out); e != nil {
+			if e = l.copyValueDepth(out, depth+1); e != nil {
 				return e
 			}
 			first = false
@@ -233,7 +347,7 @@ func (l *jsonLex) copyValue(out io.Writer) error {
 			if e = l.r.UnreadByte(); e != nil {
 				return e
 			}
-			if e = l.copyValue(out); e != nil {
+			if e = l.copyValueDepth(out, depth+1); e != nil {
 				return e
 			}
 			first = false
@@ -279,13 +393,32 @@ func (l *jsonLex) readControlString() (string, error) {
 	return l.copyString(io.Discard, 64*1024)
 }
 
-func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(string) string) (_ *streamedResponsesRequest, err error) {
+type spoolLimitWriter struct {
+	w         io.Writer
+	remaining int64
+}
+
+func (w *spoolLimitWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.remaining {
+		return 0, errResponsesOutputTooLarge
+	}
+	n, err := w.w.Write(p)
+	w.remaining -= int64(n)
+	return n, err
+}
+
+func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(string) string) (*streamedResponsesRequest, error) {
+	return streamResponsesRequest(r, maxBytes, responsesStreamOptions{rewriteModel: rewriteModel})
+}
+
+func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOptions) (_ *streamedResponsesRequest, err error) {
 	out, e := os.CreateTemp("", "codex-pool-responses-*.json")
 	if e != nil {
 		return nil, e
 	}
 	res := &streamedResponsesRequest{File: out, ClientWantsNonStreaming: true}
-	bw := bufio.NewWriterSize(out, 64*1024)
+	outputLimit := responsesOutputLimit(maxBytes)
+	bw := bufio.NewWriterSize(&spoolLimitWriter{w: out, remaining: outputLimit}, 64*1024)
 	defer func() {
 		if err != nil {
 			res.Close()
@@ -294,7 +427,10 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 	if maxBytes <= 0 {
 		return nil, errResponsesSpoolTooLarge
 	}
-	lex := newJSONLex(&spoolLimitReader{r: r, remaining: maxBytes})
+	if opts.ctx != nil {
+		r = &contextReader{ctx: opts.ctx, r: r}
+	}
+	lex := newJSONLex(&spoolLimitReader{r: r, remaining: maxBytes, limitErr: errResponsesSpoolTooLarge})
 	if e = lex.expect('{'); e != nil {
 		return nil, e
 	}
@@ -306,6 +442,8 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 	instructions := false
 	store := false
 	stream := false
+	var reasoningRaw, serviceTierRaw json.RawMessage
+	var suffixEffort, suffixTier string
 	writeField := func(key string, fn func() error) error {
 		if wrote {
 			if _, x := io.WriteString(bw, ","); x != nil {
@@ -356,9 +494,12 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 		if seenKeys[key] {
 			return nil, fmt.Errorf("duplicate top-level field %q", key)
 		}
+		if len(seenKeys) >= maxResponsesTopLevelFields {
+			return nil, fmt.Errorf("Responses request exceeds %d top-level fields", maxResponsesTopLevelFields)
+		}
 		seenKeys[key] = true
 		first = false
-		if codexResponsesDroppedFields[key] {
+		if !opts.passthrough && codexResponsesDroppedFields[key] {
 			if x = lex.copyValue(io.Discard); x != nil {
 				return nil, x
 			}
@@ -366,18 +507,27 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 		}
 		switch key {
 		case "store":
-			if x = lex.copyValue(io.Discard); x == nil && !store {
+			if opts.passthrough {
+				store = true
+				x = writeField(key, func() error { return lex.copyValue(bw) })
+			} else if x = lex.copyValue(io.Discard); x == nil && !store {
 				x = writeField(key, func() error { _, z := io.WriteString(bw, "false"); return z })
 				store = true
 			}
 		case "stream":
 			var requested bool
-			x = lex.decodeSmallValue(&requested, 64)
+			var raw json.RawMessage
+			x = lex.decodeSmallValue(&raw, 64)
+			if x == nil {
+				x = json.Unmarshal(raw, &requested)
+			}
 			if x == nil {
 				res.ClientWantsNonStreaming = !requested
-				if !stream {
+				stream = true
+				if opts.passthrough {
+					x = writeField(key, func() error { _, z := bw.Write(raw); return z })
+				} else {
 					x = writeField(key, func() error { _, z := io.WriteString(bw, "true"); return z })
-					stream = true
 				}
 			}
 		case "instructions":
@@ -387,21 +537,32 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 			model, z := lex.readControlString()
 			x = z
 			if x == nil {
-				if rewriteModel != nil {
-					model = rewriteModel(model)
+				if opts.rewriteModel != nil {
+					model = opts.rewriteModel(model)
+				}
+				if !opts.passthrough && isOpenAIModel(model) {
+					base, budget, hasBudget := parseThinkingSuffix(model)
+					model, suffixEffort, suffixTier = stripCodexModelSuffixes(base)
+					if hasBudget {
+						// Match injectThinkingBudget without decoding the prompt. Keep
+						// native-context metadata and apply the admission effort cap below.
+						suffixEffort = "medium"
+						if budget >= 10000 {
+							suffixEffort = "high"
+						} else if budget <= 2000 {
+							suffixEffort = "low"
+						}
+					}
 				}
 				res.Model = model
 				x = writeField(key, func() error { v, _ := json.Marshal(model); _, z := bw.Write(v); return z })
 			}
-		case "client_metadata", "reasoning":
-			// Keep control values separate from the prompt, including when they follow input.
+		case "client_metadata":
 			var raw json.RawMessage
 			x = lex.decodeSmallValue(&raw, contextRequestLimit)
 			if x == nil {
 				var value any
-				decoder := json.NewDecoder(strings.NewReader(string(raw)))
-				decoder.UseNumber()
-				x = decoder.Decode(&value)
+				x = decodeResponsesControl(raw, &value)
 				if x == nil {
 					if res.contextMetadata == nil {
 						res.contextMetadata = make(map[string]any)
@@ -410,10 +571,51 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 					x = writeField(key, func() error { _, z := bw.Write(raw); return z })
 				}
 			}
+		case "reasoning":
+			if opts.passthrough {
+				x = writeField(key, func() error { return lex.copyValue(bw) })
+			} else {
+				x = lex.decodeSmallValue(&reasoningRaw, contextRequestLimit)
+			}
+		case "service_tier":
+			if opts.passthrough {
+				x = writeField(key, func() error { return lex.copyValue(bw) })
+			} else {
+				x = lex.decodeSmallValue(&serviceTierRaw, 64*1024)
+			}
+		case "text":
+			if opts.passthrough {
+				x = writeField(key, func() error { return lex.copyValue(bw) })
+			} else {
+				var raw json.RawMessage
+				x = lex.decodeSmallValue(&raw, largeReplayBodyThreshold)
+				if x == nil {
+					var value any
+					x = decodeResponsesControl(raw, &value)
+					if text, _ := value.(map[string]any); text != nil {
+						if format, _ := text["format"].(map[string]any); format != nil {
+							if schema, _ := format["schema"].(map[string]any); schema != nil {
+								format["schema"] = prepareCodexJSONSchema(schema)
+							}
+						}
+					}
+					if x == nil {
+						var encoded []byte
+						encoded, x = json.Marshal(value)
+						if x == nil {
+							x = writeField(key, func() error { _, z := bw.Write(encoded); return z })
+						}
+					}
+				}
+			}
 		case "tools":
-			x = writeField(key, func() error { return lex.copyToolsArray(bw) })
+			x = writeField(key, func() error { return lex.copyToolsArray(bw, !opts.passthrough) })
 		case "input":
-			x = writeField(key, func() error { return lex.copyResponsesInput(bw) })
+			if opts.passthrough {
+				x = writeField(key, func() error { return lex.copyFilteredArray(bw) })
+			} else {
+				x = writeField(key, func() error { return lex.copyResponsesInput(bw) })
+			}
 		case "tool_choice":
 			f, keep, z := lex.spoolValueAndCheckMCP()
 			x = z
@@ -437,25 +639,77 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 			return nil, x
 		}
 	}
-	if !instructions {
-		if e = writeField("instructions", func() error { _, z := io.WriteString(bw, `""`); return z }); e != nil {
-			return nil, e
+	if !opts.passthrough {
+		if len(reasoningRaw) > 0 || suffixEffort != "" {
+			var reasoningValue any
+			if len(reasoningRaw) > 0 {
+				if e = decodeResponsesControl(reasoningRaw, &reasoningValue); e != nil {
+					return nil, e
+				}
+			}
+			reasoning, _ := reasoningValue.(map[string]any)
+			if suffixEffort != "" {
+				if reasoning == nil {
+					reasoning = make(map[string]any)
+				}
+				if _, ok := reasoning["summary"]; !ok {
+					reasoning["summary"] = "auto"
+				}
+				reasoning["effort"] = suffixEffort
+				reasoningValue = reasoning
+			}
+			if reasoning != nil && opts.effortLimit != "" {
+				current, _ := reasoning["effort"].(string)
+				ceiling, ceilingOK := codexEffortRank[strings.ToLower(strings.TrimSpace(opts.effortLimit))]
+				rank, rankOK := codexEffortRank[strings.ToLower(strings.TrimSpace(current))]
+				if ceilingOK && rankOK && rank > ceiling {
+					reasoning["effort"] = strings.ToLower(strings.TrimSpace(opts.effortLimit))
+				}
+				reasoningValue = reasoning
+			}
+			encoded, marshalErr := json.Marshal(reasoningValue)
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			if e = writeField("reasoning", func() error { _, z := bw.Write(encoded); return z }); e != nil {
+				return nil, e
+			}
+			if res.contextMetadata == nil {
+				res.contextMetadata = make(map[string]any)
+			}
+			res.contextMetadata["reasoning"] = reasoningValue
 		}
-	}
-	if !store {
-		if e = writeField("store", func() error { _, z := io.WriteString(bw, "false"); return z }); e != nil {
-			return nil, e
+		if suffixTier != "" {
+			serviceTierRaw, _ = json.Marshal(suffixTier)
 		}
-	}
-	if !stream {
-		if e = writeField("stream", func() error { _, z := io.WriteString(bw, "true"); return z }); e != nil {
-			return nil, e
+		if len(serviceTierRaw) > 0 {
+			if e = writeField("service_tier", func() error { _, z := bw.Write(serviceTierRaw); return z }); e != nil {
+				return nil, e
+			}
+		}
+		if !instructions {
+			if e = writeField("instructions", func() error { _, z := io.WriteString(bw, `""`); return z }); e != nil {
+				return nil, e
+			}
+		}
+		if !store {
+			if e = writeField("store", func() error { _, z := io.WriteString(bw, "false"); return z }); e != nil {
+				return nil, e
+			}
+		}
+		if !stream {
+			if e = writeField("stream", func() error { _, z := io.WriteString(bw, "true"); return z }); e != nil {
+				return nil, e
+			}
 		}
 	}
 	if e = writeByte(bw, '}'); e != nil {
 		return nil, e
 	}
 	if trailing, e2 := lex.nonspace(); e2 != io.EOF {
+		if e2 != nil {
+			return nil, e2
+		}
 		return nil, fmt.Errorf("trailing JSON data starting with %q", trailing)
 	}
 	if e = bw.Flush(); e != nil {
@@ -468,6 +722,12 @@ func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(
 		return nil, e
 	}
 	return res, nil
+}
+
+func decodeResponsesControl(raw json.RawMessage, dst any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	return decoder.Decode(dst)
 }
 
 func (l *jsonLex) decodeSmallValue(dst any, limit int64) error {
@@ -488,7 +748,7 @@ func (l *jsonLex) decodeSmallValue(dst any, limit int64) error {
 	return json.NewDecoder(f).Decode(dst)
 }
 
-func (l *jsonLex) copyToolsArray(out io.Writer) error {
+func (l *jsonLex) copyToolsArray(out io.Writer, prepareSchema bool) error {
 	b, err := l.nonspace()
 	if err != nil {
 		return err
@@ -534,13 +794,34 @@ func (l *jsonLex) copyToolsArray(out io.Writer) error {
 			return err
 		}
 		var tool map[string]any
-		if err = json.NewDecoder(f).Decode(&tool); err != nil {
+		decoder := json.NewDecoder(f)
+		decoder.UseNumber()
+		if err = decoder.Decode(&tool); err != nil {
 			removeLexTemp(f)
 			return err
 		}
-		removeLexTemp(f)
 		if typ, _ := tool["type"].(string); strings.TrimSpace(typ) == hostedMCPToolType {
+			removeLexTemp(f)
 			first = false
+			continue
+		}
+		if wrote {
+			if _, err = io.WriteString(out, ","); err != nil {
+				removeLexTemp(f)
+				return err
+			}
+		}
+		if !prepareSchema {
+			if _, err = f.Seek(0, io.SeekStart); err != nil {
+				removeLexTemp(f)
+				return err
+			}
+			_, err = io.Copy(out, f)
+			removeLexTemp(f)
+			if err != nil {
+				return err
+			}
+			wrote, first = true, false
 			continue
 		}
 		if params, _ := tool["parameters"].(map[string]any); params != nil {
@@ -552,13 +833,9 @@ func (l *jsonLex) copyToolsArray(out io.Writer) error {
 			}
 		}
 		encoded, err := json.Marshal(tool)
+		removeLexTemp(f)
 		if err != nil {
 			return err
-		}
-		if wrote {
-			if _, err = io.WriteString(out, ","); err != nil {
-				return err
-			}
 		}
 		if _, err = out.Write(encoded); err != nil {
 			return err

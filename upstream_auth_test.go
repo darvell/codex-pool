@@ -49,7 +49,7 @@ func assertPoolAuthFailure(t *testing.T, resp *http.Response) {
 }
 
 func TestStreamedPoolAuthRecovery(t *testing.T) {
-	for _, mode := range []string{"chunked", "oversized"} {
+	for _, mode := range []string{"chunked", "oversized", "gzip", "zstd"} {
 		for _, recovery := range []string{"unavailable", "refreshed", "still-rejected", "refresh-failed"} {
 			t.Run(mode+"/"+recovery, func(t *testing.T) {
 				t.Setenv("POOL_JWT_SECRET", "test-secret")
@@ -88,13 +88,21 @@ func TestStreamedPoolAuthRecovery(t *testing.T) {
 				fx := newCodexProxyFixture(t, base, []*Account{account})
 				fx.handler.cfg.disableRefresh = recovery == "unavailable"
 				fx.handler.cfg.maxSpoolBodyBytes = 1 << 20
+				fx.handler.cfg.maxWireBodyBytes = 1 << 20
 				fx.handler.cfg.maxAttempts = 1
 				fx.handler.refreshTransport = http.DefaultTransport
 				fx.handler.aliases = newModelAliases(nil)
 				payload := `{"model":"gpt-6-astra","stream":true,"input":[{"role":"user","content":"` + strings.Repeat("x", 4096) + `"}]}`
-				req, _ := http.NewRequest(http.MethodPost, fx.server.URL+"/v1/responses", strings.NewReader(payload))
+				wire := []byte(payload)
+				if mode == "gzip" || mode == "zstd" {
+					wire = compressedResponsesBody(t, mode, wire)
+				}
+				req, _ := http.NewRequest(http.MethodPost, fx.server.URL+"/v1/responses", bytes.NewReader(wire))
 				req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "test-user"))
 				req.Header.Set("Content-Type", "application/json")
+				if mode == "gzip" || mode == "zstd" {
+					req.Header.Set("Content-Encoding", mode)
+				}
 				if mode == "chunked" {
 					req.ContentLength = -1
 				}

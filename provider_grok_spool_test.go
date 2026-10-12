@@ -113,18 +113,19 @@ func TestGrokSpoolBoundedMemory(t *testing.T) {
 }
 
 func TestGrokSpoolOpaqueJSON(t *testing.T) {
-	for _, body := range []string{
-		`{"model":"grok-4.6","input":"invalid \x escape","metadata":{}}`,
-		`{"model":"grok-4.6","input":1e999,"metadata":{}}`,
-	} {
-		s := newGrokTestSpool(t, strings.NewReader(body), "grok-4.6")
-		if err := sanitizeSpooledGrokRequest(s); err != nil {
-			t.Fatal(err)
-		}
-		got, err := io.ReadAll(s.File)
-		if err != nil || !bytes.Equal(got, rewriteAndSanitizeGrokRequestBody([]byte(body), s.Model)) {
-			t.Fatalf("opaque body changed: %q, error = %v", got, err)
-		}
+	invalid := newGrokTestSpool(t, strings.NewReader(`{"model":"grok-4.6","input":"invalid \x escape","metadata":{}}`), "grok-4.6")
+	if err := sanitizeSpooledGrokRequest(invalid); err == nil {
+		t.Fatal("invalid JSON escape was accepted")
+	}
+
+	body := `{"model":"grok-4.6","input":1e999,"metadata":{}}`
+	s := newGrokTestSpool(t, strings.NewReader(body), "grok-4.6")
+	if err := sanitizeSpooledGrokRequest(s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(s.File)
+	if err != nil || !bytes.Equal(got, rewriteAndSanitizeGrokRequestBody([]byte(body), s.Model)) {
+		t.Fatalf("opaque body changed: %q, error = %v", got, err)
 	}
 }
 
@@ -197,6 +198,11 @@ func TestGrokSpoolFailureKeepsInput(t *testing.T) {
 	got, err := io.ReadAll(s.File)
 	if err != nil || string(got) != body {
 		t.Fatalf("original body = %q, error = %v", got, err)
+	}
+	name := s.File.Name()
+	s.Close()
+	if _, err := os.Stat(name); !os.IsNotExist(err) {
+		t.Fatalf("failed Grok rewrite spool remains after Close: %v", err)
 	}
 }
 

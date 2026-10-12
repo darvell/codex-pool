@@ -62,6 +62,8 @@ type config struct {
 	claudeTraceSecrets         bool
 	maxInMemoryBodyBytes       int64
 	maxSpoolBodyBytes          int64
+	maxWireBodyBytes           int64
+	responsesBodyTimeout       time.Duration
 	flushInterval              time.Duration
 	usageRefresh               time.Duration
 	maxAttempts                int
@@ -188,10 +190,22 @@ func buildConfig() *config {
 			cfg.maxInMemoryBodyBytes = n
 		}
 	}
-	cfg.maxSpoolBodyBytes = 1024 * 1024 * 1024 // 1 GiB disk-backed request ceiling
+	cfg.maxSpoolBodyBytes = 1024 * 1024 * 1024 // 1 GiB decoded disk-backed request ceiling
 	if v := getenv("PROXY_MAX_SPOOL_BODY_BYTES", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n > 0 {
 			cfg.maxSpoolBodyBytes = n
+		}
+	}
+	cfg.maxWireBodyBytes = cfg.maxSpoolBodyBytes
+	if v := getenv("PROXY_MAX_WIRE_BODY_BYTES", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n > 0 {
+			cfg.maxWireBodyBytes = n
+		}
+	}
+	cfg.responsesBodyTimeout = 120 * time.Second
+	if v := getenv("PROXY_RESPONSES_BODY_TIMEOUT_SECONDS", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n > 0 {
+			cfg.responsesBodyTimeout = time.Duration(n) * time.Second
 		}
 	}
 	cfg.flushInterval = 0
@@ -547,6 +561,7 @@ func main() {
 		startTime:            time.Now(),
 		pacer:                pacer,
 		largeReplayBodies:    make(chan struct{}, 1),
+		responsesSpoolBodies: make(chan struct{}, 1),
 	}
 	if store != nil {
 		contextStore, err := newNativeContextStore(store.db)
@@ -705,6 +720,9 @@ type proxyHandler struct {
 	// Large JSON rewrites temporarily hold several copies of a request. This
 	// deliberately serializes only those requests on a small production host.
 	largeReplayBodies chan struct{}
+	// Disk-backed Responses bodies retain decoded and transformed temporary files
+	// through upstream replay, independently of the in-memory rewrite gate.
+	responsesSpoolBodies chan struct{}
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -735,6 +753,21 @@ const largeReplayBodyThreshold = 8 * 1024 * 1024
 // acquireLargeReplayBody serializes requests whose JSON rewrite retains large
 // raw, decoded, and re-marshaled copies simultaneously. Small requests remain
 // fully concurrent. A missing channel keeps lightweight test handlers working.
+func (h *proxyHandler) acquireResponsesSpool(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if h == nil || h.responsesSpoolBodies == nil {
+		return func() {}, nil
+	}
+	select {
+	case h.responsesSpoolBodies <- struct{}{}:
+		return sync.OnceFunc(func() { <-h.responsesSpoolBodies }), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (h *proxyHandler) acquireLargeReplayBody(ctx context.Context, contentLength int64) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1830,6 +1863,150 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 	return body
 }
 
+func (h *proxyHandler) responsesWireLimit() int64 {
+	if h != nil && h.cfg != nil && h.cfg.maxWireBodyBytes > 0 {
+		return h.cfg.maxWireBodyBytes
+	}
+	if h != nil && h.cfg != nil {
+		return h.cfg.maxSpoolBodyBytes
+	}
+	return 0
+}
+
+func validateResponsesSpoolSize(spooled *streamedResponsesRequest, maxDecoded int64) error {
+	if spooled == nil || spooled.File == nil {
+		return errors.New("Responses replay spool unavailable")
+	}
+	info, err := spooled.File.Stat()
+	if err != nil {
+		return err
+	}
+	spooled.Size = info.Size()
+	if spooled.Size > responsesOutputLimit(maxDecoded) {
+		return fmt.Errorf("%w (%d > %d)", errResponsesOutputTooLarge, spooled.Size, responsesOutputLimit(maxDecoded))
+	}
+	return nil
+}
+
+var errResponsesBodyTimeout = errors.New("Responses request body upload timed out")
+
+func responsesSpoolError(w http.ResponseWriter, prefix string, err error) {
+	status := http.StatusBadRequest
+	switch {
+	case errors.Is(err, errResponsesUnsupportedEncoding):
+		status = http.StatusUnsupportedMediaType
+	case errors.Is(err, errResponsesWireTooLarge), errors.Is(err, errResponsesSpoolTooLarge), errors.Is(err, errResponsesOutputTooLarge):
+		status = http.StatusRequestEntityTooLarge
+	case errors.Is(err, errResponsesBodyTimeout):
+		status = http.StatusRequestTimeout
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return
+	}
+	http.Error(w, prefix+err.Error(), status)
+}
+
+func (h *proxyHandler) spoolHTTPResponsesRequest(w http.ResponseWriter, r *http.Request, opts responsesStreamOptions) (_ *streamedResponsesRequest, err error) {
+	wireLimit := h.responsesWireLimit()
+	if r.ContentLength > wireLimit && wireLimit > 0 {
+		return nil, fmt.Errorf("%w (%d > %d)", errResponsesWireTooLarge, r.ContentLength, wireLimit)
+	}
+	uploadCtx := r.Context()
+	cancelUpload := func() {}
+	if h.cfg.responsesBodyTimeout > 0 {
+		uploadCtx, cancelUpload = context.WithTimeout(r.Context(), h.cfg.responsesBodyTimeout)
+	}
+	controller := http.NewResponseController(w)
+	if deadline, ok := uploadCtx.Deadline(); ok && w != nil {
+		_ = controller.SetReadDeadline(deadline)
+	}
+	originalBody := r.Body
+	closed := make(chan struct{})
+	stopClose := context.AfterFunc(uploadCtx, func() {
+		defer close(closed)
+		// net/http request Body.Close can wait behind an in-progress socket read.
+		// Expire the connection read first so cancellation releases admission now,
+		// rather than waiting for the independent upload deadline.
+		if w != nil {
+			_ = controller.SetReadDeadline(time.Now())
+		}
+		_ = originalBody.Close()
+	})
+	finishUpload := sync.OnceFunc(func() {
+		if !stopClose() {
+			<-closed
+		}
+		cancelUpload()
+		if w != nil {
+			_ = controller.SetReadDeadline(time.Time{})
+		}
+	})
+	defer finishUpload()
+
+	decoded, err := decodeResponsesRequest(uploadCtx, r.Body, r.Header.Get("Content-Encoding"), wireLimit, h.cfg.maxSpoolBodyBytes)
+	if err != nil {
+		if errors.Is(uploadCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w after %s", errResponsesBodyTimeout, h.cfg.responsesBodyTimeout)
+		}
+		if contextErr := r.Context().Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, err
+	}
+	defer decoded.Close()
+
+	raw, err := os.CreateTemp("", "codex-pool-responses-decoded-*.json")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			closeAndRemoveTemp(raw)
+		}
+	}()
+	limited := &spoolLimitReader{r: decoded, remaining: h.cfg.maxSpoolBodyBytes, limitErr: errResponsesSpoolTooLarge}
+	if _, err = io.Copy(raw, limited); err != nil {
+		if errors.Is(err, zstd.ErrWindowSizeExceeded) || errors.Is(err, zstd.ErrDecoderSizeExceeded) {
+			return nil, fmt.Errorf("%w: zstd resource window exceeds %d bytes", errResponsesSpoolTooLarge, maxResponsesZstdWindowBytes)
+		}
+		if errors.Is(uploadCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w after %s", errResponsesBodyTimeout, h.cfg.responsesBodyTimeout)
+		}
+		if contextErr := r.Context().Err(); contextErr != nil {
+			return nil, contextErr
+		}
+		return nil, err
+	}
+	finishUpload()
+	originalSize, err := raw.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	// Small bodies must enter the established buffered pipeline before any
+	// disk-only control limits or Codex-specific parsing/routing. Compression
+	// must not reject buffered provider routes or valid small BYOK requests.
+	if originalSize <= h.cfg.maxInMemoryBodyBytes {
+		return &streamedResponsesRequest{OriginalFile: raw, OriginalSize: originalSize}, nil
+	}
+	opts.ctx = r.Context()
+	if _, err = raw.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	spooled, err := streamResponsesRequest(raw, h.cfg.maxSpoolBodyBytes, opts)
+	if err != nil {
+		return nil, err
+	}
+	spooled.OriginalFile = raw
+	if spooled.OriginalSize, err = raw.Seek(0, io.SeekEnd); err != nil {
+		spooled.Close()
+		return nil, err
+	}
+	if _, err = raw.Seek(0, io.SeekStart); err != nil {
+		spooled.Close()
+		return nil, err
+	}
+	return spooled, nil
+}
+
 // decodeRequestBody makes compressed JSON routable and rewritable. We must not
 // forward encoded bytes after a model-based provider override: the selected
 // provider needs the rewritten JSON, not the original Codex wire payload.
@@ -1961,7 +2138,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
-	if streamBody || shouldPeekStreamedModelRoute(r) {
+	responsesEncoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
+	responsesCompressed := responsesEncoding == "gzip" || responsesEncoding == "zstd"
+	responsesCompact := isCodexResponsesPath(r.URL.Path) && strings.HasSuffix(normalizeNoopPath(r.URL.Path), "/compact")
+	responsesNeedsSpool := isCodexResponsesPath(r.URL.Path) && !responsesCompact &&
+		(responsesCompressed || r.ContentLength < 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes ||
+			(h.responsesWireLimit() > 0 && r.ContentLength > h.responsesWireLimit()))
+	// The bounded lexical spool performs Responses model routing itself. Peeking
+	// before upload admission could otherwise block forever on a chunked body.
+	if !responsesNeedsSpool && (streamBody || shouldPeekStreamedModelRoute(r)) {
 		var err error
 		provider, targetBase, err = h.applyStreamedModelRoute(r, provider, targetBase, reqID)
 		if err != nil {
@@ -1973,15 +2158,19 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	// Codex-shaped Responses paths need rewriting and hosted-MCP filtering, but
 	// large prompts must not be decoded into map[string]any. Spool token-by-token,
-	// then model-route: Grok/Kimi/MiniMax/ZAI/Xiaomi/Adverserial must not inherit
-	// the path-selected Codex upstream (especially /backend-api/codex/responses).
+	// then model-route. Codex and Grok have disk-backed normalization; other
+	// providers fall back only when decoded bodies fit the bounded RAM path.
 	if isCodexResponsesPath(r.URL.Path) {
-		largeOrChunked := r.ContentLength < 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes
-		encoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
-		uncompressedJSON := encoding == "" || encoding == "identity"
-		isCompact := strings.HasSuffix(normalizeNoopPath(r.URL.Path), "/compact")
-		if largeOrChunked && uncompressedJSON && !isCompact {
-			releaseSpool, err := h.acquireLargeReplayBody(r.Context(), r.ContentLength)
+		// Compact requests still use their dedicated buffered validation and are
+		// intentionally outside this narrowly scoped Responses streaming path.
+		if !responsesCompact && responsesEncoding != "" && responsesEncoding != "identity" && !responsesCompressed {
+			responsesSpoolError(w, "streaming Responses rewrite: ", fmt.Errorf("%w: %q", errResponsesUnsupportedEncoding, responsesEncoding))
+			return
+		}
+		if responsesNeedsSpool {
+			// Compressed requests whose wire size is deceptively small still consume
+			// the single bounded decompression/spool admission slot.
+			releaseSpool, err := h.acquireResponsesSpool(r.Context())
 			if err != nil {
 				return
 			}
@@ -1991,7 +2180,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if resolved, ok := h.aliases.resolve(model); ok {
 					model = resolved
 				}
-				if base, _, hasSuffix := parseThinkingSuffix(model); hasSuffix {
+				if base, _, hasSuffix := parseThinkingSuffix(model); hasSuffix && !isOpenAIModel(base) {
 					model = base
 				}
 				if routed, _, canonical := h.resolveStreamedModelRoute(r.URL.Path, model); routed != nil && canonical != "" {
@@ -2000,20 +2189,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				return model
 			}
 			spoolStarted := time.Now()
-			spooled, spoolErr := streamCodexResponsesRequest(r.Body, h.cfg.maxSpoolBodyBytes, rewriteModel)
+			spooled, spoolErr := h.spoolHTTPResponsesRequest(w, r, responsesStreamOptions{
+				rewriteModel: rewriteModel,
+				effortLimit:  h.effortCap.limitFor(userID, originIP),
+			})
 			if spoolErr != nil {
-				status := http.StatusBadRequest
-				if errors.Is(spoolErr, errResponsesSpoolTooLarge) {
-					status = http.StatusRequestEntityTooLarge
-				}
-				http.Error(w, "streaming Responses rewrite: "+spoolErr.Error(), status)
+				responsesSpoolError(w, "streaming Responses rewrite: ", spoolErr)
 				return
 			}
-			defer spooled.Close()
-			if spooled.ClientWantsNonStreaming {
-				http.Error(w, "oversized Responses requests currently require stream=true", http.StatusBadRequest)
-				return
-			}
+			defer func() { spooled.Close() }()
 			if spooled.Model != "" {
 				if routed, routeBase, _ := h.resolveStreamedModelRoute(r.URL.Path, spooled.Model); routed != nil {
 					provider = routed
@@ -2027,28 +2211,86 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					return
 				}
 			}
-			if accountType == AccountTypeGrok {
-				if err := sanitizeSpooledGrokRequest(spooled); err != nil {
-					http.Error(w, "grok request sanitizing error: "+err.Error(), http.StatusBadRequest)
+			needsBufferedTransforms := accountType != AccountTypeCodex && accountType != AccountTypeGrok
+			canFallbackBuffered := spooled.OriginalSize <= h.cfg.maxInMemoryBodyBytes
+			if canFallbackBuffered {
+				// Compression and chunking hide decoded size until after admission.
+				// Return small bodies to the established whole-object pipeline so every
+				// provider transform and non-streaming aggregation remains unchanged.
+				decodedBody, readErr := io.ReadAll(io.NewSectionReader(spooled.OriginalFile, 0, spooled.OriginalSize))
+				if readErr != nil {
+					http.Error(w, readErr.Error(), http.StatusBadRequest)
 					return
 				}
+				r.Body = io.NopCloser(bytes.NewReader(decodedBody))
+				r.GetBody = nil
+				r.ContentLength = int64(len(decodedBody))
+				r.Header.Del("Content-Length")
+				r.Header.Del("Content-Encoding")
+				streamBody = false
+				spooled.Close()
+				releaseSpool()
+			} else if needsBufferedTransforms {
+				http.Error(w, fmt.Sprintf("oversized Responses request for %s requires provider-specific buffered transforms", accountType), http.StatusRequestEntityTooLarge)
+				return
+			} else {
+				if spooled.ClientWantsNonStreaming {
+					http.Error(w, "oversized pooled Responses requests currently require stream=true", http.StatusRequestEntityTooLarge)
+					return
+				}
+				if accountType == AccountTypeGrok {
+					if _, err := spooled.OriginalFile.Seek(0, io.SeekStart); err != nil {
+						http.Error(w, "grok request replay error: "+err.Error(), http.StatusBadRequest)
+						return
+					}
+					// The initial routing pass is no longer needed once Grok is known.
+					// Remove it before the preserve-fields pass to keep peak disk use bounded.
+					closeAndRemoveTemp(spooled.File)
+					spooled.File = nil
+					grokSpool, err := streamResponsesRequest(spooled.OriginalFile, h.cfg.maxSpoolBodyBytes, responsesStreamOptions{
+						ctx:          r.Context(),
+						passthrough:  true,
+						rewriteModel: rewriteModel,
+					})
+					if err != nil {
+						responsesSpoolError(w, "grok request replay error: ", err)
+						return
+					}
+					grokSpool.OriginalFile = spooled.OriginalFile
+					grokSpool.OriginalSize = spooled.OriginalSize
+					spooled.File, spooled.OriginalFile = nil, nil
+					spooled = grokSpool
+					if err := sanitizeSpooledGrokRequest(spooled); err != nil {
+						http.Error(w, "grok request sanitizing error: "+err.Error(), http.StatusBadRequest)
+						return
+					}
+					if err := validateResponsesSpoolSize(spooled, h.cfg.maxSpoolBodyBytes); err != nil {
+						responsesSpoolError(w, "grok request sanitizing error: ", err)
+						return
+					}
+				}
+				closeAndRemoveTemp(spooled.OriginalFile)
+				spooled.OriginalFile = nil
+				spooled.OriginalSize = 0
+				r = r.WithContext(context.WithValue(r.Context(), responsesRequestIntentKey{}, requestIntent{stream: !spooled.ClientWantsNonStreaming}))
+				if accountType == AccountTypeCodex {
+					r = r.WithContext(context.WithValue(r.Context(), contextSpoolKey{}, spooled))
+				}
+				r.Body = spooled.File
+				r.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(io.NewSectionReader(spooled.File, 0, spooled.Size)), nil
+				}
+				// Keep admission until the upstream response completes: the transformed
+				// file remains live and replayable for authentication recovery.
+				r.ContentLength = spooled.Size
+				r.Header.Del("Content-Length")
+				r.Header.Del("Content-Encoding")
+				r.Header.Set("Content-Type", "application/json")
+				log.Printf("[%s] disk-streaming Responses request: bytes=%d model=%s provider=%s transform_ms=%d",
+					reqID, spooled.Size, spooled.Model, accountType, time.Since(spoolStarted).Milliseconds())
+				h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
+				return
 			}
-			if accountType == AccountTypeCodex {
-				r = r.WithContext(context.WithValue(r.Context(), contextSpoolKey{}, spooled))
-			}
-			r.Body = spooled.File
-			r.GetBody = func() (io.ReadCloser, error) {
-				return io.NopCloser(io.NewSectionReader(spooled.File, 0, spooled.Size)), nil
-			}
-			// Only the disk-backed body remains; generation must not hold a RAM slot.
-			releaseSpool()
-			r.ContentLength = spooled.Size
-			r.Header.Del("Content-Length")
-			r.Header.Set("Content-Type", "application/json")
-			log.Printf("[%s] disk-streaming Responses request: bytes=%d model=%s provider=%s transform_ms=%d",
-				reqID, spooled.Size, spooled.Model, accountType, time.Since(spoolStarted).Milliseconds())
-			h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
-			return
 		}
 		if accountType == AccountTypeCodex {
 			streamBody = false
@@ -4001,11 +4243,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	accountType := provider.Type()
 	spooled, _ := r.Context().Value(contextSpoolKey{}).(*streamedResponsesRequest)
 	contextSession := ""
+	requestedModel := ""
 	if spooled != nil {
 		contextSession = contextSessionID(spooled.contextMetadata)
+		requestedModel = spooled.Model
 	}
 
-	requiredPlan := requiredPlanForRequest(accountType, r, "")
+	requiredPlan := requiredPlanForRequest(accountType, r, requestedModel)
 	clientIP := getClientIP(r)
 	acc := h.pool.candidate(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP)
 	if acc == nil {
@@ -4020,9 +4264,12 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		atomic.AddInt64(&h.inflight, -1)
 	}()
 
-	// For streamed-body requests we can't inspect the body, so pass nil.
-	// clientOrDefaultTimeout will still check X-Stainless-Timeout header.
-	timeout := clientOrDefaultTimeout(r, h.cfg.requestTimeout, h.cfg.streamTimeout, nil)
+	// Disk-backed requests captured client stream intent during lexical parsing.
+	intent, _ := r.Context().Value(responsesRequestIntentKey{}).(requestIntent)
+	if spooled != nil {
+		intent.stream = !spooled.ClientWantsNonStreaming
+	}
+	timeout := timeoutForRequestIntent(r, h.cfg.requestTimeout, h.cfg.streamTimeout, intent)
 
 	ctx := r.Context()
 	var cancel context.CancelFunc
@@ -4052,6 +4299,10 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	if spooled != nil {
 		if err := h.nativeContext.prepareSpool(contextScope(userID), clientIP, spooled); err != nil {
 			writeContextError(w, err)
+			return
+		}
+		if err := validateResponsesSpoolSize(spooled, h.cfg.maxSpoolBodyBytes); err != nil {
+			responsesSpoolError(w, "native context Responses rewrite: ", err)
 			return
 		}
 		r.Body = spooled.File
@@ -4493,6 +4744,8 @@ type requestIntent struct {
 	image  bool
 }
 
+type responsesRequestIntentKey struct{}
+
 func timeoutForRequestIntent(r *http.Request, reqTimeout, streamTimeout time.Duration, intent requestIntent) time.Duration {
 	const codexExpectedStreamTimeout = 5 * time.Minute
 
@@ -4808,6 +5061,58 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		h.proxyPassthroughWebSocket(w, r, reqID, providerType, provider, targetBase, start)
 		return
 	}
+	if providerType == AccountTypeCodex && isCodexResponsesPath(path) && !isCompactPath(path) {
+		encoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
+		compressed := encoding == "gzip" || encoding == "zstd"
+		if encoding != "" && encoding != "identity" && !compressed {
+			responsesSpoolError(w, "streaming passthrough Responses filter: ", fmt.Errorf("%w: %q", errResponsesUnsupportedEncoding, encoding))
+			return
+		}
+		largeOrChunked := r.ContentLength < 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes ||
+			(h.responsesWireLimit() > 0 && r.ContentLength > h.responsesWireLimit())
+		if largeOrChunked || compressed {
+			releaseSpool, err := h.acquireResponsesSpool(r.Context())
+			if err != nil {
+				return
+			}
+			defer releaseSpool()
+			spooled, err := h.spoolHTTPResponsesRequest(w, r, responsesStreamOptions{passthrough: true})
+			if err != nil {
+				responsesSpoolError(w, "streaming passthrough Responses filter: ", err)
+				return
+			}
+			defer spooled.Close()
+			if spooled.OriginalSize <= h.cfg.maxInMemoryBodyBytes {
+				decodedBody, readErr := io.ReadAll(io.NewSectionReader(spooled.OriginalFile, 0, spooled.OriginalSize))
+				if readErr != nil {
+					http.Error(w, readErr.Error(), http.StatusBadRequest)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(decodedBody))
+				r.GetBody = nil
+				r.ContentLength = int64(len(decodedBody))
+				r.Header.Del("Content-Length")
+				r.Header.Del("Content-Encoding")
+				spooled.Close()
+				releaseSpool()
+			} else {
+				r.Body = spooled.File
+				r.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(io.NewSectionReader(spooled.File, 0, spooled.Size)), nil
+				}
+				r.ContentLength = spooled.Size
+				r.Header.Del("Content-Length")
+				r.Header.Del("Content-Encoding")
+				r.Header.Set("Content-Type", "application/json")
+				closeAndRemoveTemp(spooled.OriginalFile)
+				spooled.OriginalFile = nil
+				spooled.OriginalSize = 0
+				r = r.WithContext(context.WithValue(r.Context(), responsesRequestIntentKey{}, requestIntent{stream: !spooled.ClientWantsNonStreaming}))
+				h.proxyPassthroughStreamed(w, r, reqID, providerType, provider, targetBase, start)
+				return
+			}
+		}
+	}
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
 	if providerType == AccountTypeCodex && (codexPassthroughNeedsBodyRewrite(path) || isCodexResponsesPath(path)) {
 		streamBody = false
@@ -5111,7 +5416,8 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.Request, reqID string, providerType AccountType, provider Provider, targetBase *url.URL, start time.Time) {
-	timeout := clientOrDefaultTimeout(r, h.cfg.requestTimeout, h.cfg.streamTimeout, nil)
+	intent, _ := r.Context().Value(responsesRequestIntentKey{}).(requestIntent)
+	timeout := timeoutForRequestIntent(r, h.cfg.requestTimeout, h.cfg.streamTimeout, intent)
 
 	ctx := r.Context()
 	var cancel context.CancelFunc
@@ -5131,13 +5437,23 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 
 	var reqSample *bytes.Buffer
 	var body io.Reader = r.Body
-	if (h.cfg.logBodies && h.cfg.bodyLogLimit > 0) || (providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled()) {
+	if r.GetBody != nil {
+		var err error
+		body, err = r.GetBody()
+		if err != nil {
+			http.Error(w, "request replay unavailable", http.StatusInternalServerError)
+			return
+		}
+	}
+	// A replayable disk spool may contain very large private prompts. Do not
+	// duplicate or sample it into logs; ordinary non-spooled tracing is unchanged.
+	if r.GetBody == nil && ((h.cfg.logBodies && h.cfg.bodyLogLimit > 0) || (providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled())) {
 		sampleLimit := h.cfg.bodyLogLimit
 		if sampleLimit <= 0 || (providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() && h.cfg.claudeTraceBodyLimit > sampleLimit) {
 			sampleLimit = h.cfg.claudeTraceBodyLimit
 		}
 		reqSample = &bytes.Buffer{}
-		body = io.TeeReader(r.Body, &limitedWriter{w: reqSample, n: sampleLimit})
+		body = io.TeeReader(body, &limitedWriter{w: reqSample, n: sampleLimit})
 	}
 
 	outReq, err := http.NewRequestWithContext(ctx, r.Method, outURL.String(), body)
@@ -5198,7 +5514,22 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 		log.Printf("[%s] passthrough request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
 	}
 
-	// Write response to client
+	respContentType := resp.Header.Get("Content-Type")
+	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
+	if providerType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) && !isSSE {
+		filterLimit := h.cfg.maxInMemoryBodyBytes
+		if filterLimit <= 0 {
+			filterLimit = 16 << 20
+		}
+		if err := filterHostedMCPNonStreamingResponseLimit(resp, filterLimit); err != nil {
+			h.recent.add(err.Error())
+			http.Error(w, "passthrough Responses response filtering failed: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+
+	// Write response to client only after non-streaming hosted-MCP filtering has
+	// succeeded; otherwise neither upstream headers nor private payload can leak.
 	copyHeader(w.Header(), resp.Header)
 	removeHopByHopHeaders(w.Header())
 	h.logRateLimitResponseHeaders(reqID, providerType, resp.Header)
@@ -5206,8 +5537,6 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, _ := w.(http.Flusher)
-	respContentType := resp.Header.Get("Content-Type")
-	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
 
 	var writer io.Writer = w
 	var fw *flushWriter

@@ -2,11 +2,18 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestStreamCodexResponsesRequestLargePayloadAndFiltering(t *testing.T) {
@@ -196,5 +203,163 @@ func benchmarkStreamResponses(b *testing.B, size int64) {
 		got.Close()
 	}
 }
+func compressedResponsesBody(t *testing.T, encoding string, body []byte) []byte {
+	t.Helper()
+	switch encoding {
+	case "gzip":
+		var out bytes.Buffer
+		zw := gzip.NewWriter(&out)
+		if _, err := zw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return out.Bytes()
+	case "zstd":
+		zw, err := zstd.NewWriter(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer zw.Close()
+		return zw.EncodeAll(body, nil)
+	default:
+		return body
+	}
+}
+
+func TestResponsesStreamingCompressionAndIndependentLimits(t *testing.T) {
+	plain := []byte(`{"model":"gpt-5.6","stream":true,"input":"` + strings.Repeat("image-like-data", 8192) + `"}`)
+	for _, encoding := range []string{"gzip", "zstd"} {
+		t.Run(encoding, func(t *testing.T) {
+			wire := compressedResponsesBody(t, encoding, plain)
+			decoded, err := decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)+1), int64(len(plain)+1024))
+			if err != nil {
+				t.Fatal(err)
+			}
+			spooled, err := streamResponsesRequest(decoded, int64(len(plain)+1024), responsesStreamOptions{})
+			decoded.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer spooled.Close()
+			got, err := io.ReadAll(spooled.File)
+			if err != nil || !bytes.Contains(got, []byte(strings.Repeat("image-like-data", 128))) {
+				t.Fatalf("decoded payload incomplete: bytes=%d err=%v", len(got), err)
+			}
+
+			decoded, err = decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)-1), int64(len(plain)+1024))
+			if err == nil {
+				_, err = io.ReadAll(decoded)
+				decoded.Close()
+			}
+			if !errors.Is(err, errResponsesWireTooLarge) {
+				t.Fatalf("wire limit error = %v", err)
+			}
+
+			decoded, err = decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)+1), int64(len(plain)+1024))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = streamResponsesRequest(decoded, 1024, responsesStreamOptions{})
+			decoded.Close()
+			if !errors.Is(err, errResponsesSpoolTooLarge) {
+				t.Fatalf("decoded limit error = %v", err)
+			}
+		})
+	}
+}
+
+func TestResponsesPassthroughLexicalModePreservesSemantics(t *testing.T) {
+	src := `{"model":"gpt-5.6-high-fast","store":true,"stream":false,"input":"hello","reasoning":{"effort":"xhigh"},"tools":[{"type":"mcp","secret":"drop"},{"type":"function","parameters":{"type":"object","required":null}}]}`
+	got, err := streamResponsesRequest(strings.NewReader(src), 1<<20, responsesStreamOptions{passthrough: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Close()
+	body, _ := io.ReadAll(got.File)
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["model"] != "gpt-5.6-high-fast" || obj["store"] != true || obj["stream"] != false || obj["input"] != "hello" {
+		t.Fatalf("passthrough semantics changed: %s", body)
+	}
+	tools := obj["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["parameters"].(map[string]any)["required"] != nil || bytes.Contains(body, []byte("secret")) {
+		t.Fatalf("passthrough filtering/schema changed: %s", body)
+	}
+}
+
+func TestResponsesPooledSuffixAndEffortCap(t *testing.T) {
+	src := `{"reasoning":{"effort":"max"},"model":"gpt-5.6-high-fast","stream":true,"input":[]}`
+	got, err := streamResponsesRequest(strings.NewReader(src), 1<<20, responsesStreamOptions{effortLimit: "medium"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer got.Close()
+	body, _ := io.ReadAll(got.File)
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatal(err)
+	}
+	reasoning := obj["reasoning"].(map[string]any)
+	if obj["model"] != "gpt-5.6" || obj["service_tier"] != "priority" || reasoning["effort"] != "medium" || reasoning["summary"] != "auto" {
+		t.Fatalf("pooled controls differ: %s", body)
+	}
+}
+
+func TestResponsesLexicalAdmissionBounds(t *testing.T) {
+	var fields strings.Builder
+	fields.WriteString(`{"model":"gpt-5.6"`)
+	for i := 0; i < maxResponsesTopLevelFields; i++ {
+		fields.WriteString(`,"field`)
+		fields.WriteString(fmt.Sprint(i))
+		fields.WriteString(`":null`)
+	}
+	fields.WriteByte('}')
+	if got, err := streamResponsesRequest(strings.NewReader(fields.String()), int64(fields.Len()+1), responsesStreamOptions{}); err == nil {
+		got.Close()
+		t.Fatal("top-level field admission limit was not enforced")
+	}
+
+	body := `{"model":"gpt-5.6","stream":true}`
+	if got, err := streamResponsesRequest(strings.NewReader(body+" "), int64(len(body)), responsesStreamOptions{}); !errors.Is(err, errResponsesSpoolTooLarge) {
+		if got != nil {
+			got.Close()
+		}
+		t.Fatalf("trailing decoded limit error = %v", err)
+	}
+}
+
+func TestResponsesLexicalValidationAndCleanup(t *testing.T) {
+	before, _ := filepath.Glob(filepath.Join(os.TempDir(), "codex-pool-responses-*.json"))
+	for _, src := range []string{
+		`{"model":"gpt-5.6","input":"bad\x"}`,
+		`{"model":"gpt-5.6","input":` + strings.Repeat("[", maxResponsesJSONDepth+2) + `0` + strings.Repeat("]", maxResponsesJSONDepth+2) + `}`,
+	} {
+		if got, err := streamResponsesRequest(strings.NewReader(src), 1<<20, responsesStreamOptions{}); err == nil {
+			got.Close()
+			t.Fatalf("malformed input accepted")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	decoded, err := decodeResponsesRequest(ctx, strings.NewReader(`{"model":"gpt-5.6"}`), "", 1<<20, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := streamResponsesRequest(decoded, 1<<20, responsesStreamOptions{}); !errors.Is(err, context.Canceled) {
+		if got != nil {
+			got.Close()
+		}
+		t.Fatalf("cancel error = %v", err)
+	}
+	after, _ := filepath.Glob(filepath.Join(os.TempDir(), "codex-pool-responses-*.json"))
+	if len(after) != len(before) {
+		t.Fatalf("temporary files leaked: before=%d after=%d", len(before), len(after))
+	}
+}
+
 func BenchmarkStreamResponses16MiB(b *testing.B) { benchmarkStreamResponses(b, 16*1024*1024) }
 func BenchmarkStreamResponses64MiB(b *testing.B) { benchmarkStreamResponses(b, 64*1024*1024) }
