@@ -440,6 +440,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/setup/operator":
 		h.handleOperatorBootstrap(w, r)
 		return
+	case "/api/pool/failure-insights":
+		if !h.checkMemberOrAdminAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handlePoolFailureInsights(w, r)
+		return
 	case "/api/pool/stats":
 		if !h.checkMemberOrAdminAuth(w, r) {
 			return

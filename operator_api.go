@@ -336,7 +336,7 @@ var operatorRoutes = []operatorRoute{
 	{http.MethodGet, "/api/operator/v1/accounting/requests", "operator.read"},
 	{http.MethodGet, "/api/pool/stats", "operator.read"}, {http.MethodGet, "/api/pool/users", "operator.read"},
 	{http.MethodGet, "/api/pool/origins", "operator.read"}, {http.MethodGet, "/api/pool/daily-breakdown", "operator.read"},
-	{http.MethodGet, "/api/pool/hourly", "operator.read"}, {http.MethodGet, "/api/pool/signal", "operator.read"},
+	{http.MethodGet, "/api/pool/hourly", "operator.read"}, {http.MethodGet, "/api/pool/signal", "operator.read"}, {http.MethodGet, "/api/pool/failure-insights", "operator.read"},
 	{http.MethodGet, "/api/pool/catalog", "operator.read"}, {http.MethodGet, "/api/me/usage", "operator.read"}, {http.MethodGet, "/api/pool/users/*/daily", "operator.read"},
 	{http.MethodGet, "/api/pool/users/*/hourly", "operator.read"}, {http.MethodGet, "/api/console/principals", "operator.read"},
 	{http.MethodGet, "/api/console/principals/*/usage", "operator.read"}, {http.MethodGet, "/api/console/audit", "operator.read"},

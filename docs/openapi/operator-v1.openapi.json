@@ -792,6 +792,33 @@
         },
         "additionalProperties": true
       },
+      "FailureInsights": {
+        "type": "object",
+        "required": ["since", "until", "total", "groups"],
+        "properties": {
+          "since": { "type": "string", "format": "date-time" },
+          "until": { "type": "string", "format": "date-time" },
+          "total": { "type": "integer", "minimum": 0 },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["account_id", "provider", "error_class", "error_domain", "error_code", "outcome", "attempts", "last_seen_at"],
+              "properties": {
+                "account_id": { "type": "string" },
+                "provider": { "type": "string" },
+                "model": { "type": "string" },
+                "error_class": { "type": "string" },
+                "error_domain": { "type": "string" },
+                "error_code": { "type": "string" },
+                "outcome": { "type": "string" },
+                "attempts": { "type": "integer", "minimum": 1 },
+                "last_seen_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          }
+        }
+      },
       "Signal": {
         "type": "object",
         "required": [
@@ -2210,6 +2237,25 @@
               "default": 24
             }
           }
+        ]
+      }
+    },
+    "/api/pool/failure-insights": {
+      "get": {
+        "summary": "Aggregate provider failure attempts",
+        "description": "hours defaults to 168 and is capped at 8784; limit defaults to 100 and is capped at 500.",
+        "x-operator-capability": "operator.read",
+        "responses": {
+          "200": {
+            "description": "Failure insight groups",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FailureInsights" } } }
+          },
+          "401": { "description": "JSON error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "description": "JSON error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        },
+        "parameters": [
+          { "name": "hours", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 8784, "default": 168 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } }
         ]
       }
     },
