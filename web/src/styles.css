@@ -93,70 +93,13 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .tabs .tab { min-height: 40px; border: 1px solid var(--rule); background: transparent; color: var(--muted); padding: 0 10px; cursor: pointer; font: .6875rem "IBM Plex Mono", monospace; }
 .tabs .tab.active { border-color: var(--gold); background: var(--gold); color: var(--void); }
 
-/* Operational text must survive an ordinary laptop at arm's length. Many of
-   these roles were 7–10px; 11px is the floor for metadata, not the target for
-   body copy. Chart internals keep their own density. */
-.signal-main small,
-.signal-main footer,
-.signal-main .model-head,
-.signal-main .account-head,
-.signal-main .origin-head,
-.signal-main .capacity-head,
-.signal-main .evidence-head,
-.signal-main .subsidy-head,
-.signal-main .flow-head,
-.signal-main .audit-list,
-.signal-main .detail-facts > span,
-.signal-main .console-toolbar span,
-.signal-main .console-toolbar small,
-.signal-main .principal-row .rank,
-.signal-main .row-actions button,
-.signal-main .quiet-button,
-.signal-main .copy-btn,
-.signal-main .burn-readout,
-.signal-main .chart-corner-readout span,
-.signal-main .chart-corner-readout small,
-.signal-main .origin-row,
-.signal-main .model-provider-filter button,
-.signal-main .quota-limit em,
-.signal-main .reset-window,
-.signal-main .detail-heading span,
-.signal-main .detail-heading p,
-.signal-main .detail-facts b,
-.signal-main .audit-list > div,
-.signal-main .client-header,
+/* Compact metadata is opt-in. Do not globally resize unrelated descendants:
+   long labels and explanatory copy must retain their component hierarchy. */
+.signal-main .principal-row small,
 .signal-main .pass-status,
 .signal-main .inspector-code,
-.signal-main .inspector-reset-credits header,
-.signal-main .inspector-reset-credits > div,
-.signal-main .inspector-reset-credits > small,
-.signal-main .capacity-row small,
-.signal-main .capacity-provider small,
-.signal-main .evidence-row small,
-.signal-main .calendar-event time,
-.signal-main .calendar-event small,
-.signal-main .reset-behavior header,
-.signal-main .reset-observation small,
-.signal-main .scenario-controls span,
-.signal-main .scenario-outcome span,
-.signal-main .subsidy-row small,
-.signal-main .flow-row small,
-.signal-main .health-board small,
-.signal-main .peak-heatmap footer,
-.signal-main .model-demand-table small,
-.signal-main .model-demand-controls,
-.signal-main .concentration-board span,
-.signal-main .concentration-board p,
-.signal-main .conservation-board span,
-.signal-main .conservation-board p,
-.signal-main .setup-secret > span,
-.signal-main .setup-secret > small,
-.signal-main .setup-selector label,
-.signal-main .setup-selector p,
-.signal-main .passport-setup-list strong,
-.signal-main .passport-setup-list button,
-.signal-main .principal-row small { font-size: .6875rem !important; }
-.signal-main .principal-row strong { font-size: .78rem; }
+.signal-main .principal-row .rank { font-size: .6875rem; }
+.signal-main .principal-row strong { font-size: .85rem; }
 .insight-tabs button { grid-template-columns: 1fr; }
 .insight-tabs button > span { display: none; }
 .tool-tabs .tab { font-size: .7rem; }
@@ -1239,3 +1182,121 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .code-block { padding-right: 15px; padding-top: 50px; }
   .copy-btn { left: 8px; right: auto; }
 }
+
+/* Operator UI consolidation
+   Keep these primitives at the end of the file until the view styles are
+   migrated into their own modules. They provide one contract for controls and
+   narrow-screen data surfaces instead of another component-specific patch. */
+:root {
+  --control-height: 44px;
+  --control-radius: 2px;
+  --content-gutter: clamp(16px, 3vw, 44px);
+}
+
+.signal-main button,
+.signal-main input,
+.signal-main select,
+.signal-main textarea { border-radius: var(--control-radius); }
+
+.signal-main button:not(.account-row):not(.principal-row):not(.heavy-account-row) {
+  min-height: var(--control-height);
+}
+
+.gold-button,
+.contribute-button,
+.unlock-button,
+.operator-badge,
+.quiet-button,
+.danger-action,
+.copy-btn,
+.row-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  line-height: 1.2;
+  white-space: normal;
+  text-align: center;
+}
+
+.quiet-button,
+.row-actions button,
+.copy-btn { border-color: var(--rule); color: var(--muted); }
+.quiet-button:hover:not(:disabled),
+.row-actions button:hover:not(:disabled),
+.copy-btn:hover:not(:disabled) { border-color: var(--gold-dim); color: var(--gold-hot); background: rgba(200,155,54,.06); }
+.danger-action { border: 1px solid rgba(255,91,77,.45); background: transparent; color: #ff8b80; }
+.danger-action:hover:not(:disabled) { border-color: var(--danger); background: rgba(255,91,77,.08); }
+
+.account-filters,
+.console-toolbar,
+.setup-selector,
+.setup-client-bar { min-width: 0; }
+.account-filters label,
+.member-search,
+.member-filter { min-width: 0; }
+
+.console-layout { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
+.principal-roster { min-width: 0; border-top: 1px solid var(--rule); }
+.principal-row > * { min-width: 0; }
+.principal-usage { text-align: right; }
+.principal-usage strong,
+.principal-usage small { overflow-wrap: anywhere; }
+.principal-detail { min-width: 0; overflow-wrap: anywhere; }
+.audit-list > div { min-width: 0; }
+.audit-list details { min-width: 0; }
+
+/* Long operational strings must wrap inside their column, never expand the
+   page or collide with adjacent controls. */
+.account-identity b,
+.model-route button,
+.model-route small,
+.pass-identity,
+.client-header > span,
+.detail-facts b,
+.setup-secret code,
+.code-block pre { overflow-wrap: anywhere; word-break: break-word; }
+
+.inspector-backdrop { display: none; }
+
+@media (max-width: 1120px) {
+  .console-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  .account-filters { grid-template-columns: minmax(0, 1fr) max-content; gap: 12px; }
+  .console-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+  .console-toolbar > * { min-width: 0; }
+  .audit-list > div { grid-template-columns: minmax(130px, .7fr) minmax(120px, .7fr) minmax(0, 1fr); }
+  .audit-list details { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+  .signal-main { padding-inline: var(--content-gutter); }
+  .account-filters,
+  .console-toolbar,
+  .setup-selector,
+  .setup-client-bar { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .account-filters > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .account-filters > div button { min-width: 0; }
+  .member-search { grid-template-columns: 1fr; gap: 6px; }
+  .member-filter { grid-template-columns: 1fr; gap: 6px; width: 100%; }
+  .member-filter select { width: 100%; }
+  .console-layout { display: block; min-height: 0; }
+  .principal-roster { max-height: none; }
+  .principal-row { grid-template-columns: 24px 42px minmax(0, 1fr) max-content; }
+  .principal-usage { grid-column: 3 / -1; grid-row: 2; text-align: left; }
+  .principal-row .pass-status { grid-column: 4; grid-row: 1; }
+  .account-inspector { inset: calc(var(--rail-height) + 56px) 0 0; padding: 20px var(--content-gutter) 32px; }
+  .inspector-backdrop { display: block; position: fixed; inset: calc(var(--rail-height) + 56px) 0 0; z-index: 17; background: rgba(0,0,0,.72); }
+  .account-inspector { z-index: 18; }
+  .audit-list > div { grid-template-columns: 1fr; gap: 6px; }
+  .audit-list details { grid-column: auto; }
+  .pass-row { gap: 10px; }
+  .pass-row .row-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .pass-row .row-actions button { min-width: 0; }
+  .setup-secret { grid-template-columns: minmax(0, 1fr); }
+  .setup-secret button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+.inspector-backdrop { border: 0; padding: 0; cursor: default; }

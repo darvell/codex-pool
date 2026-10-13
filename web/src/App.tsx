@@ -2707,6 +2707,7 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
             );
           })}
         </div>
+        {selected && mobileInspector && <button className="inspector-backdrop" aria-label="Close account details" onClick={closeInspector} />}
         {selected && (
           <aside
             ref={inspectorRef}
