@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { AccessGate, isArmedAccountAction, OperatorAPIKeys, poolSurplus, providerDisplay, shouldShowPassFormOnLoad, viewFromSearch, watchVibeSession } from "./App";
-import { createOperatorAPIToken, loadOperatorAPITokens, operatorBootstrap, replaceOperatorAPIToken, revokeOperatorAPIToken, startVibeLogin, vibeLoginStatus } from "./api";
+import { createOperatorAPIToken, loadFailureInsights, loadOperatorAPITokens, operatorBootstrap, replaceOperatorAPIToken, revokeOperatorAPIToken, startVibeLogin, vibeLoginStatus } from "./api";
 import type { VibeLoginSession } from "./types";
 
 describe("account action confirmation", () => {
@@ -107,6 +107,18 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("failure insights requests", () => {
+  it("loads the bounded seven-day grouped failure report", async () => {
+    mockVibeBrowser();
+    const response = { since: "2026-10-05T00:00:00Z", until: "2026-10-12T00:00:00Z", total: 2, groups: [{ account_id: "hashed-account", provider: "codex", error_class: "auth", error_domain: "http", error_code: "401", outcome: "terminal_failure", attempts: 2, last_seen_at: "2026-10-11T00:00:00Z" }] };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(response));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await loadFailureInsights()).toEqual(response);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/api/pool/failure-insights?hours=168&limit=100", { credentials: "same-origin", cache: "no-store" });
+  });
 });
 
 describe("operator API key requests", () => {

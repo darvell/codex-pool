@@ -28,6 +28,7 @@ import {
   legacySignup,
 	loadModelCatalog,
   loadPoolStats,
+  loadFailureInsights,
   loadSignalAnalytics,
   loadPassportMe,
   exchangeLegacySession,
@@ -93,6 +94,7 @@ import {
 import type {
   AccountStats,
   AdminAccount,
+  FailureInsightsResponse,
   QuotaWindow,
   GuestPass,
   PasskeyCredential,
@@ -116,11 +118,11 @@ import type {
 } from "./types";
 
 type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "operator-api" | "setup";
-type InsightMode = "overview" | "capacity" | "flow" | "demand";
+type InsightMode = "overview" | "capacity" | "flow" | "demand" | "failures";
 type HistoryMode = "push" | "replace";
 
 const VIEWS: View[] = ["pulse", "insights", "mine", "passes", "console", "accounts", "models", "operator-api", "setup"];
-const INSIGHT_MODES: InsightMode[] = ["overview", "capacity", "flow", "demand"];
+const INSIGHT_MODES: InsightMode[] = ["overview", "capacity", "flow", "demand", "failures"];
 
 export function viewFromSearch(search: string): View {
   const candidate = new URLSearchParams(search).get("view") as View | null;
@@ -317,6 +319,8 @@ export function App() {
   const [joinError, setJoinError] = useState("");
   const [stats, setStats] = useState<PoolStats | null>(null);
   const [signal, setSignal] = useState<SignalAnalytics | null>(null);
+  const [failureInsights, setFailureInsights] = useState<FailureInsightsResponse | null>(null);
+  const [failureInsightsError, setFailureInsightsError] = useState("");
 	const [models, setModels] = useState<ModelDescriptor[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -335,10 +339,20 @@ export function App() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-	  const [nextStats, nextSignal, nextCatalog] = await Promise.all([loadPoolStats(), loadSignalAnalytics(), loadModelCatalog()]);
-      setStats(nextStats);
-      setSignal(nextSignal);
-	  setModels(nextCatalog.models);
+      const [statsResult, signalResult, failuresResult, catalogResult] = await Promise.allSettled([loadPoolStats(), loadSignalAnalytics(), loadFailureInsights(168, 100), loadModelCatalog()]);
+      if (statsResult.status === "rejected") throw statsResult.reason;
+      if (signalResult.status === "rejected") throw signalResult.reason;
+      if (catalogResult.status === "rejected") throw catalogResult.reason;
+      setStats(statsResult.value);
+      setSignal(signalResult.value);
+      setModels(catalogResult.value.models);
+      if (failuresResult.status === "fulfilled") {
+        setFailureInsights(failuresResult.value);
+        setFailureInsightsError("");
+      } else {
+        setFailureInsights(null);
+        setFailureInsightsError(failuresResult.reason instanceof Error ? failuresResult.reason.message : "Unable to load failure insights. Try again.");
+      }
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to refresh pool data. Try again.");
@@ -474,6 +488,8 @@ export function App() {
     setPassport(null);
     setStats(null);
     setSignal(null);
+    setFailureInsights(null);
+    setFailureInsightsError("");
     setModels([]);
     updateURL({ view: null, insight: null, account: null, accounts: null, member: null }, "replace");
   };
@@ -492,7 +508,7 @@ export function App() {
         <main className="signal-main" id="main-content">
           {error && <div className="signal-error" role="alert"> {error}</div>}
           {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => goToView("accounts", { accounts: "attention" })} onMember={(id) => goToView("console", { member: id })} />}
-          {view === "insights" && <Insights stats={stats} signal={signal} onAccounts={() => goToView("accounts", { accounts: null })} />}
+          {view === "insights" && <Insights stats={stats} signal={signal} failures={failureInsights} failuresError={failureInsightsError} onAccounts={() => goToView("accounts", { accounts: null })} />}
           {view === "mine" && <PassportMine principal={passport} onPrincipal={setPassport} />}
           {view === "passes" && passport && passport.kind !== "guest" && <Passes />}
           {view === "console" && passport && passport.kind !== "guest" && <PassportConsole principal={passport} />}
@@ -2033,7 +2049,7 @@ export function providerDisplay(provider: string) {
     : { label: "Unknown", color: "#9c967f", dither: "grey" as DitherColor, glyph: "·" };
 }
 
-function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void }) {
+function Insights({ stats, signal, failures, failuresError, onAccounts }: { stats: PoolStats | null; signal: SignalAnalytics | null; failures: FailureInsightsResponse | null; failuresError: string; onAccounts: () => void }) {
   const [mode, setMode] = useState<InsightMode>(() => {
     const candidate = queryValue("insight") as InsightMode | null;
     return candidate && INSIGHT_MODES.includes(candidate) ? candidate : "overview";
@@ -2044,6 +2060,7 @@ function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; sign
     ["capacity", "Capacity", "Measured limits, resets, and scenarios"],
     ["flow", "Flow", "Unused supply and routing balance"],
     ["demand", "Demand", "Peaks, models, and concentration"],
+    ["failures", "Failures", "Provider errors and retry outcomes"],
   ];
 
   useEffect(() => updateURL({ insight: mode }, "replace"), [mode]);
@@ -2103,6 +2120,7 @@ function Insights({ stats, signal, onAccounts }: { stats: PoolStats | null; sign
         {mode === "capacity" && <CapacityDashboard stats={stats} signal={signal} onAccounts={onAccounts} />}
         {mode === "flow" && <FlowDashboard stats={stats} signal={signal} onAccounts={onAccounts} />}
         {mode === "demand" && <DemandDashboard stats={stats} signal={signal} />}
+        {mode === "failures" && <FailureDashboard failures={failures} error={failuresError} />}
       </div>
     </div>
   );
@@ -2451,6 +2469,54 @@ function DemandDashboard({ stats, signal }: { stats: PoolStats; signal: SignalAn
         </SignalPanel>
         <SignalPanel title="Opportunities to conserve capacity"><ConservationBoard stats={stats} signal={signal} /></SignalPanel>
       </section>
+    </div>
+  );
+}
+
+function formatFailureLastSeen(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "—" : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function FailureDashboard({ failures, error }: { failures: FailureInsightsResponse | null; error: string }) {
+  if (error) {
+    return <div className="failure-state failure-error" role="alert">Unable to load failure insights: {error}</div>;
+  }
+  if (!failures) {
+    return <div className="failure-state" role="status" aria-live="polite">Loading failure insights…</div>;
+  }
+  const providers = new Set(failures.groups.map((row) => row.provider)).size;
+  const accounts = new Set(failures.groups.map((row) => row.account_id)).size;
+  return (
+    <div className="insight-dashboard failure-dashboard">
+      <section className="inline-instruments insights-instruments" aria-label="Failure insights summary">
+        <Instrument label="FAILURE ATTEMPTS" value={compact.format(failures.total)} danger={failures.total > 0} />
+        <Instrument label="GROUPED SIGNATURES" value={compact.format(failures.groups.length)} accent />
+        <Instrument label="AFFECTED PROVIDERS" value={compact.format(providers)} />
+        <Instrument label="AFFECTED ACCOUNTS" value={compact.format(accounts)} />
+      </section>
+      {failures.groups.length === 0 ? (
+        <SignalPanel title="Failure groups"><div className="failure-state" role="status">No provider failures recorded in the last 7 days.</div></SignalPanel>
+      ) : (
+        <SignalPanel title="Grouped provider failures">
+          <div className="failure-table" role="table" aria-label="Grouped provider failures">
+            <div className="failure-row failure-head" role="row">
+              <span role="columnheader">PROVIDER</span><span role="columnheader">HASHED ACCOUNT ID</span><span role="columnheader">NORMALIZED CLASS / DOMAIN / CODE</span><span role="columnheader">OUTCOME</span><span role="columnheader">ATTEMPTS</span><span role="columnheader">LAST SEEN</span>
+            </div>
+            {failures.groups.map((row) => {
+              const provider = providerDisplay(row.provider);
+              return <div className="failure-row" role="row" key={`${row.provider}-${row.account_id}-${row.error_class}-${row.error_domain}-${row.error_code}-${row.outcome}`} style={{ "--provider": provider.color } as CSSProperties}>
+                <span role="cell"><i className="provider-mark" aria-hidden="true" /><b>{provider.label}</b>{row.model && <small>{row.model}</small>}</span>
+                <span role="cell"><code>{row.account_id || "unknown"}</code></span>
+                <span role="cell"><b>{row.error_class || "unknown"}</b><small>{row.error_domain || "unknown"} / {row.error_code || "unknown"}</small></span>
+                <span role="cell"><b className="failure-outcome">{row.outcome || "unknown"}</b></span>
+                <span role="cell"><b>{compact.format(row.attempts)}</b></span>
+                <span role="cell"><time dateTime={row.last_seen_at}>{formatFailureLastSeen(row.last_seen_at)}</time></span>
+              </div>;
+            })}
+          </div>
+        </SignalPanel>
+      )}
     </div>
   );
 }

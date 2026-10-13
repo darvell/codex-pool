@@ -1,5 +1,5 @@
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
-import type { AdminAccount, ClientCredential, ConsolePrincipal, FriendSession, GuestPass, ModelCatalog, OperatorAPIToken, PasskeyCredential, PassportAuditEntry, PassportPrincipal, PassportUsagePoint, PoolStats, SignalAnalytics, VibeLoginSession, VibeLoginStatus } from "./types";
+import type { AdminAccount, ClientCredential, ConsolePrincipal, FailureInsightsResponse, FriendSession, GuestPass, ModelCatalog, OperatorAPIToken, PasskeyCredential, PassportAuditEntry, PassportPrincipal, PassportUsagePoint, PoolStats, SignalAnalytics, VibeLoginSession, VibeLoginStatus } from "./types";
 
 const FRIEND_SESSION_KEY = "friendSession";
 const ADMIN_TOKEN_KEY = "operatorToken";
@@ -171,6 +171,11 @@ export function clearFriendSession() {
 
 export async function loadPoolStats(): Promise<PoolStats> {
   return decode(await fetch("/api/pool/stats", { credentials: "same-origin", cache: "no-store" }));
+}
+
+export async function loadFailureInsights(hours = 168, limit = 100): Promise<FailureInsightsResponse> {
+  const insights = await decode<FailureInsightsResponse>(await fetch(`/api/pool/failure-insights?hours=${hours}&limit=${limit}`, { credentials: "same-origin", cache: "no-store" }));
+  return { ...insights, groups: insights.groups ?? [], total: insights.total ?? 0 };
 }
 
 export async function loadSignalAnalytics(): Promise<SignalAnalytics> {
