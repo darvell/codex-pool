@@ -1413,10 +1413,17 @@ func isCodexToClaudeModelOverridePath(path string) bool {
 // provider (Kimi, MiniMax, etc.) instead of the path-detected provider.
 // Returns (provider, baseURL, rewrittenBody) or (nil, nil, nil) if no override.
 func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Provider, *url.URL, []byte) {
-	if isKimiModel(model) {
+	kimiModel, kimiDiscovered := "", false
+	if h.pool != nil {
+		kimiModel, kimiDiscovered = h.pool.discoveredCanonicalModel(AccountTypeKimi, model)
+	}
+	if isKimiModel(model) || kimiDiscovered {
 		p := h.registry.ForType(AccountTypeKimi)
 		if p == nil {
 			return nil, nil, nil
+		}
+		if kimiDiscovered && kimiModel != model {
+			return p, p.UpstreamURL(path), rewriteModelInBody(body, kimiModel)
 		}
 		return p, p.UpstreamURL(path), nil
 	}
@@ -1525,25 +1532,25 @@ func shouldPeekStreamedModelRoute(r *http.Request) bool {
 	return r.ContentLength >= streamedModelRoutePeekBytes
 }
 
-func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provider, targetBase *url.URL, reqID string) (Provider, *url.URL, error) {
+func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provider, targetBase *url.URL, reqID string) (Provider, *url.URL, string, error) {
 	if r == nil || r.Body == nil || h == nil || h.registry == nil {
-		return provider, targetBase, nil
+		return provider, targetBase, "", nil
 	}
 	if r.Method != http.MethodPost || !isStreamedModelRoutePath(r.URL.Path) {
-		return provider, targetBase, nil
+		return provider, targetBase, "", nil
 	}
 	if strings.TrimSpace(r.Header.Get("Content-Encoding")) != "" {
-		return provider, targetBase, nil
+		return provider, targetBase, "", nil
 	}
 	contentType := strings.ToLower(r.Header.Get("Content-Type"))
 	if contentType != "" && !strings.Contains(contentType, "json") {
-		return provider, targetBase, nil
+		return provider, targetBase, "", nil
 	}
 
 	prefix, err := readBodyPrefix(r.Body, streamedModelRoutePeekBytes)
 	if err != nil {
 		r.Body = &prefixReadCloser{r: bytes.NewReader(prefix), c: r.Body}
-		return provider, targetBase, err
+		return provider, targetBase, "", err
 	}
 	restoreBody := func(replacement []byte) {
 		r.Body = &prefixReadCloser{r: io.MultiReader(bytes.NewReader(replacement), r.Body), c: r.Body}
@@ -1552,7 +1559,7 @@ func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provide
 	model, valueStart, valueEnd, ok := findTopLevelJSONStringField(prefix, "model")
 	if !ok {
 		restoreBody(prefix)
-		return provider, targetBase, nil
+		return provider, targetBase, "", nil
 	}
 
 	requestedModel := strings.TrimSpace(model)
@@ -1565,23 +1572,23 @@ func (h *proxyHandler) applyStreamedModelRoute(r *http.Request, provider Provide
 	routeProvider, routeBase, canonicalModel := h.resolveStreamedModelRoute(r.URL.Path, requestedModel)
 	if routeProvider == nil {
 		restoreBody(prefix)
-		return provider, targetBase, nil
+		return provider, targetBase, model, nil
 	}
 	rewrittenPrefix := prefix
 	delta := 0
-	if canonicalModel != requestedModel {
+	if canonicalModel != model {
 		rewrittenPrefix, delta, err = replaceJSONStringToken(prefix, valueStart, valueEnd, canonicalModel)
 	}
 	if err != nil {
 		restoreBody(prefix)
-		return provider, targetBase, err
+		return provider, targetBase, "", err
 	}
 	if r.ContentLength >= 0 && delta != 0 {
 		r.ContentLength += int64(delta)
 		r.Header.Del("Content-Length")
 	}
 	restoreBody(rewrittenPrefix)
-	return routeProvider, routeBase, nil
+	return routeProvider, routeBase, canonicalModel, nil
 }
 
 func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, *url.URL, string) {
@@ -2137,6 +2144,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
+	streamedModel := ""
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
 	responsesEncoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
 	responsesCompressed := responsesEncoding == "gzip" || responsesEncoding == "zstd"
@@ -2148,7 +2156,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// before upload admission could otherwise block forever on a chunked body.
 	if !responsesNeedsSpool && (streamBody || shouldPeekStreamedModelRoute(r)) {
 		var err error
-		provider, targetBase, err = h.applyStreamedModelRoute(r, provider, targetBase, reqID)
+		provider, targetBase, streamedModel, err = h.applyStreamedModelRoute(r, provider, targetBase, reqID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -2288,7 +2296,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				r.Header.Set("Content-Type", "application/json")
 				log.Printf("[%s] disk-streaming Responses request: bytes=%d model=%s provider=%s transform_ms=%d",
 					reqID, spooled.Size, spooled.Model, accountType, time.Since(spoolStarted).Milliseconds())
-				h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
+				h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase, streamedModel)
 				return
 			}
 		}
@@ -2308,7 +2316,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			log.Printf("[%s] streaming request body: method=%s path=%s provider=%s content-length=%d",
 				reqID, r.Method, r.URL.Path, accountType, r.ContentLength)
 		}
-		h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase)
+		h.proxyRequestStreamed(w, r, reqID, userID, originID, provider, targetBase, streamedModel)
 		return
 	}
 
@@ -4238,12 +4246,11 @@ func logRelayFrame(logLabel, label string, msgType websocket.MessageType, data [
 	log.Printf("[ws-relay %s] %s: type=%v len=%d %s%s", logLabel, label, msgType, len(data), string(summary), suffix)
 }
 
-func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL) {
+func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID, originID string, provider Provider, targetBase *url.URL, requestedModel string) {
 	start := time.Now()
 	accountType := provider.Type()
 	spooled, _ := r.Context().Value(contextSpoolKey{}).(*streamedResponsesRequest)
 	contextSession := ""
-	requestedModel := ""
 	if spooled != nil {
 		contextSession = contextSessionID(spooled.contextMetadata)
 		requestedModel = spooled.Model
@@ -4251,7 +4258,12 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	requiredPlan := requiredPlanForRequest(accountType, r, requestedModel)
 	clientIP := getClientIP(r)
-	acc := h.pool.candidate(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP)
+	var acc *Account
+	if accountType == AccountTypeKimi {
+		acc = h.pool.candidateForModel(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP, requestedModel)
+	} else {
+		acc = h.pool.candidate(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP)
+	}
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return

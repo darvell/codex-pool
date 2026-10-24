@@ -95,7 +95,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools 
 				BaseURL: baseURL,
 				APIKey:  anthropicAPIKey,
 				API:     "anthropic-messages",
-				Models:  piModelsForProvider(AccountTypeKimi),
+				Models:  piModelsForProvider(AccountTypeKimi, pool),
 			},
 			"minimax": {
 				BaseURL: baseURL,
@@ -170,7 +170,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string, pools ...*poolState)
 		},
 	}
 	for _, accountType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial} {
-		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType)...)
+		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType, pool)...)
 	}
 	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey)...)
 	settings.CustomModels = append(settings.CustomModels, mistralCuteModels(baseURL, apiKey, pool)...)
@@ -228,8 +228,8 @@ func grokCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
 	return models
 }
 
-func cuteModelsForProvider(baseURL, apiKey string, accountType AccountType) []cuteCodeModelConfig {
-	models := modelsForProvider(accountType)
+func cuteModelsForProvider(baseURL, apiKey string, accountType AccountType, pools ...*poolState) []cuteCodeModelConfig {
+	models := exportModelsForProvider(accountType, pools...)
 	result := make([]cuteCodeModelConfig, 0, len(models))
 	for _, model := range models {
 		protocol := "anthropic"
@@ -323,8 +323,27 @@ func boolPtr(v bool) *bool {
 	return &v
 }
 
-func piModelsForProvider(accountType AccountType) []piModelConfig {
-	models := modelsForProvider(accountType)
+func exportModelsForProvider(accountType AccountType, pools ...*poolState) []poolModel {
+	if accountType != AccountTypeKimi || len(pools) == 0 || pools[0] == nil {
+		return modelsForProvider(accountType)
+	}
+	var models []poolModel
+	for _, descriptor := range poolModelDescriptors(pools[0]) {
+		if descriptor.Provider != string(accountType) {
+			continue
+		}
+		models = append(models, poolModel{
+			AccountType: accountType, ID: descriptor.ID, DisplayName: descriptor.Name,
+			Description: descriptor.Description, ContextWindow: descriptor.ContextWindow,
+			MaxTokens: descriptor.MaxOutputTokens, Reasoning: descriptor.Capabilities["reasoning"],
+			Input: append([]string(nil), descriptor.Modalities...),
+		})
+	}
+	return models
+}
+
+func piModelsForProvider(accountType AccountType, pools ...*poolState) []piModelConfig {
+	models := exportModelsForProvider(accountType, pools...)
 	result := make([]piModelConfig, 0, len(models))
 	for _, model := range models {
 		config := piModelConfig{

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -57,8 +58,12 @@ func (h *proxyHandler) handleKimiAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate key by calling GET /v1/models
-	validationURL := h.cfg.kimiBase.String() + "/v1/models"
-	validReq, _ := http.NewRequest(http.MethodGet, validationURL, nil)
+	validationURL := strings.TrimRight(h.cfg.kimiBase.String(), "/") + "/v1/models"
+	validReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, validationURL, nil)
+	if err != nil {
+		respondJSONError(w, http.StatusInternalServerError, "invalid Kimi validation URL")
+		return
+	}
 	validReq.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := h.transport.RoundTrip(validReq)
@@ -66,7 +71,12 @@ func (h *proxyHandler) handleKimiAdd(w http.ResponseWriter, r *http.Request) {
 		respondJSONError(w, http.StatusBadGateway, "failed to validate key: "+err.Error())
 		return
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	resp.Body.Close()
+	if err != nil {
+		respondJSONError(w, http.StatusBadGateway, "failed to read Kimi catalog")
+		return
+	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		respondJSONError(w, http.StatusBadRequest, "invalid API key (authentication failed)")
@@ -77,7 +87,14 @@ func (h *proxyHandler) handleKimiAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, r, AccountTypeKimi, "kimi", apiKey)
+	models, err := parseProviderModels(body)
+	if err != nil {
+		respondJSONError(w, http.StatusBadGateway, "key validation returned an unexpected catalog: "+err.Error())
+		return
+	}
+
+	snapshot := &providerModelSnapshot{FetchedAt: time.Now().UTC(), Models: models}
+	h.saveAPIKeySnapshot(w, r, AccountTypeKimi, "kimi", apiKey, snapshot)
 }
 
 // handleAPIKeyList lists all accounts of the given type.

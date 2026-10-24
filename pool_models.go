@@ -94,6 +94,17 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 		tools := true
 		modalities := append([]string(nil), model.Input...)
 		upstreamID := model.ID
+		if model.AccountType == AccountTypeKimi {
+			if discovered, ok := discoveredMetadataForPool(pool, model.AccountType, model.ID); ok {
+				displayName = discovered.DisplayName
+				contextWindow = discovered.ContextWindow
+				reasoning = discovered.Reasoning
+				modalities = append([]string(nil), discovered.Modalities...)
+				if discovered.MaxOutputTokens > 0 {
+					maxOutputTokens = discovered.MaxOutputTokens
+				}
+			}
+		}
 		if isMistralType(model.AccountType) {
 			upstreamID = mistralCanonicalModel(model.ID)
 			tools = false
