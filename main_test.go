@@ -1308,6 +1308,49 @@ func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
 	}
 }
 
+func TestCodexCatalogRequiredFields(t *testing.T) {
+	t.Parallel()
+
+	for _, body := range []string{
+		`{"models":[{"slug":"codex-auto-review","supported_reasoning_levels":[{"effort":"high","description":"Deep reasoning"}],"shell_type":"shell_command","priority":7,"base_instructions":"upstream instructions"}]}`,
+		`{"models":[]}`,
+	} {
+		var catalog struct {
+			Models []map[string]json.RawMessage `json:"models"`
+		}
+		if err := json.Unmarshal(injectClaudeModels([]byte(body)), &catalog); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range catalog.Models {
+			var slug string
+			_ = json.Unmarshal(row["slug"], &slug)
+			if !strings.HasPrefix(slug, "gpt-") {
+				continue
+			}
+			for _, field := range []string{"supported_reasoning_levels", "shell_type", "visibility", "supported_in_api", "priority", "support_verbosity", "truncation_policy", "experimental_supported_tools"} {
+				if value, ok := row[field]; !ok || string(value) == "null" {
+					t.Errorf("%s missing required field %s", slug, field)
+				}
+			}
+			var levels []struct {
+				Effort      string `json:"effort"`
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(row["supported_reasoning_levels"], &levels); err != nil || len(levels) == 0 {
+				t.Errorf("%s has no usable reasoning levels: %s (%v)", slug, row["supported_reasoning_levels"], err)
+			}
+			for _, level := range levels {
+				if level.Effort == "" || level.Description == "" {
+					t.Errorf("%s has incomplete reasoning preset: %+v", slug, level)
+				}
+			}
+			if strings.Contains(body, "codex-auto-review") && (string(row["priority"]) != "7" || string(row["base_instructions"]) != `"upstream instructions"`) {
+				t.Errorf("%s lost upstream template fields", slug)
+			}
+		}
+	}
+}
+
 func TestInjectClaudeModelsDoesNotDuplicateExistingCodexFallbackModels(t *testing.T) {
 	t.Parallel()
 

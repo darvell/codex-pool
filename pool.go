@@ -481,14 +481,15 @@ type poolState struct {
 	// nested with Account.mu. Network I/O occurs outside all locks; persistence
 	// never occurs while the selection, account, or registry locks are held.
 	// A guarded poll may retain stateMu so reload cannot pass its final check.
-	stateMu       sync.RWMutex
-	mu            sync.RWMutex
-	accounts      []*Account
-	convPin       map[string]string // conversation_id -> account ID
-	debug         bool
-	rr            uint64
-	tierThreshold float64 // secondary usage % at which we stop preferring a tier (default 0.50)
-	generation    uint64  // increments on every successful account/registry commit
+	stateMu             sync.RWMutex
+	mu                  sync.RWMutex
+	accounts            []*Account
+	chatGPTReservations map[string]chatGPTReservation
+	convPin             map[string]string // conversation_id -> account ID
+	debug               bool
+	rr                  uint64
+	tierThreshold       float64 // secondary usage % at which we stop preferring a tier (default 0.50)
+	generation          uint64  // increments on every successful account/registry commit
 }
 
 func newPoolState(accs []*Account, debug bool) *poolState {
@@ -712,7 +713,7 @@ func (p *poolState) nearestCooldown(accountType AccountType, exclude map[string]
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) {
+		if p.chatGPTReservedLocked(a) || a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) {
 			a.mu.Unlock()
 			continue
 		}
@@ -754,7 +755,7 @@ func (p *poolState) candidateByID(id string, accountType AccountType, requiredPl
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
-	if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
+	if p.chatGPTReservedLocked(a) || a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
 		return nil
 	}
 	if !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
@@ -784,7 +785,7 @@ func (p *poolState) candidateWithCyberAccess(exclude map[string]bool, accountTyp
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) || a.RateLimitUntil.After(now) {
+		if p.chatGPTReservedLocked(a) || a.Dead || a.Disabled || !a.CyberAccess || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) || a.RateLimitUntil.After(now) {
 			a.mu.Unlock()
 			continue
 		}
@@ -871,10 +872,19 @@ func accountDiscoveredModel(account *Account, model string) (DiscoveredModel, bo
 		if !ok {
 			return DiscoveredModel{}, false
 		}
+	} else if account != nil && account.Type == AccountTypeOpencodeGo {
+		if bare, ok := opencodeGoBareID(model); ok {
+			model = bare
+		}
 	}
 	for id, discovered := range account.Models {
 		if strings.EqualFold(id, model) {
 			return discovered, true
+		}
+		if account.Type == AccountTypeOpencodeGo {
+			if bare, ok := opencodeGoBareID(id); ok && strings.EqualFold(bare, model) {
+				return discovered, true
+			}
 		}
 	}
 	return DiscoveredModel{}, false
@@ -935,7 +945,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 				// pinned excluded; fall through to selection
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
-				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan) && accountAllowsClientIPLocked(a, clientIP)
+				ok := !p.chatGPTReservedLocked(a) && !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan) && accountAllowsClientIPLocked(a, clientIP)
 				if ok && a.Type == AccountTypeCodex && !isCodexProAccessPlan(a.PlanType) {
 					ok = false
 					if p.debug {
@@ -1013,7 +1023,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			continue
 		}
 		a.mu.Lock()
-		if a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
+		if p.chatGPTReservedLocked(a) || a.Dead || a.Disabled || (accountType != "" && a.Type != accountType) || !planMatchesRequired(a.PlanType, requiredPlan) || !accountAllowsClientIPLocked(a, clientIP) {
 			a.mu.Unlock()
 			continue
 		}

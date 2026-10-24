@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { AccessGate, isArmedAccountAction, OperatorAPIKeys, poolSurplus, providerDisplay, shouldShowPassFormOnLoad, viewFromSearch, watchVibeSession } from "./App";
-import { createOperatorAPIToken, loadOperatorAPITokens, operatorBootstrap, replaceOperatorAPIToken, revokeOperatorAPIToken, startVibeLogin, vibeLoginStatus } from "./api";
+import { createOperatorAPIToken, loadClientApiKey, loadOperatorAPITokens, operatorBootstrap, replaceOperatorAPIToken, revokeOperatorAPIToken, startVibeLogin, vibeLoginStatus } from "./api";
 import type { VibeLoginSession } from "./types";
 
 describe("account action confirmation", () => {
@@ -129,6 +129,29 @@ describe("operator API key requests", () => {
       ["/api/operator-tokens/key-1/replace", { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": "test-csrf" } }],
       ["/api/operator-tokens/key-1", { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": "test-csrf" } }],
     ]);
+  });
+});
+
+describe("SDK client API key", () => {
+  it("exchanges the setup token for the signed API credential without caching", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ access_token: "signed-client-key" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+
+    expect(await loadClientApiKey("download/token", controller.signal)).toBe("signed-client-key");
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/config/claude/download%2Ftoken", {
+      cache: "no-store", credentials: "same-origin", signal: controller.signal,
+    });
+  });
+
+  it("does not return a setup token when the credential response is incomplete", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse({})));
+    await expect(loadClientApiKey("download-token")).rejects.toThrow("Couldn't load the API key. Retry setup.");
+  });
+
+  it("rejects revoked setup tokens", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("invalid or revoked token", { status: 404 })));
+    await expect(loadClientApiKey("revoked-token")).rejects.toThrow();
   });
 });
 

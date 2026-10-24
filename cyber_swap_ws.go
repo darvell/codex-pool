@@ -26,6 +26,8 @@ type codexCyberSwapOptions struct {
 	InitialOutURL               *url.URL
 	InitialUpstreamHeaders      http.Header
 	ConversationID              string
+	Model                       string
+	ServiceTier                 string
 	RequiredPlan                string
 	ClientIP                    string
 	UserID                      string
@@ -105,7 +107,7 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 		if attempt+1 >= h.cfg.maxAttempts {
 			break
 		}
-		next := h.pool.candidate(opts.ConversationID, excluded, AccountTypeCodex, opts.RequiredPlan, opts.ClientIP)
+		next := h.pool.candidateForTier(opts.ConversationID, excluded, AccountTypeCodex, opts.RequiredPlan, opts.ClientIP, opts.Model, opts.ServiceTier)
 		if next == nil {
 			break
 		}
@@ -179,11 +181,29 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 		clientCh:             startWebSocketReader(relayCtx, clientConn),
 		upstreamCh:           startWebSocketReader(relayCtx, upstreamConn),
 		session:              session,
+		activityCh:           make(chan struct{}, 1),
 		activeConversationID: opts.ConversationID,
 		// Already on a cyber account — no further swap is meaningful.
 		swapDone: opts.InitialAccount.CyberAccess,
 	}
 	defer state.closeAll()
+	if state.contextEnabled() {
+		state.proWS = newChatGPTProWS(relayCtx, clientReq, h.handleChatGPTPro, func(ctx context.Context, data []byte) error {
+			if err := state.clientWriter.Write(ctx, websocket.MessageText, data); err != nil {
+				return err
+			}
+			select {
+			case state.activityCh <- struct{}{}:
+			default:
+			}
+			return nil
+		}, opts.ReadLimit, func() {
+			state.turnMu.Lock()
+			defer state.turnMu.Unlock()
+			state.session.setActive(state.turnsActive())
+		})
+		defer state.proWS.Close()
+	}
 
 	statusCode, relayErr := state.run()
 	termination := normalizeCompletedWebSocketTermination(classifyWebSocketTermination(relayErr), session)
@@ -218,6 +238,8 @@ type codexRelayState struct {
 	clientCh   <-chan wsFrame
 	upstreamCh <-chan wsFrame
 	session    *trackedWebSocketSession
+	proWS      *chatGPTProWS
+	activityCh chan struct{}
 
 	// swapDone covers both "we already swapped" and "we tried and gave
 	// up" — once true, no further swap attempts.
@@ -290,14 +312,17 @@ func (s *codexRelayState) relayOnce() error {
 
 	upstreamErrCh := make(chan error, 1)
 	clientErrCh := make(chan error, 1)
-	activityCh := make(chan struct{}, 1)
+	activityCh := s.activityCh
+	if activityCh == nil {
+		activityCh = make(chan struct{}, 1)
+	}
 
 	debug := s.h != nil && s.h.cfg != nil && s.h.cfg.debug.Load()
 	go func() {
-		upstreamErrCh <- pumpFrames(roundCtx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream, s.markUpstreamForwarded, activityCh)
+		upstreamErrCh <- pumpFrames(roundCtx, s.ctx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream, s.markUpstreamForwarded, activityCh)
 	}()
 	go func() {
-		clientErrCh <- pumpFrames(roundCtx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient, s.markClientForwarded, activityCh)
+		clientErrCh <- pumpFrames(roundCtx, s.ctx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient, s.markClientForwarded, activityCh)
 	}()
 
 	var idleTimer *time.Timer
@@ -351,7 +376,7 @@ func (s *codexRelayState) relayOnce() error {
 // and/or return a sentinel error (e.g. *swapPendingErr) to abort the
 // relay without writing the frame.
 func pumpFrames(
-	ctx context.Context,
+	ctx, writeCtx context.Context,
 	src <-chan wsFrame,
 	dst *webSocketWriter,
 	logLabel, label string,
@@ -391,7 +416,9 @@ func pumpFrames(
 			if debug {
 				logRelayFrame(logLabel, label, frame.msgType, data)
 			}
-			if err := dst.Write(ctx, frame.msgType, data); err != nil {
+			// Cancelling a coder/websocket write closes its socket. Round
+			// cancellation must not destroy connections retained after a swap.
+			if err := dst.Write(writeCtx, frame.msgType, data); err != nil {
 				return fmt.Errorf("%s write: %w", label, err)
 			}
 			if afterForward != nil {
@@ -401,11 +428,15 @@ func pumpFrames(
 	}
 }
 
+func (s *codexRelayState) turnsActive() bool {
+	return len(s.turns) != 0 || s.proWS != nil && s.proWS.Active()
+}
+
 func (s *codexRelayState) markClientForwarded(data []byte) {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
 	if s.session != nil && isCodexResponseCreate(data) {
-		s.session.setActive(len(s.turns) != 0)
+		s.session.setActive(s.turnsActive())
 	}
 }
 
@@ -413,7 +444,7 @@ func (s *codexRelayState) markUpstreamForwarded(data []byte) {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
 	if s.session != nil && isTerminalCodexWebSocketEvent(data) {
-		s.session.setActive(len(s.turns) != 0)
+		s.session.setActive(s.turnsActive())
 	}
 }
 
@@ -500,6 +531,15 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if changed {
 		data = filtered
 	}
+	if s.contextEnabled() && s.proWS != nil {
+		handled, err := s.proWS.Handle(data)
+		if handled {
+			if s.session != nil {
+				s.session.setActive(s.turnsActive())
+			}
+			return []byte{}, err
+		}
+	}
 	conversationID := extractConversationIDFromJSON(data)
 	if conversationID == "" {
 		conversationID = s.activeConversationID
@@ -507,16 +547,27 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	model := extractCodexWebSocketRequestedModel(data)
 	turn := &codexRelayTurn{request: append([]byte(nil), data...), model: model, conversationID: conversationID, account: s.activeAccount}
 	s.turns = append(s.turns, turn)
-	if s.h != nil && s.h.pool != nil && s.h.pool.discoveredModelRequiresEntitlement(AccountTypeCodex, model) && !accountSupportsDiscoveredModel(s.activeAccount, model) {
+	tier := serviceTierFromJSON(data)
+	if s.h != nil && s.h.pool != nil && ((s.h.pool.discoveredModelRequiresEntitlement(AccountTypeCodex, model) && !accountSupportsDiscoveredModel(s.activeAccount, model)) || !accountSupportsTier(s.activeAccount, model, tier)) {
 		if len(s.turns) > 1 {
 			s.finishTurn(turn)
 			return nil, fmt.Errorf("cannot change websocket account while responses are pending")
 		}
 		exclude := map[string]bool{s.activeAccount.ID: true}
-		next := s.h.pool.candidateForModel(conversationID, exclude, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, model)
+		next := s.h.pool.candidateForTier(conversationID, exclude, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, model, tier)
 		if next == nil {
 			s.finishTurn(turn)
-			return nil, fmt.Errorf("no Codex account is entitled to websocket model %q", model)
+			if tierNeedsDiscovery(tier) && s.clientWriter != nil {
+				payload, _ := json.Marshal(map[string]any{
+					"type": "error", "status": http.StatusServiceUnavailable,
+					"error": map[string]any{
+						"type": "server_error", "code": "service_tier_unavailable",
+						"message": fmt.Sprintf("Service tier %q unavailable for %q. Choose another tier or retry.", tier, model),
+					},
+				})
+				_ = s.clientWriter.Write(s.ctx, websocket.MessageText, payload)
+			}
+			return nil, fmt.Errorf("no Codex account is entitled to websocket model %q with service tier %q", model, tier)
 		}
 		return nil, &swapPendingErr{next: next}
 	}
@@ -791,6 +842,10 @@ func (s *codexRelayState) pickCyberAccessCandidate() *Account {
 	}
 	if s.activeAccount != nil {
 		exclude[s.activeAccount.ID] = true
+	}
+	if len(s.turns) == 1 {
+		turn := s.turns[0]
+		exclude = s.h.pool.tierExclusions(exclude, AccountTypeCodex, turn.model, serviceTierFromJSON(turn.request))
 	}
 	return s.h.pool.candidateWithCyberAccess(exclude, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP)
 }

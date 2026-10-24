@@ -36,6 +36,7 @@ func TestGPT6LongContextPricing(t *testing.T) {
 		want ModelPricing
 	}{
 		{"gpt-6-sol", tieredPricing(2, 10, 0.2, 0, 272000, 4, 15, 0.4, 0)},
+		{"gpt-6.1-sol", tieredPricing(2, 10, 0.2, 0, 272000, 4, 15, 0.4, 0)},
 		{"gpt-6-luna", tieredPricing(0.1, 0.5, 0.01, 0, 272000, 0.2, 0.75, 0.02, 0)},
 	} {
 		for _, id := range []string{tt.id, tt.id + "[1m]"} {

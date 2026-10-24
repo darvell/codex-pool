@@ -131,7 +131,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools 
 				BaseURL: baseURL + "/v1",
 				APIKey:  codexAPIKey,
 				API:     "openai-completions",
-				Models:  opencodeGoPiModels(),
+				Models:  opencodeGoPiModels(pool),
 			},
 			// The built-in Pi `mistral` provider speaks Mistral Conversations,
 			// not Chat Completions. Use a distinct key so Pi loads this config.
@@ -172,7 +172,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string, pools ...*poolState)
 	for _, accountType := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial} {
 		settings.CustomModels = append(settings.CustomModels, cuteModelsForProvider(baseURL, apiKey, accountType, pool)...)
 	}
-	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey)...)
+	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, mistralCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
 	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey)...)
@@ -375,8 +375,45 @@ func piModelsForProvider(accountType AccountType, pools ...*poolState) []piModel
 // completions endpoint. Pi and Cute Code provider entries are
 // single-protocol, so messages/responses-family Go models stay available
 // through /api/pool/models and native opencode clients only.
-func opencodeGoChatModels() []poolModel {
+func opencodeGoFreeModels(pool *poolState) []poolModel {
+	if pool == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var result []poolModel
+	for _, account := range pool.allAccounts() {
+		if account.Type != AccountTypeOpencodeGo {
+			continue
+		}
+		account.mu.Lock()
+		for id, discovered := range account.Models {
+			if !opencodeGoIsFreeModel(id) || seen[strings.ToLower(id)] {
+				continue
+			}
+			seen[strings.ToLower(id)] = true
+			name := discovered.DisplayName
+			if strings.TrimSpace(name) == "" {
+				name = id
+			}
+			result = append(result, poolModel{
+				AccountType: AccountTypeOpencodeGo, ID: id,
+				DisplayName: name, Description: discovered.Description,
+				ContextWindow: discovered.ContextWindow, MaxTokens: discovered.MaxOutputTokens,
+				Reasoning: discovered.Reasoning, Input: append([]string(nil), discovered.Modalities...),
+			})
+		}
+		account.mu.Unlock()
+	}
+	return result
+}
+
+func opencodeGoChatModels(pools ...*poolState) []poolModel {
 	models := modelsForProvider(AccountTypeOpencodeGo)
+	var pool *poolState
+	if len(pools) > 0 {
+		pool = pools[0]
+	}
+	models = append(models, opencodeGoFreeModels(pool)...)
 	result := make([]poolModel, 0, len(models))
 	for _, model := range models {
 		if opencodeGoEndpointForModel(opencodeGoUpstreamModel(model.ID)) != opencodeGoEndpointChat {
@@ -387,8 +424,8 @@ func opencodeGoChatModels() []poolModel {
 	return result
 }
 
-func opencodeGoPiModels() []piModelConfig {
-	models := opencodeGoChatModels()
+func opencodeGoPiModels(pools ...*poolState) []piModelConfig {
+	models := opencodeGoChatModels(pools...)
 	result := make([]piModelConfig, 0, len(models))
 	for _, model := range models {
 		result = append(result, piModelConfig{
@@ -408,8 +445,13 @@ func opencodeGoPiModels() []piModelConfig {
 // protocol is the Responses API and its `anthropic` protocol is the Messages
 // API — the two routes the Go router serves — so the per-model protocol label
 // selects the config entry.
-func opencodeGoCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
+func opencodeGoCuteModels(baseURL, apiKey string, pools ...*poolState) []cuteCodeModelConfig {
 	models := modelsForProvider(AccountTypeOpencodeGo)
+	var pool *poolState
+	if len(pools) > 0 {
+		pool = pools[0]
+	}
+	models = append(models, opencodeGoFreeModels(pool)...)
 	result := make([]cuteCodeModelConfig, 0, len(models))
 	for _, model := range models {
 		if opencodeGoClientProtocol(model.ID) == "openai" {

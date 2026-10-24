@@ -6,6 +6,15 @@ import (
 	"strings"
 )
 
+func responsesReasoningItem(text string) map[string]any {
+	return map[string]any{
+		"type": "reasoning",
+		"summary": []any{
+			map[string]any{"type": "summary_text", "text": text},
+		},
+	}
+}
+
 // translateChatCompletionsToResponses converts an OpenAI Chat Completions request
 // body to the Responses API format used by the Codex backend.
 func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
@@ -52,6 +61,9 @@ func translateChatCompletionsToResponses(body []byte) ([]byte, error) {
 			input = append(input, item)
 
 		case "assistant":
+			if reasoning, ok := m["reasoning_content"].(string); ok && reasoning != "" {
+				input = append(input, responsesReasoningItem(reasoning))
+			}
 			if text := extractTextContent(m); text != "" {
 				input = append(input, map[string]any{
 					"type": "message",
@@ -1194,6 +1206,7 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 				}
 				// Array of content blocks - separate text and tool_use
 				var textParts []string
+				var reasoningParts []string
 				var toolUseBlocks []map[string]any
 				for _, b := range blocks {
 					block, ok := b.(map[string]any)
@@ -1208,9 +1221,16 @@ func translateClaudeToResponsesRequest(body []byte) ([]byte, error) {
 						}
 					case "tool_use":
 						toolUseBlocks = append(toolUseBlocks, block)
-					case "thinking", "redacted_thinking":
-						// Skip thinking blocks
+					case "thinking":
+						if thinking, ok := block["thinking"].(string); ok && thinking != "" {
+							reasoningParts = append(reasoningParts, thinking)
+						}
+					case "redacted_thinking":
+						// Redacted reasoning has no portable text representation.
 					}
+				}
+				if len(reasoningParts) > 0 {
+					input = append(input, responsesReasoningItem(joinStrings(reasoningParts)))
 				}
 				// Emit assistant message with text if present
 				if len(textParts) > 0 {

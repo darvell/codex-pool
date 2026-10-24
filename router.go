@@ -298,6 +298,11 @@ func providerContributionActor(r *http.Request) string {
 
 // ServeHTTP routes incoming requests to the appropriate handler.
 func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Own the entire namespace before generic provider routing, including malformed paths.
+	if strings.HasPrefix(r.URL.Path, chatGPTPrefix) || strings.HasPrefix(r.URL.EscapedPath(), chatGPTPrefix) {
+		h.handleChatGPT(w, r)
+		return
+	}
 	reqID := randomID()
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] incoming %s %s", reqID, r.Method, r.URL.Path)

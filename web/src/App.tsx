@@ -52,6 +52,7 @@ import {
   createMyClient,
   rotateMyClient,
   revealMyClient,
+  loadClientApiKey,
   revokeMyClient,
   loadPasses,
   createPass,
@@ -1045,7 +1046,22 @@ function SetupPage() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const revealVersion = useRef(0);
+  const [sdkCredential, setSdkCredential] = useState({ token: "", key: "" });
+  const [sdkError, setSdkError] = useState("");
   const base = window.location.origin;
+
+  useEffect(() => {
+    setSdkError("");
+    if (!setupToken) return;
+
+    const controller = new AbortController();
+    void loadClientApiKey(setupToken, controller.signal).then((key) => {
+      if (!controller.signal.aborted) setSdkCredential({ token: setupToken, key });
+    }).catch(() => {
+      if (!controller.signal.aborted) setSdkError("Couldn't load the API key. Retry setup.");
+    });
+    return () => controller.abort();
+  }, [setupToken]);
 
   const reveal = useCallback(async (id: string) => {
     const version = ++revealVersion.current;
@@ -1145,22 +1161,23 @@ function SetupPage() {
       manual: [{ file: "pi models.json", url: `${base}/config/pi/${token}` }],
     },
   };
+  const apiKey = sdkCredential.token === setupToken ? sdkCredential.key : "";
   const sdkTools: Record<string, { name: string; summary: string; examples: { label: string; code: string }[] }> = {
     anthropic: {
       name: "Anthropic API",
-      summary: "Use the pool token as an Anthropic API key. Claude models route natively; GPT/Kimi/MiniMax/GLM/Xiaomi are translated through /v1/messages.",
+      summary: "Use your client API key with the Anthropic SDK or /v1/messages.",
       examples: [
-        { label: "Python SDK", code: `pip install anthropic\n\nfrom anthropic import Anthropic\nclient = Anthropic(base_url="${base}", api_key="${token}")\nmsg = client.messages.create(model="claude-sonnet-5", max_tokens=1024, messages=[{"role": "user", "content": "hello"}])` },
-        { label: "Env + curl", code: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${token}"\n\ncurl "$ANTHROPIC_BASE_URL/v1/messages" \\\n  -H "x-api-key: $ANTHROPIC_API_KEY" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}'` },
+        { label: "Python SDK", code: `pip install anthropic\n\nfrom anthropic import Anthropic\nclient = Anthropic(base_url="${base}", api_key="${apiKey}")\nmsg = client.messages.create(model="claude-sonnet-5", max_tokens=1024, messages=[{"role": "user", "content": "hello"}])` },
+        { label: "Env + curl", code: `export ANTHROPIC_BASE_URL="${base}"\nexport ANTHROPIC_API_KEY="${apiKey}"\n\ncurl "$ANTHROPIC_BASE_URL/v1/messages" \\\n  -H "x-api-key: $ANTHROPIC_API_KEY" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"claude-sonnet-5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}'` },
       ],
     },
     openai: {
       name: "OpenAI SDK",
       summary: "Works with the official OpenAI SDK, Cursor, Continue, Aider, LiteLLM, and any OpenAI-compatible client. Chat Completions and Responses both work; model names route automatically.",
       examples: [
-        { label: "Python SDK", code: `pip install openai\n\nfrom openai import OpenAI\nclient = OpenAI(base_url="${base}/v1", api_key="${token}")\nresp = client.responses.create(model="gpt-6-astra", input="hello")` },
-        { label: "TypeScript SDK", code: `npm install openai\n\nimport OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${token}" });\nconst resp = await client.responses.create({ model: "gpt-6-astra", input: "hello" });` },
-        { label: "curl", code: `curl "${base}/v1/responses" \\\n  -H "Authorization: Bearer ${token}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"gpt-6-astra","input":"hello"}'` },
+        { label: "Python SDK", code: `pip install openai\n\nfrom openai import OpenAI\nclient = OpenAI(base_url="${base}/v1", api_key="${apiKey}")\nresp = client.responses.create(model="gpt-6-astra", input="hello")` },
+        { label: "TypeScript SDK", code: `npm install openai\n\nimport OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "${base}/v1", apiKey: "${apiKey}" });\nconst resp = await client.responses.create({ model: "gpt-6-astra", input: "hello" });` },
+        { label: "curl", code: `curl "${base}/v1/responses" \\\n  -H "Authorization: Bearer ${apiKey}" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"gpt-6-astra","input":"hello"}'` },
       ],
     },
   };
@@ -1198,11 +1215,13 @@ function SetupPage() {
         <section className="setup-step"><span>2</span><div><h3>Connect it to Codex Pool</h3><p className="step-note">macOS or Linux</p><div className="code-wrapper"><div className="code-block"><pre>{activeTool.oneliner}</pre></div><CopyButton className="copy-btn" text={activeTool.oneliner} /></div><p className="step-note">Windows PowerShell</p><div className="code-wrapper"><div className="code-block"><pre>{activeTool.powershell}</pre></div><CopyButton className="copy-btn" text={activeTool.powershell} /></div></div></section>
         <details className="manual-setup"><summary>Configure files manually</summary><p>Fetch the config file directly and place it yourself.</p>{activeTool.manual.map((item) => <div key={item.file} className="code-wrapper"><div className="code-block"><pre>{`curl -sL "${item.url}"\n# → ${item.file}`}</pre></div><CopyButton className="copy-btn" text={`curl -sL "${item.url}"`} /></div>)}</details>
       </div>}
-      {activeSdk && <div className="tool-detail">
+      {activeSdk && !apiKey && (sdkError ? <div className="signal-error" role="alert">{sdkError} <button className="quiet-button" onClick={() => reveal(selected)}>Retry setup</button></div> : <div className="empty-state" role="status">Loading API key…</div>)}
+      {activeSdk && apiKey && <div className="tool-detail">
         <header className="tool-heading"><h2>{activeSdk.name}</h2><p>{activeSdk.summary}</p></header>
         <div className="api-cards">
           <div className="api-card"><div className="api-card-title">Base URL</div><code>{tool === "openai" ? `${base}/v1` : base}</code></div>
-          <div className="api-card"><div className="api-card-title">Authentication</div><code>{tool === "openai" ? "Authorization: Bearer <token>" : "x-api-key: <token>"}</code></div>
+          <div className="api-card"><div className="api-card-title">Authentication</div><code>{tool === "openai" ? "Authorization: Bearer <api-key>" : "x-api-key: <api-key>"}</code></div>
+          <div className="api-card"><div className="api-card-title">API key</div><div className="api-key-value"><code>{apiKey}</code><CopyButton text={apiKey} className="quiet-button" /></div></div>
         </div>
         {activeSdk.examples.map((ex) => <section className="sdk-example" key={ex.label}><h3>{ex.label}</h3><div className="code-wrapper"><div className="code-block"><pre>{ex.code}</pre></div><CopyButton className="copy-btn" text={ex.code} /></div></section>)}
         <h3 className="models-heading">Model IDs</h3>

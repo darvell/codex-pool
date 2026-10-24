@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -55,6 +57,90 @@ func TestOpencodeGoAuthHeaders(t *testing.T) {
 	}
 	if p.MatchesPath("/v1/messages") {
 		t.Fatal("Go should be model-routed, not path-routed")
+	}
+}
+
+func TestOpencodeGoFreeModelTransport(t *testing.T) {
+	t.Parallel()
+
+	goBase, _ := url.Parse("https://opencode.ai/zen/go/v1")
+	zenBase, _ := url.Parse("https://opencode.ai/zen/v1")
+	provider := NewOpencodeGoProvider(goBase, zenBase)
+	if got := provider.UpstreamURLForModel("opencode/deepseek-v4.1-flash-free", "/v1/chat/completions").String(); got != "https://opencode.ai/inference/openai/v1" {
+		t.Fatalf("free inference base = %q", got)
+	}
+	if got := provider.UpstreamURLForModel("opencode-go/longcat-2.0", "/v1/chat/completions").String(); got != goBase.String() {
+		t.Fatalf("Go inference base = %q", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "https://pool.example/v1/chat/completions", nil)
+	req.Header.Set("x-opencode-session", "session-free")
+	provider.SetAuthHeadersForModel(req, &Account{AccessToken: "go-key"}, "opencode/deepseek-v4.1-flash-free")
+	if got := req.Header.Get("Authorization"); got != "Bearer public" {
+		t.Fatalf("free Authorization = %q", got)
+	}
+	if got := req.Header.Get("X-Api-Key"); got != "" {
+		t.Fatalf("free X-Api-Key = %q", got)
+	}
+	if got := req.Header.Get("x-session-affinity"); got != "session-free" {
+		t.Fatalf("free x-session-affinity = %q", got)
+	}
+	if got := req.Header.Get("x-session-id"); got != "session-free" {
+		t.Fatalf("free x-session-id = %q", got)
+	}
+}
+
+func TestFetchOpencodeGoFreeModels(t *testing.T) {
+	t.Parallel()
+
+	zen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("catalog path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-v4.1-flash-free"},{"id":"deepseek-v4.1-flash"},{"id":"space-bunny-free"}]}`))
+	}))
+	defer zen.Close()
+	base, _ := url.Parse(zen.URL)
+	models, err := fetchOpencodeGoFreeModels(context.Background(), http.DefaultTransport, NewOpencodeGoProvider(base, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models["deepseek-v4.1-flash-free"].ID == "" || models["deepseek-v4.1-flash"].ID != "" {
+		t.Fatalf("free catalog = %#v", models)
+	}
+}
+
+func TestSyncOpencodeGoModelsMergesZenFreeCatalog(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/go/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"longcat-2.0"}]}`))
+		case "/zen/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-v4.1-flash-free"},{"id":"deepseek-v4.1-flash"}]}`))
+		default:
+			t.Fatalf("unexpected discovery path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	goBase, _ := url.Parse(server.URL + "/go")
+	zenBase, _ := url.Parse(server.URL + "/zen")
+	provider := NewOpencodeGoProvider(goBase, zenBase)
+	accountFile := filepath.Join(t.TempDir(), "go.json")
+	if err := os.WriteFile(accountFile, []byte(`{"api_key":"key"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account := &Account{Type: AccountTypeOpencodeGo, ID: "go", File: accountFile, AccessToken: "key"}
+	registry := NewProviderRegistry(nil, nil, nil, provider)
+	if err := syncProviderModels(context.Background(), http.DefaultTransport, registry, account); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := account.Models["opencode/deepseek-v4.1-flash-free"]; !ok {
+		t.Fatalf("free model missing from merged snapshot: %#v", account.Models)
+	}
+	if _, ok := account.Models["deepseek-v4.1-flash"]; ok {
+		t.Fatalf("paid Zen model should not be merged: %#v", account.Models)
 	}
 }
 
@@ -167,8 +253,9 @@ func TestDiscoveredOpencodeGoModelsGetEndpointProtocol(t *testing.T) {
 	account := &Account{
 		ID: "go", Type: AccountTypeOpencodeGo,
 		Models: map[string]DiscoveredModel{
-			"muse-spark-1.3-contributor": {ID: "muse-spark-1.3-contributor", DisplayName: "muse-spark-1.3-contributor"},
-			"longcat-2.0":                {ID: "longcat-2.0", DisplayName: "longcat-2.0"},
+			"muse-spark-1.3-contributor":        {ID: "muse-spark-1.3-contributor", DisplayName: "muse-spark-1.3-contributor"},
+			"longcat-2.0":                       {ID: "longcat-2.0", DisplayName: "longcat-2.0"},
+			"opencode/deepseek-v4.1-flash-free": {ID: "deepseek-v4.1-flash-free", DisplayName: "DeepSeek V4.1 Flash Free"},
 		},
 	}
 	pool := newPoolState([]*Account{account}, false)
@@ -183,6 +270,9 @@ func TestDiscoveredOpencodeGoModelsGetEndpointProtocol(t *testing.T) {
 	}
 	if got := byID["longcat-2.0"]; got != "anthropic" {
 		t.Fatalf("discovered longcat protocol = %q, want anthropic", got)
+	}
+	if got := byID["opencode/deepseek-v4.1-flash-free"]; got != "openai" {
+		t.Fatalf("discovered free model protocol = %q, want openai", got)
 	}
 
 	// The client reads the label from /api/pool/models, so assert the payload.
@@ -425,6 +515,144 @@ func TestFetchOpencodeGoUsage(t *testing.T) {
 	}
 }
 
+func TestOpencodeGoQuotaRecovery(t *testing.T) {
+	t.Parallel()
+
+	for _, window := range []string{"rolling", "weekly"} {
+		t.Run(window, func(t *testing.T) {
+			t.Parallel()
+
+			now := time.Now().UTC()
+			rolling, weekly := 0.0, 40.0
+			old := UsageSnapshot{PrimaryUsed: 1, PrimaryUsedPercent: 1, SecondaryUsed: 0.4, SecondaryUsedPercent: 0.4}
+			if window == "weekly" {
+				rolling, weekly = 20, 0
+				old = UsageSnapshot{PrimaryUsed: 0.2, PrimaryUsedPercent: 0.2, SecondaryUsed: 1, SecondaryUsedPercent: 1}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				respondJSON(w, map[string]any{"usage": map[string]any{
+					"rolling": map[string]any{"status": "ok", "percent": rolling},
+					"weekly":  map[string]any{"status": "ok", "percent": weekly},
+					"monthly": map[string]any{"status": "ok", "percent": 20},
+				}})
+			}))
+			defer server.Close()
+
+			base, _ := url.Parse(server.URL)
+			acc := &Account{Type: AccountTypeOpencodeGo, ID: "go", PlanType: "opencode_go", AccessToken: "sk-go-test", Usage: old}
+			pool := newPoolState([]*Account{acc}, false)
+			h := &proxyHandler{cfg: &config{opencodeGoBase: base}, pool: pool, transport: http.DefaultTransport}
+			if pool.candidate("", nil, AccountTypeOpencodeGo, "", "") != nil {
+				t.Fatal("exhausted account should not route before reset")
+			}
+			if err := h.fetchOpencodeGoUsage(now, acc); err != nil {
+				t.Fatal(err)
+			}
+			if acc.Usage.PrimaryUsedPercent != rolling/100 || acc.Usage.PrimaryUsed != rolling/100 || acc.Usage.SecondaryUsedPercent != weekly/100 || acc.Usage.SecondaryUsed != weekly/100 {
+				t.Fatalf("quota reset retained stale usage: %+v", acc.Usage)
+			}
+			if got := pool.candidate("", nil, AccountTypeOpencodeGo, "", ""); got != acc {
+				t.Fatal("reset account should become routable")
+			}
+		})
+	}
+}
+
+func TestOpencodeGoQuotaCycle(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var quota atomic.Value
+	quota.Store(`{"usage":{"rolling":{"status":"ok","percent":0},"weekly":{"status":"ok","percent":40}}}`)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/usage" {
+			_, _ = w.Write([]byte(quota.Load().(string)))
+			return
+		}
+		calls.Add(1)
+		respondJSON(w, map[string]any{"id": "chatcmpl-quota", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "OK"}}}})
+	}))
+	defer server.Close()
+
+	base, _ := url.Parse(server.URL)
+	acc := &Account{Type: AccountTypeOpencodeGo, ID: "go", PlanType: "opencode_go", AccessToken: "sk-go-test"}
+	h := &proxyHandler{
+		cfg:  &config{opencodeGoBase: base, maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool: newPoolState([]*Account{acc}, false), metrics: newMetrics(), recent: newRecentErrors(5),
+		registry:  NewProviderRegistry(NewCodexProvider(base, base, nil), NewClaudeProvider(base), NewGeminiProvider(base, base), NewOpencodeGoProvider(base)),
+		transport: http.DefaultTransport,
+	}
+	request := func(want int) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode-go/longcat-2.0","messages":[{"role":"user","content":"Reply OK"}]}`))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "quota-user"))
+		w := httptest.NewRecorder()
+		h.proxyRequest(w, r, "quota-cycle")
+		if w.Code != want || (want == http.StatusOK && !strings.Contains(w.Body.String(), `"content":"OK"`)) {
+			t.Fatalf("quota cycle response: status=%d body=%s", w.Code, w.Body.String())
+		}
+		if want == http.StatusBadGateway && strings.TrimSpace(w.Body.String()) != "all attempts failed" {
+			t.Fatalf("expected exhausted cooldown retry, got %s", w.Body.String())
+		}
+	}
+	ageQuota := func() {
+		acc.mu.Lock()
+		acc.Usage.RetrievedAt = time.Now().Add(-opencodeGoUsagePollInterval)
+		acc.mu.Unlock()
+	}
+
+	h.pollUpstreamUsage()
+	request(http.StatusOK)
+	quota.Store(`{"usage":{"rolling":{"status":"rate-limited","percent":100,"resetsAt":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + `"},"weekly":{"status":"ok","percent":40}}}`)
+	ageQuota()
+	h.pollUpstreamUsage()
+	request(http.StatusBadGateway)
+
+	quota.Store(`{"usage":{"rolling":{"status":"ok","percent":0},"weekly":{"status":"ok","percent":40}}}`)
+	ageQuota()
+	h.pollUpstreamUsage()
+	request(http.StatusBadGateway)
+	acc.mu.Lock()
+	acc.RateLimitUntil = time.Now().Add(-time.Second)
+	acc.mu.Unlock()
+	request(http.StatusOK)
+
+	ageQuota()
+	h.pollUpstreamUsage()
+	request(http.StatusOK)
+	if calls.Load() != 3 {
+		t.Fatalf("inference calls=%d, want 3; exhausted/cooling accounts must not reach upstream", calls.Load())
+	}
+}
+
+func TestOpencodeGoPollInCooldown(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"usage":{"rolling":{"status":"ok","percent":0},"weekly":{"status":"ok","percent":40}}}`))
+	}))
+	defer server.Close()
+
+	base, _ := url.Parse(server.URL)
+	acc := &Account{Type: AccountTypeOpencodeGo, ID: "go", AccessToken: "sk-go-test", RateLimitUntil: time.Now().Add(time.Hour), Usage: UsageSnapshot{PrimaryUsedPercent: 1}}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{cfg: &config{opencodeGoBase: base}, pool: pool, transport: http.DefaultTransport}
+	h.pollUpstreamUsage()
+	if calls != 1 || acc.Usage.PrimaryUsedPercent != 0 {
+		t.Fatalf("cooldown skipped quota recovery: calls=%d usage=%+v", calls, acc.Usage)
+	}
+	if got := pool.candidate("", nil, AccountTypeOpencodeGo, "", ""); got != nil {
+		t.Fatal("quota refresh should not bypass an active inference cooldown")
+	}
+	h.pollUpstreamUsage()
+	if calls != 1 {
+		t.Fatalf("fresh quota should not be polled again: calls=%d", calls)
+	}
+}
+
 func TestFetchOpencodeGoUsageUnauthorizedMarksDead(t *testing.T) {
 	t.Parallel()
 
@@ -453,6 +681,49 @@ func TestFetchOpencodeGoUsageUnauthorizedMarksDead(t *testing.T) {
 	data, _ := os.ReadFile(accountFile)
 	if !strings.Contains(string(data), `"dead": true`) {
 		t.Fatalf("dead flag not persisted: %s", data)
+	}
+}
+
+func TestProxyRequestRoutesOpencodeGoFreeModel(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	goBase, _ := url.Parse("https://opencode.ai/zen/go/v1")
+	zenBase, _ := url.Parse("https://opencode.ai/zen/v1")
+	acc := &Account{Type: AccountTypeOpencodeGo, ID: "go", AccessToken: "sk-go-upstream", PlanType: "opencode_go", Models: map[string]DiscoveredModel{
+		"opencode/deepseek-v4.1-flash-free": {ID: "deepseek-v4.1-flash-free", DisplayName: "DeepSeek V4.1 Flash Free"},
+	}}
+	var upstreamURL, auth, apiKey, session string
+	h := &proxyHandler{
+		cfg:     &config{maxAttempts: 1, maxInMemoryBodyBytes: 4096},
+		pool:    newPoolState([]*Account{acc}, false),
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+		registry: NewProviderRegistry(
+			NewCodexProvider(goBase, goBase, nil), NewClaudeProvider(goBase),
+			NewGeminiProvider(goBase, goBase), NewOpencodeGoProvider(goBase, zenBase),
+		),
+		transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamURL = req.URL.String()
+			auth = req.Header.Get("Authorization")
+			apiKey = req.Header.Get("X-Api-Key")
+			session = req.Header.Get("x-session-id")
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"chatcmpl-free","choices":[{"message":{"role":"assistant","content":"OK"}}]}`))}, nil
+		}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"opencode/deepseek-v4.1-flash-free","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", generateClaudePoolToken("test-secret", "free-user"))
+	req.Header.Set("x-opencode-session", "free-session")
+	rr := httptest.NewRecorder()
+	h.proxyRequest(rr, req, "free-request")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamURL != "https://opencode.ai/inference/openai/v1/chat/completions" {
+		t.Fatalf("upstream URL = %q", upstreamURL)
+	}
+	if auth != "Bearer public" || apiKey != "" || session != "free-session" {
+		t.Fatalf("free upstream headers auth=%q api-key=%q session=%q", auth, apiKey, session)
 	}
 }
 

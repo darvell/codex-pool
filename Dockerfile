@@ -17,13 +17,13 @@ COPY --from=web /src/web/dist ./web/dist
 RUN go build -trimpath -ldflags='-s -w' -o /out/codex-pool .
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl chromium && rm -rf /var/lib/apt/lists/* \
  && groupadd --system codex && useradd --system --gid codex --home-dir /app codex
 WORKDIR /app
 COPY --from=build /out/codex-pool /app/codex-pool
 RUN mkdir -p /app/data /app/pool /app/tmp && chown -R codex:codex /app
 USER codex
-ENV DUCKDB_PATH=/app/data/usage.duckdb
+ENV DUCKDB_PATH=/app/data/usage.duckdb CHATGPT_BROWSER_PATH=/usr/bin/chromium
 EXPOSE 8989
 HEALTHCHECK --interval=30s --timeout=3s CMD curl -fsS http://127.0.0.1:8989/healthz || exit 1
 ENTRYPOINT ["/app/codex-pool"]

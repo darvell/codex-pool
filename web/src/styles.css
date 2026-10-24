@@ -1227,6 +1227,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .api-card { min-width: 0; }
 .api-card-title { color: var(--muted); font: .85rem "IBM Plex Sans Condensed", sans-serif; margin-bottom: 7px; }
 .api-card code { color: var(--ink); font: .78rem/1.6 "IBM Plex Mono", monospace; overflow-wrap: anywhere; }
+.api-key-value { display: flex; align-items: flex-start; gap: 12px; }
+.api-key-value code { min-width: 0; flex: 1; }
+.api-key-value button { flex-shrink: 0; }
 .models-heading { margin-top: 32px; }
 .model-pills { display: flex; flex-wrap: wrap; gap: 10px 24px; }
 .model-pill { color: var(--muted); font: .75rem/1.5 "IBM Plex Mono", monospace; overflow-wrap: anywhere; }

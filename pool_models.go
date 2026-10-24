@@ -250,6 +250,9 @@ func poolModelAvailability(pool *poolState, accountType AccountType, modelIDs ..
 	var model poolModel
 	if len(modelIDs) > 0 {
 		model, _ = modelForProvider(accountType, modelIDs[0])
+		if !model.RequiresDiscovery && pool.discoveredModelKnown(accountType, modelIDs[0]) {
+			model.RequiresDiscovery = true
+		}
 	}
 	now := time.Now()
 	supportingAccounts := 0

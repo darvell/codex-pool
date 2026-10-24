@@ -48,6 +48,7 @@ type config struct {
 	grokBase               *url.URL // Grok Code OpenAI-compatible endpoint
 	adverserialBase        *url.URL // api.adverserial.ai wallet shim (Anthropic + OpenAI)
 	opencodeGoBase         *url.URL // OpenCode Go subscription endpoint (zen/go/v1)
+	opencodeZenBase        *url.URL // OpenCode Zen catalog endpoint (zen/v1)
 	mistralBase            *url.URL // Mistral paid API endpoint
 	poolDir                string
 
@@ -161,6 +162,7 @@ func buildConfig() *config {
 	// chat product and returns 403 "Use of API key is not enabled".
 	cfg.adverserialBase = mustParse(getenv("UPSTREAM_ADVERSERIAL_BASE", "https://api.adverserial.ai"))
 	cfg.opencodeGoBase = mustParse(getenv("UPSTREAM_OPENCODE_GO_BASE", "https://opencode.ai/zen/go/v1"))
+	cfg.opencodeZenBase = mustParse(getenv("UPSTREAM_OPENCODE_ZEN_BASE", "https://opencode.ai/zen/v1"))
 	cfg.mistralBase = mustParse(getenv("UPSTREAM_MISTRAL_BASE", "https://api.mistral.ai"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
 
@@ -337,7 +339,7 @@ func main() {
 	xiaomiProvider := NewXiaomiProvider(cfg.xiaomiBase)
 	grokProvider := NewGrokProvider(cfg.grokBase)
 	adverserialProvider := NewAdverserialProvider(cfg.adverserialBase)
-	opencodeGoProvider := NewOpencodeGoProvider(cfg.opencodeGoBase)
+	opencodeGoProvider := NewOpencodeGoProvider(cfg.opencodeGoBase, cfg.opencodeZenBase)
 	mistralProvider := NewMistralProvider(cfg.mistralBase)
 	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, antigravityProvider, kimiProvider, minimaxProvider, zaiProvider, xiaomiProvider, grokProvider, adverserialProvider, opencodeGoProvider, mistralProvider, newMistralVibeProvider(cfg.mistralBase))
 
@@ -569,6 +571,12 @@ func main() {
 			log.Fatalf("initialize native context store: %v", err)
 		}
 		h.nativeContext = &nativeContext{store: contextStore, pool: pool, provider: registry.ForType(AccountTypeCodex), transport: h.transport, refresh: h.refreshAccountAfterAuthFailure}
+		chatGPTOrigin, chatGPTIssuer := chatGPTOrigins()
+		h.chatGPT, err = newChatGPTGateway(store.db, pool, chatGPTOrigin, chatGPTIssuer, h.transport)
+		if err != nil {
+			log.Fatalf("initialize ChatGPT gateway: %v", err)
+		}
+		h.chatGPT.refresh = h.refreshAccountAfterAuthFailure
 	}
 	h.startUsagePoller()
 	if getenv("PROXY_ENABLE_QUOTA_INTELLIGENCE", "1") != "0" {
@@ -704,6 +712,7 @@ type proxyHandler struct {
 	registry             *ProviderRegistry
 	store                *usageStore
 	nativeContext        *nativeContext
+	chatGPT              *chatGPTGateway
 	analyticsStore       *AnalyticsStore
 	duckAnalytics        *DuckAnalytics
 	pricing              *PricingData
@@ -1489,7 +1498,8 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		// so extractClaudeReasoningEffort would silently drop them.
 		return p, p.UpstreamURL(path), nil
 	}
-	if isOpencodeGoModel(model) {
+	opencodeGoDiscovered := h.pool != nil && h.pool.discoveredModelKnown(AccountTypeOpencodeGo, model)
+	if isOpencodeGoModel(model) || opencodeGoDiscovered {
 		p := h.registry.ForType(AccountTypeOpencodeGo)
 		if p == nil {
 			return nil, nil, nil
@@ -1497,7 +1507,7 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		// The Go upstream expects the bare model ID in the body and rejects the
 		// proxy-only session_id field, which must travel as a header instead.
 		rewritten := opencodeGoUpstreamBody(body, model)
-		return p, p.UpstreamURL(path), rewritten
+		return p, opencodeGoTargetURL(p, model, path), rewritten
 	}
 	// Cross-format model routing: detect if the model belongs to a different provider
 	// than the one the request path would normally select.
@@ -1625,7 +1635,7 @@ func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, 
 		if discovered {
 			canonical = discoveredModel
 		}
-		return provider, provider.UpstreamURL(path), canonical
+		return provider, opencodeGoTargetURL(provider, model, path), canonical
 	}
 	return nil, nil, model
 }
@@ -2206,6 +2216,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				return
 			}
 			defer func() { spooled.Close() }()
+			if h.handleSpooledPro(w, r, spooled) {
+				return
+			}
 			if spooled.Model != "" {
 				if routed, routeBase, _ := h.resolveStreamedModelRoute(r.URL.Path, spooled.Model); routed != nil {
 					provider = routed
@@ -2409,6 +2422,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// Resolve model aliases before routing.
 	if requestedModel != "" {
 		requestedModel, bodyBytes = applyModelAlias(h.aliases, requestedModel, bodyBytes, h.cfg.debug.Load(), reqID)
+	}
+
+	if h.handleChatGPTPro(w, r, bodyBytes, requestedModel) {
+		return
 	}
 
 	// Antigravity owns its complete upstream envelope and protocol conversion.
@@ -2717,6 +2734,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	var lastStatus int
 	cyberAccessRetry := false
 	requiredPlan := requiredPlanForRequest(accountType, r, requestedModel)
+	requestedTier := serviceTierFromJSON(bodyBytes)
 
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
 	const preferredImageCodexAccountID = "neon"
@@ -2725,10 +2743,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		var acc *Account
-		candidateExclude := exclude
+		candidateExclude := h.pool.tierExclusions(exclude, accountType, requestedModel, requestedTier)
 		if imageGenerationRequest {
 			candidateExclude = make(map[string]bool, len(exclude)+h.pool.countByType(accountType))
-			for id, excluded := range exclude {
+			for id, excluded := range h.pool.tierExclusions(exclude, accountType, requestedModel, requestedTier) {
 				candidateExclude[id] = excluded
 			}
 			h.pool.excludeImageIncapable(candidateExclude)
@@ -2737,7 +2755,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 		}
 		if imageGenerationRequest && attempt == 1 && !imageFanoutChild {
-			acc = h.pool.candidateByID(preferredImageCodexAccountID, accountType, requiredPlan, originIP)
+			if !candidateExclude[preferredImageCodexAccountID] {
+				acc = h.pool.candidateByID(preferredImageCodexAccountID, accountType, requiredPlan, originIP)
+			}
 			if acc != nil && h.cfg.debug.Load() {
 				log.Printf("[%s] routing image generation request to codex account %s", reqID, acc.ID)
 			}
@@ -2761,7 +2781,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		if acc == nil {
 			// All accounts excluded or rate-limited. If there are rate-limited
 			// accounts, wait for the shortest cooldown instead of 503 immediately.
-			if cooldown := h.pool.nearestCooldown(accountType, nil); cooldown > 0 {
+			if cooldown := h.pool.nearestCooldown(accountType, h.pool.tierExclusions(nil, accountType, requestedModel, requestedTier)); cooldown > 0 {
 				wait := cooldown
 				if wait > maxCooldownWait {
 					wait = maxCooldownWait
@@ -2780,7 +2800,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if lastErr != nil {
 				prelude.httpError(w, lastErr.Error(), http.StatusServiceUnavailable)
 			} else {
-				if requiredPlan != "" {
+				if accountType == AccountTypeCodex && tierNeedsDiscovery(requestedTier) {
+					prelude.httpError(w, fmt.Sprintf("no live Codex accounts for model %q with service tier %q", requestedModel, requestedTier), http.StatusServiceUnavailable)
+				} else if requiredPlan != "" {
 					prelude.httpError(w, fmt.Sprintf("no live %s %s accounts for model %s", accountType, requiredPlan, requestedModel), http.StatusServiceUnavailable)
 				} else {
 					prelude.httpError(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
@@ -2997,7 +3019,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			respBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr == nil {
-				modified := injectClaudeModels(respBody)
+				modified := mergeCodexServiceTiers(injectClaudeModels(respBody), h.pool)
 				w.WriteHeader(resp.StatusCode)
 				w.Write(modified)
 			} else {
@@ -3653,7 +3675,22 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		}
 		selectionConversationID = "cyber-fallback:" + fallbackID
 	}
-	acc := h.pool.candidate(selectionConversationID, map[string]bool{}, accountType, requiredPlan, clientIP)
+	hintModel, hintTier := codexRoutingHint(r.Header)
+	acc := h.pool.candidateForTier(selectionConversationID, map[string]bool{}, accountType, requiredPlan, clientIP, hintModel, hintTier)
+	if acc == nil && (hintModel != "" || hintTier != "") {
+		// The hint is advisory; the later response.create may select another tier.
+		acc = h.pool.candidate(selectionConversationID, map[string]bool{}, accountType, requiredPlan, clientIP)
+	}
+	if acc == nil && accountType == AccountTypeCodex && isCodexResponsesPath(r.URL.Path) {
+		client, err := h.proAccount(contextScope(userID), clientIP, "", "")
+		if err == nil {
+			_, err = client.account()
+		}
+		if err == nil {
+			h.proxyProOnlyWebSocket(w, r, reqID)
+			return
+		}
+	}
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -3758,6 +3795,8 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			InitialOutURL:               outURL,
 			InitialUpstreamHeaders:      upstreamHeaders,
 			ConversationID:              conversationID,
+			Model:                       hintModel,
+			ServiceTier:                 hintTier,
 			RequiredPlan:                requiredPlan,
 			ClientIP:                    clientIP,
 			UserID:                      userID,
@@ -4250,19 +4289,20 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	start := time.Now()
 	accountType := provider.Type()
 	spooled, _ := r.Context().Value(contextSpoolKey{}).(*streamedResponsesRequest)
-	contextSession := ""
+	contextSession, requestedTier := "", ""
 	if spooled != nil {
 		contextSession = contextSessionID(spooled.contextMetadata)
-		requestedModel = spooled.Model
+		requestedModel, requestedTier = spooled.Model, spooled.ServiceTier
 	}
 
 	requiredPlan := requiredPlanForRequest(accountType, r, requestedModel)
 	clientIP := getClientIP(r)
+	exclude := h.pool.tierExclusions(nil, accountType, requestedModel, requestedTier)
 	var acc *Account
 	if accountType == AccountTypeKimi {
-		acc = h.pool.candidateForModel(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP, requestedModel)
+		acc = h.pool.candidateForModel(contextSession, exclude, accountType, requiredPlan, clientIP, requestedModel)
 	} else {
-		acc = h.pool.candidate(contextSession, map[string]bool{}, accountType, requiredPlan, clientIP)
+		acc = h.pool.candidate(contextSession, exclude, accountType, requiredPlan, clientIP)
 	}
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
@@ -4332,6 +4372,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
 	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	if accountType == AccountTypeOpencodeGo && opencodeGoIsFreeModel(requestedModel) {
+		outURL.Path = singleJoin(targetBase.Path, "/chat/completions")
+	}
 
 	authAccount.mu.Lock()
 	access := authAccount.AccessToken
@@ -4396,7 +4439,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	outReq.Header.Del("X-Real-Ip")
 
 	// Register and authenticate with the same credential snapshot.
-	provider.SetAuthHeaders(outReq, authAccount)
+	if goProvider, ok := provider.(*OpencodeGoProvider); ok {
+		goProvider.SetAuthHeadersForModel(outReq, authAccount, requestedModel)
+	} else {
+		provider.SetAuthHeaders(outReq, authAccount)
+	}
 
 	// Force uncompressed responses — SSE frame parsing and client decompression
 	// break on gzip-compressed streams that split across TCP segments.
@@ -4434,7 +4481,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 			http.Error(w, "request replay unavailable", http.StatusInternalServerError)
 			return
 		}
-		provider.SetAuthHeaders(retry, authAccount)
+		if goProvider, ok := provider.(*OpencodeGoProvider); ok {
+			goProvider.SetAuthHeadersForModel(retry, authAccount, requestedModel)
+		} else {
+			provider.SetAuthHeaders(retry, authAccount)
+		}
 		resp, err = h.transport.RoundTrip(retry)
 		captureCodexResponseState(acc, resp, reqID)
 		if err != nil {
@@ -5637,6 +5688,9 @@ func (h *proxyHandler) tryOnce(
 	outURL.Host = targetBase.Host
 	// Use provider's NormalizePath method for path handling
 	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(in.URL.Path))
+	if provider.Type() == AccountTypeOpencodeGo && opencodeGoIsFreeModel(requestedModel) {
+		outURL.Path = singleJoin(targetBase.Path, "/chat/completions")
+	}
 	if provider.Type() == AccountTypeCodex && isCodexLegacyLivePath(in.URL.Path) {
 		q := outURL.Query()
 		q.Set("intent", "quicksilver")
@@ -5712,8 +5766,12 @@ func (h *proxyHandler) tryOnce(
 			return nil, fmt.Errorf("account %s has empty access token", acc.ID)
 		}
 
-		// Use provider's SetAuthHeaders method for provider-specific auth
-		provider.SetAuthHeaders(outReq, authAccount)
+		// Use provider's model-specific auth when OpenCode serves a Zen free model.
+		if goProvider, ok := provider.(*OpencodeGoProvider); ok {
+			goProvider.SetAuthHeadersForModel(outReq, authAccount, requestedModel)
+		} else {
+			provider.SetAuthHeaders(outReq, authAccount)
+		}
 		// Native Realtime and GPT Live reject the Codex Responses websocket beta
 		// header. Keep it only on the Responses transport that requires it.
 		if provider.Type() == AccountTypeCodex && isCodexRealtimePath(in.URL.Path) {

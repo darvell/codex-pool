@@ -387,6 +387,7 @@ func convertClaudeMsgToOpenAI(m map[string]any) []map[string]any {
 
 	// Check for tool_result blocks (these become separate tool messages)
 	var textParts []string
+	var reasoningParts []string
 	var toolCalls []map[string]any
 	var toolResults []map[string]any
 	var contentParts []map[string]any // multimodal content parts for OpenAI
@@ -435,8 +436,12 @@ func convertClaudeMsgToOpenAI(m map[string]any) []map[string]any {
 			toolCalls = append(toolCalls, tc)
 		case "tool_result":
 			toolResults = append(toolResults, block)
-		case "thinking", "redacted_thinking":
-			// Skip thinking blocks - OpenAI doesn't support them in messages
+		case "thinking":
+			if thinking, ok := block["thinking"].(string); ok && thinking != "" {
+				reasoningParts = append(reasoningParts, thinking)
+			}
+		case "redacted_thinking":
+			// Redacted reasoning has no portable text representation.
 		}
 	}
 
@@ -451,6 +456,9 @@ func convertClaudeMsgToOpenAI(m map[string]any) []map[string]any {
 			msg["content"] = nil
 		}
 		msg["tool_calls"] = toolCalls
+		if len(reasoningParts) > 0 {
+			msg["reasoning_content"] = joinStrings(reasoningParts)
+		}
 		msgs = append(msgs, msg)
 		return msgs
 	}
@@ -479,6 +487,9 @@ func convertClaudeMsgToOpenAI(m map[string]any) []map[string]any {
 		msg["content"] = joinStrings(textParts)
 	} else {
 		msg["content"] = ""
+	}
+	if len(reasoningParts) > 0 {
+		msg["reasoning_content"] = joinStrings(reasoningParts)
 	}
 	msgs = append(msgs, msg)
 	return msgs
@@ -1505,7 +1516,7 @@ func injectClaudeModels(body []byte) []byte {
 
 func injectMissingCodexCatalogModels(models []any) []any {
 	existing := make(map[string]bool, len(models))
-	var template map[string]any
+	var template, firstTemplate map[string]any
 	for _, model := range models {
 		m, ok := model.(map[string]any)
 		if !ok {
@@ -1516,9 +1527,16 @@ func injectMissingCodexCatalogModels(models []any) []any {
 			continue
 		}
 		existing[slug] = true
+		if firstTemplate == nil {
+			firstTemplate = m
+		}
 		if template == nil && strings.HasPrefix(slug, "gpt-") {
 			template = m
 		}
+	}
+
+	if template == nil {
+		template = firstTemplate
 	}
 
 	for _, fallback := range codexCatalogFallbackModels {
@@ -1531,9 +1549,16 @@ func injectMissingCodexCatalogModels(models []any) []any {
 }
 
 func codexCatalogFallbackEntry(model codexCatalogModel, template map[string]any) map[string]any {
-	entry := cloneCatalogEntry(template)
-	if entry == nil {
-		entry = map[string]any{}
+	entry := claudeModelEntry(model.slug, model.displayName, model.contextWindow)
+	entry["supported_reasoning_levels"] = []map[string]string{
+		{"effort": "low", "description": "Fast responses with lighter reasoning"},
+		{"effort": "medium", "description": "Balances speed and reasoning depth"},
+		{"effort": "high", "description": "Greater reasoning depth for complex problems"},
+		{"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+		{"effort": "max", "description": "Maximum reasoning depth for the hardest problems"},
+	}
+	for key, value := range cloneCatalogEntry(template) {
+		entry[key] = value
 	}
 	entry["slug"] = model.slug
 	entry["display_name"] = model.displayName

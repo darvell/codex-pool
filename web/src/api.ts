@@ -91,6 +91,13 @@ export async function rotateMyClient(id: string): Promise<ClientCredential & { s
 export async function revealMyClient(id: string): Promise<{ setup_token: string }> {
   return decode(await fetch(`/api/me/clients/${encodeURIComponent(id)}/reveal`, { method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } }));
 }
+export async function loadClientApiKey(setupToken: string, signal?: AbortSignal): Promise<string> {
+  const config = await decode<{ access_token: string }>(await fetch(`/config/claude/${encodeURIComponent(setupToken)}`, {
+    cache: "no-store", credentials: "same-origin", signal,
+  }));
+  if (!config.access_token) throw new Error("Couldn't load the API key. Retry setup.");
+  return config.access_token;
+}
 export async function revokeMyClient(id: string): Promise<void> {
   await decode(await fetch(`/api/me/clients/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "same-origin", headers: { "X-CSRF-Token": csrfToken() } }));
 }

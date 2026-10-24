@@ -229,6 +229,7 @@ func (pd *PricingData) startPricingRefresh() {
 var pricingModelAliases = map[string]string{
 	"gpt-6-astra[1m]":            "gpt-6-astra",
 	"gpt-6-sol[1m]":              "gpt-6-sol",
+	"gpt-6.1-sol[1m]":            "gpt-6.1-sol",
 	"gpt-6-luna[1m]":             "gpt-6-luna",
 	"gpt-6-astra [1m]":           "gpt-6-astra",
 	"gpt-6-astra-none":           "gpt-6-astra",

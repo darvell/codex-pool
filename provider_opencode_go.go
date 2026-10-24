@@ -16,22 +16,29 @@ import (
 // OpencodeGoProvider handles OpenCode Go subscription accounts ($10/month,
 // pooled open coding models served from https://opencode.ai/zen/go/v1).
 //
-// Auth is a static API key. Chat-completions and Responses endpoints take
-// `Authorization: Bearer`, while the Anthropic-compatible messages endpoint
-// takes `x-api-key`, so both headers are always sent (verified against the
-// opencode repo's zen route handlers and live probes).
+// Go subscription requests use a static API key. Chat-completions and
+// Responses endpoints take `Authorization: Bearer`, while the
+// Anthropic-compatible messages endpoint takes `x-api-key`, so both headers
+// are sent for subscription models. Zen free models use the public OpenCode
+// inference route and its client headers.
 //
-// Pool model IDs are namespaced as `opencode-go/<model-id>` (matching
-// OpenCode's own `opencode-go/` config convention). Bare IDs route to Go
-// only when no other provider claims them; overlapping bare IDs keep their
-// existing provider.
+// Pool model IDs use `opencode-go/<model-id>` for subscription models and
+// `opencode/<model-id>` for Zen public free models. Bare IDs route to Go only
+// when no other provider claims them; overlapping bare IDs keep their existing
+// provider.
 type OpencodeGoProvider struct {
-	opencodeGoBase *url.URL
+	opencodeGoBase  *url.URL
+	opencodeZenBase *url.URL
 }
 
-// NewOpencodeGoProvider creates a new OpenCode Go provider.
-func NewOpencodeGoProvider(opencodeGoBase *url.URL) *OpencodeGoProvider {
-	return &OpencodeGoProvider{opencodeGoBase: opencodeGoBase}
+// NewOpencodeGoProvider creates a new OpenCode Go provider. The optional Zen
+// base supplies the catalog for public `-free` models.
+func NewOpencodeGoProvider(opencodeGoBase *url.URL, opencodeZenBase ...*url.URL) *OpencodeGoProvider {
+	var zenBase *url.URL
+	if len(opencodeZenBase) > 0 {
+		zenBase = opencodeZenBase[0]
+	}
+	return &OpencodeGoProvider{opencodeGoBase: opencodeGoBase, opencodeZenBase: zenBase}
 }
 
 func (p *OpencodeGoProvider) Type() AccountType {
@@ -69,6 +76,36 @@ func (p *OpencodeGoProvider) LoadAccount(name, path string, data []byte) (*Accou
 func (p *OpencodeGoProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
 	req.Header.Set("X-Api-Key", acc.AccessToken)
+}
+
+func (p *OpencodeGoProvider) SetAuthHeadersForModel(req *http.Request, acc *Account, model string) {
+	if opencodeGoIsFreeModel(model) {
+		req.Header.Set("Authorization", "Bearer public")
+		req.Header.Del("X-Api-Key")
+		if req.Header.Get("x-opencode-client") == "" {
+			req.Header.Set("x-opencode-client", "cli")
+		}
+		if session := strings.TrimSpace(req.Header.Get("x-opencode-session")); session != "" {
+			req.Header.Set("x-session-affinity", session)
+			req.Header.Set("x-session-id", session)
+		}
+		return
+	}
+	p.SetAuthHeaders(req, acc)
+}
+
+func (p *OpencodeGoProvider) UpstreamURLForModel(model string, path string) *url.URL {
+	if !opencodeGoIsFreeModel(model) || p.opencodeZenBase == nil {
+		return p.UpstreamURL(path)
+	}
+	return opencodeGoInferenceBase(p.opencodeZenBase)
+}
+
+func opencodeGoTargetURL(provider Provider, model, path string) *url.URL {
+	if goProvider, ok := provider.(*OpencodeGoProvider); ok {
+		return goProvider.UpstreamURLForModel(model, path)
+	}
+	return provider.UpstreamURL(path)
 }
 
 // opencodeGoSessionHeader returns the value for the `x-opencode-session`
@@ -224,6 +261,7 @@ const (
 	opencodeGoEndpointChat      opencodeGoEndpoint = "chat"
 	opencodeGoEndpointMessages  opencodeGoEndpoint = "messages"
 	opencodeGoEndpointResponses opencodeGoEndpoint = "responses"
+	opencodeGoEndpointFree      opencodeGoEndpoint = "free"
 )
 
 // opencodeGoEndpointForModel returns the Go endpoint serving the given bare
@@ -234,7 +272,31 @@ const (
 // provisions each model on the front-ends its upstream supports, so a model
 // can answer on more than one; this returns the one the client should use.
 // Models not listed default to chat completions.
+func opencodeGoIsFreeModel(model string) bool {
+	trimmed := strings.TrimSpace(model)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "opencode/") {
+		return false
+	}
+	bare := opencodeGoUpstreamModel(trimmed)
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(bare)), "-free")
+}
+
+func opencodeGoInferenceBase(zenBase *url.URL) *url.URL {
+	if zenBase == nil {
+		return nil
+	}
+	base := *zenBase
+	base.Path = "/inference/openai/v1"
+	base.RawQuery = ""
+	base.Fragment = ""
+	return &base
+}
+
 func opencodeGoEndpointForModel(bare string) opencodeGoEndpoint {
+	if opencodeGoIsFreeModel(bare) {
+		return opencodeGoEndpointFree
+	}
 	switch strings.ToLower(strings.TrimSpace(bare)) {
 	case "grok-4.6", "grok-4.5", "gpt-5.6-luna",
 		"muse-spark-1.3-contributor", "muse-spark-1.2-contributor":
@@ -255,7 +317,8 @@ func opencodeGoEndpointForModel(bare string) opencodeGoEndpoint {
 // rejects them on /responses with "not supported for format", while a
 // responses-family model is rejected on /messages the same way.
 func opencodeGoClientProtocol(poolModelID string) string {
-	if opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID)) == opencodeGoEndpointResponses {
+	endpoint := opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID))
+	if endpoint == opencodeGoEndpointResponses || endpoint == opencodeGoEndpointFree {
 		return "openai"
 	}
 	return "anthropic"
@@ -269,7 +332,8 @@ func opencodeGoClientProtocol(poolModelID string) string {
 // already native on the route the client's protocol label selects, so they
 // report FormatUnknown and pass through untouched.
 func opencodeGoTargetFormat(poolModelID string) RequestFormat {
-	if opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID)) == opencodeGoEndpointChat {
+	endpoint := opencodeGoEndpointForModel(opencodeGoUpstreamModel(poolModelID))
+	if endpoint == opencodeGoEndpointChat || endpoint == opencodeGoEndpointFree {
 		return FormatOpenAI
 	}
 	return FormatUnknown
@@ -280,7 +344,7 @@ func opencodeGoTargetFormat(poolModelID string) RequestFormat {
 func opencodeGoBareID(model string) (string, bool) {
 	trimmed := strings.TrimSpace(model)
 	lower := strings.ToLower(trimmed)
-	for _, prefix := range []string{"opencode-go/", "opencode_go/", "opencode-go:", "opencode_go:"} {
+	for _, prefix := range []string{"opencode-go/", "opencode_go/", "opencode/", "opencode-go:", "opencode_go:", "opencode:"} {
 		if strings.HasPrefix(lower, prefix) {
 			bare := strings.TrimSpace(trimmed[len(prefix):])
 			if bare == "" {
@@ -425,7 +489,7 @@ func parseOpencodeGoUsage(body []byte, now time.Time) (opencodeGoQuotaState, err
 		return opencodeGoQuotaState{}, err
 	}
 	var out opencodeGoQuotaState
-	out.snapshot = UsageSnapshot{RetrievedAt: now, Source: "opencode-go-usage"}
+	out.snapshot = UsageSnapshot{RetrievedAt: now, Source: "opencode-go-usage", primarySet: true, secondarySet: true}
 
 	applyWindow := func(w opencodeGoWindowUsage, set func(pct float64, reset time.Time)) {
 		pct := clampRateLimitPercent(w.Percent / 100)

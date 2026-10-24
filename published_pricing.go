@@ -6,6 +6,7 @@ var forcePublishedPricing = map[string]bool{
 	"claude-opus-5-5":           true,
 	"gpt-6-astra":               true,
 	"gpt-6-sol":                 true,
+	"gpt-6.1-sol":               true,
 	"gpt-6-luna":                true,
 	"claude-fable-5-1":          true,
 	"claude-sonnet-5":           true,
@@ -46,8 +47,11 @@ var forcePublishedPricing = map[string]bool{
 func publishedModelPricing(now time.Time) map[string]ModelPricing {
 	prices := map[string]ModelPricing{
 		// OpenAI GPT-6 Astra model page, verified 2026-09-04; long rates cover the full request.
-		"gpt-6-astra":         tieredPricing(10, 50, 1, 12.5, 272000, 20, 75, 2, 25),
-		"gpt-6-sol":           tieredPricing(2, 10, 0.2, 0, 272000, 4, 15, 0.4, 0),
+		"gpt-6-astra": tieredPricing(10, 50, 1, 12.5, 272000, 20, 75, 2, 25),
+		"gpt-6-sol":   tieredPricing(2, 10, 0.2, 0, 272000, 4, 15, 0.4, 0),
+		// GPT-6.1-Sol currently uses the GPT-6-Sol rate card until its
+		// provider pricing is published separately.
+		"gpt-6.1-sol":         tieredPricing(2, 10, 0.2, 0, 272000, 4, 15, 0.4, 0),
 		"gpt-6-luna":          tieredPricing(0.1, 0.5, 0.01, 0, 272000, 0.2, 0.75, 0.02, 0),
 		"gpt-5.6-sol":         tieredPricing(5, 30, 0.5, 6.25, 272000, 10, 45, 1, 12.5),
 		"gpt-5.6-terra":       tieredPricing(2, 12, 0.2, 2.5, 272000, 4, 18, 0.4, 5),

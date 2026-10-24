@@ -128,6 +128,7 @@ type streamedResponsesRequest struct {
 	OriginalFile            *os.File
 	OriginalSize            int64
 	Model                   string
+	ServiceTier             string
 	ClientWantsNonStreaming bool
 	contextMetadata         map[string]any
 }
@@ -683,6 +684,9 @@ func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOpt
 			serviceTierRaw, _ = json.Marshal(suffixTier)
 		}
 		if len(serviceTierRaw) > 0 {
+			if e = json.Unmarshal(serviceTierRaw, &res.ServiceTier); e != nil {
+				return nil, e
+			}
 			if e = writeField("service_tier", func() error { _, z := bw.Write(serviceTierRaw); return z }); e != nil {
 				return nil, e
 			}

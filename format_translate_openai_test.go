@@ -50,6 +50,63 @@ func TestTranslateCompletionsToResponses(t *testing.T) {
 	}
 }
 
+func TestTranslateClaudeRequestToOpenAIPreservesReasoning(t *testing.T) {
+	body := []byte(`{
+		"model":"cat-jam-free",
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"I should greet the user."},
+				{"type":"text","text":"Hi!"}
+			]},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out, err := translateClaudeReqToOpenAI(body)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, out)
+	}
+	messages := got["messages"].([]any)
+	assistant := messages[1].(map[string]any)
+	if assistant["reasoning_content"] != "I should greet the user." {
+		t.Fatalf("assistant reasoning = %#v", assistant)
+	}
+}
+
+func TestTranslateChatCompletionsToResponsesPreservesReasoning(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-6.1-sol",
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"Hi!","reasoning_content":"I should greet the user."},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out, err := translateChatCompletionsToResponses(body)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, out)
+	}
+	input := got["input"].([]any)
+	reasoning := input[1].(map[string]any)
+	if reasoning["type"] != "reasoning" {
+		t.Fatalf("reasoning item = %#v", reasoning)
+	}
+	summary := reasoning["summary"].([]any)
+	if summary[0].(map[string]any)["text"] != "I should greet the user." {
+		t.Fatalf("reasoning summary = %#v", summary)
+	}
+}
+
 func TestTranslateResponsesToCompletions(t *testing.T) {
 	body := []byte(`{
 		"id":"resp_1",

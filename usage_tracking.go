@@ -114,10 +114,6 @@ func (h *proxyHandler) pollUpstreamUsage() {
 			continue
 		}
 
-		if !rateLimitUntil.IsZero() && rateLimitUntil.After(now) {
-			continue
-		}
-
 		// OpenCode Go exposes rolling/weekly/monthly quota via /usage.
 		// Poll on its own 15-minute cadence, even while cooling down, so
 		// window resets clear hard excludes without waiting for restart.
@@ -127,6 +123,10 @@ func (h *proxyHandler) pollUpstreamUsage() {
 					log.Printf("opencode-go usage fetch %s failed: %v", a.ID, err)
 				}
 			}
+			continue
+		}
+
+		if !rateLimitUntil.IsZero() && rateLimitUntil.After(now) {
 			continue
 		}
 

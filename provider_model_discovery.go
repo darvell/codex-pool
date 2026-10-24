@@ -19,16 +19,17 @@ const (
 )
 
 type DiscoveredModel struct {
-	ID              string   `json:"id"`
-	DisplayName     string   `json:"display_name,omitempty"`
-	Description     string   `json:"description,omitempty"`
-	ContextWindow   int      `json:"context_window,omitempty"`
-	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
-	Reasoning       bool     `json:"reasoning,omitempty"`
-	Tools           bool     `json:"tools,omitempty"`
-	CompletionChat  bool     `json:"completion_chat,omitempty"`
-	WebSearch       bool     `json:"web_search,omitempty"`
-	Modalities      []string `json:"modalities,omitempty"`
+	ID              string             `json:"id"`
+	DisplayName     string             `json:"display_name,omitempty"`
+	Description     string             `json:"description,omitempty"`
+	ContextWindow   int                `json:"context_window,omitempty"`
+	MaxOutputTokens int                `json:"max_output_tokens,omitempty"`
+	Reasoning       bool               `json:"reasoning,omitempty"`
+	Tools           bool               `json:"tools,omitempty"`
+	CompletionChat  bool               `json:"completion_chat,omitempty"`
+	WebSearch       bool               `json:"web_search,omitempty"`
+	Modalities      []string           `json:"modalities,omitempty"`
+	ServiceTiers    []modelServiceTier `json:"service_tiers,omitempty"`
 }
 
 type providerModelSnapshot struct {
@@ -69,6 +70,11 @@ func parseProviderModels(body []byte) (map[string]DiscoveredModel, error) {
 			model.Reasoning = hasNonEmptyArray(row, "supported_reasoning_levels", "reasoning_efforts")
 		}
 		decodeFirstBool(row, &model.WebSearch, "supports_backend_search", "supports_search_tool", "web_search")
+		if raw, ok := row["service_tiers"]; ok {
+			if err := json.Unmarshal(raw, &model.ServiceTiers); err != nil {
+				return nil, fmt.Errorf("invalid service tiers for model %q: %w", model.ID, err)
+			}
+		}
 
 		model.Modalities = decodeStringArray(row, "input_modalities", "modalities")
 		if len(model.Modalities) == 0 {
@@ -308,6 +314,44 @@ func fetchProviderModels(ctx context.Context, transport http.RoundTripper, provi
 	return providerModelSnapshot{FetchedAt: time.Now().UTC(), Models: models}, nil
 }
 
+func fetchOpencodeGoFreeModels(ctx context.Context, transport http.RoundTripper, provider *OpencodeGoProvider) (map[string]DiscoveredModel, error) {
+	if provider == nil || provider.opencodeZenBase == nil {
+		return nil, errors.New("OpenCode Zen catalog is not configured")
+	}
+	target := *provider.opencodeZenBase
+	target.Path = singleJoin(target.Path, "/models")
+	target.RawQuery = ""
+	target.Fragment = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("OpenCode Zen model discovery failed: %s: %s", resp.Status, safeText(body))
+	}
+	models, err := parseProviderModels(body)
+	if err != nil {
+		return nil, err
+	}
+	free := make(map[string]DiscoveredModel)
+	for id, model := range models {
+		if strings.HasSuffix(strings.ToLower(id), "-free") {
+			free[id] = model
+		}
+	}
+	return free, nil
+}
+
 func syncProviderModels(ctx context.Context, transport http.RoundTripper, registry *ProviderRegistry, account *Account) error {
 	if registry == nil || account == nil {
 		return errors.New("missing provider model discovery dependency")
@@ -325,6 +369,16 @@ func syncProviderModels(ctx context.Context, transport http.RoundTripper, regist
 	snapshot, err := fetchProviderModels(ctx, transport, provider, account)
 	if err != nil {
 		return err
+	}
+	if goProvider, ok := provider.(*OpencodeGoProvider); ok {
+		if freeModels, freeErr := fetchOpencodeGoFreeModels(ctx, transport, goProvider); freeErr == nil {
+			for id, model := range freeModels {
+				if _, exists := snapshot.Models[id]; exists {
+					continue
+				}
+				snapshot.Models["opencode/"+id] = model
+			}
+		}
 	}
 	account.mu.Lock()
 	changed := !reflect.DeepEqual(account.Models, snapshot.Models)
@@ -392,6 +446,7 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 	}
 	type aggregate struct {
 		model      DiscoveredModel
+		sourceID   string
 		provider   AccountType
 		supporting int
 		available  int
@@ -411,7 +466,7 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 			key := string(account.Type) + "\x00" + strings.ToLower(id)
 			entry := aggregates[key]
 			if entry == nil {
-				entry = &aggregate{model: model, provider: account.Type}
+				entry = &aggregate{model: model, sourceID: id, provider: account.Type}
 				aggregates[key] = entry
 			}
 			entry.supporting++
@@ -435,14 +490,21 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 			protocol = "openai"
 		} else if entry.provider == AccountTypeOpencodeGo {
 			// Discovered Go models carry the bare upstream ID, so they need the
-			// same per-endpoint protocol label the catalog entries get. Without
-			// it a responses-family model is advertised as Anthropic Messages
-			// and every request fails on the upstream's /messages route.
-			protocol = opencodeGoClientProtocol(entry.model.ID)
+			// same per-endpoint protocol label the catalog entries get. Zen free
+			// models use the OpenCode namespace and the public OpenAI route.
+			if strings.HasPrefix(strings.ToLower(entry.sourceID), "opencode/") {
+				protocol = "openai"
+			} else {
+				protocol = opencodeGoClientProtocol(entry.model.ID)
+			}
 		}
 		publicID := entry.model.ID
 		upstreamID := entry.model.ID
+		aliases := []string(nil)
 		description := entry.model.Description
+		if entry.provider == AccountTypeOpencodeGo && strings.HasPrefix(strings.ToLower(entry.sourceID), "opencode/") {
+			publicID = entry.sourceID
+		}
 		if isMistralType(entry.provider) {
 			publicID = mistralPublicID(entry.provider, entry.model.ID)
 			adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
@@ -466,7 +528,7 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 			Protocol: protocol, Protocols: []string{protocol}, Provider: string(entry.provider), UpstreamID: upstreamID,
 			ContextWindow: entry.model.ContextWindow, MaxOutputTokens: entry.model.MaxOutputTokens,
 			Modalities: append([]string(nil), entry.model.Modalities...), Capabilities: capabilities,
-			NativeTools:        nativeWebSearchTools(entry.provider, entry.model.WebSearch),
+			NativeTools: nativeWebSearchTools(entry.provider, entry.model.WebSearch), Aliases: aliases,
 			SupportingAccounts: entry.supporting, AvailableAccounts: entry.available, AvailableNow: entry.available > 0,
 		})
 	}

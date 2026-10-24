@@ -172,6 +172,14 @@ func (s *nativeContext) credentials(owner contextAccount, clientIP string) (*Acc
 		if acc.Type != AccountTypeCodex || acc.ID != owner.Alias {
 			continue
 		}
+		s.pool.mu.RLock()
+		acc.mu.Lock()
+		reserved := s.pool.chatGPTReservedLocked(acc)
+		acc.mu.Unlock()
+		s.pool.mu.RUnlock()
+		if reserved {
+			return nil, nil, errContextUnavailable
+		}
 		identity, snapshot, err := contextIdentity(acc)
 		if err != nil || identity != owner || !accountAllowsClientIPLocked(snapshot, clientIP) {
 			return nil, nil, errContextUnavailable
