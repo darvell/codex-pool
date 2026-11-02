@@ -158,6 +158,25 @@ export interface QuotaWindow {
   window_minutes: number;
 }
 
+export interface FailureInsight {
+  account_id: string;
+  provider: string;
+  model?: string;
+  error_class: string;
+  error_domain: string;
+  error_code: string;
+  outcome: string;
+  attempts: number;
+  last_seen_at: string;
+}
+
+export interface FailureInsightsResponse {
+  since: string;
+  until: string;
+  total: number;
+  groups: FailureInsight[];
+}
+
 export interface PoolStats {
   total_accounts: number;
   active_accounts: number;
