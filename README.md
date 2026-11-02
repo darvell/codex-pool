@@ -16,6 +16,10 @@ The setup dashboard configures **Codex CLI**, **Claude Code**, **Gemini CLI**, *
 
 For browser, mobile, or CLI speech-to-speech agents, see [Realtime voice agents through codex-pool](docs/realtime-voice-agent.md). It uses a pooled ephemeral secret followed by a direct WebRTC session.
 
+## Pool failure insights API
+
+Authenticated members and admins can query `GET /api/pool/failure-insights` for aggregate provider failure attempts. The optional `hours` (1–8784) and `limit` (1–500) parameters control the time window and group count. Responses include hashed account IDs, provider/model, normalized error class/domain/code, outcome, attempt count, and last-seen timestamp; request/response bodies and credentials are never persisted.
+
 ---
 
 ## Why
