@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -97,6 +99,103 @@ func TestServeCodexSetupScript_Bash(t *testing.T) {
 	}
 	if !strings.Contains(body, "features enable realtime_conversation") {
 		t.Fatal("expected bash setup to enable realtime_conversation")
+	}
+}
+
+func TestCodexSetupCatalogFailure(t *testing.T) {
+	catalog, err := json.Marshal(map[string]any{
+		"models": []any{claudeModelEntry("gpt-6-astra", "gpt-6-astra", 200000)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"fresh", "missing catalog", "existing catalog"} {
+		t.Run(state, func(t *testing.T) {
+			home := t.TempDir()
+			authDir := filepath.Join(home, ".codex")
+			if err := os.MkdirAll(authDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			configFile := filepath.Join(authDir, "config.toml")
+			catalogFile := filepath.Join(authDir, "model_catalog.json")
+			initialConfig := ""
+			if state != "fresh" {
+				initialConfig = "model_provider = \"codex-pool\"\nmodel_catalog_json = \"" + catalogFile + "\"\n"
+				if err := os.WriteFile(configFile, []byte(initialConfig), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldCatalog := string(catalog) + "\n"
+			if state == "existing catalog" {
+				if err := os.WriteFile(catalogFile, []byte(oldCatalog), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var catalogStatus atomic.Int32
+			catalogStatus.Store(http.StatusServiceUnavailable)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/config/codex/token":
+					w.Write([]byte(`{"tokens":{"access_token":"test-token"}}`))
+				case "/backend-api/codex/models":
+					if r.Header.Get("Authorization") != "Bearer test-token" {
+						t.Error("catalog request missing pool authorization")
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					w.WriteHeader(int(catalogStatus.Load()))
+					w.Write(catalog)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			h := &proxyHandler{}
+			rr := httptest.NewRecorder()
+			h.serveCodexSetupScript(rr, httptest.NewRequest(http.MethodGet, server.URL+"/setup/codex/token", nil))
+			run := func() ([]byte, error) {
+				cmd := exec.Command("bash", "-s")
+				cmd.Stdin = strings.NewReader(rr.Body.String())
+				cmd.Env = append(os.Environ(), "HOME="+home, "CODEX_HOME="+authDir)
+				return cmd.CombinedOutput()
+			}
+			output, err := run()
+			if err == nil || strings.Contains(string(output), "Setup complete!") {
+				t.Fatalf("failed catalog download reported success: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(configFile)
+			if state == "fresh" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("failed setup created config: %v\n%s", err, data)
+				}
+			} else if err != nil || string(data) != initialConfig {
+				t.Fatalf("failed setup changed config: %v\n%s", err, data)
+			}
+			data, err = os.ReadFile(catalogFile)
+			if state == "existing catalog" {
+				if err != nil || string(data) != oldCatalog {
+					t.Fatalf("failed download replaced catalog: %v\n%s", err, data)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("failed download left a catalog: %v\n%s", err, data)
+			}
+			if files, err := filepath.Glob(catalogFile + ".tmp.*"); err != nil || len(files) != 0 {
+				t.Fatalf("download temporary files remain: %v, %v", files, err)
+			}
+
+			catalogStatus.Store(http.StatusOK)
+			if output, err := run(); err != nil {
+				t.Fatalf("retry after recovery: %v\n%s", err, output)
+			}
+			if data, err := os.ReadFile(catalogFile); err != nil || string(data) != string(catalog) {
+				t.Fatalf("retry did not install catalog: %v\n%s", err, data)
+			}
+			if data, err := os.ReadFile(configFile); err != nil || !strings.Contains(string(data), `model_catalog_json = "`+catalogFile+`"`) {
+				t.Fatalf("retry did not configure catalog: %v\n%s", err, data)
+			}
+		})
 	}
 }
 

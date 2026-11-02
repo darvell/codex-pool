@@ -498,34 +498,32 @@ if ($PSVersionTable.PSEdition -eq 'Desktop') {
 Set-Utf8NoBom -Path $authFile -Value $authContent
 
 Write-Host '2. Fetching model catalog...'
+$raw = Get-Content -Path $authFile -Raw
+$auth = $raw | ConvertFrom-JsonCompat
+$accessToken = $null
+if ($auth -and (Has-Property $auth 'tokens') -and (Has-Property $auth.tokens 'access_token')) {
+  $accessToken = [string]$auth.tokens.access_token
+} elseif ($auth -and (Has-Property $auth 'access_token')) {
+  $accessToken = [string]$auth.access_token
+}
+if ([string]::IsNullOrWhiteSpace($accessToken)) {
+  throw 'Pool credentials are missing. Generate a new setup command from the pool page.'
+}
+$modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
+$headers = @{ Authorization = "Bearer $accessToken" }
+$tmp = [System.IO.Path]::GetTempFileName()
 try {
-  $raw = Get-Content -Path $authFile -Raw
-  $auth = $raw | ConvertFrom-JsonCompat
-  $accessToken = $null
-  if ($auth -and (Has-Property $auth 'tokens') -and (Has-Property $auth.tokens 'access_token')) {
-    $accessToken = [string]$auth.tokens.access_token
-  } elseif ($auth -and (Has-Property $auth 'access_token')) {
-    $accessToken = [string]$auth.access_token
+  if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
+  } else {
+    Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
   }
-  if (-not [string]::IsNullOrWhiteSpace($accessToken)) {
-    $modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
-    $headers = @{ Authorization = "Bearer $accessToken" }
-    $tmp = [System.IO.Path]::GetTempFileName()
-    try {
-      if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
-      } else {
-        Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
-      }
-      Move-Item -Force -Path $tmp -Destination $modelCatalog
-      Write-Host "Model catalog saved to $modelCatalog"
-    } catch {
-      if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
-      Write-Host "Warning: Could not fetch model catalog (non-fatal): $_"
-    }
-  }
+  Move-Item -Force -Path $tmp -Destination $modelCatalog
+  Write-Host "Model catalog saved to $modelCatalog"
 } catch {
-  Write-Host "Warning: Could not parse auth for model catalog fetch (non-fatal): $_"
+  throw 'Model catalog download failed. Check your connection and rerun setup.'
+} finally {
+  if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
 }
 
 Write-Host '3. Installing model sync MCP sidecar...'
@@ -844,12 +842,21 @@ chmod 600 "$AUTH_FILE"
 
 echo "2. Fetching model catalog..."
 ACCESS_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
-if [ -n "${ACCESS_TOKEN:-}" ]; then
-    curl --connect-timeout 5 --max-time 10 -fsSL \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        "$BASE_URL/backend-api/codex/models?client_version=0.125.0" \
-        -o "$MODEL_CATALOG" 2>/dev/null && chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
+if [ -z "${ACCESS_TOKEN:-}" ]; then
+    echo "Pool credentials are missing. Generate a new setup command from the pool page." >&2
+    exit 1
 fi
+CATALOG_TMP=$(mktemp "${MODEL_CATALOG}.tmp.XXXXXX")
+if ! curl --connect-timeout 5 --max-time 10 -fsSL \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    "$BASE_URL/backend-api/codex/models?client_version=0.125.0" \
+    -o "$CATALOG_TMP"; then
+    rm -f "$CATALOG_TMP"
+    echo "Model catalog download failed. Check your connection and rerun setup." >&2
+    exit 1
+fi
+chmod 600 "$CATALOG_TMP"
+mv "$CATALOG_TMP" "$MODEL_CATALOG"
 
 echo "3. Installing model sync MCP sidecar..."
 cat <<'EOF' > "$MCP_SCRIPT"
