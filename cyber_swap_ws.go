@@ -1097,6 +1097,10 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	if len(s.turns) != 1 || s.turns[0] != turn {
 		return fmt.Errorf("cannot replace websocket overload turn")
 	}
+	if cand == nil {
+		return errors.New("cannot replace websocket upstream without an account")
+	}
+	sameAccount := s.activeAccount != nil && s.activeAccount.ID == cand.ID
 	s.clearBootstrap()
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
@@ -1110,7 +1114,10 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	}
 	captureCodexResponseState(cand, newResp, s.opts.ReqID)
 	newConn.SetReadLimit(s.opts.ReadLimit)
-	replay := stripPreviousResponseID(turn.request)
+	replay := turn.request
+	if !sameAccount {
+		replay = stripPreviousResponseID(replay)
+	}
 	if s.contextEnabled() {
 		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
 		if err != nil {
