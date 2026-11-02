@@ -31,13 +31,13 @@ typography:
     lineHeight: 1.2
     letterSpacing: "normal"
   body:
-    fontFamily: "Space Mono, ui-monospace, monospace"
+    fontFamily: "IBM Plex Mono, ui-monospace, monospace"
     fontSize: "0.875rem"
     fontWeight: 400
     lineHeight: 1.65
     letterSpacing: "normal"
   label:
-    fontFamily: "Space Mono, ui-monospace, monospace"
+    fontFamily: "IBM Plex Mono, ui-monospace, monospace"
     fontSize: "0.7rem"
     fontWeight: 700
     lineHeight: 1.2
@@ -107,11 +107,13 @@ The system is built from near-black tonal layers and one aged metallic accent. P
 
 **Display Font:** Cormorant Garamond (with Georgia and serif fallback)
 
-**Body Font:** Space Mono (with a native monospace fallback)
+**Body Font:** IBM Plex Mono (with a native monospace fallback)
 
-**Label/Mono Font:** Space Mono
+**Label/Mono Font:** IBM Plex Mono
 
-**Character:** Cormorant carries the club's ceremonial voice in page titles and the friend mark. Space Mono makes setup instructions, controls, status, and analytics feel exact and inspectable. The contrast between them is the identity; do not introduce a third family.
+The authenticated console also uses IBM Plex Sans Condensed for compact explanatory copy. Cormorant Garamond remains reserved for page-level display titles. These fonts are self-hosted in `web/src/main.tsx`; do not add remote font dependencies.
+
+**Character:** Cormorant carries the club's ceremonial voice in page titles and the friend mark. IBM Plex Mono makes setup instructions, controls, status, and analytics feel exact and inspectable. The contrast between them is the identity; do not introduce a fourth family.
 
 ### Hierarchy
 
@@ -179,12 +181,25 @@ The operator-key screen is a security ceremony, not a generic settings list. Per
 
 ## Do's and Don'ts
 
+### Operator UI implementation contract
+
+The authenticated operator surfaces use a small set of shared control rules, currently implemented at the end of `web/src/styles.css` while the view-specific styles are being separated:
+
+- interactive controls have a 44px minimum touch target;
+- primary, quiet, destructive, and copy actions share the same geometry and focus treatment;
+- long identifiers and commands wrap inside their column instead of expanding the page;
+- dense desktop data becomes a reduced grid or stacked surface below 760px;
+- the account inspector is a keyboard-contained dialog on mobile, with Escape, focus restoration, body-scroll locking, and a dismissible backdrop;
+- reduced-motion preferences disable decorative transitions and animations.
+
+New operator UI should use these contracts rather than introducing a view-specific button or breakpoint system.
+
 ### Do:
 
 - **Do** preserve the black, gold, heraldic, terminal-adjacent identity while making setup faster to scan.
 - **Do** reserve Gilded for permission, current selection, primary actions, and valuable state.
 - **Do** keep the shortest copy-paste setup path before manual configuration.
-- **Do** use Cormorant Garamond for ceremony and Space Mono for operation.
+- **Do** use Cormorant Garamond for ceremony and IBM Plex Mono for operation.
 - **Do** make commands, controls, errors, and live usage data readily legible even when decorative text remains low-light.
 - **Do** show reduced-motion alternatives and preserve keyboard focus across every interactive component.
 

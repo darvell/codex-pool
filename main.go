@@ -2846,6 +2846,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 			}
 			if lastErr != nil {
+				h.recordFailureEvent(failureEvent(reqID, nil, string(accountType), requestedModel, attempt, 0, lastErr, "terminal_failure"))
 				prelude.httpError(w, lastErr.Error(), http.StatusServiceUnavailable)
 			} else {
 				if accountType == AccountTypeCodex && tierNeedsDiscovery(requestedTier) {
@@ -2871,6 +2872,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&h.inflight, -1)
 
 		if err != nil {
+			if !isContextError(err) {
+				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, 0, err, "attempt_failed"))
+			}
 			if isContextError(err) {
 				if prelude.started() {
 					prelude.writeError(w, contextErrorStatus(err), contextErrorBody(err))
@@ -2919,6 +2923,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] retrying cyber_policy response from account %s on a cyber_access account", reqID, acc.ID)
 				}
+				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, resp.StatusCode, nil, "attempt_failed"))
 				continue
 			}
 
@@ -2933,6 +2938,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				h.disableAccountPermanently(acc, reqID, safeText(errBody))
 				lastErr = fmt.Errorf("claude organization disabled for account %s", acc.ID)
 				h.recent.add(lastErr.Error())
+				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, resp.StatusCode, nil, "terminal_failure"))
 				continue
 			}
 
@@ -2963,6 +2969,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 				lastErr = fmt.Errorf("account deactivated: %s", errBodyStr)
 				h.recent.add(lastErr.Error())
+				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, resp.StatusCode, nil, "terminal_failure"))
 				continue
 			}
 
@@ -3005,6 +3012,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				acc.mu.Unlock()
 			}
 
+			h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, resp.StatusCode, nil, func() string {
+				if errClass.Retryable() {
+					return "attempt_failed"
+				}
+				return "terminal_failure"
+			}()))
 			if errClass.Retryable() {
 				if len(errBody) > 0 {
 					lastErr = fmt.Errorf("upstream %s: %s", resp.Status, errBodyStr)

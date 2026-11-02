@@ -154,7 +154,15 @@ CREATE TABLE IF NOT EXISTS usage_events (
  output_tokens BIGINT NOT NULL, reasoning_tokens BIGINT NOT NULL, billable_tokens BIGINT NOT NULL,
  api_equivalent_cost_usd DECIMAL(18,9) NOT NULL, pricing_version VARCHAR NOT NULL,
  usage_completeness VARCHAR NOT NULL, source VARCHAR NOT NULL, source_grain VARCHAR NOT NULL
-);`
+);
+CREATE TABLE IF NOT EXISTS pool_failure_attempts (
+ event_id VARCHAR PRIMARY KEY, request_id VARCHAR NOT NULL, account_id VARCHAR NOT NULL,
+ provider VARCHAR NOT NULL, model VARCHAR, attempt INTEGER NOT NULL, observed_at TIMESTAMPTZ NOT NULL,
+ error_class VARCHAR NOT NULL, error_domain VARCHAR NOT NULL, error_code VARCHAR NOT NULL,
+ http_status INTEGER, outcome VARCHAR NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pool_failure_attempts_observed ON pool_failure_attempts(observed_at);
+`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create duckdb schema: %w", err)
@@ -332,8 +340,9 @@ func (a *DuckAnalytics) run() {
 }
 
 type outboxRow struct {
-	seq  uint64
-	fact AnalyticsFact
+	seq     uint64
+	fact    AnalyticsFact
+	failure *PoolFailureAttempt
 }
 
 func (a *DuckAnalytics) drain(limit int) error {
@@ -348,11 +357,22 @@ func (a *DuckAnalytics) drain(limit int) error {
 		}
 		c := b.Cursor()
 		for k, v := c.First(); k != nil && len(rows) < limit; k, v = c.Next() {
+			var envelope struct {
+				Type string             `json:"type"`
+				Data PoolFailureAttempt `json:"data"`
+			}
+			if err := json.Unmarshal(v, &envelope); err != nil {
+				return err
+			}
+			if envelope.Type == "pool_failure_attempt" {
+				rows = append(rows, outboxRow{seq: binary.BigEndian.Uint64(k), failure: &envelope.Data})
+				continue
+			}
 			var f AnalyticsFact
 			if err := json.Unmarshal(v, &f); err != nil {
 				return err
 			}
-			rows = append(rows, outboxRow{binary.BigEndian.Uint64(k), f})
+			rows = append(rows, outboxRow{seq: binary.BigEndian.Uint64(k), fact: f})
 		}
 		return nil
 	})
@@ -364,24 +384,37 @@ func (a *DuckAnalytics) drain(limit int) error {
 		a.setFault(err)
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	usageStmt, err := tx.Prepare(`INSERT OR IGNORE INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		a.setFault(err)
 		return err
 	}
+	failureStmt, err := tx.Prepare(`INSERT OR IGNORE INTO pool_failure_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		_ = usageStmt.Close()
+		_ = tx.Rollback()
+		a.setFault(err)
+		return err
+	}
 	for _, r := range rows {
-		f := r.fact
-		_, err = stmt.Exec(f.EventID, f.ProxyRequestID, f.UsageSequence, f.UpstreamRequestID, f.AttemptNumber, f.ObservedAt,
-			f.PrincipalID, f.ClientCredentialID, f.OriginID, f.AccountID, f.AccountType, f.PlanType, f.ModelReported,
-			f.ModelNormalized, f.NormalizationVersion, f.InputTokens, f.CacheReadTokens, f.CacheCreationTokens,
-			f.OutputTokens, f.ReasoningTokens, f.BillableTokens, f.APIEquivalentCostUSD, f.PricingVersion,
-			f.UsageCompleteness, f.Source, f.SourceGrain)
+		if r.failure != nil {
+			f := r.failure
+			_, err = failureStmt.Exec(f.EventID, f.RequestID, f.AccountID, f.Provider, f.Model, f.Attempt, f.ObservedAt, f.ErrorClass, f.ErrorDomain, f.ErrorCode, f.HTTPStatus, f.Outcome)
+		} else {
+			f := r.fact
+			_, err = usageStmt.Exec(f.EventID, f.ProxyRequestID, f.UsageSequence, f.UpstreamRequestID, f.AttemptNumber, f.ObservedAt,
+				f.PrincipalID, f.ClientCredentialID, f.OriginID, f.AccountID, f.AccountType, f.PlanType, f.ModelReported,
+				f.ModelNormalized, f.NormalizationVersion, f.InputTokens, f.CacheReadTokens, f.CacheCreationTokens,
+				f.OutputTokens, f.ReasoningTokens, f.BillableTokens, f.APIEquivalentCostUSD, f.PricingVersion,
+				f.UsageCompleteness, f.Source, f.SourceGrain)
+		}
 		if err != nil {
 			break
 		}
 	}
-	_ = stmt.Close()
+	_ = usageStmt.Close()
+	_ = failureStmt.Close()
 	if err == nil {
 		err = tx.Commit()
 	} else {
@@ -550,6 +583,14 @@ func (a *DuckAnalytics) Reconcile(start, end time.Time) (*AnalyticsReconciliatio
 		}
 		if bucket := tx.Bucket([]byte(bucketAnalyticsOutbox)); bucket != nil {
 			return bucket.ForEach(func(_, value []byte) error {
+				// Failure events share this outbox but are not usage facts and
+				// must not participate in token-accounting reconciliation.
+				var envelope struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(value, &envelope) == nil && envelope.Type == "pool_failure_attempt" {
+					return nil
+				}
 				var fact AnalyticsFact
 				if json.Unmarshal(value, &fact) == nil && !fact.ObservedAt.Before(start) && fact.ObservedAt.Before(end) {
 					pending = append(pending, fact)
