@@ -72,6 +72,52 @@ func TestProWSTerminalNextTurn(t *testing.T) {
 	}
 }
 
+func TestProWSRetriesOverloadBeforeEmittingError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var calls atomic.Int64
+	frames := make(chan map[string]any, 2)
+	handle := func(w http.ResponseWriter, r *http.Request, body []byte, model string) bool {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`)
+			return true
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
+		return true
+	}
+	bridge := newChatGPTProWS(ctx, httptest.NewRequest(http.MethodGet, "/responses", nil), handle, func(ctx context.Context, data []byte) error {
+		var frame map[string]any
+		if err := json.Unmarshal(data, &frame); err != nil {
+			return err
+		}
+		select {
+		case frames <- frame:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, 4096, nil)
+	defer bridge.Close()
+
+	if handled, err := bridge.Handle([]byte(`{"type":"response.create","model":"gpt-6-pro","input":"test"}`)); !handled || err != nil {
+		t.Fatalf("request rejected: handled=%v err=%v", handled, err)
+	}
+	select {
+	case frame := <-frames:
+		if frame["type"] != "response.completed" {
+			t.Fatalf("unexpected frame: %v", frame)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for retried Pro response")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("Pro upstream calls=%d, want 2", calls.Load())
+	}
+}
+
 func TestProWSProxyRouting(t *testing.T) {
 	for _, ordinary := range []bool{false, true} {
 		t.Run(fmt.Sprintf("ordinary=%v", ordinary), func(t *testing.T) {

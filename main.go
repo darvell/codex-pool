@@ -521,10 +521,12 @@ func main() {
 		log.Printf("analytics store initialized at %s", analyticsDBPath)
 	}
 
-	var aliasesCfg map[string]string
+	var aliasesCfg, redirectsCfg, tierCfg map[string]string
 	var effortByUser, effortByOrigin map[string]string
 	if globalConfigFile != nil {
 		aliasesCfg = globalConfigFile.ModelAliases
+		redirectsCfg = globalConfigFile.ModelRedirectsByOrigin
+		tierCfg = globalConfigFile.ServiceTierByOrigin
 		effortByUser = globalConfigFile.MaxReasoningEffortByUser
 		effortByOrigin = globalConfigFile.MaxReasoningEffortByOrigin
 	}
@@ -556,6 +558,8 @@ func main() {
 		duckAnalytics:        duckAnalytics,
 		pricing:              pricing,
 		aliases:              newModelAliases(aliasesCfg),
+		modelRedirects:       newModelRedirects(redirectsCfg),
+		serviceTierOverride:  newModelRedirects(tierCfg),
 		effortCap:            newEffortCap(effortByUser, effortByOrigin),
 		bruteForce:           newBruteForceTracker(),
 		metrics:              newMetrics(),
@@ -717,6 +721,8 @@ type proxyHandler struct {
 	duckAnalytics        *DuckAnalytics
 	pricing              *PricingData
 	aliases              *modelAliases
+	modelRedirects       *modelRedirects
+	serviceTierOverride  *modelRedirects
 	effortCap            *effortCap
 	bruteForce           *bruteForceTracker
 	metrics              *metrics
@@ -2138,6 +2144,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	originID := hashRequestOrigin(r, h.originHashSalt())
 	originIP := getClientIP(r)
+	redirectModel := h.modelRedirects.modelFor(originIP)
+	forcedTier := h.serviceTierOverride.modelFor(originIP)
 	if h.store != nil && originID != "" && originIP != "" {
 		h.store.enqueueOriginMetadata(originID, originIP, userID, r.UserAgent(), r.URL.Path, time.Now())
 	}
@@ -2149,6 +2157,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	accountType := provider.Type()
 
+	if redirectModel != "" && r.Method == http.MethodPost && (strings.HasPrefix(r.URL.Path, "/v1beta/models/") || strings.HasPrefix(r.URL.Path, "/v1/images/")) {
+		http.Error(w, "model redirect is unavailable on this endpoint", http.StatusBadRequest)
+		return
+	}
+	if redirectModel != "" && isWebSocketUpgradeRequest(r) && accountType != AccountTypeCodex {
+		http.Error(w, "model redirect is unavailable on this endpoint", http.StatusBadRequest)
+		return
+	}
 	if isWebSocketUpgradeRequest(r) {
 		h.proxyRequestWebSocket(w, r, reqID, userID, originID, provider, targetBase)
 		return
@@ -2164,7 +2180,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			(h.responsesWireLimit() > 0 && r.ContentLength > h.responsesWireLimit()))
 	// The bounded lexical spool performs Responses model routing itself. Peeking
 	// before upload admission could otherwise block forever on a chunked body.
-	if !responsesNeedsSpool && (streamBody || shouldPeekStreamedModelRoute(r)) {
+	if redirectModel == "" && forcedTier == "" && !responsesNeedsSpool && (streamBody || shouldPeekStreamedModelRoute(r)) {
 		var err error
 		provider, targetBase, streamedModel, err = h.applyStreamedModelRoute(r, provider, targetBase, reqID)
 		if err != nil {
@@ -2194,6 +2210,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 			defer releaseSpool()
 			rewriteModel := func(model string) string {
+				if redirectModel != "" {
+					return redirectModel
+				}
 				model = strings.TrimSpace(model)
 				if resolved, ok := h.aliases.resolve(model); ok {
 					model = resolved
@@ -2210,12 +2229,17 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			spooled, spoolErr := h.spoolHTTPResponsesRequest(w, r, responsesStreamOptions{
 				rewriteModel: rewriteModel,
 				effortLimit:  h.effortCap.limitFor(userID, originIP),
+				forceTier:    forcedTier,
 			})
 			if spoolErr != nil {
 				responsesSpoolError(w, "streaming Responses rewrite: ", spoolErr)
 				return
 			}
 			defer func() { spooled.Close() }()
+			if redirectModel != "" && spooled.File != nil && spooled.Model == "" {
+				http.Error(w, "model is required for redirect", http.StatusBadRequest)
+				return
+			}
 			if h.handleSpooledPro(w, r, spooled) {
 				return
 			}
@@ -2321,7 +2345,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	// need buffered body transformations: effort normalization for Adverserial
 	// and Grok, and Messages-to-Chat translation, reasoning normalization, and
 	// usage injection for Mistral. Chunked requests must take the same path.
-	if accountType == AccountTypeAdverserial || accountType == AccountTypeGrok || isMistralType(accountType) {
+	if redirectModel != "" || forcedTier != "" || accountType == AccountTypeAdverserial || accountType == AccountTypeGrok || isMistralType(accountType) {
 		streamBody = false
 	}
 	if streamBody {
@@ -2415,12 +2439,25 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		log.Printf("[%s] conv_id empty; top-level keys (first %d): %s", reqID, len(keys), strings.Join(keys, ","))
 	}
 	requestedModel := originalModel
+	if redirectModel != "" && requestedModel == "" && r.Method == http.MethodPost && (isCodexResponsesPath(r.URL.Path) || r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/chat/completions") {
+		http.Error(w, "model is required for redirect", http.StatusBadRequest)
+		return
+	}
+	if redirectModel != "" && requestedModel != "" {
+		rewritten := rewriteModelInBody(bodyBytes, redirectModel)
+		if rewritten == nil {
+			http.Error(w, "unable to redirect model", http.StatusBadRequest)
+			return
+		}
+		bodyBytes = rewritten
+		requestedModel = redirectModel
+	}
 	if requestedModel == "" {
 		requestedModel = antigravityModelFromGeminiPath(r.URL.Path)
 	}
 
 	// Resolve model aliases before routing.
-	if requestedModel != "" {
+	if requestedModel != "" && redirectModel == "" {
 		requestedModel, bodyBytes = applyModelAlias(h.aliases, requestedModel, bodyBytes, h.cfg.debug.Load(), reqID)
 	}
 
@@ -2456,6 +2493,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 				log.Printf("[%s] effort cap: %s -> %s (user=%s origin=%s model=%s)", reqID, previous, limit, userID, originID, requestedModel)
 			}
+		}
+	}
+
+	if forcedTier != "" && isOpenAIModel(requestedModel) {
+		var err error
+		bodyBytes, err = forceServiceTier(bodyBytes, forcedTier)
+		if err != nil {
+			http.Error(w, "invalid service tier request", http.StatusBadRequest)
+			return
 		}
 	}
 
@@ -2738,6 +2784,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 
 	const maxCooldownWait = 10 * time.Second // max time to wait for a rate-limited account
 	const preferredImageCodexAccountID = "neon"
+	const maxServerOverloadRetries = 6
+	serverOverloadRetries := 0
 	imageFanoutChild := r.Header.Get("X-Codex-Pool-Image-Fanout") != ""
 	imageFanoutIndex, _ := strconv.Atoi(r.Header.Get("X-Codex-Pool-Image-Fanout-Index"))
 
@@ -2856,6 +2904,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			resp.Body.Close()
 			errBody = bodyForInspection(nil, errBody)
 			errBodyStr := string(errBody)
+			serverOverloaded := accountType == AccountTypeCodex && isServerOverloadedError(errBody)
+			if serverOverloaded {
+				errClass = ErrorClassTransient
+			}
 
 			if accountType == AccountTypeCodex && isCyberPolicyError(errBody) && !acc.CyberAccess {
 				cyberAccessRetry = true
@@ -2960,6 +3012,31 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					lastErr = fmt.Errorf("upstream %s", resp.Status)
 				}
 				h.recent.add(lastErr.Error())
+				if serverOverloaded && serverOverloadRetries < maxServerOverloadRetries {
+					serverOverloadRetries++
+					if attempt >= attempts {
+						attempts++
+					}
+					exclude = map[string]bool{}
+					delay := serverOverloadRetryDelay(resp.Header, serverOverloadRetries)
+					if h.cfg.debug.Load() {
+						log.Printf("[%s] upstream overloaded; retrying request in %s (%d/%d)", reqID, delay, serverOverloadRetries, maxServerOverloadRetries)
+					}
+					select {
+					case <-time.After(delay):
+					case <-ctx.Done():
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					continue
+				}
+				if serverOverloaded {
+					h.applyServerOverloadCooldown(acc)
+				}
+				if h.cfg.debug.Load() && serverOverloaded {
+					log.Printf("[%s] upstream overload retry budget exhausted", reqID)
+				}
 				if h.cfg.debug.Load() {
 					log.Printf("[%s] attempt %d/%d account=%s status=%d class=%s refreshFailed=%v",
 						reqID, attempt, attempts, acc.ID, resp.StatusCode, errClass, refreshFailed)
@@ -3676,6 +3753,12 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		selectionConversationID = "cyber-fallback:" + fallbackID
 	}
 	hintModel, hintTier := codexRoutingHint(r.Header)
+	if tier := h.serviceTierOverride.modelFor(clientIP); tier != "" {
+		hintTier = tier
+	}
+	if model := h.modelRedirects.modelFor(clientIP); model != "" {
+		hintModel = model
+	}
 	acc := h.pool.candidateForTier(selectionConversationID, map[string]bool{}, accountType, requiredPlan, clientIP, hintModel, hintTier)
 	if acc == nil && (hintModel != "" || hintTier != "") {
 		// The hint is advisory; the later response.create may select another tier.
@@ -4928,6 +5011,38 @@ func isPermanentRefreshTokenError(err error) bool {
 		}
 	}
 	return false
+}
+
+const serverOverloadCooldown = 30 * time.Second
+
+func (h *proxyHandler) applyServerOverloadCooldown(account *Account) {
+	if account == nil {
+		return
+	}
+	until := time.Now().Add(serverOverloadCooldown)
+	account.mu.Lock()
+	if account.RateLimitUntil.Before(until) {
+		account.RateLimitUntil = until
+	}
+	account.mu.Unlock()
+}
+
+func serverOverloadRetryDelay(h http.Header, retry int) time.Duration {
+	const (
+		baseDelay = 500 * time.Millisecond
+		maxDelay  = 10 * time.Second
+	)
+	if retry < 1 {
+		retry = 1
+	}
+	if delay, ok := parseRetryAfter(h); ok && delay < maxDelay {
+		return delay
+	}
+	delay := baseDelay << uint(retry-1)
+	if delay > maxDelay || delay <= 0 {
+		return maxDelay
+	}
+	return delay
 }
 
 func parseRetryAfter(h http.Header) (time.Duration, bool) {

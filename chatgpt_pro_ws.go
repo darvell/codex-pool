@@ -85,7 +85,23 @@ func (h *proxyHandler) proxyProOnlyWebSocket(w http.ResponseWriter, r *http.Requ
 				return
 			}
 			resetIdle()
-			data := applyModelAliasToJSONFrame(h, reqID, frame.data)
+			data := frame.data
+			if model := h.modelRedirects.modelFor(getClientIP(r)); model != "" {
+				var err error
+				data, err = redirectWSModel(data, model)
+				if err != nil {
+					return
+				}
+			} else {
+				data = applyModelAliasToJSONFrame(h, reqID, data)
+			}
+			if tier := h.serviceTierOverride.modelFor(getClientIP(r)); tier != "" && isCodexResponseCreate(data) {
+				var err error
+				data, err = forceServiceTier(data, tier)
+				if err != nil {
+					return
+				}
+			}
 			userID, _, _, _, _ := h.authorizePoolCredentialRequest(r)
 			data = applyEffortCapToJSONFrame(h, reqID, userID, getClientIP(r), data)
 			handled, err := bridge.Handle(data)
@@ -103,6 +119,9 @@ func (h *proxyHandler) proxyProOnlyWebSocket(w http.ResponseWriter, r *http.Requ
 }
 
 type proWSHandler func(http.ResponseWriter, *http.Request, []byte, string) bool
+
+var errProOverloaded = errors.New("Pro upstream overloaded")
+
 type proWSWrite func(context.Context, []byte) error
 
 // chatGPTProWS bridges only Pro response.create frames. The owning relay keeps
@@ -168,34 +187,51 @@ func (b *chatGPTProWS) Handle(frame []byte) (bool, error) {
 			}
 			close(done)
 		}()
-		ctx, cancel := context.WithCancel(b.ctx)
-		defer cancel()
-		r := b.request.Clone(ctx)
-		r.Method = http.MethodPost
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Accept", "text/event-stream")
-		write := func(ctx context.Context, data []byte) error {
-			var event struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(data, &event) == nil && (isTerminalCodexWebSocketEvent(data) || event.Type == "error") {
-				b.mu.Lock()
-				if b.done == done {
-					b.busy = false
+		for overloadAttempt := 1; ; overloadAttempt++ {
+			if overloadAttempt > 1 {
+				timer := time.NewTimer(websocketOverloadDelay(overloadAttempt - 1))
+				select {
+				case <-timer.C:
+				case <-b.ctx.Done():
+					timer.Stop()
+					return
 				}
-				b.mu.Unlock()
 			}
-			return b.write(ctx, data)
-		}
-		w := &proWSResponse{header: make(http.Header), ctx: ctx, cancel: cancel, write: write, limit: b.limit}
-		if !b.handle(w, r, body, model) {
-			_ = proWSError(ctx, write, http.StatusBadRequest, map[string]any{"message": "Pro Responses route unavailable"})
+			ctx, cancel := context.WithCancel(b.ctx)
+			r := b.request.Clone(ctx)
+			r.Method = http.MethodPost
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Accept", "text/event-stream")
+			write := func(ctx context.Context, data []byte) error {
+				var event struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(data, &event) == nil && (isTerminalCodexWebSocketEvent(data) || event.Type == "error") {
+					b.mu.Lock()
+					if b.done == done {
+						b.busy = false
+					}
+					b.mu.Unlock()
+				}
+				return b.write(ctx, data)
+			}
+			w := &proWSResponse{header: make(http.Header), ctx: ctx, cancel: cancel, write: write, limit: b.limit}
+			if !b.handle(w, r, body, model) {
+				cancel()
+				_ = proWSError(b.ctx, write, http.StatusBadRequest, map[string]any{"message": "Pro Responses route unavailable"})
+				return
+			}
+			err := w.finish()
+			cancel()
+			if errors.Is(err, errProOverloaded) && b.ctx.Err() == nil {
+				continue
+			}
+			if err != nil && b.ctx.Err() == nil {
+				_ = proWSError(b.ctx, write, http.StatusBadGateway, map[string]any{"message": err.Error()})
+			}
 			return
-		}
-		if err := w.finish(); err != nil && b.ctx.Err() == nil {
-			_ = proWSError(b.ctx, write, http.StatusBadGateway, map[string]any{"message": err.Error()})
 		}
 	}()
 	return true, nil
@@ -346,6 +382,9 @@ func (w *proWSResponse) finish() error {
 	status := w.status
 	if status < http.StatusBadRequest {
 		return errors.New("Pro Responses adapter returned no event stream")
+	}
+	if isServerOverloadedError(w.body) {
+		return errProOverloaded
 	}
 	var result map[string]json.RawMessage
 	if json.Unmarshal(w.body, &result) != nil {

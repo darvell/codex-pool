@@ -22,7 +22,9 @@ type ConfigFile struct {
 	AdminToken       string  `toml:"admin_token"`
 	TierThreshold    float64 `toml:"tier_threshold"` // Secondary usage % threshold for tier preference (default 0.15)
 
-	ModelAliases map[string]string `toml:"model_aliases"`
+	ModelAliases           map[string]string `toml:"model_aliases"`
+	ModelRedirectsByOrigin map[string]string `toml:"model_redirects_by_origin"`
+	ServiceTierByOrigin    map[string]string `toml:"service_tier_by_origin"`
 
 	// Caps on Codex reasoning effort, keyed by pool user ID and by raw client
 	// IP. Values are effort names ("medium", "high", ...).

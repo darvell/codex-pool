@@ -29,6 +29,30 @@ func serviceTierFromJSON(body []byte) string {
 	return controls.Response.ServiceTier
 }
 
+func forceServiceTier(body []byte, tier string) ([]byte, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, err
+	}
+	value, err := json.Marshal(tier)
+	if err != nil {
+		return nil, err
+	}
+	obj["service_tier"] = value
+	if raw, ok := obj["response"]; ok {
+		var response map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &response); err != nil || response == nil {
+			return nil, errInvalidRedirectFrame
+		}
+		response["service_tier"] = value
+		obj["response"], err = json.Marshal(response)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(obj)
+}
+
 func tierNeedsDiscovery(tier string) bool {
 	// Keep the established API tiers working before discovery completes.
 	// New catalog-defined tiers must never fall back to an unentitled account.

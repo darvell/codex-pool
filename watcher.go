@@ -155,6 +155,16 @@ func (pw *poolWatcher) reloadConfig() {
 		log.Printf("reloaded model aliases (config overrides=%d)", len(cfg.ModelAliases))
 	}
 
+	if pw.handler.modelRedirects != nil {
+		pw.handler.modelRedirects.reload(cfg.ModelRedirectsByOrigin)
+		log.Printf("reloaded model redirects (origins=%d)", len(cfg.ModelRedirectsByOrigin))
+	}
+
+	if pw.handler.serviceTierOverride != nil {
+		pw.handler.serviceTierOverride.reload(cfg.ServiceTierByOrigin)
+		log.Printf("reloaded service tier overrides (origins=%d)", len(cfg.ServiceTierByOrigin))
+	}
+
 	// Reasoning-effort caps are operational throttles, so they retune without
 	// a restart like aliases do.
 	if pw.handler.effortCap != nil {

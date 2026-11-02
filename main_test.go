@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -550,6 +551,80 @@ func TestOversizedCodexBackendAPIResponsesStillHitsCodexPath(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for upstream")
+	}
+}
+
+func TestServerOverloadRetriesBeforeWritingResponse(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		if call <= 2 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	baseURL, _ := url.Parse(upstream.URL)
+	registry := NewProviderRegistry(
+		NewCodexProvider(baseURL, baseURL, baseURL),
+		NewClaudeProvider(baseURL),
+		NewGeminiProvider(baseURL, baseURL),
+	)
+	pool := newPoolState([]*Account{{
+		Type:        AccountTypeCodex,
+		ID:          "codex",
+		AccessToken: "codex-token",
+		PlanType:    "pro",
+		AccountID:   "acct",
+	}}, false)
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 1 << 20,
+			maxSpoolBodyBytes:    16 << 20,
+			maxAttempts:          1,
+			disableRefresh:       true,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+		aliases:   newModelAliases(nil),
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","stream":true,"input":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "overload-user"))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("upstream calls=%d, want 3", calls.Load())
+	}
+	if bytes.Contains(body, []byte("server_is_overloaded")) {
+		t.Fatalf("overload error leaked to client: %s", body)
 	}
 }
 

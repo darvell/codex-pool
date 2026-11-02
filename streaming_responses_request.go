@@ -165,6 +165,7 @@ type responsesStreamOptions struct {
 	rewriteModel func(string) string
 	passthrough  bool
 	effortLimit  string
+	forceTier    string
 }
 
 func newJSONLex(r io.Reader) *jsonLex { return &jsonLex{r: bufio.NewReaderSize(r, 64*1024)} }
@@ -682,6 +683,9 @@ func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOpt
 		}
 		if suffixTier != "" {
 			serviceTierRaw, _ = json.Marshal(suffixTier)
+		}
+		if opts.forceTier != "" {
+			serviceTierRaw, _ = json.Marshal(opts.forceTier)
 		}
 		if len(serviceTierRaw) > 0 {
 			if e = json.Unmarshal(serviceTierRaw, &res.ServiceTier); e != nil {

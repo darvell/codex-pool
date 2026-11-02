@@ -19,6 +19,106 @@ import (
 
 const testWebSocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+func TestWebSocketOverloadRetriesOnSameClientConnection(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var overloads int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			_, _, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			if overloads < 2 {
+				overloads++
+				_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"error","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`))
+				continue
+			}
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.created","response":{"id":"resp-1"}}`))
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.completed","response":{"id":"resp-1"}}`))
+			return
+		}
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewProviderRegistry(
+		NewCodexProvider(baseURL, baseURL, baseURL),
+		NewClaudeProvider(baseURL),
+		NewGeminiProvider(baseURL, baseURL),
+	)
+	pool := newPoolState([]*Account{{
+		Type:        AccountTypeCodex,
+		ID:          "codex",
+		AccessToken: "codex-token",
+		AccountID:   "acct",
+		PlanType:    "pro",
+	}}, false)
+	h := &proxyHandler{
+		cfg:       &config{maxAttempts: 1, websocketReadLimit: 1 << 20, disableRefresh: true},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	wsURL, _ := url.Parse(proxy.URL)
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/responses"
+	auth := "Bearer " + generateClaudePoolToken("test-secret", "ws-overload-user")
+	client, _, err := websocket.Dial(context.Background(), wsURL.String(), &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{auth}}})
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer client.CloseNow()
+	if err := client.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}`)); err != nil {
+		t.Fatalf("write response.create: %v", err)
+	}
+
+	readCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	seenCompleted := false
+	for !seenCompleted {
+		_, data, err := client.Read(readCtx)
+		if err != nil {
+			t.Fatalf("read proxy websocket: %v", err)
+		}
+		if isServerOverloadedError(data) {
+			t.Fatalf("overload error leaked to websocket client: %s", data)
+		}
+		seenCompleted = isTerminalCodexWebSocketEvent(data) && strings.Contains(string(data), `"response.completed"`)
+	}
+	if overloads != 2 {
+		t.Fatalf("upstream overload frames=%d, want 2", overloads)
+	}
+}
+
+func TestCodexRelayTransportRetryOnlyBeforeOutput(t *testing.T) {
+	turn := &codexRelayTurn{model: "gpt-5.6-sol"}
+	state := &codexRelayState{turns: []*codexRelayTurn{turn}}
+	if pending := state.transportRetry(fmt.Errorf("upstream->client read: EOF")); pending == nil || pending.turn != turn {
+		t.Fatalf("transport retry = %#v, want pending turn", pending)
+	}
+	turn.outputStarted = true
+	if pending := state.transportRetry(fmt.Errorf("upstream->client read: EOF")); pending != nil {
+		t.Fatalf("transport retry after output = %#v, want nil", pending)
+	}
+	if pending := state.transportRetry(fmt.Errorf("upstream->client read: received close frame: status = StatusInternalError")); pending != nil {
+		t.Fatalf("explicit close retry = %#v, want nil", pending)
+	}
+}
+
 func TestIsWebSocketUpgradeRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "http://localhost/ws", nil)
 	if err != nil {

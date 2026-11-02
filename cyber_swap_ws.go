@@ -64,11 +64,42 @@ type swapPendingErr struct {
 	conversationID string
 }
 
+type overloadPendingErr struct {
+	turn  *codexRelayTurn
+	count int
+}
+
+type transportPendingErr struct {
+	turn *codexRelayTurn
+	err  error
+}
+
 func (e *swapPendingErr) Error() string {
 	if e == nil || e.next == nil {
 		return "cyber swap pending"
 	}
 	return "cyber swap pending: " + e.next.ID
+}
+
+func (e *overloadPendingErr) Error() string {
+	if e == nil || e.turn == nil {
+		return "overload retry pending"
+	}
+	return fmt.Sprintf("overload retry pending for %s (%d)", e.turn.model, e.count)
+}
+
+func (e *transportPendingErr) Error() string {
+	if e == nil || e.turn == nil {
+		return "transport retry pending"
+	}
+	return fmt.Sprintf("transport retry pending for %s: %v", e.turn.model, e.err)
+}
+
+func (e *transportPendingErr) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 type wsFrame struct {
@@ -184,7 +215,9 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 		activityCh:           make(chan struct{}, 1),
 		activeConversationID: opts.ConversationID,
 		// Already on a cyber account — no further swap is meaningful.
-		swapDone: opts.InitialAccount.CyberAccess,
+		swapDone:         opts.InitialAccount.CyberAccess,
+		overloadTimes:    make(map[string][]time.Time),
+		bootstrapEnabled: true,
 	}
 	defer state.closeAll()
 	if state.contextEnabled() {
@@ -217,6 +250,7 @@ type codexRelayTurn struct {
 	conversationID string
 	account        *Account
 	responseID     string
+	outputStarted  bool
 }
 
 type codexRelayState struct {
@@ -243,7 +277,12 @@ type codexRelayState struct {
 
 	// swapDone covers both "we already swapped" and "we tried and gave
 	// up" — once true, no further swap attempts.
-	swapDone bool
+	swapDone         bool
+	overloadTimes    map[string][]time.Time
+	bootstrap        [][]byte
+	bootstrapBytes   int
+	bootstrapReady   bool
+	bootstrapEnabled bool
 
 	activeConversationID string
 	recordedResponses    map[string]struct{}
@@ -256,6 +295,20 @@ func (s *codexRelayState) run() (int, error) {
 		err := s.relayOnce()
 		if err == nil {
 			return 101, nil
+		}
+		var transport *transportPendingErr
+		if errors.As(err, &transport) {
+			if retryErr := s.retryTransportTurn(transport); retryErr != nil {
+				return 101, retryErr
+			}
+			continue
+		}
+		var overload *overloadPendingErr
+		if errors.As(err, &overload) {
+			if retryErr := s.retryOverloadedTurn(overload); retryErr != nil {
+				return 101, retryErr
+			}
+			continue
 		}
 		var swap *swapPendingErr
 		if errors.As(err, &swap) {
@@ -319,10 +372,10 @@ func (s *codexRelayState) relayOnce() error {
 
 	debug := s.h != nil && s.h.cfg != nil && s.h.cfg.debug.Load()
 	go func() {
-		upstreamErrCh <- pumpFrames(roundCtx, s.ctx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream, s.markUpstreamForwarded, activityCh)
+		upstreamErrCh <- pumpFrames(roundCtx, s.ctx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream, s.flushBootstrap, s.markUpstreamForwarded, activityCh)
 	}()
 	go func() {
-		clientErrCh <- pumpFrames(roundCtx, s.ctx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient, s.markClientForwarded, activityCh)
+		clientErrCh <- pumpFrames(roundCtx, s.ctx, s.clientCh, upstreamWriter, s.opts.LogLabel, "client->upstream", debug, s.inspectClient, nil, s.markClientForwarded, activityCh)
 	}()
 
 	var idleTimer *time.Timer
@@ -337,6 +390,9 @@ func (s *codexRelayState) relayOnce() error {
 		case err := <-upstreamErrCh:
 			roundCancel()
 			<-clientErrCh
+			if pending := s.transportRetry(err); pending != nil {
+				return pending
+			}
 			return err
 		case err := <-clientErrCh:
 			roundCancel()
@@ -382,6 +438,7 @@ func pumpFrames(
 	logLabel, label string,
 	debug bool,
 	inspect func([]byte) ([]byte, error),
+	flush func() [][]byte,
 	afterForward func([]byte),
 	activity chan<- struct{},
 ) error {
@@ -407,22 +464,33 @@ func pumpFrames(
 					return err
 				}
 				if rewritten != nil {
-					if len(rewritten) == 0 {
-						continue
-					}
 					data = rewritten
 				}
 			}
-			if debug {
-				logRelayFrame(logLabel, label, frame.msgType, data)
+			batch := [][]byte{data}
+			if flush != nil {
+				if buffered := flush(); len(buffered) > 0 {
+					batch = buffered
+				}
 			}
-			// Cancelling a coder/websocket write closes its socket. Round
-			// cancellation must not destroy connections retained after a swap.
-			if err := dst.Write(writeCtx, frame.msgType, data); err != nil {
-				return fmt.Errorf("%s write: %w", label, err)
+			if len(data) == 0 && len(batch) == 1 && len(batch[0]) == 0 {
+				continue
 			}
-			if afterForward != nil {
-				afterForward(data)
+			for _, output := range batch {
+				if len(output) == 0 {
+					continue
+				}
+				if debug {
+					logRelayFrame(logLabel, label, frame.msgType, output)
+				}
+				// Cancelling a coder/websocket write closes its socket. Round
+				// cancellation must not destroy connections retained after a swap.
+				if err := dst.Write(writeCtx, frame.msgType, output); err != nil {
+					return fmt.Errorf("%s write: %w", label, err)
+				}
+				if afterForward != nil {
+					afterForward(output)
+				}
 			}
 		}
 	}
@@ -458,7 +526,7 @@ func isTerminalCodexWebSocketEvent(data []byte) bool {
 	if json.Unmarshal(data, &event) != nil {
 		return false
 	}
-	return event.Type == "response.completed" || event.Type == "response.failed" || event.Type == "response.incomplete"
+	return event.Type == "response.completed" || event.Type == "response.done" || event.Type == "response.failed" || event.Type == "response.incomplete"
 }
 
 func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
@@ -473,7 +541,26 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 	if changed {
 		data = filtered
 	}
+	if turn != nil && isCodexMeaningfulOutput(data) {
+		turn.outputStarted = true
+	}
+	if isServerOverloadedError(data) {
+		turn := s.responseTurn(data)
+		if turn == nil && len(s.turns) == 1 {
+			turn = s.turns[0]
+		}
+		if turn != nil {
+			return []byte{}, &overloadPendingErr{turn: turn, count: s.recordOverload(s.activeAccount)}
+		}
+	}
 	if !isCyberPolicyError(data) {
+		if s.bootstrapEnabled && turn != nil && len(s.turns) == 1 && !s.bootstrapReady {
+			s.bufferBootstrap(data, turn)
+			if isTerminalCodexWebSocketEvent(data) {
+				s.finishTurn(turn)
+			}
+			return []byte{}, nil
+		}
 		if isTerminalCodexWebSocketEvent(data) {
 			s.finishTurn(turn)
 		}
@@ -522,7 +609,28 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 		return data, nil
 	}
 
-	data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
+	model := ""
+	if s.h != nil {
+		model = s.h.modelRedirects.modelFor(s.opts.ClientIP)
+	}
+	if model != "" {
+		var err error
+		data, err = redirectWSModel(data, model)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		data = applyModelAliasToJSONFrame(s.h, s.opts.ReqID, data)
+	}
+	if s.h != nil {
+		if tier := s.h.serviceTierOverride.modelFor(s.opts.ClientIP); tier != "" {
+			var err error
+			data, err = forceServiceTier(data, tier)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	data = applyEffortCapToJSONFrame(s.h, s.opts.ReqID, s.opts.UserID, s.opts.ClientIP, data)
 	filtered, changed, err := filterHostedMCPRequestJSON(data)
 	if err != nil {
@@ -544,7 +652,7 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if conversationID == "" {
 		conversationID = s.activeConversationID
 	}
-	model := extractCodexWebSocketRequestedModel(data)
+	model = extractCodexWebSocketRequestedModel(data)
 	turn := &codexRelayTurn{request: append([]byte(nil), data...), model: model, conversationID: conversationID, account: s.activeAccount}
 	s.turns = append(s.turns, turn)
 	tier := serviceTierFromJSON(data)
@@ -683,7 +791,7 @@ func (s *codexRelayState) recordCompletedUsage(data []byte, turn *codexRelayTurn
 	}
 
 	var event map[string]any
-	if err := json.Unmarshal(data, &event); err != nil || event["type"] != "response.completed" {
+	if err := json.Unmarshal(data, &event); err != nil || (event["type"] != "response.completed" && event["type"] != "response.done") {
 		return
 	}
 
@@ -772,6 +880,275 @@ func applyEffortCapToJSONFrame(h *proxyHandler, reqID, userID, clientIP string, 
 	return capped
 }
 
+const (
+	websocketBootstrapMaxFrames = 48
+	websocketBootstrapMaxBytes  = 1 << 20
+)
+
+func isCodexMeaningfulOutput(data []byte) bool {
+	var event struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &event) != nil {
+		return false
+	}
+	switch event.Type {
+	case "response.output_text.delta",
+		"response.output_text.done",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.audio.delta":
+		return true
+	default:
+		return false
+	}
+}
+
+const (
+	websocketOverloadWindow    = 30 * time.Second
+	websocketOverloadSwapAfter = 5
+)
+
+func websocketOverloadDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Second * time.Duration(attempt)
+	if delay > 3*time.Second {
+		return 3 * time.Second
+	}
+	return delay
+}
+
+func (s *codexRelayState) recordOverload(account *Account) int {
+	if account == nil {
+		return 0
+	}
+	if s.overloadTimes == nil {
+		s.overloadTimes = make(map[string][]time.Time)
+	}
+	now := time.Now()
+	cutoff := now.Add(-websocketOverloadWindow)
+	entries := s.overloadTimes[account.ID]
+	kept := entries[:0]
+	for _, entry := range entries {
+		if entry.After(cutoff) {
+			kept = append(kept, entry)
+		}
+	}
+	kept = append(kept, now)
+	s.overloadTimes[account.ID] = kept
+	if s.h != nil {
+		s.h.applyServerOverloadCooldown(account)
+	}
+	return len(kept)
+}
+
+func (s *codexRelayState) overloadCandidate(turn *codexRelayTurn) *Account {
+	if s.h == nil || s.h.pool == nil || turn == nil {
+		return nil
+	}
+	exclude := map[string]bool{}
+	if s.activeAccount != nil {
+		exclude[s.activeAccount.ID] = true
+	}
+	tier := serviceTierFromJSON(turn.request)
+	exclude = s.h.pool.tierExclusions(exclude, AccountTypeCodex, turn.model, tier)
+	return s.h.pool.candidateForTier(turn.conversationID, exclude, AccountTypeCodex, s.opts.RequiredPlan, s.opts.ClientIP, turn.model, tier)
+}
+
+func (s *codexRelayState) bufferBootstrap(data []byte, turn *codexRelayTurn) {
+	if turn == nil || s.bootstrapReady {
+		return
+	}
+	if len(s.bootstrap) >= websocketBootstrapMaxFrames || s.bootstrapBytes+len(data) > websocketBootstrapMaxBytes {
+		s.bootstrapReady = true
+		s.bootstrap = append(s.bootstrap, append([]byte(nil), data...))
+		s.bootstrapBytes += len(data)
+		return
+	}
+	s.bootstrap = append(s.bootstrap, append([]byte(nil), data...))
+	s.bootstrapBytes += len(data)
+	if turn.outputStarted || isTerminalCodexWebSocketEvent(data) {
+		s.bootstrapReady = true
+	}
+}
+
+func (s *codexRelayState) flushBootstrap() [][]byte {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if !s.bootstrapReady {
+		return nil
+	}
+	batch := s.bootstrap
+	s.bootstrap = nil
+	s.bootstrapBytes = 0
+	s.bootstrapReady = false
+	return batch
+}
+
+func (s *codexRelayState) clearBootstrap() {
+	s.bootstrap = nil
+	s.bootstrapBytes = 0
+	s.bootstrapReady = false
+}
+
+func (s *codexRelayState) transportRetry(err error) *transportPendingErr {
+	if err == nil || !strings.Contains(err.Error(), "upstream->client read:") || strings.Contains(err.Error(), "received close frame") {
+		return nil
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) && closeErr.Code != websocket.StatusAbnormalClosure {
+		return nil
+	}
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if len(s.turns) != 1 || s.turns[0].outputStarted {
+		return nil
+	}
+	return &transportPendingErr{turn: s.turns[0], err: err}
+}
+
+func (s *codexRelayState) retryTransportTurn(pending *transportPendingErr) error {
+	if pending == nil || pending.turn == nil {
+		return errors.New("transport retry has no pending turn")
+	}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
+	if s.ctx.Err() != nil {
+		return s.ctx.Err()
+	}
+	s.turnMu.Lock()
+	active := s.activeAccount
+	s.turnMu.Unlock()
+	if active == nil {
+		return errors.New("transport retry has no active account")
+	}
+	return s.replaceTurnUpstream(active, pending.turn, "transport")
+}
+
+func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error {
+	if pending == nil || pending.turn == nil {
+		return errors.New("overload retry has no pending turn")
+	}
+	delay := websocketOverloadDelay(pending.count)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
+	s.discardOverloadTail()
+	s.clearBootstrap()
+
+	s.turnMu.Lock()
+	if len(s.turns) != 1 || s.turns[0] != pending.turn {
+		pendingCount := len(s.turns)
+		s.turnMu.Unlock()
+		return fmt.Errorf("cannot retry websocket overload with %d pending responses", pendingCount)
+	}
+	turn := s.turns[0]
+	if pending.count >= websocketOverloadSwapAfter {
+		if cand := s.overloadCandidate(turn); cand != nil {
+			s.turnMu.Unlock()
+			return s.replaceTurnUpstream(cand, turn, "overload")
+		}
+	}
+	turn.responseID = ""
+	replay := append([]byte(nil), turn.request...)
+	writeErr := s.upstreamConn.Write(s.ctx, websocket.MessageText, replay)
+	active := s.activeAccount
+	s.turnMu.Unlock()
+	if writeErr == nil {
+		return nil
+	}
+	if active == nil {
+		return writeErr
+	}
+	return s.replaceTurnUpstream(active, turn, "overload")
+}
+
+func (s *codexRelayState) discardOverloadTail() {
+	for {
+		select {
+		case _, ok := <-s.upstreamCh:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTurn, reason string) error {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if len(s.turns) != 1 || s.turns[0] != turn {
+		return fmt.Errorf("cannot replace websocket overload turn")
+	}
+	s.clearBootstrap()
+	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
+	if err != nil {
+		if newResp != nil {
+			if newResp.Body != nil {
+				newResp.Body.Close()
+			}
+			s.h.applyWebSocketStatusEffects(s.opts.ReqID, cand, "", false, false, newResp.StatusCode)
+		}
+		return err
+	}
+	captureCodexResponseState(cand, newResp, s.opts.ReqID)
+	newConn.SetReadLimit(s.opts.ReadLimit)
+	replay := stripPreviousResponseID(turn.request)
+	if s.contextEnabled() {
+		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
+		if err != nil {
+			newConn.CloseNow()
+			s.finishTurn(turn)
+			return err
+		}
+	}
+	if err := newConn.Write(s.ctx, websocket.MessageText, replay); err != nil {
+		newConn.CloseNow()
+		return fmt.Errorf("replay overloaded turn: %w", err)
+	}
+	old := s.activeAccount
+	s.activeConversationID = turn.conversationID
+	if s.opts.SetActiveAccount != nil {
+		s.opts.SetActiveAccount(cand)
+	}
+	if turn.conversationID != "" {
+		s.h.pool.pin(turn.conversationID, cand.ID)
+	}
+	log.Printf("[%s] replacing codex upstream: %s -> %s (reason=%s)", s.opts.ReqID, accountIDForLog(old), cand.ID, reason)
+	s.upstreamConn.CloseNow()
+	s.upstreamConn = newConn
+	s.upstreamCh = startWebSocketReader(s.ctx, newConn)
+	s.activeAccount = cand
+	s.contextAccount = authAccount
+	turn.account = cand
+	turn.responseID = ""
+	return nil
+}
+
+func accountIDForLog(account *Account) string {
+	if account == nil {
+		return "unknown"
+	}
+	return account.ID
+}
+
 func (s *codexRelayState) doSwap(cand *Account) error {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
@@ -780,6 +1157,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	if len(s.turns) != 1 {
 		return fmt.Errorf("cannot swap websocket account with %d pending responses", len(s.turns))
 	}
+	s.clearBootstrap()
 	turn := s.turns[0]
 	s.activeConversationID = turn.conversationID
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)

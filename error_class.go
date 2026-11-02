@@ -157,6 +157,56 @@ func isCodexModelUnavailableError(body []byte) bool {
 		strings.Contains(s, "does not have access to model")
 }
 
+// isServerOverloadedError recognizes the provider error that means the
+// request can succeed unchanged after a short wait. The upstream has used
+// both a machine-readable code and a human-readable message for this case.
+func isServerOverloadedError(body []byte) bool {
+	var envelope struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Detail  string `json:"detail"`
+		Error   struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Response struct {
+			Error struct {
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(body), &envelope) == nil {
+		for _, code := range []string{envelope.Code, envelope.Error.Code, envelope.Response.Error.Code} {
+			if strings.EqualFold(strings.TrimSpace(code), "server_is_overloaded") {
+				return true
+			}
+		}
+		for _, typ := range []string{envelope.Type, envelope.Error.Type, envelope.Response.Error.Type} {
+			typ = strings.ToLower(strings.TrimSpace(typ))
+			if typ == "server_is_overloaded" || typ == "service_unavailable_error" {
+				return true
+			}
+		}
+		for _, message := range []string{
+			envelope.Message,
+			envelope.Detail,
+			envelope.Error.Message,
+			envelope.Response.Error.Message,
+		} {
+			message = strings.ToLower(message)
+			if strings.Contains(message, "server_is_overloaded") || strings.Contains(message, "server is overloaded") || strings.Contains(message, "servers are currently overloaded") {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(body)), "server_is_overloaded")
+}
+
 // Retryable returns true if this class should be retried on another account.
 func (c ErrorClass) Retryable() bool {
 	switch c {

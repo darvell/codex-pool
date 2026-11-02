@@ -10,6 +10,30 @@ func TestClassifyAnthropicOverloadedAsTransient(t *testing.T) {
 	}
 }
 
+func TestIsServerOverloadedError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"code", `{"error":{"code":"server_is_overloaded"}}`, true},
+		{"message", `{"error":{"message":"Our servers are currently overloaded. Please try again later."}}`, true},
+		{"response failed", `{"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}`, true},
+		{"service unavailable", `{"error":{"type":"service_unavailable_error"}}`, true},
+		{"other", `{"error":{"code":"invalid_request_error"}}`, false},
+		{"assistant text", `{"type":"response.output_text.delta","delta":"servers are currently overloaded is a phrase"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isServerOverloadedError([]byte(tc.body)); got != tc.want {
+				t.Fatalf("isServerOverloadedError()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsClaudeOrganizationDisabled(t *testing.T) {
 	t.Parallel()
 
