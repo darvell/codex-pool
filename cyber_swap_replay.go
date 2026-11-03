@@ -259,24 +259,33 @@ func analyzeToolOutputCoverage(items []json.RawMessage) (hasOutput, coversAll bo
 }
 
 // buildRedialPayload rebuilds a response.create for a freshly dialed socket.
-// With accumulated history it forwards the full input transcript and drops the
-// dead response id; the prior turn's context survives the redial. Without
-// history, or when the transcript cannot cover a tool-call output, it falls
-// back to stripping the id so the delta request at least reaches upstream.
-func buildRedialPayload(request []byte, history []json.RawMessage) []byte {
+// A full transcript the pool has seen is forwarded without previous_response_id,
+// because that id dies with the socket that minted it, even on the same account.
+// A cached delta that cannot be rebuilt is refused. Stripping the id and
+// forwarding only the delta would look like success while dropping the
+// conversation. The caller writes previous_response_not_found so Pi resends
+// the original full body. A request that never carried the id is unchanged.
+func buildRedialPayload(request []byte, history []json.RawMessage) ([]byte, error) {
+	if !hasPreviousResponseID(request) {
+		return request, nil
+	}
 	if len(history) == 0 {
-		return stripPreviousResponseID(request)
+		return nil, errPreviousResponseUnreplayable
 	}
 	current := extractInputItems(request)
-	full := buildReplaySequence(history, current, hasPreviousResponseID(request))
+	full := buildReplaySequence(history, current, true)
 	if len(full) == 0 {
-		return stripPreviousResponseID(request)
+		return nil, errPreviousResponseUnreplayable
 	}
 	hasOutput, coversAll := analyzeToolOutputCoverage(full)
 	if hasOutput && !coversAll {
-		return stripPreviousResponseID(request)
+		return nil, errPreviousResponseUnreplayable
 	}
-	return setInputAndStripPrevID(request, full)
+	out := setInputAndStripPrevID(request, full)
+	if hasPreviousResponseID(out) {
+		return nil, errPreviousResponseUnreplayable
+	}
+	return out, nil
 }
 
 func setInputAndStripPrevID(body []byte, full []json.RawMessage) []byte {
@@ -318,9 +327,9 @@ const (
 )
 
 // capHistory keeps the most recent tail of the accumulated transcript within
-// bounded memory. Older context beyond the cap is dropped rather than letting
-// a long session grow without limit.
-func capHistory(items []json.RawMessage) []json.RawMessage {
+// bounded memory. truncated is true when any older item was dropped. A
+// truncated transcript must not be replayed in place of previous_response_id.
+func capHistory(items []json.RawMessage) ([]json.RawMessage, bool) {
 	total := 0
 	start := len(items)
 	for i := len(items) - 1; i >= 0; i-- {
@@ -333,5 +342,8 @@ func capHistory(items []json.RawMessage) []json.RawMessage {
 		}
 		start = i
 	}
-	return items[start:]
+	if start >= len(items) {
+		return nil, len(items) > 0
+	}
+	return items[start:], start > 0
 }
