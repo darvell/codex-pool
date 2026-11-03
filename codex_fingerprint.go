@@ -23,8 +23,8 @@ const (
 	// classifies mismatched or legacy identities more aggressively and can
 	// return server_is_overloaded before producing output.
 	codexDefaultOriginator     = "codex_cli_rs"
-	codexDefaultAppVersion     = "26.318.11754"
-	codexDefaultBuildNumber    = "1100"
+	codexDefaultAppVersion     = "26.1027.61615"
+	codexDefaultBuildNumber    = "24141"
 	codexDefaultChromium       = "144"
 	codexDefaultResidency      = "us"
 	codexAppcastURL            = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
@@ -95,11 +95,19 @@ func codexDesktopUserAgent(fp codexFingerprintState) string {
 	// Keep the real fingerprint suffix, but canonicalize the client identity and
 	// remove the optional TUI trailer so originator and User-Agent agree.
 	if slash := strings.IndexByte(ua, '/'); slash > 0 && !strings.ContainsAny(ua, "\\r\\n") {
-		rest := ua[slash:]
-		if open := strings.LastIndex(rest, "("); open > 0 && strings.Contains(strings.ToLower(rest[open:]), "codex-tui") {
-			rest = strings.TrimRight(rest[:open], " ")
+		rest := ua[slash+1:]
+		versionEnd := len(rest)
+		if space := strings.IndexByte(rest, ' '); space >= 0 && space < versionEnd {
+			versionEnd = space
 		}
-		return codexDefaultOriginator + rest
+		if open := strings.IndexByte(rest, '('); open >= 0 && open < versionEnd {
+			versionEnd = open
+		}
+		suffix := rest[versionEnd:]
+		if open := strings.LastIndex(suffix, "("); open > 0 && strings.Contains(strings.ToLower(suffix[open:]), "codex-tui") {
+			suffix = strings.TrimRight(suffix[:open], " ")
+		}
+		return codexDefaultOriginator + "/" + fp.AppVersion + suffix
 	}
 	return fmt.Sprintf("%s/%s (%s; %s)", codexDefaultOriginator, fp.AppVersion, fp.Platform, fp.Arch)
 }
