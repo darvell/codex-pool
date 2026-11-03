@@ -13,10 +13,10 @@ import (
 // account minted the blob the downstream client currently holds, and strip a
 // known cross-account echo before it reaches upstream.
 //
-// This is the anti-contamination half of sub2api's ticket system, without the
-// harvester: we never synthesize traffic or store blobs, we only stop
-// forwarding a blob to an account that did not mint it. Unknown origin (no
-// record, expired record, first turn) passes through untouched.
+// This keeps account-bound turn state from crossing a failover boundary. The
+// pool records provenance and removes a known cross-account echo before it
+// reaches upstream. Unknown origin (no record, expired record, first turn)
+// passes through untouched.
 
 const codexTurnStateHeader = "x-codex-turn-state"
 

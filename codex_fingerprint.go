@@ -91,9 +91,9 @@ func codexDesktopUserAgent(fp codexFingerprintState) string {
 	if ua == "" {
 		ua = fmt.Sprintf("%s/%s (%s; %s)", codexDefaultOriginator, fp.AppVersion, fp.Platform, fp.Arch)
 	}
-	// PR 8487 documents that the TUI identity is capacity-shed more often.
-	// Keep the real fingerprint suffix, but canonicalize the client identity and
-	// remove the optional TUI trailer so originator and User-Agent agree.
+	// Capacity shedding is more aggressive for the TUI identity. Keep the
+	// real fingerprint suffix, but canonicalize the client identity and remove
+	// the optional TUI trailer so originator and User-Agent agree.
 	if slash := strings.IndexByte(ua, '/'); slash > 0 && !strings.ContainsAny(ua, "\\r\\n") {
 		rest := ua[slash+1:]
 		versionEnd := len(rest)

@@ -8,11 +8,10 @@ import (
 
 // Response IDs are scoped to the connection that minted them. A newly dialed
 // socket cannot honor previous_response_id, so a redial must rebuild the
-// conversation from a full input transcript the pool has actually seen. This
-// file ports sub2api's tool-continuation replay: the upstream response frames
-// are mined for the assistant's tool calls and messages, and those items are
-// accumulated per conversation so a failover can forward them instead of the
-// dead response id.
+// conversation from a full input transcript the pool has actually seen. The
+// upstream response frames are mined for assistant tool calls and messages;
+// those items accumulate per conversation so failover can forward them
+// instead of the dead response ID.
 
 func isCodexToolCallContextItemType(typ string) bool {
 	switch strings.TrimSpace(typ) {
