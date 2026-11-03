@@ -22,7 +22,7 @@ func TestCodexProviderAddsDesktopFingerprintHeadersAndCookies(t *testing.T) {
 	checks := map[string]string{
 		"Authorization":                     "Bearer tok",
 		"ChatGPT-Account-ID":                "acct_123",
-		"originator":                        "Codex Desktop",
+		"originator":                        "codex_cli_rs",
 		"x-openai-internal-codex-residency": "us",
 		"OpenAI-Beta":                       "responses_websockets=2026-02-06",
 		"sec-fetch-site":                    "same-origin",
@@ -38,12 +38,30 @@ func TestCodexProviderAddsDesktopFingerprintHeadersAndCookies(t *testing.T) {
 	if got := req.Header.Get("x-client-request-id"); got == "" {
 		t.Fatalf("x-client-request-id was not set")
 	}
-	if got := req.Header.Get("User-Agent"); !strings.HasPrefix(got, "Codex Desktop/") {
-		t.Fatalf("User-Agent = %q, want Codex Desktop prefix", got)
+	if got := req.Header.Get("User-Agent"); !strings.HasPrefix(got, "codex_cli_rs/") {
+		t.Fatalf("User-Agent = %q, want codex_cli_rs prefix", got)
 	}
 	cookie := req.Header.Get("Cookie")
 	if !strings.Contains(cookie, "cf_clearance=clear") || !strings.Contains(cookie, "__cf_bm=bm") {
 		t.Fatalf("Cookie = %q, want persisted Cloudflare cookies", cookie)
+	}
+}
+
+func TestCodexIdentityNormalizesTUIToCLI(t *testing.T) {
+	t.Setenv("CODEX_USER_AGENT", "codex-tui/0.140.2 (Mac OS X 14.0; arm64) iTerm (codex-tui; 0.140.2)")
+	got := codexDesktopUserAgent(codexFingerprintState{AppVersion: "26.1027.61615", Platform: "darwin", Arch: "arm64"})
+	want := "codex_cli_rs/26.1027.61615 (darwin; arm64)"
+	if got != want {
+		t.Fatalf("normalized User-Agent = %q, want %q", got, want)
+	}
+}
+
+func TestCodexIdentityKeepsCanonicalPair(t *testing.T) {
+	t.Setenv("CODEX_USER_AGENT", "Codex Desktop/26.318.11754 (darwin; arm64)")
+	got := codexDesktopUserAgent(codexFingerprintState{AppVersion: "26.1027.61615", Platform: "linux", Arch: "x64"})
+	want := "codex_cli_rs/26.1027.61615 (linux; x64)"
+	if got != want {
+		t.Fatalf("canonical User-Agent = %q, want %q", got, want)
 	}
 }
 

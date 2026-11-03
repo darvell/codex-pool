@@ -18,7 +18,11 @@ import (
 )
 
 const (
-	codexDefaultOriginator     = "Codex Desktop"
+	// Match codex-rs's current default identity. The originator and
+	// User-Agent client name must stay paired: OpenAI's capacity shedding
+	// classifies mismatched or legacy identities more aggressively and can
+	// return server_is_overloaded before producing output.
+	codexDefaultOriginator     = "codex_cli_rs"
 	codexDefaultAppVersion     = "26.318.11754"
 	codexDefaultBuildNumber    = "1100"
 	codexDefaultChromium       = "144"
@@ -83,10 +87,21 @@ func currentCodexFingerprint() codexFingerprintState {
 }
 
 func codexDesktopUserAgent(fp codexFingerprintState) string {
-	if ua := strings.TrimSpace(os.Getenv("CODEX_USER_AGENT")); ua != "" {
-		return ua
+	ua := strings.TrimSpace(os.Getenv("CODEX_USER_AGENT"))
+	if ua == "" {
+		ua = fmt.Sprintf("%s/%s (%s; %s)", codexDefaultOriginator, fp.AppVersion, fp.Platform, fp.Arch)
 	}
-	return fmt.Sprintf("Codex Desktop/%s (%s; %s)", fp.AppVersion, fp.Platform, fp.Arch)
+	// PR 8487 documents that the TUI identity is capacity-shed more often.
+	// Keep the real fingerprint suffix, but canonicalize the client identity and
+	// remove the optional TUI trailer so originator and User-Agent agree.
+	if slash := strings.IndexByte(ua, '/'); slash > 0 && !strings.ContainsAny(ua, "\\r\\n") {
+		rest := ua[slash:]
+		if open := strings.LastIndex(rest, "("); open > 0 && strings.Contains(strings.ToLower(rest[open:]), "codex-tui") {
+			rest = strings.TrimRight(rest[:open], " ")
+		}
+		return codexDefaultOriginator + rest
+	}
+	return fmt.Sprintf("%s/%s (%s; %s)", codexDefaultOriginator, fp.AppVersion, fp.Platform, fp.Arch)
 }
 
 func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
@@ -95,7 +110,7 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 	}
 
 	fp := currentCodexFingerprint()
-	req.Header.Set("originator", fp.Originator)
+	req.Header.Set("originator", codexDefaultOriginator)
 	req.Header.Set("x-openai-internal-codex-residency", getenv("CODEX_RESIDENCY", codexDefaultResidency))
 	if req.Header.Get("x-client-request-id") == "" {
 		req.Header.Set("x-client-request-id", uuid.NewString())
