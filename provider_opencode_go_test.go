@@ -420,6 +420,30 @@ func TestModelRouteOverrideOpencodeGo(t *testing.T) {
 	}
 }
 
+func TestOpencodeGoDiscoveryDoesNotClaimOpenAIBareModel(t *testing.T) {
+	t.Parallel()
+
+	base, _ := url.Parse("https://example.test")
+	handler := opencodeGoTestHandler(base)
+	goAccount := &Account{ID: "go", Type: AccountTypeOpencodeGo, Models: map[string]DiscoveredModel{
+		"gpt-5.6-luna": {ID: "gpt-5.6-luna"},
+	}}
+	handler.pool = newPoolState([]*Account{goAccount}, false)
+
+	// The bare OpenAI name stays with Codex even though a Go account lists it.
+	if provider, _, _ := handler.resolveStreamedModelRoute("/v1/responses", "gpt-5.6-luna"); provider != nil && provider.Type() == AccountTypeOpencodeGo {
+		t.Fatal("streamed bare gpt-5.6-luna routed to OpenCode Go")
+	}
+	if provider, _, _ := handler.modelRouteOverride("/v1/responses", "gpt-5.6-luna", []byte(`{"model":"gpt-5.6-luna"}`)); provider != nil && provider.Type() == AccountTypeOpencodeGo {
+		t.Fatal("buffered bare gpt-5.6-luna routed to OpenCode Go")
+	}
+
+	// The prefixed form still reaches Go.
+	if provider, _, _ := handler.resolveStreamedModelRoute("/v1/responses", "opencode-go/gpt-5.6-luna"); provider == nil || provider.Type() != AccountTypeOpencodeGo {
+		t.Fatalf("prefixed route provider=%v, want opencode-go", provider)
+	}
+}
+
 func TestResolveStreamedModelRouteOpencodeGo(t *testing.T) {
 	t.Parallel()
 

@@ -376,6 +376,17 @@ func opencodeGoBareModelTaken(model string) bool {
 	return false
 }
 
+// opencodeGoDiscoveryRoutes reports whether a discovered Go model may claim a
+// request. A bare ID another provider owns (gpt-5.6-luna, for example) stays
+// with that provider even when a Go account also lists it; only the
+// `opencode-go/` form reaches Go.
+func opencodeGoDiscoveryRoutes(model string) bool {
+	if _, prefixed := opencodeGoBareID(model); prefixed {
+		return true
+	}
+	return !opencodeGoBareModelTaken(strings.TrimSpace(model))
+}
+
 // isOpencodeGoModel returns true if the given model name should be routed to
 // OpenCode Go: always for `opencode-go/<id>` references, and for bare IDs
 // only when no other provider claims them.
