@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -33,6 +34,7 @@ type codexCyberSwapOptions struct {
 	UserID                      string
 	OriginID                    string
 	IdleTimeout                 time.Duration
+	FirstByteTimeout            time.Duration
 	DownstreamHeartbeatInterval time.Duration
 	ReadLimit                   int64
 	CompressionEnabled          bool
@@ -121,7 +123,18 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 ) codexCyberSwapResult {
 	ctx := clientReq.Context()
 
-	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(ctx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
+	dialCtx, disarmDial := beginFirstByteDeadline(ctx, opts.FirstByteTimeout)
+	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(dialCtx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
+	if disarmDial() || errors.Is(err, errUpstreamFirstByteTimeout) || errors.Is(context.Cause(dialCtx), errUpstreamFirstByteTimeout) {
+		if upstreamConn != nil {
+			upstreamConn.CloseNow()
+		}
+		if upstreamResp != nil && upstreamResp.Body != nil {
+			upstreamResp.Body.Close()
+		}
+		writeUpstreamFirstByteTimeout(w)
+		return codexCyberSwapResult{statusCode: http.StatusGatewayTimeout, err: errUpstreamFirstByteTimeout, finalAccount: opts.InitialAccount}
+	}
 	excluded := map[string]bool{opts.InitialAccount.ID: true}
 	for attempt := 0; err != nil && upstreamResp != nil && upstreamResp.StatusCode == http.StatusUnauthorized; attempt++ {
 		if upstreamTokenRevoked(upstreamResp) {
@@ -149,6 +162,16 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 			opts.SetActiveAccount(next)
 		}
 		upstreamConn, upstreamResp, opts.InitialContextAccount, err = h.dialSwappedUpstream(ctx, opts, next, subprotocols)
+	}
+	if errors.Is(err, errUpstreamFirstByteTimeout) {
+		if upstreamConn != nil {
+			upstreamConn.CloseNow()
+		}
+		if upstreamResp != nil && upstreamResp.Body != nil {
+			upstreamResp.Body.Close()
+		}
+		writeUpstreamFirstByteTimeout(w)
+		return codexCyberSwapResult{statusCode: http.StatusGatewayTimeout, err: errUpstreamFirstByteTimeout, finalAccount: opts.InitialAccount}
 	}
 	if err != nil {
 		if upstreamResp != nil && upstreamResp.StatusCode == http.StatusUnauthorized {
@@ -278,11 +301,13 @@ type codexRelayState struct {
 	contextAccount *Account
 	subprotocols   []string
 
-	clientCh   <-chan wsFrame
-	upstreamCh <-chan wsFrame
-	session    *trackedWebSocketSession
-	proWS      *chatGPTProWS
-	activityCh chan struct{}
+	clientCh            <-chan wsFrame
+	upstreamCh          <-chan wsFrame
+	upstreamResponseCh  chan struct{}
+	sawUpstreamResponse atomic.Bool
+	session             *trackedWebSocketSession
+	proWS               *chatGPTProWS
+	activityCh          chan struct{}
 
 	// swapDone covers both "we already swapped" and "we tried and gave
 	// up" — once true, no further swap attempts.
@@ -302,7 +327,10 @@ type codexRelayState struct {
 	// history keys each conversation's full input transcript by conversation
 	// id. A redial rebuilds the conversation from it instead of the dead
 	// response id; a fresh turn (no previous_response_id) resets its key.
-	history map[string][]json.RawMessage
+	// historyIncomplete marks a key whose transcript was truncated and must
+	// not be replayed as if it were complete.
+	history           map[string][]json.RawMessage
+	historyIncomplete map[string]bool
 }
 
 func (s *codexRelayState) run() (int, error) {
@@ -314,6 +342,9 @@ func (s *codexRelayState) run() (int, error) {
 		var transport *transportPendingErr
 		if errors.As(err, &transport) {
 			if retryErr := s.retryTransportTurn(transport); retryErr != nil {
+				if status, done := s.surfaceRelayErr(retryErr); done {
+					return status, retryErr
+				}
 				return 101, retryErr
 			}
 			continue
@@ -321,14 +352,23 @@ func (s *codexRelayState) run() (int, error) {
 		var overload *overloadPendingErr
 		if errors.As(err, &overload) {
 			if retryErr := s.retryOverloadedTurn(overload); retryErr != nil {
+				if status, done := s.surfaceRelayErr(retryErr); done {
+					return status, retryErr
+				}
 				return 101, retryErr
 			}
 			continue
+		}
+		if status, done := s.surfaceRelayErr(err); done {
+			return status, err
 		}
 		var swap *swapPendingErr
 		if errors.As(err, &swap) {
 			if swap.next != nil {
 				if doErr := s.doSwap(swap.next); doErr != nil {
+					if status, done := s.surfaceRelayErr(doErr); done {
+						return status, doErr
+					}
 					if isContextError(doErr) {
 						if err := s.writeContextError(doErr); err != nil {
 							return http.StatusSwitchingProtocols, err
@@ -385,6 +425,14 @@ func (s *codexRelayState) relayOnce() error {
 		activityCh = make(chan struct{}, 1)
 	}
 
+	if s.upstreamResponseCh == nil {
+		s.upstreamResponseCh = make(chan struct{}, 1)
+	}
+	s.sawUpstreamResponse.Store(false)
+	select {
+	case <-s.upstreamResponseCh:
+	default:
+	}
 	debug := s.h != nil && s.h.cfg != nil && s.h.cfg.debug.Load()
 	go func() {
 		upstreamErrCh <- pumpFrames(roundCtx, s.ctx, s.upstreamCh, s.clientWriter, s.opts.LogLabel, "upstream->client", debug, s.inspectUpstream, s.flushBootstrap, s.markUpstreamForwarded, activityCh)
@@ -399,6 +447,13 @@ func (s *codexRelayState) relayOnce() error {
 		idleTimer = time.NewTimer(s.opts.IdleTimeout)
 		idleCh = idleTimer.C
 		defer idleTimer.Stop()
+	}
+	var firstTimer *time.Timer
+	var firstCh <-chan time.Time
+	if s.opts.FirstByteTimeout > 0 {
+		firstTimer = time.NewTimer(s.opts.FirstByteTimeout)
+		firstCh = firstTimer.C
+		defer firstTimer.Stop()
 	}
 	for {
 		select {
@@ -433,6 +488,22 @@ func (s *codexRelayState) relayOnce() error {
 				}
 				idleTimer.Reset(s.opts.IdleTimeout)
 			}
+		case <-s.upstreamResponseCh:
+			if firstTimer != nil {
+				firstTimer.Stop()
+				firstTimer = nil
+				firstCh = nil
+			}
+		case <-firstCh:
+			if s.sawUpstreamResponse.Load() {
+				firstTimer = nil
+				firstCh = nil
+				continue
+			}
+			roundCancel()
+			<-upstreamErrCh
+			<-clientErrCh
+			return errUpstreamFirstByteTimeout
 		case <-idleCh:
 			roundCancel()
 			<-upstreamErrCh
@@ -544,7 +615,22 @@ func isTerminalCodexWebSocketEvent(data []byte) bool {
 	return event.Type == "response.completed" || event.Type == "response.done" || event.Type == "response.failed" || event.Type == "response.incomplete"
 }
 
+func (s *codexRelayState) noteUpstreamResponse() {
+	if s == nil {
+		return
+	}
+	s.sawUpstreamResponse.Store(true)
+	if s.upstreamResponseCh == nil {
+		return
+	}
+	select {
+	case s.upstreamResponseCh <- struct{}{}:
+	default:
+	}
+}
+
 func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
+	s.noteUpstreamResponse()
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
 	turn := s.responseTurn(data)
@@ -834,13 +920,35 @@ func (s *codexRelayState) recordHistory(done *codexRelayTurn) {
 		return
 	}
 	key := replayHistoryKey(done.conversationID)
-	if done.hasPrevID {
-		fullInput := buildReplaySequence(s.history[key], done.inputItems, true)
-		s.setHistory(key, capHistory(combineInputItems(fullInput, done.collector.AllItems())))
+	if done.hasPrevID && s.historyIncomplete[key] {
 		return
 	}
-	// A fresh chain replaces whatever that conversation held before.
-	s.setHistory(key, capHistory(combineInputItems(done.inputItems, done.collector.AllItems())))
+	var combined []json.RawMessage
+	if done.hasPrevID {
+		fullInput := buildReplaySequence(s.historyFor(done.conversationID), done.inputItems, true)
+		combined = combineInputItems(fullInput, done.collector.AllItems())
+	} else {
+		// A fresh chain replaces whatever that conversation held before.
+		combined = combineInputItems(done.inputItems, done.collector.AllItems())
+	}
+	capped, truncated := capHistory(combined)
+	if truncated {
+		// A partial tail is not a full transcript. Forget it so the next
+		// redial asks the client to resend instead of succeeding without
+		// the dropped context.
+		s.setHistory(key, nil)
+		if key != "" {
+			if s.historyIncomplete == nil {
+				s.historyIncomplete = map[string]bool{}
+			}
+			s.historyIncomplete[key] = true
+		}
+		return
+	}
+	if s.historyIncomplete != nil {
+		delete(s.historyIncomplete, key)
+	}
+	s.setHistory(key, capped)
 }
 
 func replayHistoryKey(conversationID string) string {
@@ -862,10 +970,39 @@ func (s *codexRelayState) setHistory(key string, items []json.RawMessage) {
 }
 
 func (s *codexRelayState) historyFor(conversationID string) []json.RawMessage {
+	key := replayHistoryKey(conversationID)
+	if s.historyIncomplete[key] {
+		return nil
+	}
 	if s.history == nil {
 		return nil
 	}
-	return s.history[replayHistoryKey(conversationID)]
+	return s.history[key]
+}
+
+// surfaceRelayErr writes the client-visible frame for a terminal relay
+// failure. It reports done when the caller should stop instead of treating
+// the error as a generic swap or close. The write is bounded so a stalled
+// client cannot pin the relay.
+func (s *codexRelayState) surfaceRelayErr(err error) (int, bool) {
+	switch {
+	case errors.Is(err, errUpstreamFirstByteTimeout):
+		s.writeClientFrame(upstreamFirstByteTimeoutFrame())
+		return 101, true
+	case errors.Is(err, errPreviousResponseUnreplayable):
+		return 101, true
+	default:
+		return 0, false
+	}
+}
+
+func (s *codexRelayState) writeClientFrame(frame []byte) {
+	if s == nil || s.clientWriter == nil || len(frame) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.clientWriter.Write(ctx, websocket.MessageText, frame)
 }
 
 // recordCompletedUsage sends terminal Codex websocket usage through the same
@@ -1243,6 +1380,14 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	if cand == nil {
 		return errors.New("cannot replace websocket upstream without an account")
 	}
+	replay, replayErr := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
+	if replayErr != nil {
+		err := s.rejectUnreplayableTurn(turn)
+		s.turnMu.Unlock()
+		s.writeUnreplayableFrame()
+		s.turnMu.Lock()
+		return err
+	}
 	s.clearBootstrap()
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
@@ -1256,7 +1401,6 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	}
 	captureCodexResponseState(cand, newResp, s.opts.ReqID)
 	newConn.SetReadLimit(s.opts.ReadLimit)
-	replay := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
 	if s.contextEnabled() {
 		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
 		if err != nil {
@@ -1288,6 +1432,18 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	return nil
 }
 
+// rejectUnreplayableTurn drops the turn under turnMu. The caller writes the
+// previous_response_not_found frame after releasing the lock.
+func (s *codexRelayState) rejectUnreplayableTurn(turn *codexRelayTurn) error {
+	s.finishTurn(turn)
+	log.Printf("[%s] refusing redial of previous_response_id without a rebuildable transcript", s.opts.ReqID)
+	return errPreviousResponseUnreplayable
+}
+
+func (s *codexRelayState) writeUnreplayableFrame() {
+	s.writeClientFrame(previousResponseNotFoundFrame())
+}
+
 func accountIDForLog(account *Account) string {
 	if account == nil {
 		return "unknown"
@@ -1306,6 +1462,14 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	s.clearBootstrap()
 	turn := s.turns[0]
 	s.activeConversationID = turn.conversationID
+	replay, replayErr := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
+	if replayErr != nil {
+		err := s.rejectUnreplayableTurn(turn)
+		s.turnMu.Unlock()
+		s.writeUnreplayableFrame()
+		s.turnMu.Lock()
+		return err
+	}
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
 		if newResp != nil {
@@ -1318,7 +1482,6 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	}
 	captureCodexResponseState(cand, newResp, s.opts.ReqID)
 	newConn.SetReadLimit(s.opts.ReadLimit)
-	replay := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
 	if s.contextEnabled() {
 		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
 		if err != nil {
@@ -1489,7 +1652,14 @@ func (h *proxyHandler) dialSwappedUpstream(
 	// did not mint, a contradiction real Codex never produces.
 	h.guardCodexTurnStateEcho(opts.UserID, opts.ConversationID, acc, tmpReq.Header)
 
-	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)
+	dialCtx, disarm := beginFirstByteDeadline(ctx, opts.FirstByteTimeout)
+	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(dialCtx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)
+	if disarm() || errors.Is(err, errUpstreamFirstByteTimeout) || errors.Is(context.Cause(dialCtx), errUpstreamFirstByteTimeout) {
+		if conn != nil {
+			conn.CloseNow()
+		}
+		return nil, resp, nil, errUpstreamFirstByteTimeout
+	}
 	if err != nil {
 		return nil, resp, nil, err
 	}

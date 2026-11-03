@@ -79,6 +79,7 @@ type config struct {
 	requestTimeout             time.Duration // Timeout for non-streaming requests (0 = no timeout)
 	streamTimeout              time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
 	streamIdleTimeout          time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	upstreamFirstByteTimeout   time.Duration // Fail before the first upstream byte (0 = no first-byte deadline)
 	websocketIdleTimeout       time.Duration // Kill websocket relays idle for this long (0 = no idle timeout)
 	websocketHeartbeatInterval time.Duration // Send downstream app-level websocket heartbeats this often (0 = disabled)
 	websocketReadLimit         int64         // Maximum websocket message size
@@ -251,6 +252,17 @@ func buildConfig() *config {
 	if v := getenv("STREAM_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamIdleTimeout = time.Duration(n) * time.Second
+		}
+	}
+	// Headers and the first websocket frame are bounded by default so a silent
+	// upstream becomes a JSON/websocket error inside Cloudflare's window.
+	// STREAM_IDLE_TIMEOUT_SECONDS still defaults off: it would cut a live
+	// generation, which this deadline must not do. Set the env var to 0 to
+	// restore the old unbounded wait.
+	cfg.upstreamFirstByteTimeout = defaultUpstreamFirstByteTimeout
+	if v := getenv("UPSTREAM_FIRST_BYTE_TIMEOUT_SECONDS", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n >= 0 {
+			cfg.upstreamFirstByteTimeout = time.Duration(n) * time.Second
 		}
 	}
 	cfg.websocketIdleTimeout = 0
@@ -641,8 +653,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, opencode_go=%d, mistral=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, opencodeGoCount, mistralCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, antigravity=%d, kimi=%d, minimax=%d, zai=%d, xiaomi=%d, grok=%d, adverserial=%d, opencode_go=%d, mistral=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, upstream_first_byte_timeout=%v, websocket_idle_timeout=%v, websocket_heartbeat_interval=%v, websocket_read_limit=%d)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, antigravityCount, kimiCount, minimaxCount, zaiCount, xiaomiCount, grokCount, adverserialCount, opencodeGoCount, mistralCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.upstreamFirstByteTimeout, cfg.websocketIdleTimeout, cfg.websocketHeartbeatInterval, cfg.websocketReadLimit)
 	if cfg.claudeTraceDir != "" {
 		log.Printf("claude traffic tracing enabled: dir=%s body_limit=%d include_secrets=%v", cfg.claudeTraceDir, cfg.claudeTraceBodyLimit, cfg.claudeTraceSecrets)
 	}
@@ -2905,6 +2917,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&h.inflight, -1)
 
 		if err != nil {
+			if errors.Is(err, errUpstreamFirstByteTimeout) {
+				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, http.StatusGatewayTimeout, err, "upstream_first_byte_timeout"))
+				writeUpstreamFirstByteTimeout(w)
+				return
+			}
 			if !isContextError(err) {
 				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, 0, err, "attempt_failed"))
 			}
@@ -3941,6 +3958,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			UserID:                      userID,
 			OriginID:                    originID,
 			IdleTimeout:                 h.cfg.websocketIdleTimeout,
+			FirstByteTimeout:            h.cfg.upstreamFirstByteTimeout,
 			DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 			ReadLimit:                   readLimit,
 			CompressionEnabled:          h.cfg.websocketCompression,
@@ -3984,6 +4002,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 
 	relay := relayWebSocket(w, r, outURL, upstreamHeaders, webSocketRelayOptions{
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
+		FirstByteTimeout:            h.cfg.upstreamFirstByteTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		CompressionEnabled:          h.cfg.websocketCompression,
@@ -4093,6 +4112,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	}
 	relayOpts := webSocketRelayOptions{
 		IdleTimeout:                 h.cfg.websocketIdleTimeout,
+		FirstByteTimeout:            h.cfg.upstreamFirstByteTimeout,
 		DownstreamHeartbeatInterval: downstreamHeartbeatInterval,
 		ReadLimit:                   readLimit,
 		CompressionEnabled:          h.cfg.websocketCompression,
@@ -4148,6 +4168,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 //  3. Relay messages bidirectionally until either side closes.
 type webSocketRelayOptions struct {
 	IdleTimeout                 time.Duration
+	FirstByteTimeout            time.Duration
 	DownstreamHeartbeatInterval time.Duration
 	ReadLimit                   int64
 	CompressionEnabled          bool
@@ -4189,7 +4210,18 @@ func relayWebSocket(
 	ctx := clientReq.Context()
 
 	wsURL := *upstreamURL
-	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(ctx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
+	dialCtx, disarmDial := beginFirstByteDeadline(ctx, opts.FirstByteTimeout)
+	upstreamConn, upstreamResp, _, err := dialUpstreamWebSocket(dialCtx, &wsURL, upstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
+	if disarmDial() || errors.Is(err, errUpstreamFirstByteTimeout) || errors.Is(context.Cause(dialCtx), errUpstreamFirstByteTimeout) {
+		if upstreamConn != nil {
+			upstreamConn.CloseNow()
+		}
+		if upstreamResp != nil && upstreamResp.Body != nil {
+			upstreamResp.Body.Close()
+		}
+		writeUpstreamFirstByteTimeout(w)
+		return webSocketRelayResult{statusCode: http.StatusGatewayTimeout, err: errUpstreamFirstByteTimeout}
+	}
 	if err != nil {
 		if upstreamResp != nil {
 			status := writeWebSocketRejection(w, upstreamResp)
@@ -4266,10 +4298,10 @@ func relayWebSocket(
 	}
 
 	go func() {
-		errCh <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.Debug, opts.OnUpstreamMessage, opts.TransformUpstreamMessage, markUpstreamForwarded)
+		errCh <- relayMessages(relayCtx, upstreamConn, clientWriter, opts.LogLabel, "upstream->client", opts.IdleTimeout, opts.FirstByteTimeout, opts.Debug, opts.OnUpstreamMessage, opts.TransformUpstreamMessage, markUpstreamForwarded)
 	}()
 	go func() {
-		errCh <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, opts.Debug, opts.OnClientMessage, opts.TransformClientMessage, markClientForwarded)
+		errCh <- relayMessages(relayCtx, clientConn, upstreamWriter, opts.LogLabel, "client->upstream", opts.IdleTimeout, 0, opts.Debug, opts.OnClientMessage, opts.TransformClientMessage, markClientForwarded)
 	}()
 
 	var relayErr error
@@ -4277,6 +4309,11 @@ func relayWebSocket(
 	case relayErr = <-errCh:
 	case relayErr = <-clientHeartbeatErr:
 	case relayErr = <-upstreamHeartbeatErr:
+	}
+	if errors.Is(relayErr, errUpstreamFirstByteTimeout) {
+		writeCtx, writeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = clientWriter.Write(writeCtx, websocket.MessageText, upstreamFirstByteTimeoutFrame())
+		writeCancel()
 	}
 	relayCancel()
 	termination := normalizeCompletedWebSocketTermination(classifyWebSocketTermination(relayErr), session)
@@ -4343,25 +4380,23 @@ func (w *webSocketWriter) CopyFrom(ctx context.Context, msgType websocket.Messag
 // We use a time.AfterFunc watchdog instead of context.WithTimeout because
 // coder/websocket closes the connection when the read context is cancelled,
 // which would tear the relay down on every successful frame.
-func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout time.Duration, debug bool, onMessage func([]byte) error, transform func([]byte) ([]byte, error), afterForward func([]byte)) error {
+func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, logLabel, label string, idleTimeout, firstFrameTimeout time.Duration, debug bool, onMessage func([]byte) error, transform func([]byte) ([]byte, error), afterForward func([]byte)) error {
 	if !debug && onMessage == nil && transform == nil {
-		return relayMessagesStreaming(ctx, src, dst, label, idleTimeout)
+		return relayMessagesStreaming(ctx, src, dst, label, idleTimeout, firstFrameTimeout)
 	}
-	var idleTimer *time.Timer
-	if idleTimeout > 0 {
-		idleTimer = time.AfterFunc(idleTimeout, func() {
-			src.Close(websocket.StatusPolicyViolation, fmt.Sprintf("idle for %v", idleTimeout))
-		})
-		defer idleTimer.Stop()
-	}
+	guard := newRelayIdleGuard(src, idleTimeout, firstFrameTimeout)
+	defer guard.stop()
 	for {
-		if idleTimer != nil {
-			idleTimer.Reset(idleTimeout)
-		}
+		guard.arm()
 		msgType, data, err := src.Read(ctx)
 		if err != nil {
+			err = guard.wrap(err)
+			if errors.Is(err, errUpstreamFirstByteTimeout) {
+				return err
+			}
 			return fmt.Errorf("%s read: %w", label, err)
 		}
+		guard.markFrame()
 		if onMessage != nil {
 			if err := onMessage(data); err != nil {
 				return err
@@ -4388,22 +4423,20 @@ func relayMessages(ctx context.Context, src *websocket.Conn, dst *webSocketWrite
 	}
 }
 
-func relayMessagesStreaming(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, label string, idleTimeout time.Duration) error {
-	var idleTimer *time.Timer
-	if idleTimeout > 0 {
-		idleTimer = time.AfterFunc(idleTimeout, func() {
-			src.Close(websocket.StatusPolicyViolation, fmt.Sprintf("idle for %v", idleTimeout))
-		})
-		defer idleTimer.Stop()
-	}
+func relayMessagesStreaming(ctx context.Context, src *websocket.Conn, dst *webSocketWriter, label string, idleTimeout, firstFrameTimeout time.Duration) error {
+	guard := newRelayIdleGuard(src, idleTimeout, firstFrameTimeout)
+	defer guard.stop()
 	for {
-		if idleTimer != nil {
-			idleTimer.Reset(idleTimeout)
-		}
+		guard.arm()
 		msgType, reader, err := src.Reader(ctx)
 		if err != nil {
+			err = guard.wrap(err)
+			if errors.Is(err, errUpstreamFirstByteTimeout) {
+				return err
+			}
 			return fmt.Errorf("%s read: %w", label, err)
 		}
+		guard.markFrame()
 		if err := dst.CopyFrom(ctx, msgType, reader); err != nil {
 			return fmt.Errorf("%s write: %w", label, err)
 		}
@@ -4592,7 +4625,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] streamed -> %s %s (account=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID)
 	}
 
-	resp, err := h.transport.RoundTrip(outReq)
+	resp, err := h.roundTripWithFirstByteDeadline(outReq)
 	captureCodexResponseState(acc, resp, reqID)
 	if provider.Type() == AccountTypeCodex && upstreamTokenRevoked(resp) {
 		persistDeadAccount(acc, "upstream token revoked")
@@ -4602,6 +4635,10 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		acc.Penalty += 0.2
 		acc.mu.Unlock()
 		h.recent.add(err.Error())
+		if errors.Is(err, errUpstreamFirstByteTimeout) {
+			writeUpstreamFirstByteTimeout(w)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -4625,9 +4662,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		} else {
 			provider.SetAuthHeaders(retry, authAccount)
 		}
-		resp, err = h.transport.RoundTrip(retry)
+		resp, err = h.roundTripWithFirstByteDeadline(retry)
 		captureCodexResponseState(acc, resp, reqID)
 		if err != nil {
+			if errors.Is(err, errUpstreamFirstByteTimeout) {
+				writeUpstreamFirstByteTimeout(w)
+				return
+			}
 			http.Error(w, "upstream request failed after authentication recovery", http.StatusBadGateway)
 			return
 		}
@@ -5500,12 +5541,16 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		log.Printf("[%s] passthrough -> %s %s", reqID, outReq.Method, outReq.URL.String())
 	}
 
-	resp, err := h.transport.RoundTrip(outReq)
+	resp, err := h.roundTripWithFirstByteDeadline(outReq)
 	if err != nil {
 		if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
 			h.writeClaudeTrace(reqID, "passthrough", "", hashRequestOrigin(r, h.originHashSalt()), nil, r, bodyBytes, outReq, bodyBytes, nil, TranslateNone, nil, err.Error())
 		}
 		h.recent.add(err.Error())
+		if errors.Is(err, errUpstreamFirstByteTimeout) {
+			writeUpstreamFirstByteTimeout(w)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -5718,7 +5763,7 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 		log.Printf("[%s] passthrough streamed -> %s %s", reqID, outReq.Method, outReq.URL.String())
 	}
 
-	resp, err := h.transport.RoundTrip(outReq)
+	resp, err := h.roundTripWithFirstByteDeadline(outReq)
 	if err != nil {
 		if providerType == AccountTypeClaude && h.cfg.claudeTraceEnabled() {
 			var reqBody []byte
@@ -5728,6 +5773,10 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 			h.writeClaudeTrace(reqID, "passthrough_streamed", "", hashRequestOrigin(r, h.originHashSalt()), nil, r, reqBody, outReq, reqBody, nil, TranslateNone, nil, err.Error())
 		}
 		h.recent.add(err.Error())
+		if errors.Is(err, errUpstreamFirstByteTimeout) {
+			writeUpstreamFirstByteTimeout(w)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -6146,7 +6195,7 @@ func (h *proxyHandler) tryOnce(
 		acc.mu.Unlock()
 	}
 
-	resp, err := h.transport.RoundTrip(outReq)
+	resp, err := h.roundTripWithFirstByteDeadline(outReq)
 	captureCodexResponseState(acc, resp, reqID)
 	if resp != nil && len(claudeToolNameMapper) > 0 {
 		resp.Header.Del("Content-Length")
@@ -6193,7 +6242,7 @@ func (h *proxyHandler) tryOnce(
 					log.Printf("[%s] retry after refresh -> %s %s (account=%s account_id=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID, acc.AccountID)
 					acc.mu.Unlock()
 				}
-				resp, err = h.transport.RoundTrip(outReq)
+				resp, err = h.roundTripWithFirstByteDeadline(outReq)
 				captureCodexResponseState(acc, resp, reqID)
 				if resp != nil && len(claudeToolNameMapper) > 0 {
 					resp.Header.Del("Content-Length")

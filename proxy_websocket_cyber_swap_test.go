@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -623,7 +624,7 @@ func TestCyberSwapResultSwappedFlagIsActiveAccountChange(t *testing.T) {
 	}
 }
 
-func TestReplaceTurnUpstreamStripsPreviousResponseIDOnSameAccount(t *testing.T) {
+func TestReplaceTurnUpstreamRefusesDeltaWithoutHistory(t *testing.T) {
 	upstream := newFakeCodexUpstream(t)
 	replay := make(chan []byte, 1)
 	upstream.on("acct_same", func(ctx context.Context, conn *websocket.Conn) {
@@ -632,6 +633,28 @@ func TestReplaceTurnUpstreamStripsPreviousResponseIDOnSameAccount(t *testing.T) 
 			replay <- data
 		}
 	})
+	accepted := make(chan *websocket.Conn, 1)
+	clientSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		accepted <- c
+		<-r.Context().Done()
+	}))
+	defer clientSrv.Close()
+	clientConn, _, err := websocket.Dial(context.Background(), strings.Replace(clientSrv.URL, "http", "ws", 1), nil)
+	if err != nil {
+		t.Fatalf("dial client: %v", err)
+	}
+	defer clientConn.CloseNow()
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out accepting client websocket")
+	}
+	defer serverConn.CloseNow()
 
 	upURL, _ := url.Parse(upstream.server.URL)
 	account := &Account{
@@ -667,11 +690,12 @@ func TestReplaceTurnUpstreamStripsPreviousResponseIDOnSameAccount(t *testing.T) 
 		opts:          codexCyberSwapOptions{Provider: provider, InitialOutURL: upURL, InitialUpstreamHeaders: authReq.Header, ReadLimit: 1 << 20},
 		ctx:           ctx,
 		upstreamConn:  initialConn,
+		clientWriter:  &webSocketWriter{conn: serverConn},
 		activeAccount: account,
 		turns:         []*codexRelayTurn{turn},
 	}
-	if err := state.replaceTurnUpstream(account, turn, "overload"); err != nil {
-		t.Fatalf("replace upstream: %v", err)
+	if err := state.replaceTurnUpstream(account, turn, "overload"); !errors.Is(err, errPreviousResponseUnreplayable) {
+		t.Fatalf("replace upstream err = %v, want unreplayable", err)
 	}
 	defer func() {
 		state.upstreamConn.CloseNow()
@@ -679,18 +703,17 @@ func TestReplaceTurnUpstreamStripsPreviousResponseIDOnSameAccount(t *testing.T) 
 
 	select {
 	case data := <-replay:
-		var frame map[string]any
-		if err := json.Unmarshal(data, &frame); err != nil {
-			t.Fatalf("decode replay: %v", err)
-		}
-		if _, ok := frame["previous_response_id"]; ok {
-			t.Fatalf("same-account replay kept previous_response_id: %s", data)
-		}
-		if frame["input"] != "continue" {
-			t.Fatalf("same-account replay changed input: %s", data)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for replacement replay")
+		t.Fatalf("delta was forwarded to a new socket: %s", data)
+	default:
+	}
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	_, data, err := clientConn.Read(readCtx)
+	if err != nil {
+		t.Fatalf("read client error frame: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"code":"previous_response_not_found"`)) {
+		t.Fatalf("client frame = %s", data)
 	}
 }
 

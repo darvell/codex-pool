@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -43,7 +44,10 @@ func TestBuildRedialPayloadReplaysFullTranscript(t *testing.T) {
 	}
 	request := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp_old","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
 
-	out := buildRedialPayload(request, history)
+	out, err := buildRedialPayload(request, history)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
 
 	if bytes.Contains(out, []byte(`previous_response_id`)) {
 		t.Fatalf("previous_response_id not stripped: %s", out)
@@ -68,7 +72,10 @@ func TestBuildRedialPayloadPrefersClientFullTranscript(t *testing.T) {
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}
 	]}`)
 
-	out := buildRedialPayload(request, history)
+	out, err := buildRedialPayload(request, history)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
 
 	var obj map[string]any
 	if err := json.Unmarshal(out, &obj); err != nil {
@@ -86,26 +93,28 @@ func TestBuildRedialPayloadFallsBackWhenOutputUncovered(t *testing.T) {
 	// Current input carries a tool output whose call_id has no context item.
 	request := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp_old","input":[{"type":"function_call_output","call_id":"orphan","output":"done"}]}`)
 
-	out := buildRedialPayload(request, history)
-
-	if bytes.Contains(out, []byte(`previous_response_id`)) {
-		t.Fatalf("expected id strip fallback, got: %s", out)
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatalf("fallback invalid: %v", err)
-	}
-	// Fallback keeps the original delta input (not the transcript).
-	if got := len(obj["input"].([]any)); got != 1 {
-		t.Fatalf("fallback input items = %d, want 1: %s", got, out)
+	out, err := buildRedialPayload(request, history)
+	if !errors.Is(err, errPreviousResponseUnreplayable) {
+		t.Fatalf("err = %v, want unreplayable; body=%s", err, out)
 	}
 }
 
-func TestBuildRedialPayloadNoHistoryStripsID(t *testing.T) {
+func TestBuildRedialPayloadNoHistoryRefusesDelta(t *testing.T) {
 	request := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp_old","input":"continue"}`)
-	out := buildRedialPayload(request, nil)
-	if bytes.Contains(out, []byte(`previous_response_id`)) {
-		t.Fatalf("previous_response_id not stripped: %s", out)
+	out, err := buildRedialPayload(request, nil)
+	if !errors.Is(err, errPreviousResponseUnreplayable) {
+		t.Fatalf("err = %v, want unreplayable; body=%s", err, out)
+	}
+}
+
+func TestBuildRedialPayloadWithoutIDIsUnchanged(t *testing.T) {
+	request := []byte(`{"type":"response.create","model":"gpt-5.6-sol","input":"continue"}`)
+	out, err := buildRedialPayload(request, nil)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if string(out) != string(request) {
+		t.Fatalf("body changed: %s", out)
 	}
 }
 
@@ -133,8 +142,15 @@ func TestCapHistoryBoundsItems(t *testing.T) {
 	for i := 0; i < codexReplayHistoryMaxItems+10; i++ {
 		items = append(items, json.RawMessage(`{"i":0}`))
 	}
-	capped := capHistory(items)
+	capped, truncated := capHistory(items)
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
 	if len(capped) > codexReplayHistoryMaxItems {
 		t.Fatalf("capped items = %d, want <= %d", len(capped), codexReplayHistoryMaxItems)
+	}
+	fitting, truncated := capHistory([]json.RawMessage{json.RawMessage(`{"i":1}`)})
+	if truncated || len(fitting) != 1 {
+		t.Fatalf("fitting history = %d truncated=%v", len(fitting), truncated)
 	}
 }
