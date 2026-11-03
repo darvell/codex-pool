@@ -3209,7 +3209,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			}
 
 			w.WriteHeader(resp.StatusCode)
-			w.Write(bufWriter.Result())
+			result := bufWriter.Result()
+			if bufWriter.status == "failed" {
+				// Failures reach the client as HTTP 200 bodies; record the upstream
+				// reason so a reported failure can be traced after the fact.
+				log.Printf("[%s] responses failed account=%s model=%s overloaded=%v error=%s", reqID, acc.ID, requestedModel, bufWriter.overloaded, safeText(mustJSON(bufWriter.failure)))
+			}
+			w.Write(result)
 		} else if clientWantsNonStreaming && isSSE && translateDir == TranslateClaudeToResponses {
 			w.Header().Del("Content-Length")
 			w.Header().Set("Content-Type", "application/json")
