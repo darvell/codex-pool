@@ -623,6 +623,156 @@ func TestCyberSwapResultSwappedFlagIsActiveAccountChange(t *testing.T) {
 	}
 }
 
+func TestReplaceTurnUpstreamStripsPreviousResponseIDOnSameAccount(t *testing.T) {
+	upstream := newFakeCodexUpstream(t)
+	replay := make(chan []byte, 1)
+	upstream.on("acct_same", func(ctx context.Context, conn *websocket.Conn) {
+		_, data, err := conn.Read(ctx)
+		if err == nil {
+			replay <- data
+		}
+	})
+
+	upURL, _ := url.Parse(upstream.server.URL)
+	account := &Account{
+		Type:        AccountTypeCodex,
+		ID:          "same",
+		AccessToken: "same-token",
+		AccountID:   "acct_same",
+		PlanType:    "pro",
+	}
+	provider := NewCodexProvider(upURL, upURL, upURL)
+	h := &proxyHandler{
+		cfg:       &config{disableRefresh: true, websocketReadLimit: 1 << 20},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{account}, false),
+		metrics:   newMetrics(),
+	}
+	authReq := &http.Request{Header: make(http.Header)}
+	provider.SetAuthHeaders(authReq, account)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialConn, _, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upURL, authReq.Header, nil, 1<<20, false)
+	if err != nil {
+		t.Fatalf("dial initial upstream: %v", err)
+	}
+	defer initialConn.CloseNow()
+
+	turn := &codexRelayTurn{
+		request: []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_old","input":"continue"}`),
+		model:   "gpt-5.5",
+	}
+	state := &codexRelayState{
+		h:             h,
+		opts:          codexCyberSwapOptions{Provider: provider, InitialOutURL: upURL, InitialUpstreamHeaders: authReq.Header, ReadLimit: 1 << 20},
+		ctx:           ctx,
+		upstreamConn:  initialConn,
+		activeAccount: account,
+		turns:         []*codexRelayTurn{turn},
+	}
+	if err := state.replaceTurnUpstream(account, turn, "overload"); err != nil {
+		t.Fatalf("replace upstream: %v", err)
+	}
+	defer func() {
+		state.upstreamConn.CloseNow()
+	}()
+
+	select {
+	case data := <-replay:
+		var frame map[string]any
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("decode replay: %v", err)
+		}
+		if _, ok := frame["previous_response_id"]; ok {
+			t.Fatalf("same-account replay kept previous_response_id: %s", data)
+		}
+		if frame["input"] != "continue" {
+			t.Fatalf("same-account replay changed input: %s", data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for replacement replay")
+	}
+}
+
+func TestReplaceTurnUpstreamReplaysHistoryOnSameAccount(t *testing.T) {
+	upstream := newFakeCodexUpstream(t)
+	replay := make(chan []byte, 1)
+	upstream.on("acct_hist", func(ctx context.Context, conn *websocket.Conn) {
+		_, data, err := conn.Read(ctx)
+		if err == nil {
+			replay <- data
+		}
+	})
+
+	upURL, _ := url.Parse(upstream.server.URL)
+	account := &Account{
+		Type:        AccountTypeCodex,
+		ID:          "hist",
+		AccessToken: "hist-token",
+		AccountID:   "acct_hist",
+		PlanType:    "pro",
+	}
+	provider := NewCodexProvider(upURL, upURL, upURL)
+	h := &proxyHandler{
+		cfg:       &config{disableRefresh: true, websocketReadLimit: 1 << 20},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{account}, false),
+		metrics:   newMetrics(),
+	}
+	authReq := &http.Request{Header: make(http.Header)}
+	provider.SetAuthHeaders(authReq, account)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialConn, _, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upURL, authReq.Header, nil, 1<<20, false)
+	if err != nil {
+		t.Fatalf("dial initial upstream: %v", err)
+	}
+	defer initialConn.CloseNow()
+
+	turn := &codexRelayTurn{
+		request:        []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_old","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`),
+		model:          "gpt-5.5",
+		conversationID: "conv-hist",
+	}
+	state := &codexRelayState{
+		h:             h,
+		opts:          codexCyberSwapOptions{Provider: provider, InitialOutURL: upURL, InitialUpstreamHeaders: authReq.Header, ReadLimit: 1 << 20},
+		ctx:           ctx,
+		upstreamConn:  initialConn,
+		activeAccount: account,
+		turns:         []*codexRelayTurn{turn},
+		history: map[string][]json.RawMessage{
+			"conv-hist": {
+				json.RawMessage(`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}`),
+				json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"first-ok"}]}`),
+			},
+		},
+	}
+	if err := state.replaceTurnUpstream(account, turn, "overload"); err != nil {
+		t.Fatalf("replace upstream: %v", err)
+	}
+	defer func() {
+		state.upstreamConn.CloseNow()
+	}()
+
+	select {
+	case data := <-replay:
+		var frame map[string]any
+		if err := json.Unmarshal(data, &frame); err != nil {
+			t.Fatalf("decode replay: %v", err)
+		}
+		if _, ok := frame["previous_response_id"]; ok {
+			t.Fatalf("replay kept previous_response_id: %s", data)
+		}
+		input, ok := frame["input"].([]any)
+		if !ok || len(input) != 3 {
+			t.Fatalf("replay input = %d items, want full 3-item transcript: %s", len(input), data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for replacement replay")
+	}
+}
+
 func TestStripPreviousResponseIDLeavesUnrelatedFields(t *testing.T) {
 	in := []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_abc","input":[{"type":"message","role":"user"}]}`)
 	out := stripPreviousResponseID(in)

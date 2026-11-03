@@ -251,6 +251,15 @@ type codexRelayTurn struct {
 	account        *Account
 	responseID     string
 	outputStarted  bool
+
+	// inputItems is the turn's normalized input sequence; hasPrevID records
+	// whether the client anchored this turn to a prior response. The replay
+	// collector mines the assistant's tool calls and messages from the
+	// upstream frames so a redial can rebuild the full transcript.
+	inputItems  []json.RawMessage
+	hasPrevID   bool
+	collector   codexToolReplayCollector
+	completedOK bool
 }
 
 type codexRelayState struct {
@@ -288,6 +297,11 @@ type codexRelayState struct {
 	recordedResponses    map[string]struct{}
 	clientClosing        bool
 	upstreamClosing      bool
+
+	// history keys each conversation's full input transcript by conversation
+	// id. A redial rebuilds the conversation from it instead of the dead
+	// response id; a fresh turn (no previous_response_id) resets its key.
+	history map[string][]json.RawMessage
 }
 
 func (s *codexRelayState) run() (int, error) {
@@ -533,6 +547,9 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
 	turn := s.responseTurn(data)
+	if turn != nil {
+		turn.collector.AddEvent(codexEventType(data), data)
+	}
 	s.recordCompletedUsage(data, turn)
 	filtered, drop, changed := filterHostedMCPResponseJSON(data)
 	if drop {
@@ -557,11 +574,13 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 		if s.bootstrapEnabled && turn != nil && len(s.turns) == 1 && !s.bootstrapReady {
 			s.bufferBootstrap(data, turn)
 			if isTerminalCodexWebSocketEvent(data) {
+				s.markTurnCompleted(turn, data)
 				s.finishTurn(turn)
 			}
 			return []byte{}, nil
 		}
 		if isTerminalCodexWebSocketEvent(data) {
+			s.markTurnCompleted(turn, data)
 			s.finishTurn(turn)
 		}
 		return data, nil
@@ -653,7 +672,14 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 		conversationID = s.activeConversationID
 	}
 	model = extractCodexWebSocketRequestedModel(data)
-	turn := &codexRelayTurn{request: append([]byte(nil), data...), model: model, conversationID: conversationID, account: s.activeAccount}
+	turn := &codexRelayTurn{
+		request:        append([]byte(nil), data...),
+		model:          model,
+		conversationID: conversationID,
+		account:        s.activeAccount,
+		inputItems:     extractInputItems(data),
+		hasPrevID:      hasPreviousResponseID(data),
+	}
 	s.turns = append(s.turns, turn)
 	tier := serviceTierFromJSON(data)
 	if s.h != nil && s.h.pool != nil && ((s.h.pool.discoveredModelRequiresEntitlement(AccountTypeCodex, model) && !accountSupportsDiscoveredModel(s.activeAccount, model)) || !accountSupportsTier(s.activeAccount, model, tier)) {
@@ -768,6 +794,9 @@ func (s *codexRelayState) responseTurn(data []byte) *codexRelayTurn {
 func (s *codexRelayState) finishTurn(done *codexRelayTurn) {
 	for i, turn := range s.turns {
 		if turn == done {
+			if turn.completedOK {
+				s.recordHistory(turn)
+			}
 			if turn.responseID != "" {
 				if s.recordedResponses == nil {
 					s.recordedResponses = make(map[string]struct{})
@@ -780,6 +809,62 @@ func (s *codexRelayState) finishTurn(done *codexRelayTurn) {
 			return
 		}
 	}
+}
+
+// markTurnCompleted records whether a terminal upstream event closed the turn
+// successfully. Only completed turns fold into the conversation history; a
+// failed or incomplete turn contributes nothing the next delta can build on.
+func (s *codexRelayState) markTurnCompleted(turn *codexRelayTurn, data []byte) {
+	if turn == nil {
+		return
+	}
+	switch codexEventType(data) {
+	case "response.completed", "response.done":
+		turn.completedOK = true
+	}
+}
+
+// recordHistory folds a completed turn into the conversation transcript. The
+// turn's own input is appended to the accumulated history (or replaces it when
+// the client started a fresh chain), then the assistant's mined output items
+// follow. The caller holds turnMu.
+func (s *codexRelayState) recordHistory(done *codexRelayTurn) {
+	if done == nil {
+		return
+	}
+	key := replayHistoryKey(done.conversationID)
+	if done.hasPrevID {
+		fullInput := buildReplaySequence(s.history[key], done.inputItems, true)
+		s.setHistory(key, capHistory(combineInputItems(fullInput, done.collector.AllItems())))
+		return
+	}
+	// A fresh chain replaces whatever that conversation held before.
+	s.setHistory(key, capHistory(combineInputItems(done.inputItems, done.collector.AllItems())))
+}
+
+func replayHistoryKey(conversationID string) string {
+	if strings.TrimSpace(conversationID) == "" {
+		return ""
+	}
+	return conversationID
+}
+
+func (s *codexRelayState) setHistory(key string, items []json.RawMessage) {
+	if s.history == nil {
+		s.history = map[string][]json.RawMessage{}
+	}
+	if len(items) == 0 {
+		delete(s.history, key)
+		return
+	}
+	s.history[key] = items
+}
+
+func (s *codexRelayState) historyFor(conversationID string) []json.RawMessage {
+	if s.history == nil {
+		return nil
+	}
+	return s.history[replayHistoryKey(conversationID)]
 }
 
 // recordCompletedUsage sends terminal Codex websocket usage through the same
@@ -1100,7 +1185,6 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	if cand == nil {
 		return errors.New("cannot replace websocket upstream without an account")
 	}
-	sameAccount := s.activeAccount != nil && s.activeAccount.ID == cand.ID
 	s.clearBootstrap()
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
@@ -1114,10 +1198,7 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	}
 	captureCodexResponseState(cand, newResp, s.opts.ReqID)
 	newConn.SetReadLimit(s.opts.ReadLimit)
-	replay := turn.request
-	if !sameAccount {
-		replay = stripPreviousResponseID(replay)
-	}
+	replay := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
 	if s.contextEnabled() {
 		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
 		if err != nil {
@@ -1179,13 +1260,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	}
 	captureCodexResponseState(cand, newResp, s.opts.ReqID)
 	newConn.SetReadLimit(s.opts.ReadLimit)
-	// Strip previous_response_id from the replay: response_ids are
-	// scoped to the account that minted them, and the swap target has
-	// no knowledge of the original conversation. Keeping the field
-	// would cause an immediate "previous_response_not_found" error.
-	// Losing the prior turn's reasoning context is the lesser evil
-	// versus a hard failure surfacing to the user.
-	replay := stripPreviousResponseID(turn.request)
+	replay := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
 	if s.contextEnabled() {
 		replay, err = s.h.prepareContextFrame(s.opts.UserID, s.opts.ClientIP, replay, authAccount)
 		if err != nil {
@@ -1512,9 +1587,9 @@ func modelRequiresHTTPProviderRoute(model string) bool {
 }
 
 // stripPreviousResponseID removes previous_response_id from a
-// response.create payload so the swap replay is accepted by an account
-// that did not mint the original response_id. If parsing fails or the
-// field is absent, the original payload is returned unchanged.
+// response.create payload so a newly dialed upstream accepts the replay.
+// If parsing fails or the field is absent, the original payload is returned
+// unchanged.
 func stripPreviousResponseID(data []byte) []byte {
 	if !bytes.Contains(data, []byte(`"previous_response_id"`)) {
 		return data
