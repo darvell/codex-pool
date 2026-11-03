@@ -1380,13 +1380,19 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	if cand == nil {
 		return errors.New("cannot replace websocket upstream without an account")
 	}
-	replay, replayErr := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
-	if replayErr != nil {
-		err := s.rejectUnreplayableTurn(turn)
-		s.turnMu.Unlock()
-		s.writeUnreplayableFrame()
-		s.turnMu.Lock()
-		return err
+	replay := append([]byte(nil), turn.request...)
+	if s.contextEnabled() {
+		replay = setInputAndStripPrevID(turn.request, extractInputItems(turn.request))
+	} else {
+		var replayErr error
+		replay, replayErr = buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
+		if replayErr != nil {
+			err := s.rejectUnreplayableTurn(turn)
+			s.turnMu.Unlock()
+			s.writeUnreplayableFrame()
+			s.turnMu.Lock()
+			return err
+		}
 	}
 	s.clearBootstrap()
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
@@ -1462,13 +1468,19 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	s.clearBootstrap()
 	turn := s.turns[0]
 	s.activeConversationID = turn.conversationID
-	replay, replayErr := buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
-	if replayErr != nil {
-		err := s.rejectUnreplayableTurn(turn)
-		s.turnMu.Unlock()
-		s.writeUnreplayableFrame()
-		s.turnMu.Lock()
-		return err
+	replay := append([]byte(nil), turn.request...)
+	if s.contextEnabled() {
+		replay = setInputAndStripPrevID(turn.request, extractInputItems(turn.request))
+	} else {
+		var replayErr error
+		replay, replayErr = buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
+		if replayErr != nil {
+			err := s.rejectUnreplayableTurn(turn)
+			s.turnMu.Unlock()
+			s.writeUnreplayableFrame()
+			s.turnMu.Lock()
+			return err
+		}
 	}
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {
