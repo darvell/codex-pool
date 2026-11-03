@@ -40,6 +40,15 @@ const (
 	cyberAccessRoutingWeight      = 2
 	ordinaryRoutingWeight         = 1
 	competitiveRoutingScoreWindow = 0.15
+
+	// When a Pro Max account is available, new Codex conversations are spread
+	// across all Pro-access accounts with Pro Max weighted above the rest, so it
+	// takes the larger share without absorbing every request. Each weight is
+	// divided by the account's in-flight count, which shifts new work away from
+	// whichever account is busiest; upstream queues requests per account under
+	// load, so piling onto one account slows every request routed to it.
+	proMaxRoutingWeight = 3
+	routingLoadScale    = 12
 )
 
 type Account struct {
@@ -1156,8 +1165,46 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			return selected.acc
 		}
 
+		// chooseLoadWeighted rotates through candidates in proportion to their
+		// plan weight divided by current load. Rotation uses the shared counter,
+		// so over consecutive selections each account receives its exact share.
+		chooseLoadWeighted := func(candidates []*scoredAccount) *Account {
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].acc.ID < candidates[j].acc.ID
+			})
+			weights := make([]int, len(candidates))
+			total := 0
+			for i, candidate := range candidates {
+				base := ordinaryRoutingWeight
+				if candidate.proMax {
+					base = proMaxRoutingWeight
+				} else if candidate.acc.CyberAccess {
+					base = cyberAccessRoutingWeight
+				}
+				load := atomic.LoadInt64(&candidate.acc.Inflight)
+				if load < 0 {
+					load = 0
+				}
+				weight := base * routingLoadScale / (1 + int(load))
+				if weight < 1 {
+					weight = 1
+				}
+				weights[i] = weight
+				total += weight
+			}
+			slot := int(p.rr % uint64(total))
+			p.rr++
+			for i, weight := range weights {
+				if slot < weight {
+					return candidates[i].acc
+				}
+				slot -= weight
+			}
+			return candidates[len(candidates)-1].acc
+		}
+
 		if len(proMaxAny) > 0 {
-			return choose(proMaxAny)
+			return chooseLoadWeighted(tier1Any)
 		}
 
 		// Try Tier 1 accounts below threshold.

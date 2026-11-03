@@ -93,17 +93,44 @@ func TestProMaxWebSocketRouting(t *testing.T) {
 	}
 }
 
-func TestProMaxRoutesFirst(t *testing.T) {
+func TestProMaxGetsLargerLoadAwareShare(t *testing.T) {
+	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro"}
+	max := &Account{ID: "max", Type: AccountTypeCodex, PlanType: "promax",
+		Usage: UsageSnapshot{SecondaryUsedPercent: 0.7, SecondaryWindowMinutes: codexWeeklyWindowMinutes,
+			SecondaryResetAt: time.Now().Add(time.Hour)}}
+	p := newPoolState([]*Account{pro, max}, false)
+
+	count := func() (int, int) {
+		maxN, proN := 0, 0
+		for range 40 {
+			switch p.candidate("", nil, AccountTypeCodex, "pro", "") {
+			case max:
+				maxN++
+			case pro:
+				proN++
+			}
+		}
+		return maxN, proN
+	}
+
+	// Equally loaded: Pro Max takes the larger share, but not every request.
+	if maxN, proN := count(); maxN <= proN || proN == 0 {
+		t.Fatalf("idle split max=%d pro=%d, want Pro Max ahead with Pro still served", maxN, proN)
+	}
+
+	// A busy Pro Max sheds new work to the idle account.
+	max.Inflight = 5
+	if maxN, proN := count(); proN <= maxN {
+		t.Fatalf("busy split max=%d pro=%d, want new work moved to the idle account", maxN, proN)
+	}
+}
+
+func TestProMaxPreferredForCyberFailover(t *testing.T) {
 	pro := &Account{ID: "pro", Type: AccountTypeCodex, PlanType: "pro", CyberAccess: true}
 	max := &Account{ID: "max", Type: AccountTypeCodex, PlanType: "promax", CyberAccess: true,
 		Usage: UsageSnapshot{SecondaryUsedPercent: 0.7, SecondaryWindowMinutes: codexWeeklyWindowMinutes,
 			SecondaryResetAt: time.Now().Add(time.Hour)}}
 	p := newPoolState([]*Account{pro, max}, false)
-	for range 12 {
-		if got := p.candidate("", nil, AccountTypeCodex, "pro", ""); got != max {
-			t.Fatalf("new request selected %v, want eligible Pro Max", got)
-		}
-	}
 	if got := p.candidateWithCyberAccess(nil, AccountTypeCodex, "pro", ""); got != max {
 		t.Fatalf("cyber-access failover selected %v, want Pro Max", got)
 	}
