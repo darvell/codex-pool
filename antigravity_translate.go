@@ -294,7 +294,7 @@ func antigravityResponsesToGemini(input map[string]any, model string) (map[strin
 	if text, ok := input["input"].(string); ok {
 		contents = append(contents, map[string]any{"role": "user", "parts": []any{map[string]any{"text": text}}})
 	} else {
-		items := antigravityNormalizeResponsesItems(anySlice(input["input"]))
+		items := antigravityNormalizeResponsesItems(antigravityLowerResponsesItems(anySlice(input["input"])))
 		callNames := make(map[string]string)
 		for index := 0; index < len(items); index++ {
 			item, _ := items[index].(map[string]any)
@@ -815,6 +815,10 @@ func antigravityCopyToolsFilteredMapped(input, result map[string]any, includeBui
 		if schema, ok := definition["parameters"].(map[string]any); ok {
 			declaration["parameters"] = cleanAntigravitySchema(schema)
 		}
+		if toolType == antigravityCustomToolType {
+			declaration["description"] = antigravityCustomToolDescription(definition)
+			declaration["parameters"] = antigravityCustomToolParameters()
+		}
 		declarations = append(declarations, declaration)
 	}
 	tools := make([]any, 0)
@@ -866,6 +870,95 @@ func antigravityCopyToolsFilteredMapped(input, result map[string]any, includeBui
 	if len(toolConfig) > 0 {
 		result["toolConfig"] = toolConfig
 	}
+}
+
+const (
+	antigravityCustomToolType       = "custom"
+	antigravityCustomToolInputField = "input"
+)
+
+// Gemini accepts only JSON function declarations. A Responses custom tool
+// (Codex apply_patch, for example) takes raw text checked against a grammar,
+// so it travels as a function with one string argument, and its grammar goes
+// into the description for the model to follow.
+func antigravityCustomToolParameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{antigravityCustomToolInputField: map[string]any{"type": "string"}},
+		"required":   []any{antigravityCustomToolInputField},
+	}
+}
+
+func antigravityCustomToolDescription(tool map[string]any) string {
+	description := strings.TrimSpace(stringValue(tool["description"]))
+	instruction := "Pass the complete raw tool input as the `input` string."
+	format := mapValue(tool["format"])
+	if definition := strings.TrimSpace(stringValue(format["definition"])); definition != "" {
+		syntax := strings.TrimSpace(stringValue(format["syntax"]))
+		if syntax == "" {
+			syntax = "grammar"
+		}
+		instruction += fmt.Sprintf(" The input must match this %s definition:\n%s", syntax, definition)
+	}
+	if description == "" {
+		return instruction
+	}
+	return description + "\n\n" + instruction
+}
+
+// antigravityCustomToolNames returns the client names of the request's custom
+// tools so their calls go back to the client as custom_tool_call items.
+func antigravityCustomToolNames(request map[string]any) map[string]bool {
+	names := make(map[string]bool)
+	for _, raw := range anySlice(request["tools"]) {
+		tool := mapValue(raw)
+		name := stringValue(tool["name"])
+		if stringValue(tool["type"]) != antigravityCustomToolType || name == "" {
+			continue
+		}
+		names[name] = true
+	}
+	return names
+}
+
+func antigravityCustomToolInput(args any) string {
+	if text, ok := mapValue(args)[antigravityCustomToolInputField].(string); ok {
+		return text
+	}
+	if text, ok := args.(string); ok {
+		return text
+	}
+	if args == nil {
+		return ""
+	}
+	encoded, _ := json.Marshal(args)
+	return string(encoded)
+}
+
+// antigravityLowerResponsesItems rewrites input items Gemini has no form for:
+// custom tool calls and outputs become function calls and outputs, and Codex
+// agent messages become user messages.
+func antigravityLowerResponsesItems(items []any) []any {
+	lowered := make([]any, 0, len(items))
+	for _, raw := range items {
+		item := mapValue(raw)
+		switch stringValue(item["type"]) {
+		case "custom_tool_call":
+			lowered = append(lowered, map[string]any{
+				"type": "function_call", "id": item["id"], "call_id": item["call_id"], "name": item["name"],
+				"arguments": map[string]any{antigravityCustomToolInputField: stringValue(item["input"])},
+			})
+		case "custom_tool_call_output":
+			lowered = append(lowered, map[string]any{"type": "function_call_output", "call_id": item["call_id"], "output": item["output"]})
+		case "agent_message":
+			if message := agentMessageAsUserMessage(item); message != nil {
+				lowered = append(lowered, message)
+			}
+		default:
+			lowered = append(lowered, raw)
+		}
+	}
+	return lowered
 }
 
 func antigravityResponsesFunctionNameMap(input map[string]any) map[string]string {

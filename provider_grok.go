@@ -746,6 +746,9 @@ func sanitizeGrokRequestObject(obj map[string]any, model string) bool {
 	if sanitizeGrokTools(obj) {
 		changed = true
 	}
+	if lowerGrokAgentMessages(obj) {
+		changed = true
+	}
 	if sanitizeGrokNestedUnsupportedFields(obj) {
 		changed = true
 	}
@@ -767,6 +770,32 @@ func sanitizeGrokRequestObject(obj map[string]any, model string) bool {
 			delete(obj, "reasoning")
 			changed = true
 		}
+	}
+	return changed
+}
+
+// lowerGrokAgentMessages converts Codex agent_message input items, which the
+// Grok Responses API does not accept, into user messages.
+func lowerGrokAgentMessages(obj map[string]any) bool {
+	items, ok := obj["input"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	lowered := make([]any, 0, len(items))
+	for _, raw := range items {
+		item := mapValue(raw)
+		if stringValue(item["type"]) != "agent_message" {
+			lowered = append(lowered, raw)
+			continue
+		}
+		changed = true
+		if message := agentMessageAsUserMessage(item); message != nil {
+			lowered = append(lowered, message)
+		}
+	}
+	if changed {
+		obj["input"] = lowered
 	}
 	return changed
 }

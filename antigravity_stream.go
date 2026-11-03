@@ -40,6 +40,7 @@ type antigravityStreamWriter struct {
 	responsesMessageCount   int
 	responsesRequest        map[string]any
 	responsesFunctionNames  map[string]string
+	responsesCustomTools    map[string]bool
 }
 
 func newAntigravityStreamWriter(w io.Writer, format antigravityClientFormat, model string) *antigravityStreamWriter {
@@ -50,6 +51,7 @@ func newAntigravityStreamWriter(w io.Writer, format antigravityClientFormat, mod
 // completed event echoes. It is intentionally optional for non-Responses users.
 func (sw *antigravityStreamWriter) setResponsesRequest(request map[string]any) {
 	sw.responsesRequest = request
+	sw.responsesCustomTools = antigravityCustomToolNames(request)
 }
 
 func (sw *antigravityStreamWriter) setResponsesFunctionNames(functionNames map[string]string) {
@@ -276,14 +278,17 @@ func (sw *antigravityStreamWriter) emitResponsesTool(call map[string]any) error 
 	if callID == "" {
 		callID = "call_" + uuid.NewString()
 	}
+	name := stringValue(call["name"])
+	if original := sw.responsesFunctionNames[name]; original != "" {
+		name = original
+	}
+	if sw.responsesCustomTools[name] {
+		return sw.emitResponsesCustomTool(callID, name, antigravityCustomToolInput(call["args"]))
+	}
 	itemID := "fc_" + uuid.NewString()
 	args := []byte("{}")
 	if call["args"] != nil {
 		args, _ = json.Marshal(call["args"])
-	}
-	name := stringValue(call["name"])
-	if original := sw.responsesFunctionNames[name]; original != "" {
-		name = original
 	}
 	item := map[string]any{"id": itemID, "type": "function_call", "status": "in_progress", "call_id": callID, "name": name, "arguments": ""}
 	if err := sw.emitResponsesEvent("response.output_item.added", map[string]any{"type": "response.output_item.added", "sequence_number": sw.nextSequence(), "output_index": sw.contentIndex, "item": item}); err != nil {
@@ -301,6 +306,27 @@ func (sw *antigravityStreamWriter) emitResponsesTool(call map[string]any) error 
 		return err
 	}
 	sw.responsesOutput[sw.contentIndex] = item
+	sw.contentIndex++
+	return nil
+}
+
+func (sw *antigravityStreamWriter) emitResponsesCustomTool(callID, name, input string) error {
+	itemID := "ctc_" + uuid.NewString()
+	item := map[string]any{"id": itemID, "type": "custom_tool_call", "status": "in_progress", "call_id": callID, "name": name, "input": ""}
+	if err := sw.emitResponsesEvent("response.output_item.added", map[string]any{"type": "response.output_item.added", "sequence_number": sw.nextSequence(), "output_index": sw.contentIndex, "item": item}); err != nil {
+		return err
+	}
+	if err := sw.emitResponsesEvent("response.custom_tool_call_input.delta", map[string]any{"type": "response.custom_tool_call_input.delta", "sequence_number": sw.nextSequence(), "item_id": itemID, "output_index": sw.contentIndex, "delta": input}); err != nil {
+		return err
+	}
+	if err := sw.emitResponsesEvent("response.custom_tool_call_input.done", map[string]any{"type": "response.custom_tool_call_input.done", "sequence_number": sw.nextSequence(), "item_id": itemID, "output_index": sw.contentIndex, "input": input}); err != nil {
+		return err
+	}
+	done := map[string]any{"id": itemID, "type": "custom_tool_call", "status": "completed", "call_id": callID, "name": name, "input": input}
+	if err := sw.emitResponsesEvent("response.output_item.done", map[string]any{"type": "response.output_item.done", "sequence_number": sw.nextSequence(), "output_index": sw.contentIndex, "item": done}); err != nil {
+		return err
+	}
+	sw.responsesOutput[sw.contentIndex] = done
 	sw.contentIndex++
 	return nil
 }

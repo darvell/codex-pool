@@ -180,7 +180,7 @@ func antigravityGeminiToResponsesWithRequest(response map[string]any, model stri
 	if !r.CreateTime.IsZero() {
 		createdAt = r.CreateTime.Unix()
 	}
-	output := antigravityResponsesOutput(r, functionNames)
+	output := antigravityResponsesOutput(r, functionNames, antigravityCustomToolNames(request))
 	result := map[string]any{"id": id, "object": "response", "created_at": createdAt, "status": "completed", "background": false, "error": nil, "incomplete_details": nil, "model": model, "output": output, "usage": map[string]any{"input_tokens": r.PromptTokens, "output_tokens": r.OutputTokens, "total_tokens": r.TotalTokens, "input_tokens_details": map[string]any{"cached_tokens": r.CachedTokens}, "output_tokens_details": map[string]any{"reasoning_tokens": r.ReasoningTokens}}}
 	for _, field := range []string{"instructions", "max_output_tokens", "max_tool_calls", "parallel_tool_calls", "previous_response_id", "prompt_cache_key", "reasoning", "safety_identifier", "service_tier", "store", "temperature", "text", "tool_choice", "tools", "top_logprobs", "top_p", "truncation", "user", "metadata"} {
 		if value, exists := request[field]; exists {
@@ -190,7 +190,7 @@ func antigravityGeminiToResponsesWithRequest(response map[string]any, model stri
 	return result
 }
 
-func antigravityResponsesOutput(r antigravityResult, functionNames map[string]string) []any {
+func antigravityResponsesOutput(r antigravityResult, functionNames map[string]string, customTools map[string]bool) []any {
 	parts := r.Parts
 	if len(parts) == 0 {
 		if r.Reasoning != "" || r.ReasoningSignature != "" {
@@ -251,16 +251,20 @@ func antigravityResponsesOutput(r antigravityResult, functionNames map[string]st
 			if callID == "" {
 				callID = fmt.Sprintf("call_%d_%s", toolIndex, uuid.NewString())
 			}
-			args := []byte("{}")
-			if part.Tool["args"] != nil {
-				args, _ = json.Marshal(part.Tool["args"])
-			}
+			toolIndex++
 			name := stringValue(part.Tool["name"])
 			if original := functionNames[name]; original != "" {
 				name = original
 			}
+			if customTools[name] {
+				output = append(output, map[string]any{"id": "ctc_" + uuid.NewString(), "type": "custom_tool_call", "status": "completed", "call_id": callID, "name": name, "input": antigravityCustomToolInput(part.Tool["args"])})
+				continue
+			}
+			args := []byte("{}")
+			if part.Tool["args"] != nil {
+				args, _ = json.Marshal(part.Tool["args"])
+			}
 			output = append(output, map[string]any{"id": "fc_" + uuid.NewString(), "type": "function_call", "status": "completed", "call_id": callID, "name": name, "arguments": string(args)})
-			toolIndex++
 		}
 	}
 	flushReasoning()

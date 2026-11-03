@@ -720,6 +720,36 @@ func translateResponsesToChatCompletions(body []byte) ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// agentMessageAsUserMessage turns a Codex multi-agent agent_message input item
+// into a plain user message for upstreams without that item type. The text
+// sits in input_text envelope parts and encrypted_content payload parts, which
+// Codex leaves as plaintext for custom providers. Without this conversion a
+// sub-agent never receives its task. It returns nil when the item has no text.
+func agentMessageAsUserMessage(item map[string]any) map[string]any {
+	text := agentMessageText(item["content"])
+	if text == "" {
+		return nil
+	}
+	return map[string]any{"type": "message", "role": "user", "content": text}
+}
+
+func agentMessageText(content any) string {
+	if text, ok := content.(string); ok {
+		return text
+	}
+	var text strings.Builder
+	for _, raw := range anySlice(content) {
+		part := mapValue(raw)
+		switch stringValue(part["type"]) {
+		case "input_text", "text":
+			text.WriteString(stringValue(part["text"]))
+		case "encrypted_content":
+			text.WriteString(stringValue(part["encrypted_content"]))
+		}
+	}
+	return text.String()
+}
+
 // translateResponsesToClaudeRequest converts a Responses API request body
 // to Claude Messages API format. Used when Codex CLI sends to /responses
 // but the model is routed to a Claude account.
@@ -758,6 +788,13 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 				continue
 			}
 			itemType, _ := it["type"].(string)
+			if itemType == "agent_message" {
+				it = agentMessageAsUserMessage(it)
+				if it == nil {
+					continue
+				}
+				itemType = "message"
+			}
 			switch itemType {
 			case "message":
 				role, _ := it["role"].(string)
