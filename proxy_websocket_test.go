@@ -150,6 +150,17 @@ func TestCodexRelayOverloadRecoveryCooldownBounded(t *testing.T) {
 	}
 }
 
+func TestCodexRelayOverloadRecoveryDoesNotWaitWithoutAlternate(t *testing.T) {
+	only := &Account{Type: AccountTypeCodex, ID: "only", AccessToken: "only", PlanType: "pro", RateLimitUntil: time.Now().Add(30 * time.Second)}
+	state := &codexRelayState{h: &proxyHandler{pool: newPoolState([]*Account{only}, false)}, activeAccount: only}
+	if wait, ok := state.overloadRecoveryCooldown(&codexRelayTurn{model: "gpt-5.5"}); ok {
+		t.Fatalf("recovery waited %s with no alternate account; it must retry the current account instead", wait)
+	}
+	if state.overloadRecovery != 0 {
+		t.Fatalf("recovery budget spent without waiting: %d", state.overloadRecovery)
+	}
+}
+
 func TestCodexRelayOverloadRecoveryUsesNearestCooldown(t *testing.T) {
 	now := time.Now()
 	a := &Account{Type: AccountTypeCodex, ID: "a", AccessToken: "a", PlanType: "pro", RateLimitUntil: now.Add(30 * time.Second)}

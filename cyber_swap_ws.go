@@ -995,8 +995,10 @@ func isCodexMeaningfulOutput(data []byte) bool {
 }
 
 const (
-	websocketOverloadWindow    = 30 * time.Second
-	websocketOverloadSwapAfter = 5
+	websocketOverloadWindow = 30 * time.Second
+	// One same-account retry absorbs a transient blip; a second overload in
+	// the window means the account is being shed, so move the turn.
+	websocketOverloadSwapAfter = 2
 
 	// websocketOverloadRecoveryMax bounds how many times a turn re-enters
 	// the relay after every candidate account is cooling down from overload.
@@ -1206,9 +1208,14 @@ func (s *codexRelayState) overloadRecoveryCooldown(turn *codexRelayTurn) (time.D
 	if s.overloadRecovery >= websocketOverloadRecoveryMax {
 		return 0, false
 	}
-	s.overloadRecovery++
 	cooldown := s.h.pool.nearestCooldown(AccountTypeCodex, s.h.pool.tierExclusions(map[string]bool{s.activeAccount.ID: true}, AccountTypeCodex, turn.model, serviceTierFromJSON(turn.request)))
-	if cooldown <= 0 || cooldown > websocketOverloadRecoveryWait {
+	// Waiting only helps when another account is cooling down and will come
+	// back; with no alternate account, retry the current one immediately.
+	if cooldown <= 0 {
+		return 0, false
+	}
+	s.overloadRecovery++
+	if cooldown > websocketOverloadRecoveryWait {
 		cooldown = websocketOverloadRecoveryWait
 	}
 	return cooldown, true

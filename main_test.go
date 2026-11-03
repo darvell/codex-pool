@@ -628,6 +628,162 @@ func TestServerOverloadRetriesBeforeWritingResponse(t *testing.T) {
 	}
 }
 
+func newOverloadFailoverHandler(t *testing.T, upstream *httptest.Server, accounts []*Account) *httptest.Server {
+	t.Helper()
+	baseURL, _ := url.Parse(upstream.URL)
+	registry := NewProviderRegistry(
+		NewCodexProvider(baseURL, baseURL, baseURL),
+		NewClaudeProvider(baseURL),
+		NewGeminiProvider(baseURL, baseURL),
+	)
+	h := &proxyHandler{
+		cfg: &config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 1 << 20,
+			maxSpoolBodyBytes:    16 << 20,
+			maxAttempts:          1,
+			disableRefresh:       true,
+		},
+		transport: http.DefaultTransport,
+		pool:      newPoolState(accounts, false),
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+		aliases:   newModelAliases(nil),
+	}
+	proxy := httptest.NewServer(h)
+	t.Cleanup(proxy.Close)
+	return proxy
+}
+
+func postPoolResponses(t *testing.T, proxy *httptest.Server, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken("test-secret", "overload-user"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, out
+}
+
+func TestServerOverloadFailsOverToAnotherAccountWithoutBackoff(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var busyCalls, freeCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("ChatGPT-Account-ID") == "acct_busy" {
+			busyCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`))
+			return
+		}
+		freeCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	busy := &Account{Type: AccountTypeCodex, ID: "busy", AccessToken: "busy-token", PlanType: "promax", AccountID: "acct_busy"}
+	free := &Account{Type: AccountTypeCodex, ID: "free", AccessToken: "free-token", PlanType: "pro", AccountID: "acct_free"}
+	proxy := newOverloadFailoverHandler(t, upstream, []*Account{busy, free})
+
+	start := time.Now()
+	status, body := postPoolResponses(t, proxy, `{"model":"gpt-5.6-sol","stream":true,"input":"hello"}`)
+	elapsed := time.Since(start)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if busyCalls.Load() != 1 || freeCalls.Load() != 1 {
+		t.Fatalf("busy calls=%d free calls=%d, want one each", busyCalls.Load(), freeCalls.Load())
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Fatalf("failover took %s; it must not back off when another account is available", elapsed)
+	}
+	busy.mu.Lock()
+	cooling := busy.RateLimitUntil.After(time.Now())
+	busy.mu.Unlock()
+	if !cooling {
+		t.Fatal("overloaded account was not shed after failing over")
+	}
+}
+
+func TestNonStreamingInStreamOverloadIsRetried(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_shed\",\"status\":\"in_progress\"}}\n\n" +
+				"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_shed\",\"status\":\"failed\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}}}\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_ok\",\"status\":\"in_progress\"}}\n\n" +
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n" +
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	account := &Account{Type: AccountTypeCodex, ID: "solo", AccessToken: "solo-token", PlanType: "pro", AccountID: "acct_solo"}
+	proxy := newOverloadFailoverHandler(t, upstream, []*Account{account})
+
+	status, body := postPoolResponses(t, proxy, `{"model":"gpt-5.6-sol","stream":false,"input":"hello"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls=%d, want the shed attempt retried once", calls.Load())
+	}
+	var out struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode: %v body=%s", err, body)
+	}
+	if out.ID != "resp_ok" || out.Status != "completed" || len(out.Output) == 0 || len(out.Output[0].Content) == 0 || out.Output[0].Content[0].Text != "OK" {
+		t.Fatalf("client got %s, want the retried completed response", body)
+	}
+}
+
+func TestBufferedResponsesFailureCarriesError(t *testing.T) {
+	bw := &responsesBufferingWriter{model: "gpt-5.6-sol"}
+	_, _ = bw.Write([]byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_x\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n"))
+	if bw.overloaded {
+		t.Fatal("server_error must not be treated as an overload")
+	}
+	var out map[string]any
+	if err := json.Unmarshal(bw.Result(), &out); err != nil {
+		t.Fatal(err)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	if out["status"] != "failed" || errObj["message"] != "boom" {
+		t.Fatalf("failed result = %v, want status failed with the upstream error", out)
+	}
+
+	shed := &responsesBufferingWriter{}
+	_, _ = shed.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"service_unavailable_error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}}\n\n"))
+	if !shed.overloaded || shed.status != "failed" {
+		t.Fatalf("error event overloaded=%v status=%q, want overloaded failure", shed.overloaded, shed.status)
+	}
+}
+
 func TestOversizedResponsesModelRoutesAwayFromChatGPT(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 

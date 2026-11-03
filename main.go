@@ -1504,7 +1504,7 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 		// so extractClaudeReasoningEffort would silently drop them.
 		return p, p.UpstreamURL(path), nil
 	}
-	opencodeGoDiscovered := h.pool != nil && h.pool.discoveredModelKnown(AccountTypeOpencodeGo, model)
+	opencodeGoDiscovered := h.pool != nil && opencodeGoDiscoveryRoutes(model) && h.pool.discoveredModelKnown(AccountTypeOpencodeGo, model)
 	if isOpencodeGoModel(model) || opencodeGoDiscovered {
 		p := h.registry.ForType(AccountTypeOpencodeGo)
 		if p == nil {
@@ -1629,6 +1629,9 @@ func (h *proxyHandler) resolveStreamedModelRoute(path, model string) (Provider, 
 		discovered := false
 		if h.pool != nil {
 			discoveredModel, discovered = h.pool.discoveredCanonicalModel(candidate.accountType, model)
+		}
+		if candidate.accountType == AccountTypeOpencodeGo && discovered && !opencodeGoDiscoveryRoutes(model) {
+			discovered = false
 		}
 		if !candidate.matches(model) && !discovered {
 			continue
@@ -2786,6 +2789,36 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	const preferredImageCodexAccountID = "neon"
 	const maxServerOverloadRetries = 6
 	serverOverloadRetries := 0
+	// retryOverload decides how to recover from an upstream overload on acc
+	// before anything reached the client. When another account can serve the
+	// request, acc is shed with a cooldown and the request fails over at once;
+	// otherwise the same pool is retried after a short backoff, because a
+	// cooldown on the only usable account would only add waiting. It returns
+	// false when the overload budget is spent or the client went away.
+	retryOverload := func(acc *Account, header http.Header) bool {
+		if serverOverloadRetries >= maxServerOverloadRetries {
+			h.applyServerOverloadCooldown(acc)
+			return false
+		}
+		serverOverloadRetries++
+		if h.pool.candidateForTier(conversationID, exclude, accountType, requiredPlan, originIP, requestedModel, requestedTier) != nil {
+			h.applyServerOverloadCooldown(acc)
+			if h.cfg.debug.Load() {
+				log.Printf("[%s] upstream overloaded on account %s; failing over (%d/%d)", reqID, acc.ID, serverOverloadRetries, maxServerOverloadRetries)
+			}
+			return true
+		}
+		exclude = map[string]bool{}
+		delay := serverOverloadRetryDelay(header, serverOverloadRetries)
+		if h.cfg.debug.Load() {
+			log.Printf("[%s] upstream overloaded with no alternate account; retrying in %s (%d/%d)", reqID, delay, serverOverloadRetries, maxServerOverloadRetries)
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+		}
+		return ctx.Err() == nil
+	}
 	imageFanoutChild := r.Header.Get("X-Codex-Pool-Image-Fanout") != ""
 	imageFanoutIndex, _ := strconv.Atoi(r.Header.Get("X-Codex-Pool-Image-Fanout-Index"))
 
@@ -3025,27 +3058,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					lastErr = fmt.Errorf("upstream %s", resp.Status)
 				}
 				h.recent.add(lastErr.Error())
-				if serverOverloaded && serverOverloadRetries < maxServerOverloadRetries {
-					serverOverloadRetries++
-					if attempt >= attempts {
-						attempts++
-					}
-					exclude = map[string]bool{}
-					delay := serverOverloadRetryDelay(resp.Header, serverOverloadRetries)
-					if h.cfg.debug.Load() {
-						log.Printf("[%s] upstream overloaded; retrying request in %s (%d/%d)", reqID, delay, serverOverloadRetries, maxServerOverloadRetries)
-					}
-					select {
-					case <-time.After(delay):
-					case <-ctx.Done():
+				if serverOverloaded {
+					if retryOverload(acc, resp.Header) {
+						if attempt >= attempts {
+							attempts++
+						}
+						continue
 					}
 					if ctx.Err() != nil {
 						return
 					}
-					continue
-				}
-				if serverOverloaded {
-					h.applyServerOverloadCooldown(acc)
 				}
 				if h.cfg.debug.Load() && serverOverloaded {
 					log.Printf("[%s] upstream overload retry budget exhausted", reqID)
@@ -3169,6 +3191,21 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			if h.shouldRetryBufferedSSEForCyberPolicy(cyberPinned, attempt, attempts, acc, reqID, "responses") {
 				cyberAccessRetry = true
 				continue
+			}
+			// An overload delivered inside an HTTP 200 stream has not reached the
+			// client yet, so recover exactly like a pre-stream overload.
+			if bufWriter.overloaded {
+				lastErr = fmt.Errorf("upstream overloaded in stream on account %s", acc.ID)
+				h.recent.add(lastErr.Error())
+				if retryOverload(acc, resp.Header) {
+					if attempt >= attempts {
+						attempts++
+					}
+					continue
+				}
+				if ctx.Err() != nil {
+					return
+				}
 			}
 
 			w.WriteHeader(resp.StatusCode)

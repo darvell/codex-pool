@@ -38,6 +38,12 @@ type responsesBufferingWriter struct {
 	cachedTokens        int64
 	status              string
 	createdAt           int64
+
+	// failure is the upstream error object from response.failed or an error
+	// event; overloaded marks a capacity shed the caller can retry elsewhere
+	// because nothing has been written to the client yet.
+	failure    any
+	overloaded bool
 }
 
 func (bw *responsesBufferingWriter) Write(p []byte) (int, error) {
@@ -126,6 +132,18 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 	case "response.failed":
 		bw.applyResponse(obj)
 		bw.status = "failed"
+		if resp, _ := obj["response"].(map[string]any); resp != nil && resp["error"] != nil {
+			bw.failure = resp["error"]
+		}
+		bw.overloaded = bw.overloaded || isServerOverloadedError(data)
+	case "error":
+		bw.status = "failed"
+		if errObj := obj["error"]; errObj != nil {
+			bw.failure = errObj
+		} else {
+			bw.failure = obj
+		}
+		bw.overloaded = bw.overloaded || isServerOverloadedError(data)
 	}
 }
 
@@ -353,6 +371,9 @@ func (bw *responsesBufferingWriter) Result() []byte {
 	}
 	if bw.cachedTokens > 0 {
 		out["usage"].(map[string]any)["input_tokens_details"] = map[string]any{"cached_tokens": bw.cachedTokens}
+	}
+	if status == "failed" && bw.failure != nil {
+		out["error"] = bw.failure
 	}
 	b, _ := json.Marshal(out)
 	return b
