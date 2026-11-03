@@ -119,6 +119,57 @@ func TestCodexRelayTransportRetryOnlyBeforeOutput(t *testing.T) {
 	}
 }
 
+func TestCodexRelayOverloadRecoveryCooldownBounded(t *testing.T) {
+	now := time.Now()
+	a := &Account{Type: AccountTypeCodex, ID: "a", AccessToken: "a", PlanType: "pro", RateLimitUntil: now.Add(5 * time.Second)}
+	b := &Account{Type: AccountTypeCodex, ID: "b", AccessToken: "b", PlanType: "pro", RateLimitUntil: now.Add(30 * time.Second)}
+	pool := newPoolState([]*Account{a, b}, false)
+	state := &codexRelayState{
+		h:             &proxyHandler{pool: pool},
+		activeAccount: a,
+	}
+	turn := &codexRelayTurn{model: "gpt-5.5"}
+
+	first, ok := state.overloadRecoveryCooldown(turn)
+	if !ok {
+		t.Fatal("first recovery round should be allowed")
+	}
+	// nearestCooldown excludes active account a; b is 30s out, so the cap
+	// should clamp the wait to websocketOverloadRecoveryWait.
+	if first > websocketOverloadRecoveryWait {
+		t.Fatalf("recovery wait %s exceeds cap %s", first, websocketOverloadRecoveryWait)
+	}
+
+	for i := 0; i < websocketOverloadRecoveryMax-1; i++ {
+		if _, ok := state.overloadRecoveryCooldown(turn); !ok {
+			t.Fatalf("recovery round %d should be allowed", i+2)
+		}
+	}
+	if _, ok := state.overloadRecoveryCooldown(turn); ok {
+		t.Fatal("recovery rounds must be bounded")
+	}
+}
+
+func TestCodexRelayOverloadRecoveryUsesNearestCooldown(t *testing.T) {
+	now := time.Now()
+	a := &Account{Type: AccountTypeCodex, ID: "a", AccessToken: "a", PlanType: "pro", RateLimitUntil: now.Add(30 * time.Second)}
+	b := &Account{Type: AccountTypeCodex, ID: "b", AccessToken: "b", PlanType: "pro", RateLimitUntil: now.Add(2 * time.Second)}
+	pool := newPoolState([]*Account{a, b}, false)
+	state := &codexRelayState{
+		h:             &proxyHandler{pool: pool},
+		activeAccount: a,
+	}
+	turn := &codexRelayTurn{model: "gpt-5.5"}
+
+	wait, ok := state.overloadRecoveryCooldown(turn)
+	if !ok {
+		t.Fatal("recovery round should be allowed")
+	}
+	if wait < 1500*time.Millisecond || wait > websocketOverloadRecoveryWait {
+		t.Fatalf("recovery wait = %s, want nearest cooldown of about 2s", wait)
+	}
+}
+
 func TestIsWebSocketUpgradeRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodGet, "http://localhost/ws", nil)
 	if err != nil {

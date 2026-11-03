@@ -288,6 +288,7 @@ type codexRelayState struct {
 	// up" — once true, no further swap attempts.
 	swapDone         bool
 	overloadTimes    map[string][]time.Time
+	overloadRecovery int
 	bootstrap        [][]byte
 	bootstrapBytes   int
 	bootstrapReady   bool
@@ -996,6 +997,19 @@ func isCodexMeaningfulOutput(data []byte) bool {
 const (
 	websocketOverloadWindow    = 30 * time.Second
 	websocketOverloadSwapAfter = 5
+
+	// websocketOverloadRecoveryMax bounds how many times a turn re-enters
+	// the relay after every candidate account is cooling down from overload.
+	// Each round waits for a candidate to leave cooldown, then retries the
+	// previously failed accounts. Overload arrives in waves: a small pool that
+	// fails together should wait out the cooldown rather than end the session.
+	websocketOverloadRecoveryMax = 3
+
+	// websocketOverloadRecoveryWait caps how long one recovery round blocks.
+	// It mirrors the HTTP path's maxCooldownWait so a wave that outlasts the
+	// cap falls back to the existing same-socket replay instead of pinning the
+	// client behind a long spinner.
+	websocketOverloadRecoveryWait = 10 * time.Second
 )
 
 func websocketOverloadDelay(attempt int) time.Duration {
@@ -1148,6 +1162,23 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 			s.turnMu.Unlock()
 			return s.replaceTurnUpstream(cand, turn, "overload")
 		}
+		// No candidate is available: every eligible account is inside its
+		// overload cooldown. Overload arrives in waves, so wait out the
+		// nearest cooldown and retry candidate selection rather than ending
+		// the session. Bound the rounds so a permanently failing pool still
+		// fails instead of hanging forever.
+		if cooldown, ok := s.overloadRecoveryCooldown(turn); ok {
+			s.turnMu.Unlock()
+			log.Printf("[%s] overload recovery %d/%d: waiting %s for account cooldown", s.opts.ReqID, s.overloadRecovery, websocketOverloadRecoveryMax, cooldown)
+			select {
+			case <-time.After(cooldown):
+			case <-s.ctx.Done():
+				return s.ctx.Err()
+			}
+			if cand := s.overloadCandidate(turn); cand != nil {
+				return s.replaceTurnUpstream(cand, turn, "overload")
+			}
+		}
 	}
 	turn.responseID = ""
 	replay := append([]byte(nil), turn.request...)
@@ -1161,6 +1192,26 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 		return writeErr
 	}
 	return s.replaceTurnUpstream(active, turn, "overload")
+}
+
+// overloadRecoveryCooldown reports whether and how long to wait before
+// retrying candidate selection after every eligible account is cooling down
+// from overload. It returns false once the bounded recovery rounds are
+// exhausted, which falls through to the same-socket replay. The caller holds
+// turnMu.
+func (s *codexRelayState) overloadRecoveryCooldown(turn *codexRelayTurn) (time.Duration, bool) {
+	if s == nil || s.h == nil || s.h.pool == nil || turn == nil {
+		return 0, false
+	}
+	if s.overloadRecovery >= websocketOverloadRecoveryMax {
+		return 0, false
+	}
+	s.overloadRecovery++
+	cooldown := s.h.pool.nearestCooldown(AccountTypeCodex, s.h.pool.tierExclusions(map[string]bool{s.activeAccount.ID: true}, AccountTypeCodex, turn.model, serviceTierFromJSON(turn.request)))
+	if cooldown <= 0 || cooldown > websocketOverloadRecoveryWait {
+		cooldown = websocketOverloadRecoveryWait
+	}
+	return cooldown, true
 }
 
 func (s *codexRelayState) discardOverloadTail() {
