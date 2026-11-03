@@ -18,26 +18,26 @@ import (
 )
 
 const (
-	// Match codex-rs's current default identity. The originator and
-	// User-Agent client name must stay paired: OpenAI's capacity shedding
-	// classifies mismatched or legacy identities more aggressively and can
-	// return server_is_overloaded before producing output.
+	// Match the current codex-rs CLI identity. The originator and the
+	// User-Agent client name stay paired, and the version is the CLI engine
+	// version rather than the desktop app version: capacity shedding treats
+	// mismatched or legacy identities more aggressively and can return
+	// server_is_overloaded before producing output.
 	codexDefaultOriginator     = "codex_cli_rs"
-	codexDefaultAppVersion     = "26.1027.61615"
-	codexDefaultBuildNumber    = "24141"
-	codexDefaultChromium       = "144"
+	codexDefaultCLIVersion     = "0.166.0"
+	codexDefaultTerminal       = "xterm-256color"
 	codexDefaultResidency      = "us"
-	codexAppcastURL            = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml"
-	codexFingerprintPollPeriod = 72 * time.Hour
+	codexCLIReleaseURL         = "https://registry.npmjs.org/@openai/codex/latest"
+	codexFingerprintPollPeriod = 24 * time.Hour
 )
 
+var codexCLIVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
 type codexFingerprintState struct {
-	Originator      string `json:"originator"`
-	AppVersion      string `json:"app_version"`
-	BuildNumber     string `json:"build_number"`
-	ChromiumVersion string `json:"chromium_version"`
-	Platform        string `json:"platform"`
-	Arch            string `json:"arch"`
+	Version  string `json:"version"`
+	Platform string `json:"platform"`
+	Arch     string `json:"arch"`
+	Terminal string `json:"terminal"`
 }
 
 var codexFingerprint = struct {
@@ -47,32 +47,30 @@ var codexFingerprint = struct {
 
 func defaultCodexFingerprintState() codexFingerprintState {
 	return codexFingerprintState{
-		Originator:      getenv("CODEX_ORIGINATOR", codexDefaultOriginator),
-		AppVersion:      getenv("CODEX_APP_VERSION", codexDefaultAppVersion),
-		BuildNumber:     getenv("CODEX_BUILD_NUMBER", codexDefaultBuildNumber),
-		ChromiumVersion: getenv("CODEX_CHROMIUM_VERSION", codexDefaultChromium),
-		Platform:        getenv("CODEX_PLATFORM", codexPlatform()),
-		Arch:            getenv("CODEX_ARCH", codexArch()),
+		Version:  getenv("CODEX_CLI_VERSION", codexDefaultCLIVersion),
+		Platform: getenv("CODEX_PLATFORM", codexPlatform()),
+		Arch:     getenv("CODEX_ARCH", codexArch()),
+		Terminal: getenv("CODEX_TERMINAL", codexDefaultTerminal),
 	}
 }
 
+// codexPlatform returns the "<OS> <version>" pair the CLI derives from
+// os_info for its User-Agent.
 func codexPlatform() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "darwin"
+		return "Mac OS 26.2.0"
 	case "windows":
-		return "win32"
-	case "linux":
-		return "linux"
+		return "Windows 11.0.26100"
 	default:
-		return runtime.GOOS
+		return "Ubuntu 24.4.0"
 	}
 }
 
 func codexArch() string {
 	switch runtime.GOARCH {
 	case "amd64":
-		return "x64"
+		return "x86_64"
 	case "arm64":
 		return "arm64"
 	default:
@@ -86,30 +84,32 @@ func currentCodexFingerprint() codexFingerprintState {
 	return codexFingerprint.state
 }
 
-func codexDesktopUserAgent(fp codexFingerprintState) string {
+func codexCLIUserAgent(fp codexFingerprintState) string {
+	canonical := fmt.Sprintf("%s/%s (%s; %s) %s", codexDefaultOriginator, fp.Version, fp.Platform, fp.Arch, fp.Terminal)
 	ua := strings.TrimSpace(os.Getenv("CODEX_USER_AGENT"))
 	if ua == "" {
-		ua = fmt.Sprintf("%s/%s (%s; %s)", codexDefaultOriginator, fp.AppVersion, fp.Platform, fp.Arch)
+		return canonical
 	}
-	// Capacity shedding is more aggressive for the TUI identity. Keep the
-	// real fingerprint suffix, but canonicalize the client identity and remove
-	// the optional TUI trailer so originator and User-Agent agree.
-	if slash := strings.IndexByte(ua, '/'); slash > 0 && !strings.ContainsAny(ua, "\\r\\n") {
-		rest := ua[slash+1:]
-		versionEnd := len(rest)
-		if space := strings.IndexByte(rest, ' '); space >= 0 && space < versionEnd {
-			versionEnd = space
-		}
-		if open := strings.IndexByte(rest, '('); open >= 0 && open < versionEnd {
-			versionEnd = open
-		}
-		suffix := rest[versionEnd:]
-		if open := strings.LastIndex(suffix, "("); open > 0 && strings.Contains(strings.ToLower(suffix[open:]), "codex-tui") {
-			suffix = strings.TrimRight(suffix[:open], " ")
-		}
-		return codexDefaultOriginator + "/" + fp.AppVersion + suffix
+	// Keep a configured fingerprint suffix, but canonicalize the client
+	// identity and version, and drop the optional TUI trailer so originator
+	// and User-Agent agree.
+	slash := strings.IndexByte(ua, '/')
+	if slash <= 0 || strings.ContainsAny(ua, "\r\n") {
+		return canonical
 	}
-	return fmt.Sprintf("%s/%s (%s; %s)", codexDefaultOriginator, fp.AppVersion, fp.Platform, fp.Arch)
+	rest := ua[slash+1:]
+	versionEnd := len(rest)
+	if space := strings.IndexByte(rest, ' '); space >= 0 && space < versionEnd {
+		versionEnd = space
+	}
+	if open := strings.IndexByte(rest, '('); open >= 0 && open < versionEnd {
+		versionEnd = open
+	}
+	suffix := rest[versionEnd:]
+	if open := strings.LastIndex(suffix, "("); open > 0 && strings.Contains(strings.ToLower(suffix[open:]), "codex-tui") {
+		suffix = strings.TrimRight(suffix[:open], " ")
+	}
+	return codexDefaultOriginator + "/" + fp.Version + suffix
 }
 
 func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
@@ -124,14 +124,13 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 		req.Header.Set("x-client-request-id", uuid.NewString())
 	}
 	req.Header.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
-	req.Header.Set("User-Agent", codexDesktopUserAgent(fp))
-	req.Header.Set("sec-ch-ua", fmt.Sprintf(`"Chromium";v="%s", "Not:A-Brand";v="24"`, fp.ChromiumVersion))
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", fmt.Sprintf(`"%s"`, codexSecCHPlatform(fp.Platform)))
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("sec-fetch-site", "same-origin")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("sec-fetch-dest", "empty")
+	req.Header.Set("User-Agent", codexCLIUserAgent(fp))
+	// The CLI is not a browser. Drop any client hints a downstream client
+	// supplied so the request does not pair a CLI identity with browser
+	// headers.
+	for _, name := range []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "Accept-Language"} {
+		req.Header.Del(name)
+	}
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "application/json, text/event-stream")
 	}
@@ -139,19 +138,6 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	applyCodexCookies(req, acc)
-}
-
-func codexSecCHPlatform(platform string) string {
-	switch strings.ToLower(platform) {
-	case "darwin", "macos":
-		return "macOS"
-	case "win32", "windows":
-		return "Windows"
-	case "linux":
-		return "Linux"
-	default:
-		return platform
-	}
 }
 
 func applyCodexCookies(req *http.Request, acc *Account) {
@@ -238,8 +224,10 @@ func startCodexFingerprintUpdater() {
 	}()
 }
 
+// checkCodexFingerprintUpdate tracks the latest published CLI release so the
+// advertised version follows real clients without a redeploy.
 func checkCodexFingerprintUpdate() {
-	url := getenv("CODEX_APPCAST_URL", codexAppcastURL)
+	url := getenv("CODEX_CLI_RELEASE_URL", codexCLIReleaseURL)
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -251,47 +239,42 @@ func checkCodexFingerprintUpdate() {
 		log.Printf("codex fingerprint update check returned %s", resp.Status)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		log.Printf("codex fingerprint update read failed: %v", err)
 		return
 	}
-	version, build := parseCodexAppcastVersion(string(body))
-	if version == "" || build == "" {
+	version := parseCodexCLIRelease(body)
+	if version == "" {
 		return
 	}
 	codexFingerprint.mu.Lock()
-	changed := codexFingerprint.state.AppVersion != version || codexFingerprint.state.BuildNumber != build
+	changed := codexFingerprint.state.Version != version
 	if changed {
-		codexFingerprint.state.AppVersion = version
-		codexFingerprint.state.BuildNumber = build
+		codexFingerprint.state.Version = version
 	}
 	state := codexFingerprint.state
 	codexFingerprint.mu.Unlock()
 	if changed {
-		log.Printf("codex fingerprint updated from appcast: version=%s build=%s", state.AppVersion, state.BuildNumber)
+		log.Printf("codex fingerprint updated from CLI release: version=%s", state.Version)
 	}
 	persistCodexFingerprintState(state)
 }
 
-func parseCodexAppcastVersion(xml string) (string, string) {
-	item := regexp.MustCompile(`(?is)<item>(.*?)</item>`).FindStringSubmatch(xml)
-	if len(item) < 2 {
-		return "", ""
+// parseCodexCLIRelease returns the stable CLI version from an npm registry
+// "latest" document. Prerelease and malformed versions are ignored.
+func parseCodexCLIRelease(body []byte) string {
+	var release struct {
+		Version string `json:"version"`
 	}
-	version := firstRegexpGroup(item[1], `sparkle:shortVersionString="([^"]+)"`, `(?is)<sparkle:shortVersionString>([^<]+)</sparkle:shortVersionString>`)
-	build := firstRegexpGroup(item[1], `sparkle:version="([^"]+)"`, `(?is)<sparkle:version>([^<]+)</sparkle:version>`)
-	return strings.TrimSpace(version), strings.TrimSpace(build)
-}
-
-func firstRegexpGroup(s string, patterns ...string) string {
-	for _, pattern := range patterns {
-		m := regexp.MustCompile(pattern).FindStringSubmatch(s)
-		if len(m) > 1 {
-			return m[1]
-		}
+	if json.Unmarshal(body, &release) != nil {
+		return ""
 	}
-	return ""
+	version := strings.TrimSpace(release.Version)
+	if !codexCLIVersionPattern.MatchString(version) {
+		return ""
+	}
+	return version
 }
 
 func persistCodexFingerprintState(state codexFingerprintState) {

@@ -238,7 +238,7 @@ func providerModelsURL(provider Provider) (*url.URL, bool) {
 		target = *typed.whamBase
 		target.Path = singleJoin(target.Path, "/codex/models")
 		query := target.Query()
-		query.Set("client_version", currentCodexFingerprint().AppVersion)
+		query.Set("client_version", currentCodexFingerprint().Version)
 		target.RawQuery = query.Encode()
 	case *ClaudeProvider:
 		base := typed.UpstreamURL("/v1/models")

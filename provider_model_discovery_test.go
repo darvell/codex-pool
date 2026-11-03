@@ -76,9 +76,9 @@ func TestCodexModelsURLUsesDesktopClientVersion(t *testing.T) {
 		t.Fatal("expected Codex model discovery URL")
 	}
 	got := target.Query().Get("client_version")
-	want := currentCodexFingerprint().AppVersion
+	want := currentCodexFingerprint().Version
 	if got != want {
-		t.Fatalf("client_version = %q, want desktop app version %q", got, want)
+		t.Fatalf("client_version = %q, want CLI version %q", got, want)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestSyncCodexModelsSetsCyberFromDaybreak(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Query().Get("client_version") != currentCodexFingerprint().AppVersion {
+		if req.URL.Query().Get("client_version") != currentCodexFingerprint().Version {
 			t.Fatalf("client_version = %q", req.URL.Query().Get("client_version"))
 		}
 		return &http.Response{
