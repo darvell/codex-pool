@@ -258,13 +258,91 @@ func analyzeToolOutputCoverage(items []json.RawMessage) (hasOutput, coversAll bo
 	return true, true
 }
 
-// buildRedialPayload rebuilds a response.create for a freshly dialed socket.
-// A full transcript the pool has seen is forwarded without previous_response_id,
-// because that id dies with the socket that minted it, even on the same account.
-// A cached delta that cannot be rebuilt is refused. Stripping the id and
-// forwarding only the delta would look like success while dropping the
-// conversation. The caller writes previous_response_not_found so Pi resends
-// the original full body. A request that never carried the id is unchanged.
+// contextRedialPayload is the Codex Responses websocket redial rule.
+// That path expands native context for the account that receives the frame,
+// so pool replay history is not a substitute for previous_response_id:
+// recorded output items, including encrypted reasoning, belong to the
+// upstream that minted them.
+//
+// A frame with no previous_response_id is the client's own transcript and is
+// forwarded unchanged. A frame that still carries the id is a cached delta
+// unless it also carries a pool context envelope. Stripping the id and
+// forwarding only that delta makes Codex reject a tool result with
+// "No tool call found for function call output", or accept a lone user
+// message while dropping the rest of the conversation. Those frames are
+// refused. The caller writes previous_response_not_found so the client
+// resends the full transcript without the id.
+//
+// A native-context tool result is the exception. Its function_call_output
+// holds the encrypted envelope, which is meaningful on the new account only
+// after expansion, and the id is dropped so the dead response is not named.
+// A sibling tool result that does not carry the envelope, and whose call is
+// not in the same input, is still a cached delta and the whole frame is refused.
+func contextRedialPayload(request []byte) ([]byte, error) {
+	if !hasPreviousResponseID(request) {
+		return append([]byte(nil), request...), nil
+	}
+	items := extractInputItems(request)
+	if !bytes.Contains(request, []byte(contextEnvelopePrefix)) || uncoveredNonContextOutput(items) {
+		return nil, errPreviousResponseUnreplayable
+	}
+	out := setInputAndStripPrevID(request, items)
+	if hasPreviousResponseID(out) {
+		return nil, errPreviousResponseUnreplayable
+	}
+	return out, nil
+}
+
+// uncoveredNonContextOutput reports a tool result that is neither a native
+// context envelope nor paired with a tool call in the same input. Replaying
+// that item without previous_response_id is what Codex rejects as
+// "No tool call found for function call output".
+func uncoveredNonContextOutput(items []json.RawMessage) bool {
+	contextIDs := map[string]struct{}{}
+	for _, raw := range items {
+		var item map[string]json.RawMessage
+		if json.Unmarshal(raw, &item) != nil {
+			continue
+		}
+		typ := rawStringValue(item["type"])
+		switch {
+		case isCodexToolCallContextItemType(typ):
+			if callID := rawStringValue(item["call_id"]); callID != "" {
+				contextIDs[callID] = struct{}{}
+			}
+		case typ == "item_reference":
+			if id := rawStringValue(item["id"]); id != "" {
+				contextIDs[id] = struct{}{}
+			}
+		}
+	}
+	for _, raw := range items {
+		if bytes.Contains(raw, []byte(contextEnvelopePrefix)) {
+			continue
+		}
+		var item map[string]json.RawMessage
+		if json.Unmarshal(raw, &item) != nil {
+			continue
+		}
+		if !isCodexToolCallOutputItemType(rawStringValue(item["type"])) {
+			continue
+		}
+		if _, ok := contextIDs[rawStringValue(item["call_id"])]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// buildRedialPayload rebuilds a response.create for a freshly dialed socket
+// on relays that do not expand native context. Codex Responses websockets use
+// contextRedialPayload instead. A full transcript the pool has seen is
+// forwarded without previous_response_id, because that id dies with the
+// socket that minted it, even on the same account. A cached delta that cannot
+// be rebuilt is refused. Stripping the id and forwarding only the delta would
+// look like success while dropping the conversation. The caller writes
+// previous_response_not_found so Pi resends the original full body. A request
+// that never carried the id is unchanged.
 func buildRedialPayload(request []byte, history []json.RawMessage) ([]byte, error) {
 	if !hasPreviousResponseID(request) {
 		return request, nil
