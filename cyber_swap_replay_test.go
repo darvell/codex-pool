@@ -118,6 +118,72 @@ func TestBuildRedialPayloadWithoutIDIsUnchanged(t *testing.T) {
 	}
 }
 
+func TestContextRedialPayloadRefusesCachedToolDelta(t *testing.T) {
+	request := []byte(`{"type":"response.create","model":"gpt-6-astra","previous_response_id":"resp_old","input":[{"type":"function_call_output","call_id":"call_0cc8d62120c14c51b703ac5471f6aaf9","output":"ok"}]}`)
+	out, err := contextRedialPayload(request)
+	if !errors.Is(err, errPreviousResponseUnreplayable) || out != nil {
+		t.Fatalf("err = %v body = %s, want unreplayable and no body", err, out)
+	}
+}
+
+func TestContextRedialPayloadRefusesMessageDelta(t *testing.T) {
+	request := []byte(`{"type":"response.create","previous_response_id":"resp_old","input":[{"type":"message","role":"user","content":"next"}]}`)
+	out, err := contextRedialPayload(request)
+	if !errors.Is(err, errPreviousResponseUnreplayable) || out != nil {
+		t.Fatalf("err = %v body = %s, want unreplayable and no body", err, out)
+	}
+}
+
+func TestContextRedialPayloadForwardsBodyWithoutID(t *testing.T) {
+	request := []byte(`{"type":"response.create","model":"gpt-6-astra","input":[{"type":"message","role":"user","content":"full"}]}`)
+	out, err := contextRedialPayload(request)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if string(out) != string(request) {
+		t.Fatalf("body changed: %s", out)
+	}
+	if len(out) > 0 && &out[0] == &request[0] {
+		t.Fatal("redial payload aliases the caller buffer")
+	}
+}
+
+func TestContextRedialPayloadStripsIDForContextEnvelope(t *testing.T) {
+	request := []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"response-from-a","input":[{"type":"function_call_output","call_id":"context-call","output":[{"type":"encrypted_content","encrypted_content":"` + contextEnvelopePrefix + `abc"}]}]}`)
+	out, err := contextRedialPayload(request)
+	if err != nil {
+		t.Fatalf("envelope redial: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"previous_response_id"`)) {
+		t.Fatalf("id kept: %s", out)
+	}
+	if !bytes.Contains(out, []byte(contextEnvelopePrefix)) || !bytes.Contains(out, []byte(`"call_id":"context-call"`)) {
+		t.Fatalf("envelope input lost: %s", out)
+	}
+}
+
+func TestContextRedialPayloadRefusesEnvelopeSiblingToolDelta(t *testing.T) {
+	request := []byte(`{"type":"response.create","previous_response_id":"resp_old","input":[
+		{"type":"function_call_output","call_id":"context-call","output":[{"type":"encrypted_content","encrypted_content":"` + contextEnvelopePrefix + `abc"}]},
+		{"type":"function_call_output","call_id":"call_pi","output":"ok"}
+	]}`)
+	out, err := contextRedialPayload(request)
+	if !errors.Is(err, errPreviousResponseUnreplayable) || out != nil {
+		t.Fatalf("err = %v body = %s, want unreplayable and no body", err, out)
+	}
+}
+
+func TestContextRedialPayloadStripsNestedContextEnvelope(t *testing.T) {
+	request := []byte(`{"type":"response.create","response":{"model":"gpt-5.5","previous_response_id":"response-from-a","input":[{"type":"function_call_output","call_id":"context-call","output":[{"type":"encrypted_content","encrypted_content":"` + contextEnvelopePrefix + `abc"}]}]}}`)
+	out, err := contextRedialPayload(request)
+	if err != nil {
+		t.Fatalf("nested envelope redial: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"previous_response_id"`)) || !bytes.Contains(out, []byte(contextEnvelopePrefix)) {
+		t.Fatalf("nested envelope = %s", out)
+	}
+}
+
 func TestAnalyzeToolOutputCoverage(t *testing.T) {
 	items := []json.RawMessage{
 		json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"x","arguments":"{}"}`),

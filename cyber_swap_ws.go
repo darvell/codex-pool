@@ -1371,6 +1371,19 @@ func (s *codexRelayState) discardOverloadTail() {
 	}
 }
 
+// replayForNewSocket chooses the body for a socket that did not mint
+// previous_response_id. Codex Responses uses contextRedialPayload. Other
+// relays may rebuild a covering transcript from history.
+func (s *codexRelayState) replayForNewSocket(turn *codexRelayTurn) ([]byte, error) {
+	if turn == nil {
+		return nil, errPreviousResponseUnreplayable
+	}
+	if s.contextEnabled() {
+		return contextRedialPayload(turn.request)
+	}
+	return buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
+}
+
 func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTurn, reason string) error {
 	s.turnMu.Lock()
 	defer s.turnMu.Unlock()
@@ -1380,19 +1393,13 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	if cand == nil {
 		return errors.New("cannot replace websocket upstream without an account")
 	}
-	replay := append([]byte(nil), turn.request...)
-	if s.contextEnabled() {
-		replay = setInputAndStripPrevID(turn.request, extractInputItems(turn.request))
-	} else {
-		var replayErr error
-		replay, replayErr = buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
-		if replayErr != nil {
-			err := s.rejectUnreplayableTurn(turn)
-			s.turnMu.Unlock()
-			s.writeUnreplayableFrame()
-			s.turnMu.Lock()
-			return err
-		}
+	replay, replayErr := s.replayForNewSocket(turn)
+	if replayErr != nil {
+		err := s.rejectUnreplayableTurn(turn)
+		s.turnMu.Unlock()
+		s.writeUnreplayableFrame()
+		s.turnMu.Lock()
+		return err
 	}
 	s.clearBootstrap()
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
@@ -1442,7 +1449,7 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 // previous_response_not_found frame after releasing the lock.
 func (s *codexRelayState) rejectUnreplayableTurn(turn *codexRelayTurn) error {
 	s.finishTurn(turn)
-	log.Printf("[%s] refusing redial of previous_response_id without a rebuildable transcript", s.opts.ReqID)
+	log.Printf("[%s] refusing redial of previous_response_id on a new upstream socket", s.opts.ReqID)
 	return errPreviousResponseUnreplayable
 }
 
@@ -1468,19 +1475,13 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	s.clearBootstrap()
 	turn := s.turns[0]
 	s.activeConversationID = turn.conversationID
-	replay := append([]byte(nil), turn.request...)
-	if s.contextEnabled() {
-		replay = setInputAndStripPrevID(turn.request, extractInputItems(turn.request))
-	} else {
-		var replayErr error
-		replay, replayErr = buildRedialPayload(turn.request, s.historyFor(turn.conversationID))
-		if replayErr != nil {
-			err := s.rejectUnreplayableTurn(turn)
-			s.turnMu.Unlock()
-			s.writeUnreplayableFrame()
-			s.turnMu.Lock()
-			return err
-		}
+	replay, replayErr := s.replayForNewSocket(turn)
+	if replayErr != nil {
+		err := s.rejectUnreplayableTurn(turn)
+		s.turnMu.Unlock()
+		s.writeUnreplayableFrame()
+		s.turnMu.Lock()
+		return err
 	}
 	newConn, newResp, authAccount, err := s.h.dialSwappedUpstream(s.ctx, s.opts, cand, s.subprotocols)
 	if err != nil {

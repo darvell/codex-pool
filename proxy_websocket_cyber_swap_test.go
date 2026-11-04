@@ -796,6 +796,247 @@ func TestReplaceTurnUpstreamReplaysHistoryOnSameAccount(t *testing.T) {
 	}
 }
 
+func TestReplaceTurnUpstreamRefusesContextToolDeltaEvenWithHistory(t *testing.T) {
+	upstream := newFakeCodexUpstream(t)
+	replay := make(chan []byte, 1)
+	upstream.on("acct_ctx", func(ctx context.Context, conn *websocket.Conn) {
+		_, data, err := conn.Read(ctx)
+		if err == nil {
+			replay <- data
+		}
+	})
+	accepted := make(chan *websocket.Conn, 1)
+	clientSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		accepted <- c
+		<-r.Context().Done()
+	}))
+	defer clientSrv.Close()
+	clientConn, _, err := websocket.Dial(context.Background(), strings.Replace(clientSrv.URL, "http", "ws", 1), nil)
+	if err != nil {
+		t.Fatalf("dial client: %v", err)
+	}
+	defer clientConn.CloseNow()
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out accepting client websocket")
+	}
+	defer serverConn.CloseNow()
+
+	upURL, _ := url.Parse(upstream.server.URL)
+	account := &Account{
+		Type:        AccountTypeCodex,
+		ID:          "ctx",
+		AccessToken: "ctx-token",
+		AccountID:   "acct_ctx",
+		PlanType:    "pro",
+	}
+	provider := NewCodexProvider(upURL, upURL, upURL)
+	h := &proxyHandler{
+		cfg:       &config{disableRefresh: true, websocketReadLimit: 1 << 20},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{account}, false),
+		metrics:   newMetrics(),
+	}
+	authReq := &http.Request{Header: make(http.Header)}
+	provider.SetAuthHeaders(authReq, account)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialConn, _, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upURL, authReq.Header, nil, 1<<20, false)
+	if err != nil {
+		t.Fatalf("dial initial upstream: %v", err)
+	}
+	defer initialConn.CloseNow()
+
+	turn := &codexRelayTurn{
+		request:        []byte(`{"type":"response.create","model":"gpt-6-astra","previous_response_id":"resp_old","input":[{"type":"function_call_output","call_id":"call_0cc8","output":"ok"}]}`),
+		model:          "gpt-6-astra",
+		conversationID: "conv-ctx",
+	}
+	state := &codexRelayState{
+		h:             h,
+		opts:          codexCyberSwapOptions{Provider: provider, InitialOutURL: upURL, InitialUpstreamHeaders: authReq.Header, ReadLimit: 1 << 20, RequestPath: "/backend-api/codex/responses"},
+		ctx:           ctx,
+		upstreamConn:  initialConn,
+		clientWriter:  &webSocketWriter{conn: serverConn},
+		activeAccount: account,
+		turns:         []*codexRelayTurn{turn},
+		history: map[string][]json.RawMessage{
+			"conv-ctx": {
+				json.RawMessage(`{"type":"function_call","call_id":"call_0cc8","name":"read","arguments":"{}"}`),
+			},
+		},
+	}
+	if err := state.replaceTurnUpstream(account, turn, "overload"); !errors.Is(err, errPreviousResponseUnreplayable) {
+		t.Fatalf("replace upstream err = %v, want unreplayable", err)
+	}
+	defer state.upstreamConn.CloseNow()
+	if upstream.hitCount("acct_ctx") != 1 {
+		t.Fatalf("replacement dials = %d, want only the initial socket", upstream.hitCount("acct_ctx")-1)
+	}
+	select {
+	case data := <-replay:
+		t.Fatalf("tool delta was forwarded to a new socket: %s", data)
+	default:
+	}
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	_, data, err := clientConn.Read(readCtx)
+	if err != nil {
+		t.Fatalf("read client error frame: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"code":"previous_response_not_found"`)) {
+		t.Fatalf("client frame = %s", data)
+	}
+}
+
+func TestReplaceTurnUpstreamForwardsContextBodyWithoutPreviousID(t *testing.T) {
+	upstream := newFakeCodexUpstream(t)
+	replay := make(chan []byte, 1)
+	upstream.on("acct_full", func(ctx context.Context, conn *websocket.Conn) {
+		_, data, err := conn.Read(ctx)
+		if err == nil {
+			replay <- data
+		}
+	})
+	upURL, _ := url.Parse(upstream.server.URL)
+	account := &Account{
+		Type:        AccountTypeCodex,
+		ID:          "full",
+		AccessToken: "full-token",
+		AccountID:   "acct_full",
+		PlanType:    "pro",
+	}
+	provider := NewCodexProvider(upURL, upURL, upURL)
+	h := &proxyHandler{
+		cfg:       &config{disableRefresh: true, websocketReadLimit: 1 << 20},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{account}, false),
+		metrics:   newMetrics(),
+	}
+	authReq := &http.Request{Header: make(http.Header)}
+	provider.SetAuthHeaders(authReq, account)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialConn, _, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upURL, authReq.Header, nil, 1<<20, false)
+	if err != nil {
+		t.Fatalf("dial initial upstream: %v", err)
+	}
+	defer initialConn.CloseNow()
+
+	body := []byte(`{"type":"response.create","model":"gpt-6-astra","input":[{"type":"message","role":"user","content":"full transcript"}]}`)
+	turn := &codexRelayTurn{request: body, model: "gpt-6-astra"}
+	state := &codexRelayState{
+		h:             h,
+		opts:          codexCyberSwapOptions{Provider: provider, InitialOutURL: upURL, InitialUpstreamHeaders: authReq.Header, ReadLimit: 1 << 20, RequestPath: "/backend-api/codex/responses"},
+		ctx:           ctx,
+		upstreamConn:  initialConn,
+		activeAccount: account,
+		turns:         []*codexRelayTurn{turn},
+	}
+	if err := state.replaceTurnUpstream(account, turn, "overload"); err != nil {
+		t.Fatalf("replace upstream: %v", err)
+	}
+	defer state.upstreamConn.CloseNow()
+	select {
+	case data := <-replay:
+		if string(data) != string(body) {
+			t.Fatalf("forwarded %s, want original transcript", data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for full-transcript redial")
+	}
+}
+
+func TestDoSwapRefusesContextToolDelta(t *testing.T) {
+	upstream := newFakeCodexUpstream(t)
+	upstream.on("acct_from", func(ctx context.Context, conn *websocket.Conn) {
+		<-ctx.Done()
+	})
+	upstream.on("acct_to", func(ctx context.Context, conn *websocket.Conn) {
+		_, data, err := conn.Read(ctx)
+		if err == nil {
+			t.Errorf("cyber swap forwarded a tool delta: %s", data)
+		}
+	})
+	accepted := make(chan *websocket.Conn, 1)
+	clientSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		accepted <- c
+		<-r.Context().Done()
+	}))
+	defer clientSrv.Close()
+	clientConn, _, err := websocket.Dial(context.Background(), strings.Replace(clientSrv.URL, "http", "ws", 1), nil)
+	if err != nil {
+		t.Fatalf("dial client: %v", err)
+	}
+	defer clientConn.CloseNow()
+	var serverConn *websocket.Conn
+	select {
+	case serverConn = <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out accepting client websocket")
+	}
+	defer serverConn.CloseNow()
+
+	upURL, _ := url.Parse(upstream.server.URL)
+	from := &Account{Type: AccountTypeCodex, ID: "from", AccessToken: "from-token", AccountID: "acct_from", PlanType: "pro"}
+	to := &Account{Type: AccountTypeCodex, ID: "to", AccessToken: "to-token", AccountID: "acct_to", PlanType: "pro", CyberAccess: true}
+	provider := NewCodexProvider(upURL, upURL, upURL)
+	h := &proxyHandler{
+		cfg:       &config{disableRefresh: true, websocketReadLimit: 1 << 20},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{from, to}, false),
+		metrics:   newMetrics(),
+	}
+	authReq := &http.Request{Header: make(http.Header)}
+	provider.SetAuthHeaders(authReq, from)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialConn, _, _, err := dialUpstreamWebSocketWithSubprotocols(ctx, upURL, authReq.Header, nil, 1<<20, false)
+	if err != nil {
+		t.Fatalf("dial initial upstream: %v", err)
+	}
+	defer initialConn.CloseNow()
+
+	turn := &codexRelayTurn{
+		request: []byte(`{"type":"response.create","model":"gpt-6-astra","previous_response_id":"resp_old","input":[{"type":"function_call_output","call_id":"call_pi","output":"ok"}]}`),
+		model:   "gpt-6-astra",
+	}
+	state := &codexRelayState{
+		h:             h,
+		opts:          codexCyberSwapOptions{Provider: provider, InitialOutURL: upURL, InitialUpstreamHeaders: authReq.Header, ReadLimit: 1 << 20, RequestPath: "/backend-api/codex/responses"},
+		ctx:           ctx,
+		upstreamConn:  initialConn,
+		clientWriter:  &webSocketWriter{conn: serverConn},
+		activeAccount: from,
+		turns:         []*codexRelayTurn{turn},
+	}
+	if err := state.doSwap(to); !errors.Is(err, errPreviousResponseUnreplayable) {
+		t.Fatalf("swap err = %v, want unreplayable", err)
+	}
+	if upstream.hitCount("acct_to") != 0 {
+		t.Fatalf("cyber account dials = %d, want 0", upstream.hitCount("acct_to"))
+	}
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	_, data, err := clientConn.Read(readCtx)
+	if err != nil {
+		t.Fatalf("read client error frame: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"code":"previous_response_not_found"`)) {
+		t.Fatalf("client frame = %s", data)
+	}
+}
+
 func TestStripPreviousResponseIDLeavesUnrelatedFields(t *testing.T) {
 	in := []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_abc","input":[{"type":"message","role":"user"}]}`)
 	out := stripPreviousResponseID(in)
