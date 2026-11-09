@@ -29,6 +29,7 @@ import {
 	loadModelCatalog,
   loadPoolStats,
   loadFailureInsights,
+  loadQuotaWaste,
   loadSignalAnalytics,
   loadPassportMe,
   exchangeLegacySession,
@@ -97,6 +98,7 @@ import type {
   AdminAccount,
   FailureInsightsResponse,
   QuotaWindow,
+  QuotaWasteResponse,
   GuestPass,
   PasskeyCredential,
   PassportPrincipal,
@@ -118,11 +120,11 @@ import type {
   VibeLoginSession,
 } from "./types";
 
-type View = "pulse" | "insights" | "mine" | "passes" | "console" | "accounts" | "models" | "operator-api" | "setup";
+type View = "pulse" | "insights" | "quota-waste" | "mine" | "passes" | "console" | "accounts" | "models" | "operator-api" | "setup";
 type InsightMode = "overview" | "capacity" | "flow" | "demand" | "failures";
 type HistoryMode = "push" | "replace";
 
-const VIEWS: View[] = ["pulse", "insights", "mine", "passes", "console", "accounts", "models", "operator-api", "setup"];
+const VIEWS: View[] = ["pulse", "insights", "quota-waste", "mine", "passes", "console", "accounts", "models", "operator-api", "setup"];
 const INSIGHT_MODES: InsightMode[] = ["overview", "capacity", "flow", "demand", "failures"];
 
 export function viewFromSearch(search: string): View {
@@ -322,6 +324,10 @@ export function App() {
   const [signal, setSignal] = useState<SignalAnalytics | null>(null);
   const [failureInsights, setFailureInsights] = useState<FailureInsightsResponse | null>(null);
   const [failureInsightsError, setFailureInsightsError] = useState("");
+  const [quotaWaste, setQuotaWaste] = useState<QuotaWasteResponse | null>(null);
+  const [quotaWasteError, setQuotaWasteError] = useState("");
+  const [quotaWasteDays, setQuotaWasteDays] = useState(30);
+  const quotaWasteRequest = useRef(0);
 	const [models, setModels] = useState<ModelDescriptor[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -357,10 +363,29 @@ export function App() {
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to refresh pool data. Try again.");
+      return;
     } finally {
       setLoading(false);
     }
-  }, []);
+    // Quota waste is operator-only and has its own failure state; it must not
+    // turn a core refresh failure into a misleading pool error.
+    if (passport?.kind !== "operator") {
+      setQuotaWaste(null);
+      setQuotaWasteError("");
+      return;
+    }
+    const requestID = ++quotaWasteRequest.current;
+    try {
+      const value = await loadQuotaWaste(quotaWasteDays);
+      if (requestID !== quotaWasteRequest.current) return;
+      setQuotaWaste(value);
+      setQuotaWasteError("");
+    } catch (cause) {
+      if (requestID !== quotaWasteRequest.current) return;
+      setQuotaWaste(null);
+      setQuotaWasteError(cause instanceof Error ? cause.message : "Unable to load quota-waste insights. Try again.");
+    }
+  }, [passport, quotaWasteDays]);
 
   useEffect(() => {
     const boot = async () => {
@@ -491,6 +516,8 @@ export function App() {
     setSignal(null);
     setFailureInsights(null);
     setFailureInsightsError("");
+    setQuotaWaste(null);
+    setQuotaWasteError("");
     setModels([]);
     updateURL({ view: null, insight: null, account: null, accounts: null, member: null }, "replace");
   };
@@ -510,6 +537,7 @@ export function App() {
           {error && <div className="signal-error" role="alert"> {error}</div>}
           {view === "pulse" && <Pulse stats={stats} signal={signal} onAccounts={() => goToView("accounts", { accounts: "attention" })} onMember={(id) => goToView("console", { member: id })} />}
           {view === "insights" && <Insights stats={stats} signal={signal} failures={failureInsights} failuresError={failureInsightsError} onAccounts={() => goToView("accounts", { accounts: null })} />}
+          {view === "quota-waste" && <QuotaWasteInsights data={quotaWaste} error={quotaWasteError} days={quotaWasteDays} onDaysChange={setQuotaWasteDays} />}
           {view === "mine" && <PassportMine principal={passport} onPrincipal={setPassport} />}
           {view === "passes" && passport && passport.kind !== "guest" && <Passes />}
           {view === "console" && passport && passport.kind !== "guest" && <PassportConsole principal={passport} />}
@@ -1669,7 +1697,7 @@ function Navigation({ view, principal, onChange, onSignOut }: { view: View; prin
     ? [{ label: "Your access", items: [["mine", "Usage"], ["setup", "Setup"]] }]
     : principal?.kind === "operator"
     ? [
-        { label: "Operate", items: [["pulse", "Pool status"], ["insights", "Insights"], ["models", "Models"]] },
+        { label: "Operate", items: [["pulse", "Pool status"], ["insights", "Insights"], ["quota-waste", "Quota waste"], ["models", "Models"]] },
         { label: "Manage", items: [["accounts", "Accounts"], ["passes", "Guest passes"], ["console", "Members"], ["operator-api", "Operator API"]] },
         { label: "Personal", items: [["mine", "Your usage"], ["setup", "Setup"]] },
       ]
@@ -1707,6 +1735,22 @@ function Navigation({ view, principal, onChange, onSignOut }: { view: View; prin
       </div>
     </nav>
   );
+}
+
+function QuotaWasteInsights({ data, error, days, onDaysChange }: { data: QuotaWasteResponse | null; error: string; days: number; onDaysChange: (days: number) => void }) {
+  if (error) return <section className="signal-section quota-waste-view"><header className="section-heading"><h1>Quota Waste</h1></header><div className="signal-error" role="alert">Quota-waste insights unavailable: {error}</div></section>;
+  if (!data) return <section className="signal-section quota-waste-view"><header className="section-heading"><h1>Quota Waste</h1></header><div className="empty-state" role="status">Gathering quota history…</div></section>;
+  return <section className="signal-section quota-waste-view">
+    <header className="section-heading quota-waste-heading">
+      <div><p className="eyebrow">Operator economics</p><h1>Quota Waste</h1><p>Expired unused subscription quota, measured independently from failed requests.</p></div>
+      <label className="quota-waste-days">History window <select value={days} onChange={(event) => onDaysChange(Number(event.target.value))}><option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option></select></label>
+      <span className="status-pill">{data.confidence} confidence · {data.days} days</span>
+    </header>
+    {data.warning && <div className="quota-waste-warning" role="note"><strong>Warning:</strong> {data.warning}</div>}
+    <SignalPanel title="Coverage and method"><p>{data.methodology}</p><p><strong>{String(data.coverage.observations ?? 0)}</strong> raw observations · <strong>{String(data.coverage.accounts ?? 0)}</strong> accounts · response is aggregated by account and window</p>{data.gaps.map((gap) => <p key={gap} className="muted">{gap}</p>)}</SignalPanel>
+    <SignalPanel title="Independent seat scenarios"><p className="muted">Scenarios are not additive. Removing a problem account does not cure load-induced risk.</p>{data.candidates.length ? <div className="stack-list">{data.candidates.map((candidate) => <article className="stack-row quota-waste-candidate" key={candidate.seat_id}><div><strong>{candidate.provider} · {candidate.plan || "unknown plan"}</strong><small>{candidate.eligibility} · {candidate.confidence} · review burden {(candidate.review_burden * 100).toFixed(0)}%</small></div><span>{candidate.projected_peak_load === undefined ? "Load unknown" : `${Math.round(candidate.projected_peak_load * 100)}% modelled load`}</span><p>{candidate.rationale.join(" ")}</p></article>)}</div> : <div className="empty-state">No seat scenarios have sufficient evidence yet.</div>}</SignalPanel>
+    <SignalPanel title="Accounts and current windows"><div className="stack-list">{data.accounts.map((account) => <article className="stack-row quota-waste-account" key={account.id}><div><strong>{account.provider} · {account.plan || "unknown plan"}</strong><small>{account.status} · health {account.health}</small></div><div className="quota-waste-windows">{account.windows.length ? account.windows.map((window) => <div className="quota-waste-window" key={window.key}><strong>{window.key}</strong><span className="quota-limit">{window.used_fraction === undefined ? "usage unknown" : `${(window.used_fraction * 100).toFixed(0)}% used · ${(window.remaining_fraction! * 100).toFixed(0)}% remaining`}</span><small>status {window.status} · {window.confidence} confidence · source {window.source || "unknown"}</small>{window.last_closed_at && <small>closed evidence: {window.closed_window_count} window{window.closed_window_count === 1 ? "" : "s"}, last observed {new Date(window.last_closed_at).toLocaleString()} · {window.last_closed_unused_percent?.toFixed(0)}% unused</small>}</div>) : <span className="muted">No windows observed yet.</span>}</div></article>)}</div></SignalPanel>
+  </section>;
 }
 
 function Pulse({ stats, signal, onAccounts, onMember }: { stats: PoolStats | null; signal: SignalAnalytics | null; onAccounts: () => void; onMember: (id: string) => void }) {

@@ -1317,3 +1317,17 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
 .inspector-backdrop { border: 0; padding: 0; cursor: default; }
+
+.quota-waste-view .quota-waste-heading { align-items: flex-start; }
+.quota-waste-days { display: grid; gap: 5px; color: var(--muted); font-size: .78rem; }
+.quota-waste-days select { min-height: 34px; border: 1px solid var(--rule); background: var(--console-2); color: var(--ink); padding: 0 8px; }
+.quota-waste-warning { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--rule-hot); color: var(--gold-hot); background: rgba(139, 103, 33, .12); }
+.quota-waste-account { align-items: flex-start; }
+.quota-waste-windows { display: grid; gap: 8px; min-width: min(100%, 420px); }
+.quota-waste-window { display: grid; gap: 2px; text-align: right; }
+.quota-waste-window small, .quota-waste-candidate small { color: var(--muted); }
+@media (max-width: 760px) {
+  .quota-waste-view .quota-waste-heading, .quota-waste-account { display: grid; gap: 12px; }
+  .quota-waste-window { text-align: left; }
+  .quota-waste-windows { min-width: 0; }
+}

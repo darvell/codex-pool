@@ -168,7 +168,33 @@ func createAnalyticsTables(db *sql.DB) error {
 	}
 	// Empty means the account is its own subscription (rows written before
 	// subscriptions were tracked).
-	return ensureAnalyticsColumn(db, "subscription_rates", "subscription_id", "TEXT NOT NULL DEFAULT ''")
+	if err := ensureAnalyticsColumn(db, "subscription_rates", "subscription_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return createQuotaWasteTables(db)
+}
+
+func (s *AnalyticsStore) quotaWasteSubscriptionSeats(accounts []*Account) (map[string]string, error) {
+	seats := make(map[string]string, len(accounts))
+	if s == nil || s.db == nil {
+		return seats, fmt.Errorf("analytics unavailable")
+	}
+	rows, err := s.db.Query(`SELECT account_id, ` + subscriptionGroupSQL + ` FROM subscription_rates WHERE end_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var accountID, seatID string
+		if err := rows.Scan(&accountID, &seatID); err != nil {
+			return nil, err
+		}
+		seats[accountID] = seatID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return seats, nil
 }
 
 func ensureAnalyticsColumn(db *sql.DB, table, column, definition string) error {

@@ -334,7 +334,7 @@ var operatorRoutes = []operatorRoute{
 	{http.MethodGet, "/api/operator/v1/models", "operator.read"},
 	{http.MethodGet, "/api/operator/v1/config/pi", "operator.read"},
 	{http.MethodGet, "/api/operator/v1/accounting/requests", "operator.read"},
-	{http.MethodGet, "/api/pool/stats", "operator.read"}, {http.MethodGet, "/api/pool/users", "operator.read"},
+	{http.MethodGet, "/api/pool/stats", "operator.read"}, {http.MethodGet, "/api/pool/quota-waste", "operator.read"}, {http.MethodGet, "/api/pool/users", "operator.read"},
 	{http.MethodGet, "/api/pool/origins", "operator.read"}, {http.MethodGet, "/api/pool/daily-breakdown", "operator.read"},
 	{http.MethodGet, "/api/pool/hourly", "operator.read"}, {http.MethodGet, "/api/pool/signal", "operator.read"}, {http.MethodGet, "/api/pool/failure-insights", "operator.read"},
 	{http.MethodGet, "/api/pool/catalog", "operator.read"}, {http.MethodGet, "/api/me/usage", "operator.read"}, {http.MethodGet, "/api/pool/users/*/daily", "operator.read"},
@@ -554,7 +554,7 @@ func (h *proxyHandler) handleOperatorAPI(w http.ResponseWriter, r *http.Request)
 	}
 	switch r.URL.Path {
 	case "/api/operator/v1":
-		respondJSON(w, map[string]any{"api_version": operatorAPIVersion, "openapi": "/api/operator/v1/openapi.json", "guide": "/api/operator/v1/guide", "whoami": "/api/operator/v1/whoami", "models": "/api/operator/v1/models", "pi_config": "/api/operator/v1/config/pi", "accounting_requests": "/api/operator/v1/accounting/requests"})
+		respondJSON(w, map[string]any{"api_version": operatorAPIVersion, "openapi": "/api/operator/v1/openapi.json", "guide": "/api/operator/v1/guide", "whoami": "/api/operator/v1/whoami", "models": "/api/operator/v1/models", "pi_config": "/api/operator/v1/config/pi", "accounting_requests": "/api/operator/v1/accounting/requests", "quota_waste": "/api/pool/quota-waste"})
 	case "/api/operator/v1/whoami":
 		response := map[string]any{"principal": publicPrincipal(access.Principal), "credential_kind": "browser_session", "permissions": []string{"operator.read", "operator.write"}}
 		if access.Token != nil {

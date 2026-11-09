@@ -595,6 +595,9 @@ func main() {
 		h.chatGPT.refresh = h.refreshAccountAfterAuthFailure
 	}
 	h.startUsagePoller()
+	// Quota-waste sampling is independent of request-derived quota intelligence;
+	// it records idle and unhealthy accounts from provider-owned snapshots.
+	h.startQuotaWasteObserver()
 	if getenv("PROXY_ENABLE_QUOTA_INTELLIGENCE", "1") != "0" {
 		h.startQuotaIntelligenceRefresher()
 	} else {

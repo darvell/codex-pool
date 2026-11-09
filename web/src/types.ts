@@ -1,5 +1,55 @@
 export type Provider = "codex" | "claude" | "gemini" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "adverserial" | "opencode_go" | "mistral" | "mistral_vibe";
 
+export interface QuotaWasteWindow {
+  key: string;
+  kind: string;
+  used_fraction?: number;
+  remaining_fraction?: number;
+  reset_at?: string;
+  last_observed_at: string;
+  status: string;
+  unused_percent?: number;
+  closed_window_count?: number;
+  last_closed_at?: string;
+  last_closed_unused_percent?: number;
+  confidence: string;
+  source: string;
+}
+export interface QuotaWasteAccount {
+  id: string;
+  seat_id?: string;
+  provider: string;
+  plan?: string;
+  status: string;
+  health: string;
+  windows: QuotaWasteWindow[];
+}
+export interface QuotaWasteCandidate {
+  seat_id: string;
+  provider: string;
+  plan: string;
+  removes_accounts: string[];
+  eligibility: string;
+  rationale: string[];
+  confidence: string;
+  projected_peak_load?: number;
+  monthly_saving_known: boolean;
+  independent_scenario: boolean;
+  review_burden: number;
+}
+export interface QuotaWasteResponse {
+  schema_version: number;
+  generated_at: string;
+  days: number;
+  accounts: QuotaWasteAccount[];
+  candidates: QuotaWasteCandidate[];
+  coverage: Record<string, unknown>;
+  gaps: string[];
+  confidence: string;
+  methodology: string;
+  warning: string;
+}
+
 export interface VibeLoginSession {
   session_id: string;
   oauth_url: string;

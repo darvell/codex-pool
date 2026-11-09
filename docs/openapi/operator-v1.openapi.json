@@ -2041,6 +2041,23 @@
         "parameters": []
       }
     },
+    "/api/pool/quota-waste": {
+      "get": {
+        "summary": "Quota waste observations and independent seat scenarios",
+        "description": "Returns one latest current state per account/window plus bounded closed-window evidence. Raw five-minute observations remain durable but are not returned. Current remaining quota is not labelled as expired waste.",
+        "x-operator-capability": "operator.read",
+        "parameters": [
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 90, "default": 30}}
+        ],
+        "responses": {
+          "200": {"description": "Quota waste insights", "content": {"application/json": {"schema": {"type": "object"}}}},
+          "400": {"description": "Invalid query"},
+          "401": {"description": "JSON error"},
+          "403": {"description": "JSON error"},
+          "503": {"description": "Analytics unavailable"}
+        }
+      }
+    },
     "/api/pool/users": {
       "get": {
         "summary": "Legacy usage leaderboard",
