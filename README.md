@@ -129,7 +129,8 @@ Pool status economics now compare full tracked API-equivalent history with a
 sparse subscription-rate/payment ledger and show a separate last-30-days
 run-rate view. Backfilled rates are estimates, not invoices; see
 [Pool status economics](docs/pool-economics.md) for coverage, corrections, and
-pricing limitations.
+pricing limitations. Operators also have independent [Quota Waste Insights](docs/quota-waste.md)
+for bounded expired-quota observations and conservative, non-additive seat scenarios.
 
 ---
 

@@ -461,6 +461,14 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handlePoolStats(w, r)
 		return
+	case "/api/pool/quota-waste":
+		// This endpoint intentionally does not accept member authentication;
+		// operator bearer/session authorization is required for quota economics.
+		if _, ok := h.requireOperatorAPI(w, r); !ok {
+			return
+		}
+		h.handleQuotaWaste(w, r)
+		return
 	case "/api/pool/whoami":
 		h.handleWhoami(w, r)
 		return

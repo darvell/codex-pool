@@ -27,6 +27,7 @@ The running pool serves the complete, version-matched contract at `GET /api/oper
 | `GET` | `/api/pool/failure-insights` | Aggregate provider failure attempts |
 | `GET` | `/api/pool/hourly` | Global hourly usage (hours 1..168) |
 | `GET` | `/api/pool/origins` | Hashed origin usage |
+| `GET` | `/api/pool/quota-waste` | Quota waste observations and independent seat scenarios |
 | `GET` | `/api/pool/signal` | All Signal Room graph series |
 | `GET` | `/api/pool/stats` | Pool status dashboard data |
 | `GET` | `/api/pool/users/{id}/daily` | User daily usage (days up to 90) |

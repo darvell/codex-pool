@@ -35,6 +35,7 @@ A read key can retrieve every current Signal Room backing series:
 | View | API |
 |---|---|
 | Pool pulse and account quota/economics | `GET /api/pool/stats` |
+| Quota expiry waste and conservative seat scenarios | `GET /api/pool/quota-waste?days=30` (operator only) |
 | Signal Room graph bundle | `GET /api/pool/signal?weeks=6` |
 | Member ranking | `GET /api/console/principals?hours=168` |
 | Selected member history | `GET /api/console/principals/{id}/usage?hours=168` |

@@ -72,6 +72,9 @@ Keep `data/analytics.db` with its existing backup: both cost aggregates and
 subscription events are needed to reconstruct the status page. Prices before
 first observation, removal before first observation, and unreported payments
 cannot be inferred automatically. Historical estimates can be refined as
-Darvell supplies the account and billing history. The legacy per-account ROI
+Darvell supplies the account and billing history. Quota Waste Insights is a
+separate operator report: it measures bounded expired-quota percentages from
+provider snapshots and never turns quota percentages into paid dollars or adds
+duplicate login quotas. The legacy per-account ROI
 and provider-lane figures still use current-account estimates and should not
 be read as the pool-wide audited ledger.

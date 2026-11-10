@@ -180,6 +180,10 @@ export async function loadPoolStats(): Promise<PoolStats> {
   return decode(await fetch("/api/pool/stats", { credentials: "same-origin", cache: "no-store" }));
 }
 
+export async function loadQuotaWaste(days = 30): Promise<import("./types").QuotaWasteResponse> {
+  return decode(await fetch(`/api/pool/quota-waste?days=${days}`, { credentials: "same-origin", cache: "no-store" }));
+}
+
 export async function loadFailureInsights(hours = 168, limit = 100): Promise<FailureInsightsResponse> {
   const insights = await decode<FailureInsightsResponse>(await fetch(`/api/pool/failure-insights?hours=${hours}&limit=${limit}`, { credentials: "same-origin", cache: "no-store" }));
   return { ...insights, groups: insights.groups ?? [], total: insights.total ?? 0 };
