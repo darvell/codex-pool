@@ -104,7 +104,6 @@ func (p *AntigravityProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", antigravityUserAgent())
-	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Connection", "close")
 }
 

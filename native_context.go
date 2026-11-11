@@ -349,7 +349,7 @@ func (s *nativeContext) send(ctx context.Context, owner contextAccount, clientIP
 		s.provider.SetAuthHeaders(req, snapshot)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Accept-Encoding", "identity")
+		req.Header.Del("Accept-Encoding")
 		resp, err := s.transport.RoundTrip(req)
 		if err != nil {
 			return nil, errContextUnavailable

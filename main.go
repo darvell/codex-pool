@@ -83,7 +83,7 @@ type config struct {
 	websocketIdleTimeout       time.Duration // Kill websocket relays idle for this long (0 = no idle timeout)
 	websocketHeartbeatInterval time.Duration // Send downstream app-level websocket heartbeats this often (0 = disabled)
 	websocketReadLimit         int64         // Maximum websocket message size
-	websocketCompression       bool          // Enable per-message websocket compression (off by default for latency)
+	websocketCompression       bool          // Negotiate per-message compression independently on each websocket
 	shutdownGrace              time.Duration // Let active websocket turns finish before forcing a restart close
 	tierThreshold              float64       // Secondary usage % at which we stop preferring a tier (default 0.50)
 }
@@ -283,7 +283,7 @@ func buildConfig() *config {
 			cfg.websocketReadLimit = n
 		}
 	}
-	cfg.websocketCompression = parseBoolEnv("WEBSOCKET_COMPRESSION", false)
+	cfg.websocketCompression = parseBoolEnv("WEBSOCKET_COMPRESSION", true)
 	cfg.shutdownGrace = 30 * time.Second
 	if v := getenv("PROXY_SHUTDOWN_GRACE_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
@@ -558,8 +558,8 @@ func main() {
 
 	h := &proxyHandler{
 		cfg:                  cfg,
-		transport:            transport,
-		antigravityTransport: antigravityTransport,
+		transport:            newUpstreamTransport(transport, cfg.maxInMemoryBodyBytes),
+		antigravityTransport: newUpstreamTransport(antigravityTransport, cfg.maxInMemoryBodyBytes),
 		refreshTransport:     refreshTransport,
 		pool:                 pool,
 		poolUsers:            poolUsers,
@@ -4620,9 +4620,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		provider.SetAuthHeaders(outReq, authAccount)
 	}
 
-	// Force uncompressed responses — SSE frame parsing and client decompression
-	// break on gzip-compressed streams that split across TCP segments.
-	outReq.Header.Set("Accept-Encoding", "identity")
+	outReq.Header.Del("Accept-Encoding")
 
 	if h.cfg.debug.Load() {
 		log.Printf("[%s] streamed -> %s %s (account=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID)
@@ -5530,8 +5528,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	removeHopByHopHeaders(outReq.Header)
 	removeConflictingProxyHeaders(outReq.Header)
 
-	// Force uncompressed responses — SSE streams break with on-the-fly decompression.
-	outReq.Header.Set("Accept-Encoding", "identity")
+	outReq.Header.Del("Accept-Encoding")
 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
@@ -5752,8 +5749,7 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 		outReq.ContentLength = r.ContentLength
 	}
 
-	// Force uncompressed responses — SSE streams break with on-the-fly decompression.
-	outReq.Header.Set("Accept-Encoding", "identity")
+	outReq.Header.Del("Accept-Encoding")
 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
@@ -6020,18 +6016,7 @@ func (h *proxyHandler) tryOnce(
 			outReq.ContentLength = int64(len(bodyBytes))
 		}
 
-		// Always request uncompressed responses. SSE is a line-oriented text
-		// protocol — gzip/br compression breaks incremental frame parsing in
-		// sseInterceptWriter and causes ZlibError in clients (e.g. Bun's
-		// fetch) when compressed chunks split across TCP segments. Deleting
-		// the header entirely would let Go's transport auto-add gzip, so we
-		// must explicitly set identity.
-		outReq.Header.Set("Accept-Encoding", "identity")
-
-		// Force uncompressed response for model catalog so we can inject Claude models
-		if strings.Contains(in.URL.Path, "codex/models") {
-			outReq.Header.Set("Accept-Encoding", "identity")
-		}
+		outReq.Header.Del("Accept-Encoding")
 
 		// Adjust headers when doing format translation
 		if translateDir == TranslateClaudeToOAI || translateDir == TranslateClaudeToResponses {
