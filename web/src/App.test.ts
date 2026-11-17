@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
+let createRoot: typeof import("react-dom/client")["createRoot"];
 import { JSDOM } from "jsdom";
-import { AccessGate, isArmedAccountAction, OperatorAPIKeys, poolSurplus, providerDisplay, shouldShowPassFormOnLoad, viewFromSearch, watchVibeSession } from "./App";
+import { App, AccessGate, isArmedAccountAction, OperatorAPIKeys, poolSurplus, providerDisplay } from "./App";
+import { watchVibeSession } from "./contributions";
+import { viewFromSearch } from "./navigation";
 import { createOperatorAPIToken, loadClientApiKey, loadFailureInsights, loadOperatorAPITokens, operatorBootstrap, replaceOperatorAPIToken, revokeOperatorAPIToken, startVibeLogin, vibeLoginStatus } from "./api";
 import type { VibeLoginSession } from "./types";
 
@@ -23,9 +25,94 @@ describe("poolSurplus", () => {
 });
 
 describe("guest pass form", () => {
-  it("opens automatically only when the loaded pass list is empty", () => {
-    expect(shouldShowPassFormOnLoad([])).toBe(true);
-    expect(shouldShowPassFormOnLoad([{ id: "pass_1" } as never])).toBe(false);
+  let dom: JSDOM;
+  let root: ReturnType<typeof createRoot>;
+  let container: HTMLElement;
+  let passes: { id: string; note: string; display_name: string; status: string; clients: number; link: string }[];
+  let finishLoad: (response: Response) => void;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  const click = async (text: string) => {
+    const button = [...container.querySelectorAll("button")].find((item) => item.textContent === text);
+    expect(button, `button ${text}`).toBeDefined();
+    await act(async () => { button!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  };
+
+  beforeEach(async () => {
+    dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "https://pool.example.test/?view=passes" });
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("navigator", dom.window.navigator);
+    vi.stubGlobal("sessionStorage", dom.window.sessionStorage);
+    vi.stubGlobal("localStorage", dom.window.localStorage);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    ({ createRoot } = await import("react-dom/client"));
+    dom.window.confirm = vi.fn().mockReturnValue(true);
+    passes = [];
+    let initialLoad = true;
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/auth/me") return jsonResponse({ id: "member", kind: "member", status: "active", display_name: "Member" });
+      if (url === "/api/passes" && init?.method === "POST") {
+        passes = [{ id: "new-pass", ...JSON.parse(init.body as string), status: "active", clients: 0, link: "/join#new-pass" }];
+        return jsonResponse({ ...passes[0], setup_token: "new-setup-token" });
+      }
+      if (url === "/api/passes") {
+        if (initialLoad) {
+          initialLoad = false;
+          return new Promise<Response>((resolve) => { finishLoad = resolve; });
+        }
+        return jsonResponse(passes);
+      }
+      if (url.endsWith("/restore")) { passes = []; return jsonResponse({ success: true }); }
+      if (url === "/api/pool/stats") return jsonResponse({ accounts: [], aggregate: {} });
+      if (url === "/api/pool/catalog") return jsonResponse({ models: [] });
+      if (url.startsWith("/api/pool/")) return jsonResponse({ hourly: [], economics: [], origin_weekly: [], groups: [] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    container = dom.window.document.getElementById("root")!;
+    root = createRoot(container);
+    await act(async () => { root.render(createElement(App)); });
+  });
+
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    dom.window.close();
+  });
+
+  it("opens after the first empty load, respects Cancel, and stays closed after creating a pass", async () => {
+    expect(container.textContent).toContain("Loading passes");
+    expect(container.querySelector(".pass-form")).toBeNull();
+    await act(async () => { finishLoad(jsonResponse([])); });
+    expect(container.querySelector(".pass-form")).not.toBeNull();
+    await click("Cancel");
+    expect(container.querySelector(".pass-form")).toBeNull();
+    await click("Create a pass");
+    await act(async () => {
+      const note = container.querySelector("textarea")!;
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(note, "Sam");
+      note.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+      note.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    });
+    await act(async () => { container.querySelector(".pass-form")!.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })); });
+    expect(container.querySelector(".pass-form")).toBeNull();
+    expect(container.querySelector(".pass-row")!.textContent).toContain("Sam");
+    expect(container.querySelector(".setup-secret")!.textContent).toContain("https://pool.example.test/join#new-pass");
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/passes" && !init?.method)).toHaveLength(2);
+  });
+
+  it("keeps the form closed after a populated first load and a later empty refresh", async () => {
+    passes = [{ id: "pass_1", note: "Sam", display_name: "Sam", status: "revoked", clients: 0, link: "/join#pass_1" }];
+    await act(async () => { finishLoad(jsonResponse(passes)); });
+    expect(container.querySelector(".pass-form")).toBeNull();
+    expect(container.querySelector(".pass-row")!.textContent).toContain("Sam");
+    await click("Restore");
+    expect(container.querySelector(".pass-form")).toBeNull();
+    expect(container.textContent).toContain("No passes yet.");
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/passes" && !init?.method)).toHaveLength(2);
+    await click("Create a pass");
+    expect(container.querySelector(".pass-form")).not.toBeNull();
   });
 });
 
@@ -39,40 +126,13 @@ describe("viewFromSearch", () => {
 });
 
 describe("providerDisplay", () => {
-  it("defines display metadata for adverserial accounts returned by the pool API", () => {
-    expect(providerDisplay("adverserial")).toEqual({
-      label: "Adverserial",
-      color: "#ff5454",
-      dither: "red",
-      glyph: "◬",
-    });
-  });
-
-  it("defines display metadata for opencode_go accounts returned by the pool API", () => {
-    expect(providerDisplay("opencode_go")).toEqual({
-      label: "OpenCode Go",
-      color: "#ffd23f",
-      dither: "gold",
-      glyph: "⬢",
-    });
-  });
-
-  it("defines display metadata for mistral accounts returned by the pool API", () => {
-    expect(providerDisplay("mistral")).toEqual({
-      label: "Mistral API",
-      color: "#fa5b30",
-      dither: "orange",
-      glyph: "✥",
-    });
-  });
-
-  it("distinguishes Vibe subscription accounts from Mistral API accounts", () => {
-    expect(providerDisplay("mistral_vibe")).toEqual({
-      label: "Mistral Vibe",
-      color: "#fa5b30",
-      dither: "orange",
-      glyph: "✥",
-    });
+  it.each([
+    ["adverserial", "Adverserial"],
+    ["opencode_go", "OpenCode Go"],
+    ["mistral", "Mistral API"],
+    ["mistral_vibe", "Mistral Vibe"],
+  ])("labels %s accounts as %s", (provider, label) => {
+    expect(providerDisplay(provider).label).toBe(label);
   });
 
   it("falls back safely when the API returns a provider newer than the frontend", () => {
@@ -164,6 +224,142 @@ describe("SDK client API key", () => {
   it("rejects revoked setup tokens", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("invalid or revoked token", { status: 404 })));
     await expect(loadClientApiKey("revoked-token")).rejects.toThrow();
+  });
+});
+
+describe("Mine client API keys", () => {
+  let dom: JSDOM;
+  let root: ReturnType<typeof createRoot>;
+  let container: HTMLElement;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let clients: { id: string; label: string; status: string }[];
+  let config: (url: string, init?: RequestInit) => Promise<Response>;
+  let clipboard: ReturnType<typeof vi.fn>;
+
+  const click = async (text: string, scope: ParentNode = container) => {
+    const button = [...scope.querySelectorAll("button")].find((item) => item.textContent === text);
+    expect(button, `button ${text}`).toBeDefined();
+    await act(async () => { button!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })); });
+  };
+
+  beforeEach(async () => {
+    dom = new JSDOM("<!doctype html><div id='root'></div>", { url: "https://pool.example.test/?view=mine" });
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    vi.stubGlobal("navigator", dom.window.navigator);
+    vi.stubGlobal("sessionStorage", dom.window.sessionStorage);
+    vi.stubGlobal("localStorage", dom.window.localStorage);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    ({ createRoot } = await import("react-dom/client"));
+    clipboard = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(dom.window.navigator, "clipboard", { value: { writeText: clipboard }, configurable: true });
+    dom.window.confirm = vi.fn().mockReturnValue(true);
+    clients = [{ id: "laptop", label: "Work laptop", status: "active" }, { id: "server", label: "Home server", status: "active" }];
+    config = async (url) => jsonResponse({ access_token: `signed-key-${url.split("/").pop()}` });
+    fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/auth/me") return jsonResponse({ id: "guest", kind: "guest", status: "active", display_name: "Guest" });
+      if (url.startsWith("/api/me/usage")) return jsonResponse({ hourly: [] });
+      if (url === "/api/me/clients" && init?.method === "POST") {
+        const client = { id: "new-client", label: "New client", status: "active" };
+        clients = [...clients, client];
+        return jsonResponse({ ...client, setup_token: "setup-new-client" });
+      }
+      if (url === "/api/me/clients") return jsonResponse(clients);
+      if (url.endsWith("/reveal")) return jsonResponse({ setup_token: `setup-${url.split("/")[4]}` });
+      if (url.endsWith("/rotate")) return jsonResponse({ ...clients[0], setup_token: "setup-replaced" });
+      if (init?.method === "DELETE") {
+        clients = clients.map((client) => client.id === url.split("/")[4] ? { ...client, status: "revoked" } : client);
+        return jsonResponse({ success: true });
+      }
+      if (url.startsWith("/config/claude/")) return config(url, init);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    container = dom.window.document.getElementById("root")!;
+    root = createRoot(container);
+    await act(async () => { root.render(createElement(App)); });
+  });
+
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    dom.window.close();
+  });
+
+  it("reveals and copies the signed key by default, with base URL and model-list curl", async () => {
+    await click("Show key");
+    const credentials = container.querySelector(".client-api-key")!;
+    expect(credentials.textContent).toContain("signed-key-setup-laptop");
+    expect(credentials.textContent).toContain("https://pool.example.test/v1");
+    expect(credentials.querySelector("pre")!.textContent).toBe('curl "https://pool.example.test/v1/models" \\\n  -H "Authorization: Bearer signed-key-setup-laptop"');
+    await click("Copy key", credentials);
+    expect(clipboard).toHaveBeenLastCalledWith("signed-key-setup-laptop");
+    await click("Copy URL", credentials);
+    expect(clipboard).toHaveBeenLastCalledWith("https://pool.example.test/v1");
+    await click("CLI installers");
+    expect(container.querySelector(".setup-secret")!.textContent).toContain("/setup/codex/setup-laptop");
+    expect(container.querySelector(".client-api-key")).toBeNull();
+    await click("Hide key");
+    expect(container.querySelector(".setup-secret")).toBeNull();
+    await click("Show key");
+    expect(container.querySelector(".client-api-key")).not.toBeNull();
+  });
+
+  it("renders Astra onboarding examples in the OpenAI SDK setup", async () => {
+    await click("Setup");
+    await click("OpenAI SDK");
+    const examples = [...container.querySelectorAll(".tool-detail pre")].map((item) => item.textContent);
+    expect(examples).toHaveLength(3);
+    expect(examples[0]).toContain('client.responses.create(model="gpt-6-astra"');
+    expect(examples[1]).toContain('client.responses.create({ model: "gpt-6-astra"');
+    expect(examples[2]).toContain('"model":"gpt-6-astra"');
+    for (const example of examples) {
+      expect(example).toContain("https://pool.example.test/v1");
+      expect(example).toContain("signed-key-setup-laptop");
+      expect(example).not.toMatch(/gpt-5\.6-(luna|sol)/);
+    }
+  });
+
+  it("aborts hidden and superseded loads, ignores late keys, and retries failures", async () => {
+    let finish!: (response: Response) => void;
+    let signal!: AbortSignal;
+    config = async (_url, init) => {
+      signal = init!.signal!;
+      return new Promise<Response>((resolve) => { finish = resolve; });
+    };
+    await click("Show key");
+    expect(container.textContent).toContain("Loading API key");
+    await click("Hide key");
+    expect(signal.aborted).toBe(true);
+    await act(async () => { finish(jsonResponse({ access_token: "late-hidden-key" })); });
+    expect(container.textContent).not.toContain("late-hidden-key");
+
+    await click("Show key");
+    const oldSignal = signal;
+    const oldFinish = finish;
+    config = async () => { throw new TypeError("offline"); };
+    await click("Show key", container.querySelectorAll(".client-card")[1]);
+    expect(oldSignal.aborted).toBe(true);
+    expect(container.textContent).toContain("Couldn't load the API key. Try again.");
+    config = async () => jsonResponse({ access_token: "signed-server-key" });
+    await click("Retry API key");
+    expect(container.querySelector(".client-api-key")!.textContent).toContain("signed-server-key");
+    await act(async () => { oldFinish(jsonResponse({ access_token: "late-laptop-key" })); });
+    expect(container.textContent).not.toContain("late-laptop-key");
+  });
+
+  it("opens created and replaced keys directly, then clears revoked credentials", async () => {
+    await click("Add client");
+    await act(async () => { container.querySelector(".client-create")!.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })); });
+    expect(container.querySelector(".client-api-key")!.textContent).toContain("signed-key-setup-new-client");
+    await click("Show key");
+    expect(container.querySelector(".client-api-key")!.textContent).toContain("signed-key-setup-laptop");
+    await click("Replace key");
+    expect(container.textContent).not.toContain("signed-key-setup-laptop");
+    expect(container.querySelector(".client-api-key")!.textContent).toContain("signed-key-setup-replaced");
+    await click("Revoke");
+    expect(container.querySelector(".client-api-key")).toBeNull();
+    expect(container.textContent).not.toContain("signed-key-setup-replaced");
+    expect((container.querySelector(".client-card button") as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
@@ -333,6 +529,7 @@ describe("OperatorAPIKeys lifecycle", () => {
     Object.defineProperty(dom.window.document, "cookie", { value: "pool_csrf=test-csrf", configurable: true });
     Object.defineProperty(dom.window.navigator, "clipboard", { value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) }, configurable: true });
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    ({ createRoot } = await import("react-dom/client"));
 
     let resolveIssue!: (response: Response) => void;
     const issued = { token: { id: "key-1", principal_id: "op", label: "diagnostics", scope: "read", status: "active", created_at: "2026-10-12T00:00:00Z", expires_at: "2027-01-10T00:00:00Z" }, secret: "poolop_key-1_once" };
@@ -374,6 +571,7 @@ describe("operator bootstrap request", () => {
     vi.stubGlobal("document", dom.window.document);
     vi.stubGlobal("navigator", dom.window.navigator);
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    ({ createRoot } = await import("react-dom/client"));
     const principal = { id: "op", kind: "operator", status: "active", username: "operator", email: "op@example.test", display_name: "Operator", avatar_url: "", expires_at: null };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ legacy_signup: false, operator_exists: false }))

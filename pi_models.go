@@ -65,12 +65,12 @@ type cuteCodeModelConfig struct {
 	Description   string `json:"description,omitempty"`
 }
 
-func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools ...*poolState) ([]byte, error) {
+func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pool *poolState) ([]byte, error) {
+	return json.MarshalIndent(preparePiModels(publicURL, codexAPIKey, anthropicAPIKey, pool), "", "  ")
+}
+
+func preparePiModels(publicURL, codexAPIKey, anthropicAPIKey string, pool *poolState) piModelsConfig {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
-	var pool *poolState
-	if len(pools) > 0 {
-		pool = pools[0]
-	}
 	cfg := piModelsConfig{
 		Providers: map[string]piProviderConfig{
 			"codex": {
@@ -89,7 +89,7 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools 
 				BaseURL: baseURL + "/v1",
 				APIKey:  codexAPIKey,
 				API:     "openai-completions",
-				Models:  antigravityPiModels(),
+				Models:  antigravityPiModels(antigravityCatalog(pool)),
 			},
 			"kimi": {
 				BaseURL: baseURL,
@@ -150,15 +150,11 @@ func generatePiModelsJSON(publicURL, codexAPIKey, anthropicAPIKey string, pools 
 		},
 	}
 
-	return json.MarshalIndent(cfg, "", "  ")
+	return cfg
 }
 
-func generateCuteCodeSettingsJSON(publicURL, apiKey string, pools ...*poolState) ([]byte, error) {
+func generateCuteCodeSettingsJSON(publicURL, apiKey string, pool *poolState) ([]byte, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(publicURL), "/")
-	var pool *poolState
-	if len(pools) > 0 {
-		pool = pools[0]
-	}
 	settings := cuteCodeSettings{
 		Model:            defaultCodexModel,
 		OpenAIBaseURL:    baseURL,
@@ -175,12 +171,11 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string, pools ...*poolState)
 	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, mistralCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
-	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey)...)
+	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey, antigravityCatalog(pool))...)
 	return json.MarshalIndent(settings, "", "  ")
 }
 
-func antigravityPiModels() []piModelConfig {
-	models := antigravityModels.Models(nil)
+func antigravityPiModels(models []AntigravityCatalogModel) []piModelConfig {
 	result := make([]piModelConfig, 0, len(models))
 	for _, model := range models {
 		input := []string{"text"}
@@ -201,8 +196,7 @@ func antigravityPiModels() []piModelConfig {
 	return result
 }
 
-func antigravityCuteModels(baseURL, apiKey string) []cuteCodeModelConfig {
-	models := antigravityModels.Models(nil)
+func antigravityCuteModels(baseURL, apiKey string, models []AntigravityCatalogModel) []cuteCodeModelConfig {
 	result := make([]cuteCodeModelConfig, 0, len(models))
 	for _, model := range models {
 		result = append(result, cuteOpenAIModel(baseURL, apiKey, "antigravity/"+model.ID, model.DisplayName, model.MaxTokens, "Google Antigravity"))
@@ -283,40 +277,6 @@ func piTextModel(id, name string, reasoning bool, contextWindow, maxTokens int) 
 		MaxTokens:     maxTokens,
 		Cost:          &piModelCost{},
 	}
-}
-
-func piCodexModel(id, name string, contextWindow, maxTokens int) piModelConfig {
-	model := piTextModel(id, name, true, contextWindow, maxTokens)
-	if id == "gpt-5.6" || strings.HasPrefix(id, "gpt-5.6-") {
-		model.ThinkingLevelMap = map[string]string{"xhigh": "xhigh", "max": "max"}
-	}
-	return model
-}
-
-func piClaudeAlias(id, name string, contextWindow, maxTokens int, inputCost, outputCost, cacheReadCost, cacheWriteCost float64) piModelConfig {
-	model := piModelConfig{
-		ID:            id,
-		Name:          name,
-		Reasoning:     boolPtr(true),
-		Input:         []string{"text", "image"},
-		ContextWindow: contextWindow,
-		MaxTokens:     maxTokens,
-		Cost: &piModelCost{
-			Input:      inputCost,
-			Output:     outputCost,
-			CacheRead:  cacheReadCost,
-			CacheWrite: cacheWriteCost,
-		},
-	}
-	if ccModelSupportsEffort(id) {
-		model.ThinkingLevelMap = map[string]string{"max": "max"}
-		model.Compat = &piModelCompat{ForceAdaptiveThinking: true}
-		canonical := ccCanonicalClaudeModel(id)
-		if strings.Contains(canonical, "opus-5") || strings.Contains(canonical, "opus-4-7") || strings.Contains(canonical, "fable-5") || strings.Contains(canonical, "sonnet-5") {
-			model.ThinkingLevelMap["xhigh"] = "xhigh"
-		}
-	}
-	return model
 }
 
 func boolPtr(v bool) *bool {

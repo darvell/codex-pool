@@ -43,7 +43,7 @@ func TestOperatorRoleRestoration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	reloaded, err := newPassportStore(db, nil)
+	reloaded, err := newPassportStore(db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

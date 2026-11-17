@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -253,6 +254,9 @@ func TestResponsesBufferingWriterPreservesFunctionCalls(t *testing.T) {
 		t.Fatalf("unmarshal buffered responses output: %v", err)
 	}
 	output := got["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("function calls = %#v, want exactly one", output)
+	}
 	call := output[0].(map[string]any)
 	if call["type"] != "function_call" || call["call_id"] != "call_1" || call["name"] != "lookup" || call["arguments"] != `{"q":"x"}` {
 		t.Fatalf("function call not preserved: %#v", output)
@@ -267,14 +271,30 @@ func TestResponsesToChatCompletionsWriterHandlesItemIDToolArgumentDone(t *testin
 	_, _ = writer.Write([]byte("event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"item_1\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}\n\n"))
 	_, _ = writer.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"))
 
-	got := out.String()
-	if !strings.Contains(got, `"id":"call_1"`) || !strings.Contains(got, `"name":"lookup"`) {
-		t.Fatalf("tool call start missing: %s", got)
+	var choices []any
+	for _, event := range protocolEvents(t, out.String()) {
+		if event["id"] != "resp_1" || event["model"] != "gpt-5.5" || event["object"] != "chat.completion.chunk" {
+			t.Fatalf("chunk identity = %#v", event)
+		}
+		chunkChoices, ok := event["choices"].([]any)
+		if !ok || len(chunkChoices) != 1 {
+			t.Fatalf("chunk choices = %#v", event["choices"])
+		}
+		choices = append(choices, chunkChoices...)
 	}
-	if !strings.Contains(got, `"arguments":"{\"q\":\"x\"}"`) {
-		t.Fatalf("tool arguments from item_id done event missing: %s", got)
+	var want []any
+	if err := json.Unmarshal([]byte(`[
+		{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null},
+		{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null},
+		{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"x\"}"}}]},"finish_reason":null},
+		{"index":0,"delta":{},"finish_reason":"tool_calls"}
+	]`), &want); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(got, `"finish_reason":"tool_calls"`) {
-		t.Fatalf("tool finish reason missing: %s", got)
+	if !reflect.DeepEqual(choices, want) {
+		t.Fatalf("tool call chunks = %#v, want %#v", choices, want)
+	}
+	if strings.Count(out.String(), "data: [DONE]\n\n") != 1 || !strings.HasSuffix(out.String(), "data: [DONE]\n\n") {
+		t.Fatalf("terminal frame missing or repeated: %s", out.String())
 	}
 }

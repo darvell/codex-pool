@@ -430,14 +430,9 @@ func (h *proxyHandler) handleChatGPTPro(w http.ResponseWriter, r *http.Request, 
 		request["input"] = input
 		delete(request, "previous_response_id")
 	}
-	translated, err := translateChatGPTRequest(mustJSON(request), upstreamModel, uuid.NewString())
+	prepared, err := prepareChatGPT(request, upstreamModel, uuid.NewString())
 	if err != nil {
 		respondJSONError(w, http.StatusBadRequest, err.Error())
-		return true
-	}
-	var conversation map[string]any
-	if json.Unmarshal(translated, &conversation) != nil {
-		respondJSONError(w, http.StatusBadRequest, "Invalid Pro conversation")
 		return true
 	}
 	alias, identity := "", ""
@@ -460,7 +455,7 @@ func (h *proxyHandler) handleChatGPTPro(w http.ResponseWriter, r *http.Request, 
 		respondProError(w, http.StatusServiceUnavailable, err)
 		return true
 	}
-	response, err := client.send(ctx, "f/conversation", headers, conversation)
+	response, err := client.send(ctx, "f/conversation", headers, prepared.conversation)
 	if err != nil {
 		respondProError(w, http.StatusBadGateway, err)
 		return true
@@ -503,16 +498,7 @@ func (h *proxyHandler) handleChatGPTPro(w http.ResponseWriter, r *http.Request, 
 		}
 		return nil
 	}
-	tools := map[string]bool{}
-	if request["tool_choice"] != "none" {
-		definitions, _ := request["tools"].([]any)
-		for _, raw := range definitions {
-			tool, _ := raw.(map[string]any)
-			name, _ := tool["name"].(string)
-			tools[name] = tool["type"] == "custom"
-		}
-	}
-	decoder := newChatGPTStream(responseID, model, emit, tools)
+	decoder := newChatGPTStream(responseID, model, emit, prepared.tools)
 	var state chatGPTStreamState
 	for {
 		_, err = io.Copy(proStreamWriter{decoder}, response.Body)

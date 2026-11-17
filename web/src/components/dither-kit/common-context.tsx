@@ -3,7 +3,6 @@
 import { createContext, use } from "react"
 import type { Seed } from "./palette"
 
-/** A single tooltip row — one series (cartesian/radar) or one slice (pie). */
 export type TooltipItem = {
   name: string
   label: string
@@ -12,13 +11,8 @@ export type TooltipItem = {
   dimmed: boolean
 }
 
-/**
- * The minimal surface shared by every chart family, so `<Legend>` and
- * `<Tooltip>` work identically whether they sit in a cartesian, bar, or polar
- * root. Each root publishes one of these alongside its family-specific context.
- */
 export type CommonChart = {
-  names: string[] // legend entries — series keys (cartesian) or slice names (pie)
+  names: string[]
   labelOf: (name: string) => string
   seedOf: (name: string) => Seed
   selectedDataKey: string | null
@@ -32,7 +26,7 @@ export type CommonChart = {
   itemsAt: (index: number) => TooltipItem[]
   ready: boolean
   tooltipLeft: number // clamped px for the floating tooltip
-  tooltipTop: number // px — follows the hovered node (cartesian) / cursor (polar)
+  tooltipTop: number // px relative to the hovered node
 }
 
 export const CommonChartContext = createContext<CommonChart | null>(null)

@@ -174,8 +174,8 @@ func createAnalyticsTables(db *sql.DB) error {
 	return createQuotaWasteTables(db)
 }
 
-func (s *AnalyticsStore) quotaWasteSubscriptionSeats(accounts []*Account) (map[string]string, error) {
-	seats := make(map[string]string, len(accounts))
+func (s *AnalyticsStore) quotaWasteSubscriptionSeats() (map[string]string, error) {
+	seats := make(map[string]string)
 	if s == nil || s.db == nil {
 		return seats, fmt.Errorf("analytics unavailable")
 	}

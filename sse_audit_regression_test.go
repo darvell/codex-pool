@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -229,8 +230,27 @@ func TestStreamingBufferingFraming(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if string(response.contentText) != "FIRSTSECOND" || string(completion.contentText) != "FIRSTSECOND" || string(chat.contentText) != "FIRSTSECOND" || string(claude.contentText) != "FIRSTSECOND" {
-			t.Fatalf("buffered content missing at split %d", split)
+		responseBody := protocolJSON(t, response.Result())
+		output := responseBody["output"].([]any)
+		wantResponse := []any{map[string]any{"type": "output_text", "text": "FIRSTSECOND", "annotations": []any{}}}
+		if len(output) != 1 || !reflect.DeepEqual(output[0].(map[string]any)["content"], wantResponse) {
+			t.Fatalf("Responses content at split %d: %#v", split, output)
+		}
+		completionBody := protocolJSON(t, completion.Result())
+		choices := completionBody["choices"].([]any)
+		if len(choices) != 1 || choices[0].(map[string]any)["text"] != "FIRSTSECOND" {
+			t.Fatalf("completion content at split %d: %#v", split, choices)
+		}
+		chatBody := protocolJSON(t, chat.Result())
+		choices = chatBody["choices"].([]any)
+		wantMessage := map[string]any{"role": "assistant", "content": "FIRSTSECOND"}
+		if len(choices) != 1 || !reflect.DeepEqual(choices[0].(map[string]any)["message"], wantMessage) {
+			t.Fatalf("chat content at split %d: %#v", split, choices)
+		}
+		claudeBody := protocolJSON(t, claude.Result())
+		wantClaude := []any{map[string]any{"type": "text", "text": "FIRSTSECOND"}}
+		if !reflect.DeepEqual(claudeBody["content"], wantClaude) {
+			t.Fatalf("Claude content at split %d: %#v", split, claudeBody["content"])
 		}
 	}
 }
@@ -277,11 +297,23 @@ func TestStreamingIncompleteSiblings(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if response.status != "incomplete" || completionBuffer.finishReason != "length" || chatBuffer.finishReason != "length" || claudeBuffer.stopReason != "max_tokens" {
-		t.Fatal("incomplete terminal not mapped by buffering writer")
+	responseBody := protocolJSON(t, response.Result())
+	wantResponseUsage := map[string]any{"input_tokens": float64(7), "output_tokens": float64(3), "total_tokens": float64(10)}
+	if responseBody["status"] != "incomplete" || !reflect.DeepEqual(responseBody["usage"], wantResponseUsage) {
+		t.Fatalf("incomplete Responses result = %#v", responseBody)
 	}
-	if response.inputTokens != 7 || response.outputTokens != 3 || completionBuffer.inputTokens != 7 || completionBuffer.outputTokens != 3 || chatBuffer.inputTokens != 7 || chatBuffer.outputTokens != 3 || claudeBuffer.inputTokens != 7 || claudeBuffer.outputTokens != 3 {
-		t.Fatal("incomplete usage lost by buffering writer")
+	for name, body := range map[string][]byte{"completion": completionBuffer.Result(), "chat": chatBuffer.Result()} {
+		result := protocolJSON(t, body)
+		choices := result["choices"].([]any)
+		wantUsage := map[string]any{"prompt_tokens": float64(7), "completion_tokens": float64(3), "total_tokens": float64(10)}
+		if len(choices) != 1 || choices[0].(map[string]any)["finish_reason"] != "length" || !reflect.DeepEqual(result["usage"], wantUsage) {
+			t.Fatalf("incomplete %s result = %#v", name, result)
+		}
+	}
+	claudeBody := protocolJSON(t, claudeBuffer.Result())
+	wantClaudeUsage := map[string]any{"input_tokens": float64(7), "output_tokens": float64(3)}
+	if claudeBody["stop_reason"] != "max_tokens" || !reflect.DeepEqual(claudeBody["usage"], wantClaudeUsage) {
+		t.Fatalf("incomplete Claude result = %#v", claudeBody)
 	}
 }
 

@@ -92,7 +92,7 @@ func (r *responsesDecodedReader) Close() error {
 	return r.close()
 }
 
-func decodeResponsesRequest(ctx context.Context, src io.Reader, encoding string, maxWire, maxDecoded int64) (*responsesDecodedReader, error) {
+func decodeResponsesRequest(ctx context.Context, src io.Reader, encoding string, maxWire int64) (*responsesDecodedReader, error) {
 	if maxWire <= 0 {
 		return nil, errResponsesWireTooLarge
 	}
@@ -120,40 +120,6 @@ func decodeResponsesRequest(ctx context.Context, src io.Reader, encoding string,
 	default:
 		return nil, fmt.Errorf("%w: %q", errResponsesUnsupportedEncoding, encoding)
 	}
-}
-
-type streamedResponsesRequest struct {
-	File                    *os.File
-	Size                    int64
-	OriginalFile            *os.File
-	OriginalSize            int64
-	Model                   string
-	ServiceTier             string
-	ClientWantsNonStreaming bool
-	contextMetadata         map[string]any
-}
-
-func closeAndRemoveTemp(f *os.File) {
-	if f != nil {
-		n := f.Name()
-		_ = f.Close()
-		_ = os.Remove(n)
-	}
-}
-
-func (s *streamedResponsesRequest) Close() {
-	if s != nil {
-		closeAndRemoveTemp(s.File)
-		closeAndRemoveTemp(s.OriginalFile)
-		s.File = nil
-		s.OriginalFile = nil
-	}
-}
-
-var codexResponsesDroppedFields = map[string]bool{
-	"temperature": true, "top_p": true, "presence_penalty": true, "frequency_penalty": true,
-	"max_tokens": true, "max_completion_tokens": true, "max_output_tokens": true, "seed": true,
-	"logprobs": true, "top_logprobs": true, "metadata": true, "prompt_cache_scope": true,
 }
 
 // jsonLex copies JSON lexically. In particular it never turns payload strings
@@ -409,10 +375,6 @@ func (w *spoolLimitWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func streamCodexResponsesRequest(r io.Reader, maxBytes int64, rewriteModel func(string) string) (*streamedResponsesRequest, error) {
-	return streamResponsesRequest(r, maxBytes, responsesStreamOptions{rewriteModel: rewriteModel})
-}
-
 func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOptions) (_ *streamedResponsesRequest, err error) {
 	out, e := os.CreateTemp("", "codex-pool-responses-*.json")
 	if e != nil {
@@ -548,12 +510,7 @@ func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOpt
 					if hasBudget {
 						// Match injectThinkingBudget without decoding the prompt. Keep
 						// native-context metadata and apply the admission effort cap below.
-						suffixEffort = "medium"
-						if budget >= 10000 {
-							suffixEffort = "high"
-						} else if budget <= 2000 {
-							suffixEffort = "low"
-						}
+						suffixEffort = reasoningEffortFromBudget(float64(budget))
 					}
 				}
 				res.Model = model
@@ -622,7 +579,7 @@ func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOpt
 			f, keep, z := lex.spoolValueAndCheckMCP()
 			x = z
 			if x == nil && keep {
-				defer removeLexTemp(f)
+				defer closeAndRemoveTemp(f)
 				x = writeField(key, func() error {
 					_, z = f.Seek(0, 0)
 					if z != nil {
@@ -632,7 +589,7 @@ func streamResponsesRequest(r io.Reader, maxBytes int64, opts responsesStreamOpt
 					return z
 				})
 			} else if f != nil {
-				removeLexTemp(f)
+				closeAndRemoveTemp(f)
 			}
 		default:
 			x = writeField(key, func() error { return lex.copyValue(bw) })
@@ -743,7 +700,7 @@ func (l *jsonLex) decodeSmallValue(dst any, limit int64) error {
 	if err != nil {
 		return err
 	}
-	defer removeLexTemp(f)
+	defer closeAndRemoveTemp(f)
 	if err = l.copyValue(f); err != nil {
 		return err
 	}
@@ -794,38 +751,38 @@ func (l *jsonLex) copyToolsArray(out io.Writer, prepareSchema bool) error {
 		}
 		size, _ := f.Seek(0, io.SeekEnd)
 		if size > largeReplayBodyThreshold {
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 			return fmt.Errorf("individual tool definition exceeds %d bytes", largeReplayBodyThreshold)
 		}
 		if _, err = f.Seek(0, 0); err != nil {
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 			return err
 		}
 		var tool map[string]any
 		decoder := json.NewDecoder(f)
 		decoder.UseNumber()
 		if err = decoder.Decode(&tool); err != nil {
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 			return err
 		}
 		if typ, _ := tool["type"].(string); strings.TrimSpace(typ) == hostedMCPToolType {
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 			first = false
 			continue
 		}
 		if wrote {
 			if _, err = io.WriteString(out, ","); err != nil {
-				removeLexTemp(f)
+				closeAndRemoveTemp(f)
 				return err
 			}
 		}
 		if !prepareSchema {
 			if _, err = f.Seek(0, io.SeekStart); err != nil {
-				removeLexTemp(f)
+				closeAndRemoveTemp(f)
 				return err
 			}
 			_, err = io.Copy(out, f)
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 			if err != nil {
 				return err
 			}
@@ -841,7 +798,7 @@ func (l *jsonLex) copyToolsArray(out io.Writer, prepareSchema bool) error {
 			}
 		}
 		encoded, err := json.Marshal(tool)
-		removeLexTemp(f)
+		closeAndRemoveTemp(f)
 		if err != nil {
 			return err
 		}
@@ -924,22 +881,22 @@ func (l *jsonLex) copyFilteredArrayAfterOpen(out io.Writer) error {
 		if keep {
 			if wrote {
 				if _, e = io.WriteString(out, ","); e != nil {
-					removeLexTemp(f)
+					closeAndRemoveTemp(f)
 					return e
 				}
 			}
 			if _, e = f.Seek(0, 0); e != nil {
-				removeLexTemp(f)
+				closeAndRemoveTemp(f)
 				return e
 			}
 			_, e = io.Copy(out, f)
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 			if e != nil {
 				return e
 			}
 			wrote = true
 		} else {
-			removeLexTemp(f)
+			closeAndRemoveTemp(f)
 		}
 		first = false
 	}
@@ -957,20 +914,20 @@ func (l *jsonLex) spoolValueType() (*os.File, string, error) {
 	}
 	fw := bufio.NewWriterSize(f, 64*1024)
 	if e = l.copyValue(fw); e != nil {
-		removeLexTemp(f)
+		closeAndRemoveTemp(f)
 		return nil, "", e
 	}
 	if e = fw.Flush(); e != nil {
-		removeLexTemp(f)
+		closeAndRemoveTemp(f)
 		return nil, "", e
 	}
 	if _, e = f.Seek(0, 0); e != nil {
-		removeLexTemp(f)
+		closeAndRemoveTemp(f)
 		return nil, "", e
 	}
 	typ, e := scanDirectType(f)
 	if e != nil {
-		removeLexTemp(f)
+		closeAndRemoveTemp(f)
 		return nil, "", e
 	}
 	return f, typ, nil
@@ -1041,12 +998,5 @@ func scanDirectType(r io.Reader) (string, error) {
 			return "", e
 		}
 		first = false
-	}
-}
-func removeLexTemp(f *os.File) {
-	if f != nil {
-		n := f.Name()
-		_ = f.Close()
-		_ = os.Remove(n)
 	}
 }

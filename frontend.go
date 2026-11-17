@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed templates/local_landing.html templates/friend_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.webp templates/assets/favicon.ico
+//go:embed templates/friend_landing.html templates/cute_code_landing.html templates/og-image.png templates/og-image-transparent.webp templates/assets/favicon.ico
 var friendContent embed.FS
 
 //go:embed web/dist/index.html web/dist/assets/*
@@ -114,10 +114,9 @@ func (h *proxyHandler) serveHeroImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *proxyHandler) getEffectivePublicURL(r *http.Request) string {
-	if u := getPublicURL(); u != "" {
+	if u := h.cfg.publicURL(); u != "" {
 		return u
 	}
-	// Infer from request
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
@@ -193,7 +192,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 	}
 
 	if h.poolUsers == nil {
-		if getPoolJWTSecret() == "" {
+		if h.cfg.poolJWTSecret() == "" {
 			respondJSONError(w, http.StatusServiceUnavailable, "System error: Pool user system not configured (missing JWT secret).")
 			return
 		}
@@ -204,7 +203,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 	email := req.Email
 	if email == "" {
 		guestDomain := "pool.local"
-		if pubURL := getPublicURL(); pubURL != "" {
+		if pubURL := h.cfg.publicURL(); pubURL != "" {
 			if u, err := url.Parse(pubURL); err == nil && u.Host != "" {
 				host := u.Hostname()
 				if net.ParseIP(host) == nil {
@@ -233,7 +232,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	authData, err := generateCodexAuth(secret, newUser)
 	if err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "Failed to generate credentials.")
@@ -287,17 +286,17 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *proxyHandler) generateCuteCodeSettingsForToken(token string, r *http.Request) ([]byte, error) {
-	if h.poolUsers == nil {
+	if h.poolUsers == nil && h.passport == nil {
 		return nil, fmt.Errorf("pool users not configured")
 	}
-	user := h.poolUsers.GetByToken(token)
+	user := h.userForSetup(token)
 	if user == nil {
 		return nil, fmt.Errorf("invalid token")
 	}
 	if user.Disabled {
 		return nil, fmt.Errorf("user disabled")
 	}
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	if secret == "" {
 		return nil, fmt.Errorf("JWT secret not configured")
 	}
@@ -336,101 +335,13 @@ func (h *proxyHandler) serveCuteCodeSetupScript(w http.ResponseWriter, r *http.R
 	publicURL := h.getEffectivePublicURL(r)
 
 	if wantsPowerShell(r) {
-		script := fmt.Sprintf(`#requires -Version 5.1
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-$ConfigUrl = '%s/config/cute-code/%s'
-
-function Set-Utf8NoBom {
-  param([string]$Path, [string]$Value)
-  $utf8 = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
-}
-
-Write-Host 'Installing cute-code...'
-try {
-  Invoke-Expression (Invoke-RestMethod 'https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.ps1')
-} catch {
-  Write-Host "Warning: cute-code installer failed or was already installed: $_"
-}
-
-Write-Host 'Configuring cute-code for Codex Pool...'
-$claudeDir = $env:CLAUDE_CONFIG_DIR
-if ([string]::IsNullOrWhiteSpace($claudeDir)) { $claudeDir = Join-Path $HOME '.claude' }
-New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
-$settingsFile = Join-Path $claudeDir 'settings.json'
-
-$incoming = Invoke-RestMethod -Uri $ConfigUrl
-$settings = $null
-try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch {}
-if ($null -eq $settings) { $settings = New-Object PSObject }
-
-foreach ($prop in $incoming.PSObject.Properties) {
-  $settings | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
-}
-
-Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 20)
-Write-Host "cute-code pool settings saved to $settingsFile"
-Write-Host 'Run: cute-code --model gpt-6-astra'
-`, publicURL, token)
+		script := renderSetupScript(cuteCodePowerShell, setupScriptData{publicURL: publicURL, token: token})
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
 		return
 	}
 
-	script := fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-CONFIG_URL="%s/config/cute-code/%s"
-CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-TMP_FILE="$(mktemp)"
-
-mkdir -p "$CLAUDE_DIR"
-
-printf 'Installing cute-code...\n'
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash || true
-fi
-
-curl -fsSL "$CONFIG_URL" -o "$TMP_FILE"
-
-if command -v node >/dev/null 2>&1; then
-    SETTINGS_FILE="$SETTINGS_FILE" TMP_FILE="$TMP_FILE" node << 'NODE_SCRIPT'
-const fs = require('fs');
-const settingsFile = process.env.SETTINGS_FILE;
-const tmpFile = process.env.TMP_FILE;
-let settings = {};
-let incoming = {};
-try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
-incoming = JSON.parse(fs.readFileSync(tmpFile, 'utf8'));
-settings = { ...settings, ...incoming };
-fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
-NODE_SCRIPT
-elif command -v python3 >/dev/null 2>&1; then
-    SETTINGS_FILE="$SETTINGS_FILE" TMP_FILE="$TMP_FILE" python3 << 'PYTHON_SCRIPT'
-import json, os
-settings_file = os.environ['SETTINGS_FILE']
-tmp_file = os.environ['TMP_FILE']
-try:
-    with open(settings_file) as f: settings = json.load(f)
-except Exception:
-    settings = {}
-with open(tmp_file) as f: incoming = json.load(f)
-settings.update(incoming)
-with open(settings_file, 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-PYTHON_SCRIPT
-else
-    cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak" 2>/dev/null || true
-    cp "$TMP_FILE" "$SETTINGS_FILE"
-fi
-
-rm -f "$TMP_FILE"
-printf 'cute-code pool settings saved to %%s\n' "$SETTINGS_FILE"
-printf 'Run: cute-code --model gpt-6-astra\n'
-`, publicURL, token)
+	script := renderSetupScript(cuteCodeBash, setupScriptData{publicURL: publicURL, token: token})
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
 }
@@ -444,679 +355,14 @@ func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Requ
 	publicURL := h.getEffectivePublicURL(r)
 
 	if wantsPowerShell(r) {
-		script := fmt.Sprintf(`#requires -Version 5.1
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-$Token = '%s'
-$BaseUrl = '%s'
-
-$authDir = Join-Path $HOME '.codex'
-$configFile = Join-Path $authDir 'config.toml'
-$authFile = Join-Path $authDir 'auth.json'
-$modelCatalog = Join-Path $authDir 'model_catalog.json'
-$mcpScript = Join-Path $authDir 'model_sync.ps1'
-$nl = [Environment]::NewLine
-
-# PS 5.1 compat wrapper: ConvertFrom-Json -Depth was added in PS 6
-function ConvertFrom-JsonCompat {
-  param([Parameter(ValueFromPipeline)]$InputObject)
-  process {
-    if ($PSVersionTable.PSVersion.Major -ge 6) {
-      $InputObject | ConvertFrom-Json -Depth 20
-    } else {
-      $InputObject | ConvertFrom-Json
-    }
-  }
-}
-
-# PS 5.1 writes UTF-8 with BOM which breaks JSON/TOML parsers. Write without BOM.
-function Set-Utf8NoBom {
-  param([string]$Path, [string]$Value)
-  $utf8 = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
-}
-
-# Safe property check that works with Set-StrictMode -Version Latest
-function Has-Property {
-  param($Obj, [string]$Name)
-  if ($null -eq $Obj) { return $false }
-  if ($Obj -is [System.Collections.IDictionary]) { return $Obj.ContainsKey($Name) }
-  return [bool]($Obj.PSObject.Properties.Name -contains $Name)
-}
-
-Write-Host 'Initializing Codex Pool setup...'
-New-Item -ItemType Directory -Path $authDir -Force | Out-Null
-
-Write-Host '1. Fetching credentials...'
-$authUrl = "$BaseUrl/config/codex/$Token"
-if ($PSVersionTable.PSEdition -eq 'Desktop') {
-  $authContent = (Invoke-WebRequest -UseBasicParsing -Uri $authUrl).Content
-} else {
-  $authContent = (Invoke-WebRequest -Uri $authUrl).Content
-}
-Set-Utf8NoBom -Path $authFile -Value $authContent
-
-Write-Host '2. Fetching model catalog...'
-$raw = Get-Content -Path $authFile -Raw
-$auth = $raw | ConvertFrom-JsonCompat
-$accessToken = $null
-if ($auth -and (Has-Property $auth 'tokens') -and (Has-Property $auth.tokens 'access_token')) {
-  $accessToken = [string]$auth.tokens.access_token
-} elseif ($auth -and (Has-Property $auth 'access_token')) {
-  $accessToken = [string]$auth.access_token
-}
-if ([string]::IsNullOrWhiteSpace($accessToken)) {
-  throw 'Pool credentials are missing. Generate a new setup command from the pool page.'
-}
-$modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
-$headers = @{ Authorization = "Bearer $accessToken" }
-$tmp = [System.IO.Path]::GetTempFileName()
-try {
-  if ($PSVersionTable.PSEdition -eq 'Desktop') {
-    Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
-  } else {
-    Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
-  }
-  Move-Item -Force -Path $tmp -Destination $modelCatalog
-  Write-Host "Model catalog saved to $modelCatalog"
-} catch {
-  throw 'Model catalog download failed. Check your connection and rerun setup.'
-} finally {
-  if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
-}
-
-Write-Host '3. Installing model sync MCP sidecar...'
-$mcpContent = @'
-param(
-  [string]$BaseUrl = ""
-)
-
-$ErrorActionPreference = 'Stop'
-
-$authDir = Join-Path $HOME '.codex'
-$authFile = Join-Path $authDir 'auth.json'
-$modelCatalog = Join-Path $authDir 'model_catalog.json'
-
-# PS 5.1 compat wrapper: ConvertFrom-Json -Depth was added in PS 6
-function ConvertFrom-JsonCompat {
-  param([Parameter(ValueFromPipeline)]$InputObject)
-  process {
-    if ($PSVersionTable.PSVersion.Major -ge 6) {
-      $InputObject | ConvertFrom-Json -Depth 20
-    } else {
-      $InputObject | ConvertFrom-Json
-    }
-  }
-}
-
-function Refresh-ModelCatalog {
-  param([string]$Url)
-  if ([string]::IsNullOrWhiteSpace($Url)) { return }
-  if (-not (Test-Path $authFile)) { return }
-
-  try {
-    $raw = Get-Content -Path $authFile -Raw
-    $auth = $raw | ConvertFrom-JsonCompat
-  } catch {
-    return
-  }
-
-  $token = $null
-  if ($auth -and $auth.tokens -and $auth.tokens.access_token) {
-    $token = [string]$auth.tokens.access_token
-  } elseif ($auth -and $auth.access_token) {
-    $token = [string]$auth.access_token
-  }
-  if ([string]::IsNullOrWhiteSpace($token)) { return }
-
-  $modelsUrl = $Url.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
-  $headers = @{ Authorization = "Bearer $token" }
-
-  try {
-    $tmp = [System.IO.Path]::GetTempFileName()
-    if ($PSVersionTable.PSEdition -eq 'Desktop') {
-      Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 5 | Out-Null
-    } else {
-      Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 5 | Out-Null
-    }
-    Move-Item -Force -Path $tmp -Destination $modelCatalog
-  } catch {
-    if ($tmp -and (Test-Path $tmp)) { Remove-Item -Force -Path $tmp -ErrorAction SilentlyContinue }
-  }
-}
-
-function Write-McpResponse {
-  param(
-    [string]$Payload,
-    [string]$Transport = 'framed'
-  )
-
-  if ($Transport -eq 'jsonl') {
-    [Console]::Out.WriteLine($Payload)
-    [Console]::Out.Flush()
-    return
-  }
-
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
-  $nl = [Environment]::NewLine
-  [Console]::Out.Write("Content-Length: " + $bytes.Length + $nl + $nl + $Payload)
-  [Console]::Out.Flush()
-}
-
-Refresh-ModelCatalog -Url $BaseUrl
-
-while ($true) {
-  $transport = 'framed'
-  $contentLength = 0
-  $body = ''
-
-  $firstLine = [Console]::In.ReadLine()
-  if ($null -eq $firstLine) { exit 0 }
-
-  if ($firstLine -match '^[ \t]*\{') {
-    $transport = 'jsonl'
-    $body = $firstLine
-  } else {
-    $line = $firstLine
-    while ($true) {
-      if ($line -eq '') { break }
-      if ($line -match '^(?i)content-length:') {
-        $lengthText = ($line -split ':', 2)[1].Trim()
-        [int]::TryParse($lengthText, [ref]$contentLength) | Out-Null
-      }
-      $line = [Console]::In.ReadLine()
-      if ($null -eq $line) { exit 0 }
-    }
-  }
-
-  if ($transport -eq 'framed' -and $contentLength -le 0) { continue }
-  if ($transport -eq 'framed') {
-    $buffer = New-Object char[] $contentLength
-    $readTotal = 0
-    while ($readTotal -lt $contentLength) {
-      $readNow = [Console]::In.Read($buffer, $readTotal, $contentLength - $readTotal)
-      if ($readNow -le 0) { exit 0 }
-      $readTotal += $readNow
-    }
-    $body = -join $buffer
-  }
-
-  try {
-    $request = $body | ConvertFrom-JsonCompat
-  } catch {
-    continue
-  }
-
-  if (-not $request.PSObject.Properties.Name.Contains('id')) {
-    continue
-  }
-
-  $method = ''
-  if ($request.PSObject.Properties.Name.Contains('method')) {
-    $method = [string]$request.method
-  }
-
-  $result = $null
-  switch ($method) {
-    'initialize' {
-      $result = @{
-        protocolVersion = '2024-11-05'
-        capabilities = @{
-          tools = @{ listChanged = $false }
-          resources = @{ listChanged = $false }
-          prompts = @{ listChanged = $false }
-        }
-        serverInfo = @{
-          name = 'model_sync'
-          version = '1.0.0'
-        }
-      }
-    }
-    'tools/list' { $result = @{ tools = @() } }
-    'resources/list' { $result = @{ resources = @() } }
-    'prompts/list' { $result = @{ prompts = @() } }
-    'ping' { $result = @{} }
-    default {
-      $errorResponse = @{
-        jsonrpc = '2.0'
-        id = $request.id
-        error = @{
-          code = -32601
-          message = 'Method not found'
-        }
-      } | ConvertTo-Json -Compress -Depth 20
-      Write-McpResponse -Payload $errorResponse -Transport $transport
-      continue
-    }
-  }
-
-  $response = @{
-    jsonrpc = '2.0'
-    id = $request.id
-    result = $result
-  } | ConvertTo-Json -Compress -Depth 20
-  Write-McpResponse -Payload $response -Transport $transport
-}
-'@
-Set-Content -Path $mcpScript -Value $mcpContent -Encoding UTF8
-
-# Find PowerShell executable path robustly
-$mcpCommand = $null
-try { $mcpCommand = (Get-Process -Id $PID).Path } catch {}
-if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
-  try { $mcpCommand = (Get-Command pwsh -ErrorAction SilentlyContinue).Source } catch {}
-}
-if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
-  try { $mcpCommand = (Get-Command powershell -ErrorAction SilentlyContinue).Source } catch {}
-}
-if ([string]::IsNullOrWhiteSpace($mcpCommand)) {
-  $mcpCommand = 'powershell'
-}
-
-$modelCatalogToml = $modelCatalog -replace '\\', '\\\\'
-$mcpScriptToml = $mcpScript -replace '\\', '\\\\'
-$mcpCommandToml = $mcpCommand -replace '\\', '\\\\'
-
-Write-Host '4. Updating configuration...'
-if (-not (Test-Path $configFile)) {
-  New-Item -ItemType File -Path $configFile -Force | Out-Null
-}
-
-$existing = ''
-try { $existing = Get-Content -Path $configFile -Raw } catch {}
-if ($null -eq $existing) { $existing = '' }
-
-# Only a root model selects the default; profile models remain independent.
-$rootConfig = ($existing -split '(?m)^[ \t]*\[', 2)[0]
-if ($rootConfig -notmatch '(?m)^[ \t]*model[ \t]*=') {
-  $existing = 'model = "gpt-6-astra"' + $nl + $existing
-  Set-Utf8NoBom -Path $configFile -Value $existing
-}
-
-if ($existing -notmatch 'codex-pool') {
-  $new = @"
-# Codex Pool Proxy Config
-model_provider = "codex-pool"
-chatgpt_base_url = "$BaseUrl/backend-api"
-experimental_realtime_webrtc_call_base_url = "$BaseUrl/v1"
-experimental_realtime_ws_base_url = "$BaseUrl/v1"
-realtime.version = "v3"
-realtime.transport = "webrtc"
-model_catalog_json = "$modelCatalogToml"
-
-$existing
-
-[model_providers.codex-pool]
-name = "OpenAI via codex-pool proxy"
-base_url = "$BaseUrl"
-wire_api = "responses"
-requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
-
-[mcp_servers.model_sync]
-command = "$mcpCommandToml"
-args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
-"@
-
-  Set-Utf8NoBom -Path $configFile -Value $new
-  Write-Host "Configuration updated in $configFile"
-} else {
-  $updated = $false
-
-  if ($existing -notmatch '(?m)^[ \t]*model_catalog_json[ \t]*=') {
-    $existing = 'model_catalog_json = "' + $modelCatalogToml + '"' + $nl + $existing
-    $updated = $true
-  }
-
-  if ($existing -notmatch '(?m)^[ \t]*experimental_realtime_webrtc_call_base_url[ \t]*=') {
-    $existing = 'experimental_realtime_webrtc_call_base_url = "' + $BaseUrl + '/v1"' + $nl + $existing
-    $updated = $true
-  }
-
-  if ($existing -notmatch '(?m)^[ \t]*experimental_realtime_ws_base_url[ \t]*=') {
-    $existing = 'experimental_realtime_ws_base_url = "' + $BaseUrl + '/v1"' + $nl + $existing
-    $updated = $true
-  }
-
-  if ($existing -notmatch '(?m)^[ \t]*realtime\.version[ \t]*=' -and $existing -notmatch '(?m)^\[realtime\]') {
-    $existing = 'realtime.version = "v3"' + $nl + 'realtime.transport = "webrtc"' + $nl + $existing
-    $updated = $true
-  }
-
-  if ($existing -match '(?m)^\[mcp_servers\.codex_pool_model_sync\]') {
-    $existing = $existing -replace '(?m)^\[mcp_servers\.codex_pool_model_sync\]', '[mcp_servers.model_sync]'
-    $updated = $true
-  }
-
-  if ($existing -notmatch '(?m)^\[mcp_servers\.model_sync\]') {
-    $existing = $existing.TrimEnd() +
-      $nl + $nl +
-      '[mcp_servers.model_sync]' + $nl +
-      'command = "' + $mcpCommandToml + '"' + $nl +
-      'args = ["-NoLogo", "-NoProfile", "-File", "' + $mcpScriptToml + '", "' + $BaseUrl + '"]' + $nl
-    $updated = $true
-  }
-
-  if ($updated) {
-    Set-Utf8NoBom -Path $configFile -Value $existing
-    Write-Host "Configuration updated in $configFile"
-  } else {
-    Write-Host "Configuration already present in $configFile. Skipping."
-  }
-}
-
-try {
-  if (Get-Command codex -ErrorAction SilentlyContinue) {
-    & codex features enable realtime_conversation | Out-Null
-  }
-} catch {}
-
-Write-Host 'Setup complete! You are ready to use the pool.'
-`, token, publicURL)
+		script := renderSetupScript(codexPowerShell, setupScriptData{token: token, publicURL: publicURL})
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
 		return
 	}
 
-	script := fmt.Sprintf(`#!/bin/bash
-set -euo pipefail
-TOKEN="%s"
-BASE_URL="%s"
-AUTH_DIR="$HOME/.codex"
-CONFIG_FILE="$AUTH_DIR/config.toml"
-AUTH_FILE="$AUTH_DIR/auth.json"
-MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
-MCP_SCRIPT="$AUTH_DIR/model_sync.sh"
-
-echo "Initializing Codex Pool setup..."
-mkdir -p "$AUTH_DIR"
-
-echo "1. Fetching credentials..."
-curl -sL "$BASE_URL/config/codex/$TOKEN" -o "$AUTH_FILE"
-chmod 600 "$AUTH_FILE"
-
-echo "2. Fetching model catalog..."
-ACCESS_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
-if [ -z "${ACCESS_TOKEN:-}" ]; then
-    echo "Pool credentials are missing. Generate a new setup command from the pool page." >&2
-    exit 1
-fi
-CATALOG_TMP=$(mktemp "${MODEL_CATALOG}.tmp.XXXXXX")
-if ! curl --connect-timeout 5 --max-time 10 -fsSL \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    "$BASE_URL/backend-api/codex/models?client_version=0.125.0" \
-    -o "$CATALOG_TMP"; then
-    rm -f "$CATALOG_TMP"
-    echo "Model catalog download failed. Check your connection and rerun setup." >&2
-    exit 1
-fi
-chmod 600 "$CATALOG_TMP"
-mv "$CATALOG_TMP" "$MODEL_CATALOG"
-
-echo "3. Installing model sync MCP sidecar..."
-cat <<'EOF' > "$MCP_SCRIPT"
-#!/bin/bash
-set -euo pipefail
-
-BASE_URL="${1:-}"
-AUTH_DIR="${HOME}/.codex"
-AUTH_FILE="$AUTH_DIR/auth.json"
-MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
-CLIENT_VERSION="0.125.0"
-
-refresh_model_catalog() {
-    if [ -z "$BASE_URL" ] || [ ! -f "$AUTH_FILE" ]; then
-        return 0
-    fi
-
-    local token
-    token=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
-    if [ -z "${token:-}" ]; then
-        return 0
-    fi
-
-    local tmp_file
-    tmp_file=$(mktemp "${MODEL_CATALOG}.tmp.XXXXXX")
-    if curl --connect-timeout 2 --max-time 5 -fsSL -H "Authorization: Bearer $token" \
-        "${BASE_URL%%/}/backend-api/codex/models?client_version=${CLIENT_VERSION}" \
-        -o "$tmp_file"; then
-        mv "$tmp_file" "$MODEL_CATALOG"
-        chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
-    else
-        rm -f "$tmp_file"
-    fi
-}
-
-read_request() {
-    local line content_length
-    content_length=0
-
-    if ! IFS= read -r line; then
-        return 1
-    fi
-    line="${line%%$'\r'}"
-
-    if [[ "$line" == \{* ]]; then
-        MCP_TRANSPORT_MODE="jsonl"
-        REQUEST_BODY="$line"
-        return 0
-    fi
-
-    while true; do
-        if [ -z "$line" ]; then
-            break
-        fi
-        case "$line" in
-            [Cc]ontent-[Ll]ength:*|[Cc]ONTENT-[Ll]ENGTH:*|CONTENT-LENGTH:*|content-length:*)
-                content_length=$(printf '%%s' "${line#*:}" | tr -d '[:space:]')
-                ;;
-        esac
-        if ! IFS= read -r line; then
-            return 1
-        fi
-        line="${line%%$'\r'}"
-    done
-
-    if [ -z "$content_length" ] || ! [[ "$content_length" =~ ^[0-9]+$ ]] || [ "$content_length" -le 0 ]; then
-        return 1
-    fi
-
-    MCP_TRANSPORT_MODE="framed"
-    REQUEST_BODY=$(dd bs=1 count="$content_length" 2>/dev/null)
-    return 0
-}
-
-write_response() {
-    local payload="$1"
-    if [ "${MCP_TRANSPORT_MODE:-framed}" = "jsonl" ]; then
-        printf '%%s\n' "$payload"
-        return
-    fi
-
-    local length
-    length=$(printf '%%s' "$payload" | LC_ALL=C wc -c | tr -d '[:space:]')
-    printf 'Content-Length: %%s\r\n\r\n%%s' "$length" "$payload"
-}
-
-handle_request() {
-    local request="$1"
-    local method id payload
-
-    method=$(printf '%%s' "$request" | sed -n 's/.*"method"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-    id=$(printf '%%s' "$request" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | head -n 1)
-    if [ -z "${id:-}" ]; then
-        return 0
-    fi
-
-    case "$method" in
-        initialize)
-            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false},"resources":{"listChanged":false},"prompts":{"listChanged":false}},"serverInfo":{"name":"model_sync","version":"1.0.0"}}}'
-            ;;
-        tools/list)
-            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"tools":[]}}'
-            ;;
-        resources/list)
-            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"resources":[]}}'
-            ;;
-        prompts/list)
-            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{"prompts":[]}}'
-            ;;
-        ping)
-            payload='{"jsonrpc":"2.0","id":'"$id"',"result":{}}'
-            ;;
-        *)
-            payload='{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32601,"message":"Method not found"}}'
-            ;;
-    esac
-
-    write_response "$payload"
-}
-
-refresh_model_catalog >/dev/null 2>&1 &
-
-while true; do
-    REQUEST_BODY=""
-    if ! read_request; then
-        exit 0
-    fi
-    handle_request "$REQUEST_BODY"
-done
-EOF
-chmod 700 "$MCP_SCRIPT"
-
-echo "4. Updating configuration..."
-if [ ! -f "$CONFIG_FILE" ]; then
-    touch "$CONFIG_FILE"
-fi
-
-# Only a root model selects the default; profile models remain independent.
-if ! awk '/^[[:space:]]*\[/ { exit } /^[[:space:]]*model[[:space:]]*=/ { found=1 } END { exit !found }' "$CONFIG_FILE"; then
-    TEMP_FILE=$(mktemp)
-    printf 'model = "gpt-6-astra"\n' > "$TEMP_FILE"
-    cat "$CONFIG_FILE" >> "$TEMP_FILE"
-    mv "$TEMP_FILE" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-fi
-
-# Check if config already exists to avoid duplication
-if ! grep -q "codex-pool" "$CONFIG_FILE"; then
-    # Create temp file with pool config at TOP, then append existing config
-    TEMP_FILE=$(mktemp)
-    cat <<EOF > "$TEMP_FILE"
-# Codex Pool Proxy Config
-model_provider = "codex-pool"
-chatgpt_base_url = "$BASE_URL/backend-api"
-experimental_realtime_webrtc_call_base_url = "$BASE_URL/v1"
-experimental_realtime_ws_base_url = "$BASE_URL/v1"
-realtime.version = "v3"
-realtime.transport = "webrtc"
-model_catalog_json = "$MODEL_CATALOG"
-
-EOF
-    # Append existing config
-    cat "$CONFIG_FILE" >> "$TEMP_FILE"
-
-    # Add model_providers section at the end (sections go after top-level keys)
-    cat <<EOF >> "$TEMP_FILE"
-
-[model_providers.codex-pool]
-name = "OpenAI via codex-pool proxy"
-base_url = "$BASE_URL"
-wire_api = "responses"
-requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
-
-[mcp_servers.model_sync]
-command = "bash"
-args = ["$MCP_SCRIPT", "$BASE_URL"]
-EOF
-
-    mv "$TEMP_FILE" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-    echo "Configuration updated in $CONFIG_FILE"
-else
-    UPDATED=0
-
-    if ! grep -Eq '^[[:space:]]*model_catalog_json[[:space:]]*=' "$CONFIG_FILE"; then
-        TEMP_FILE=$(mktemp)
-        cat <<EOF > "$TEMP_FILE"
-model_catalog_json = "$MODEL_CATALOG"
-EOF
-        cat "$CONFIG_FILE" >> "$TEMP_FILE"
-        mv "$TEMP_FILE" "$CONFIG_FILE"
-        UPDATED=1
-    fi
-
-    if ! grep -Eq '^[[:space:]]*experimental_realtime_webrtc_call_base_url[[:space:]]*=' "$CONFIG_FILE"; then
-        TEMP_FILE=$(mktemp)
-        cat <<EOF > "$TEMP_FILE"
-experimental_realtime_webrtc_call_base_url = "$BASE_URL/v1"
-EOF
-        cat "$CONFIG_FILE" >> "$TEMP_FILE"
-        mv "$TEMP_FILE" "$CONFIG_FILE"
-        UPDATED=1
-    fi
-
-    if ! grep -Eq '^[[:space:]]*experimental_realtime_ws_base_url[[:space:]]*=' "$CONFIG_FILE"; then
-        TEMP_FILE=$(mktemp)
-        cat <<EOF > "$TEMP_FILE"
-experimental_realtime_ws_base_url = "$BASE_URL/v1"
-EOF
-        cat "$CONFIG_FILE" >> "$TEMP_FILE"
-        mv "$TEMP_FILE" "$CONFIG_FILE"
-        UPDATED=1
-    fi
-
-    if ! grep -Eq '^[[:space:]]*realtime\.version[[:space:]]*=' "$CONFIG_FILE" && ! grep -q '^\[realtime\]' "$CONFIG_FILE"; then
-        TEMP_FILE=$(mktemp)
-        cat <<EOF > "$TEMP_FILE"
-realtime.version = "v3"
-realtime.transport = "webrtc"
-EOF
-        cat "$CONFIG_FILE" >> "$TEMP_FILE"
-        mv "$TEMP_FILE" "$CONFIG_FILE"
-        UPDATED=1
-    fi
-
-    if grep -q '^\[mcp_servers\.codex_pool_model_sync\]' "$CONFIG_FILE"; then
-        TEMP_FILE=$(mktemp)
-        sed 's/^\[mcp_servers\.codex_pool_model_sync\]/[mcp_servers.model_sync]/' "$CONFIG_FILE" > "$TEMP_FILE"
-        mv "$TEMP_FILE" "$CONFIG_FILE"
-        UPDATED=1
-    fi
-
-    if ! grep -q '^\[mcp_servers\.model_sync\]' "$CONFIG_FILE"; then
-        cat <<EOF >> "$CONFIG_FILE"
-
-[mcp_servers.model_sync]
-command = "bash"
-args = ["$MCP_SCRIPT", "$BASE_URL"]
-EOF
-        UPDATED=1
-    fi
-
-    chmod 600 "$CONFIG_FILE"
-    if [ "$UPDATED" -eq 1 ]; then
-        echo "Configuration updated in $CONFIG_FILE"
-    else
-        echo "Configuration already present in $CONFIG_FILE. Skipping."
-    fi
-fi
-
-if command -v codex >/dev/null 2>&1; then
-    codex features enable realtime_conversation >/dev/null 2>&1 || true
-fi
-
-echo "Setup complete! You are ready to use the pool."
-`, token, publicURL)
+	script := renderSetupScript(codexBash, setupScriptData{token: token, publicURL: publicURL})
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
@@ -1129,12 +375,11 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Validate token and get user to generate credentials
-	if h.poolUsers == nil {
+	if h.poolUsers == nil && h.passport == nil {
 		http.Error(w, "pool users not configured", http.StatusServiceUnavailable)
 		return
 	}
-	user := h.poolUsers.GetByToken(token)
+	user := h.userForSetup(token)
 	if user == nil {
 		http.Error(w, "invalid token", http.StatusNotFound)
 		return
@@ -1144,8 +389,7 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Generate pool OAuth credentials for this user
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	if secret == "" {
 		http.Error(w, "JWT secret not configured", http.StatusServiceUnavailable)
 		return
@@ -1161,130 +405,14 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 	// Script sets env vars to bypass Google OAuth validation and route through proxy
 	// Uses GOOGLE_GENAI_USE_GCA + GOOGLE_CLOUD_ACCESS_TOKEN to skip getTokenInfo() check
 	if wantsPowerShell(r) {
-		script := fmt.Sprintf(`#requires -Version 5.1
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-$BaseUrl = '%s'
-$PoolToken = '%s'
-
-# PS 5.1 writes UTF-8 with BOM which breaks parsers. Write without BOM.
-function Set-Utf8NoBom {
-  param([string]$Path, [string]$Value)
-  $utf8 = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
-}
-
-Write-Host 'Configuring Gemini CLI for pool access...'
-Write-Host ''
-
-# Set env vars for the current session
-$env:CODE_ASSIST_ENDPOINT = $BaseUrl
-$env:GOOGLE_GENAI_USE_GCA = '1'
-$env:GOOGLE_CLOUD_ACCESS_TOKEN = $PoolToken
-
-# Persist env vars for future PowerShell sessions
-$profilePath = $PROFILE.CurrentUserAllHosts
-New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
-if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force -Path $profilePath | Out-Null }
-
-$start = '# >>> Gemini Pool Configuration >>>'
-$end = '# <<< Gemini Pool Configuration <<<'
-$nl = [Environment]::NewLine
-$blockLines = @(
-  $start,
-  ('$env:CODE_ASSIST_ENDPOINT = "' + $BaseUrl + '"'),
-  ('$env:GOOGLE_GENAI_USE_GCA = "1"'),
-  ('$env:GOOGLE_CLOUD_ACCESS_TOKEN = "' + $PoolToken + '"'),
-  $end
-)
-$block = $blockLines -join $nl
-
-$existing = ''
-try { $existing = Get-Content -Path $profilePath -Raw } catch {}
-if ($null -eq $existing) { $existing = '' }
-
-$pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
-if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
-  $updated = [regex]::Replace($existing, $pattern, $block, [Text.RegularExpressions.RegexOptions]::Singleline)
-} else {
-  $sep = ''; if ($existing -and -not ($existing.EndsWith($nl))) { $sep = $nl }
-  $updated = $existing + $sep + $nl + $block + $nl
-}
-
-Set-Utf8NoBom -Path $profilePath -Value $updated
-Write-Host ("Added Gemini pool config to " + $profilePath)
-
-Write-Host ''
-Write-Host 'Setup complete!'
-Write-Host ''
-Write-Host ("Gemini CLI will use the pool proxy at: " + $BaseUrl)
-Write-Host 'No Google login required - validation is bypassed.'
-Write-Host ''
-Write-Host 'Start a new terminal, or run: . $PROFILE'
-`, publicURL, geminiAuth.AccessToken)
+		script := renderSetupScript(geminiPowerShell, setupScriptData{publicURL: publicURL, accessToken: geminiAuth.AccessToken})
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
 		return
 	}
 
-	script := fmt.Sprintf(`#!/bin/bash
-set -e
-BASE_URL="%s"
-POOL_TOKEN="%s"
-
-echo "Configuring Gemini CLI for pool access..."
-echo ""
-
-# Add env vars to shell profile
-add_to_profile() {
-    for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
-        if [ -f "$profile" ]; then
-            # Remove old Gemini-related env vars
-            grep -v "GEMINI_API_KEY=" "$profile" 2>/dev/null | \
-            grep -v "GOOGLE_GEMINI_BASE_URL=" 2>/dev/null | \
-            grep -v "CODE_ASSIST_ENDPOINT=" 2>/dev/null | \
-            grep -v "GOOGLE_GENAI_USE_GCA=" 2>/dev/null | \
-            grep -v "GOOGLE_CLOUD_ACCESS_TOKEN=" 2>/dev/null > "$profile.tmp" || true
-            mv "$profile.tmp" "$profile"
-
-            # Add pool configuration
-            cat >> "$profile" << 'ENVEOF'
-
-# Gemini Pool Configuration
-export CODE_ASSIST_ENDPOINT="%s"
-export GOOGLE_GENAI_USE_GCA=1
-export GOOGLE_CLOUD_ACCESS_TOKEN="%s"
-ENVEOF
-            echo "✓ Added Gemini pool config to $(basename $profile)"
-            return
-        fi
-    done
-
-    # Fallback: create .zshrc
-    cat >> "$HOME/.zshrc" << 'ENVEOF'
-
-# Gemini Pool Configuration
-export CODE_ASSIST_ENDPOINT="%s"
-export GOOGLE_GENAI_USE_GCA=1
-export GOOGLE_CLOUD_ACCESS_TOKEN="%s"
-ENVEOF
-    echo "✓ Created ~/.zshrc with Gemini pool config"
-}
-
-add_to_profile
-
-echo ""
-echo "Setup complete!"
-echo ""
-echo "Gemini CLI will use the pool proxy at: $BASE_URL"
-echo "No Google login required - validation is bypassed."
-echo ""
-echo "Run 'source ~/.zshrc' or start a new terminal, then run 'gemini'."
-`, publicURL, geminiAuth.AccessToken,
-		publicURL, geminiAuth.AccessToken,
-		publicURL, geminiAuth.AccessToken)
+	script := renderSetupScript(geminiBash, setupScriptData{publicURL: publicURL, accessToken: geminiAuth.AccessToken})
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
@@ -1297,12 +425,11 @@ func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Validate token and get user
-	if h.poolUsers == nil {
+	if h.poolUsers == nil && h.passport == nil {
 		http.Error(w, "pool users not configured", http.StatusServiceUnavailable)
 		return
 	}
-	user := h.poolUsers.GetByToken(token)
+	user := h.userForSetup(token)
 	if user == nil {
 		http.Error(w, "invalid token", http.StatusNotFound)
 		return
@@ -1312,8 +439,7 @@ func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Generate Claude API key (JWT)
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	if secret == "" {
 		http.Error(w, "JWT secret not configured", http.StatusServiceUnavailable)
 		return
@@ -1327,399 +453,24 @@ func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Req
 	publicURL := h.getEffectivePublicURL(r)
 
 	if wantsPowerShell(r) {
-		script := fmt.Sprintf(`#requires -Version 5.1
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-$BaseUrl = '%s'
-$OAuthToken = '%s'
-
-# PS 5.1 writes UTF-8 with BOM which breaks JSON parsers. Write without BOM.
-function Set-Utf8NoBom {
-  param([string]$Path, [string]$Value)
-  $utf8 = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
-}
-
-function Read-JsonObject {
-  param([string]$Path)
-  if (-not (Test-Path $Path)) { return (New-Object PSObject) }
-  try {
-    $raw = Get-Content -Path $Path -Raw
-    if ([string]::IsNullOrWhiteSpace($raw)) { return (New-Object PSObject) }
-    $obj = $raw | ConvertFrom-Json
-    if ($null -eq $obj) { return (New-Object PSObject) }
-    return $obj
-  } catch {
-    $backup = $Path + '.bak'
-    Copy-Item -Path $Path -Destination $backup -Force -ErrorAction SilentlyContinue
-    Write-Host ("Warning: could not parse " + $Path + "; backed it up to " + $backup + " and recreated it.")
-    return (New-Object PSObject)
-  }
-}
-
-function Has-Property {
-  param($Obj, [string]$Name)
-  if ($null -eq $Obj) { return $false }
-  if ($Obj -is [System.Collections.IDictionary]) { return $Obj.Contains($Name) }
-  $prop = $null
-  try { $prop = $Obj.PSObject.Properties[$Name] } catch { return $false }
-  return ($null -ne $prop)
-}
-
-function Get-Property {
-  param($Obj, [string]$Name)
-  if (-not (Has-Property $Obj $Name)) { return $null }
-  if ($Obj -is [System.Collections.IDictionary]) { return $Obj[$Name] }
-  return $Obj.PSObject.Properties[$Name].Value
-}
-
-function Remove-ObjectProperty {
-  param([object]$Object, [string]$Name)
-  if ($null -eq $Object) { return }
-  if ($Object -is [System.Collections.IDictionary]) {
-    if ($Object.Contains($Name)) { $Object.Remove($Name) | Out-Null }
-    return
-  }
-  try {
-    if ($Object.PSObject.Properties[$Name]) {
-      $Object.PSObject.Properties.Remove($Name)
-    }
-  } catch {}
-}
-
-Write-Host 'Configuring Claude Code for pool access...'
-Write-Host ''
-
-$conflictingEnvVars = @(
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
-  'ANTHROPIC_UNIX_SOCKET',
-  'CLAUDE_CODE_SIMPLE'
-)
-
-# Claude Code disables Claude.ai OAuth mode when these auth/provider vars are present.
-foreach ($name in $conflictingEnvVars) {
-  Remove-Item -Path ("Env:" + $name) -ErrorAction SilentlyContinue
-  [Environment]::SetEnvironmentVariable($name, $null, 'User')
-}
-
-# Set env vars for this process and the user's default Windows environment.
-$env:ANTHROPIC_BASE_URL = $BaseUrl
-$env:CLAUDE_CODE_OAUTH_TOKEN = $OAuthToken
-[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $BaseUrl, 'User')
-[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', $OAuthToken, 'User')
-
-# Persist env vars for future PowerShell sessions.
-$profilePath = $PROFILE.CurrentUserAllHosts
-New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
-if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force -Path $profilePath | Out-Null }
-
-$start = '# >>> Claude Code Pool Configuration >>>'
-$end = '# <<< Claude Code Pool Configuration <<<'
-$nl = [Environment]::NewLine
-$blockLines = @(
-  $start,
-  'Remove-Item Env:\ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\ANTHROPIC_API_KEY -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\CLAUDE_CODE_USE_BEDROCK -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\CLAUDE_CODE_USE_VERTEX -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\CLAUDE_CODE_USE_FOUNDRY -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\ANTHROPIC_UNIX_SOCKET -ErrorAction SilentlyContinue',
-  'Remove-Item Env:\CLAUDE_CODE_SIMPLE -ErrorAction SilentlyContinue',
-  ('$env:ANTHROPIC_BASE_URL = "' + $BaseUrl + '"'),
-  ('$env:CLAUDE_CODE_OAUTH_TOKEN = "' + $OAuthToken + '"'),
-  $end
-)
-$block = $blockLines -join $nl
-
-$existing = ''
-try { $existing = Get-Content -Path $profilePath -Raw } catch {}
-if ($null -eq $existing) { $existing = '' }
-
-$pattern = [regex]::Escape($start) + '.*?' + [regex]::Escape($end)
-if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]::Singleline)) {
-  $updated = [regex]::Replace($existing, $pattern, $block, [Text.RegularExpressions.RegexOptions]::Singleline)
-} else {
-  $sep = ''; if ($existing -and -not ($existing.EndsWith($nl))) { $sep = $nl }
-  $updated = $existing + $sep + $nl + $block + $nl
-}
-
-Set-Utf8NoBom -Path $profilePath -Value $updated
-Write-Host ("Added Claude Code pool config to " + $profilePath)
-
-# Claude Code reads user settings from CLAUDE_CONFIG_DIR when set, otherwise ~/.claude.
-$claudeDir = $env:CLAUDE_CONFIG_DIR
-if ([string]::IsNullOrWhiteSpace($claudeDir)) { $claudeDir = Join-Path $HOME '.claude' }
-New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
-
-# Update settings.json with pool env and remove auth/provider settings that override OAuth.
-$settingsFile = Join-Path $claudeDir 'settings.json'
-$settings = Read-JsonObject -Path $settingsFile
-Remove-ObjectProperty -Object $settings -Name 'apiKeyHelper'
-$envObj = Get-Property $settings 'env'
-if ($null -eq $envObj) { $envObj = New-Object PSObject }
-foreach ($name in $conflictingEnvVars) { Remove-ObjectProperty -Object $envObj -Name $name }
-$envObj | Add-Member -MemberType NoteProperty -Name ANTHROPIC_BASE_URL -Value $BaseUrl -Force
-$envObj | Add-Member -MemberType NoteProperty -Name CLAUDE_CODE_OAUTH_TOKEN -Value $OAuthToken -Force
-$settings | Add-Member -MemberType NoteProperty -Name env -Value $envObj -Force
-Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 10)
-Write-Host ("Updated " + $settingsFile)
-
-# Update ~/.claude.json (skip onboarding)
-$claudeJsonFile = Join-Path $HOME '.claude.json'
-$claudeJson = Read-JsonObject -Path $claudeJsonFile
-$claudeJson | Add-Member -MemberType NoteProperty -Name hasCompletedOnboarding -Value $true -Force
-Set-Utf8NoBom -Path $claudeJsonFile -Value ($claudeJson | ConvertTo-Json -Depth 10)
-Write-Host ("Updated " + $claudeJsonFile)
-
-Write-Host ''
-Write-Host 'Setup complete!'
-Write-Host ''
-Write-Host ("Claude Code will now use the pool proxy at: " + $BaseUrl)
-Write-Host ''
-Write-Host 'Start a new terminal, or run: . $PROFILE'
-`, publicURL, claudeAuth.AccessToken)
+		script := renderSetupScript(claudePowerShell, setupScriptData{publicURL: publicURL, accessToken: claudeAuth.AccessToken})
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
 		return
 	}
 
-	script := fmt.Sprintf(`#!/bin/bash
-IS_SOURCED=0
-if [ -n "$ZSH_VERSION" ]; then
-    case $ZSH_EVAL_CONTEXT in *:file) IS_SOURCED=1 ;; esac
-elif [ -n "$BASH_VERSION" ]; then
-    if [ "${BASH_SOURCE[0]}" != "$0" ]; then IS_SOURCED=1; fi
-fi
-ERREXIT_WAS_SET=0
-case $- in *e*) ERREXIT_WAS_SET=1 ;; esac
-set -e
-BASE_URL="%s"
-OAUTH_TOKEN="%s"
-
-echo "Configuring Claude Code for pool access..."
-echo ""
-
-CONFLICTING_ENV_VARS=(
-    ANTHROPIC_AUTH_TOKEN
-    ANTHROPIC_API_KEY
-    CLAUDE_CODE_USE_BEDROCK
-    CLAUDE_CODE_USE_VERTEX
-    CLAUDE_CODE_USE_FOUNDRY
-    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
-    ANTHROPIC_UNIX_SOCKET
-    CLAUDE_CODE_SIMPLE
-)
-
-# Claude Code disables Claude.ai OAuth mode when these auth/provider vars are present.
-for name in "${CONFLICTING_ENV_VARS[@]}"; do
-    unset "$name"
-done
-
-# Set env vars in the current shell if this script is sourced
-export ANTHROPIC_BASE_URL="$BASE_URL"
-export CLAUDE_CODE_OAUTH_TOKEN="$OAUTH_TOKEN"
-
-# Add env vars to shell profile (Claude Code reads tokens from process.env)
-add_to_profile() {
-    for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
-        if [ -f "$profile" ]; then
-            tmp="$profile.tmp"
-            cp "$profile" "$tmp"
-            for name in ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN "${CONFLICTING_ENV_VARS[@]}"; do
-                grep -v -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$tmp" > "$tmp.next" || true
-                mv "$tmp.next" "$tmp"
-            done
-            mv "$tmp" "$profile"
-
-            # Add pool configuration
-            cat >> "$profile" << 'ENVEOF'
-
-# Claude Code Pool Configuration
-unset ANTHROPIC_AUTH_TOKEN
-unset ANTHROPIC_API_KEY
-unset CLAUDE_CODE_USE_BEDROCK
-unset CLAUDE_CODE_USE_VERTEX
-unset CLAUDE_CODE_USE_FOUNDRY
-unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
-unset ANTHROPIC_UNIX_SOCKET
-unset CLAUDE_CODE_SIMPLE
-export ANTHROPIC_BASE_URL="%s"
-export CLAUDE_CODE_OAUTH_TOKEN="%s"
-ENVEOF
-            echo "✓ Added Claude Code pool config to $(basename $profile)"
-            return
-        fi
-    done
-
-    # Fallback: create .zshrc
-    cat >> "$HOME/.zshrc" << 'ENVEOF'
-
-# Claude Code Pool Configuration
-unset ANTHROPIC_AUTH_TOKEN
-unset ANTHROPIC_API_KEY
-unset CLAUDE_CODE_USE_BEDROCK
-unset CLAUDE_CODE_USE_VERTEX
-unset CLAUDE_CODE_USE_FOUNDRY
-unset CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST
-unset ANTHROPIC_UNIX_SOCKET
-unset CLAUDE_CODE_SIMPLE
-export ANTHROPIC_BASE_URL="%s"
-export CLAUDE_CODE_OAUTH_TOKEN="%s"
-ENVEOF
-    echo "✓ Created ~/.zshrc with Claude Code pool config"
-}
-
-CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-mkdir -p "$CLAUDE_DIR"
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
-CLAUDE_JSON="$HOME/.claude.json"
-
-# Update settings.json with env vars
-update_settings() {
-    if command -v node &> /dev/null; then
-        node << 'NODE_SCRIPT'
-const fs = require('fs');
-const path = require('path');
-const dir = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME, '.claude');
-const file = path.join(dir, 'settings.json');
-const conflictingEnvVars = [
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
-  'ANTHROPIC_UNIX_SOCKET',
-  'CLAUDE_CODE_SIMPLE',
-];
-let settings = {};
-try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-delete settings.apiKeyHelper;
-settings.env = settings.env || {};
-for (const name of conflictingEnvVars) delete settings.env[name];
-settings.env.ANTHROPIC_BASE_URL = '%s';
-settings.env.CLAUDE_CODE_OAUTH_TOKEN = '%s';
-fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
-console.log('✓ Updated settings.json (node)');
-NODE_SCRIPT
-    elif command -v python3 &> /dev/null; then
-        python3 << 'PYTHON_SCRIPT'
-import json, os
-dir = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude')
-file = os.path.join(dir, 'settings.json')
-conflicting_env_vars = [
-    'ANTHROPIC_AUTH_TOKEN',
-    'ANTHROPIC_API_KEY',
-    'CLAUDE_CODE_USE_BEDROCK',
-    'CLAUDE_CODE_USE_VERTEX',
-    'CLAUDE_CODE_USE_FOUNDRY',
-    'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
-    'ANTHROPIC_UNIX_SOCKET',
-    'CLAUDE_CODE_SIMPLE',
-]
-try:
-    with open(file) as f: settings = json.load(f)
-except: settings = {}
-settings.pop('apiKeyHelper', None)
-settings.setdefault('env', {})
-for name in conflicting_env_vars:
-    settings['env'].pop(name, None)
-settings['env']['ANTHROPIC_BASE_URL'] = '%s'
-settings['env']['CLAUDE_CODE_OAUTH_TOKEN'] = '%s'
-with open(file, 'w') as f: json.dump(settings, f, indent=2); f.write('\n')
-print("✓ Updated settings.json (python)")
-PYTHON_SCRIPT
-    else
-        [ -f "$SETTINGS_FILE" ] && cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
-        cat > "$SETTINGS_FILE" << 'EOF'
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "%s",
-    "CLAUDE_CODE_OAUTH_TOKEN": "%s"
-  }
-}
-EOF
-        echo "✓ Created settings.json (bash fallback)"
-    fi
-}
-
-# Update ~/.claude.json with hasCompletedOnboarding
-update_claude_json() {
-    if command -v node &> /dev/null; then
-        node << 'NODE_SCRIPT'
-const fs = require('fs');
-const path = require('path');
-const file = path.join(process.env.HOME, '.claude.json');
-let config = {};
-try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-config.hasCompletedOnboarding = true;
-fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
-console.log('✓ Updated .claude.json (node)');
-NODE_SCRIPT
-    elif command -v python3 &> /dev/null; then
-        python3 << 'PYTHON_SCRIPT'
-import json, os
-file = os.path.expanduser("~/.claude.json")
-try:
-    with open(file) as f: config = json.load(f)
-except: config = {}
-config['hasCompletedOnboarding'] = True
-with open(file, 'w') as f: json.dump(config, f, indent=2); f.write('\n')
-print("✓ Updated .claude.json (python)")
-PYTHON_SCRIPT
-    else
-        [ -f "$CLAUDE_JSON" ] && cp "$CLAUDE_JSON" "$CLAUDE_JSON.bak"
-        if [ -f "$CLAUDE_JSON" ]; then
-            # Try to preserve existing content (basic append)
-            tmp=$(mktemp)
-            cat "$CLAUDE_JSON" | sed 's/}$/,"hasCompletedOnboarding":true}/' > "$tmp"
-            mv "$tmp" "$CLAUDE_JSON"
-        else
-            echo '{"hasCompletedOnboarding":true}' > "$CLAUDE_JSON"
-        fi
-        echo "✓ Updated .claude.json (bash fallback)"
-    fi
-}
-
-update_settings
-update_claude_json
-add_to_profile
-
-echo ""
-echo "Setup complete!"
-echo ""
-echo "Claude Code will now use the pool proxy at: $BASE_URL"
-echo ""
-echo "Run 'source ~/.zshrc' (or ~/.bashrc) or start a new terminal, then run 'claude'."
-if [ "$IS_SOURCED" -eq 1 ] && [ "$ERREXIT_WAS_SET" -eq 0 ]; then
-    set +e
-fi
-`, publicURL, claudeAuth.AccessToken,
-		publicURL, claudeAuth.AccessToken,
-		publicURL, claudeAuth.AccessToken,
-		publicURL, claudeAuth.AccessToken, // node
-		publicURL, claudeAuth.AccessToken, // python
-		publicURL, claudeAuth.AccessToken) // bash fallback
+	script := renderSetupScript(claudeBash, setupScriptData{publicURL: publicURL, accessToken: claudeAuth.AccessToken})
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))
 }
 
-// hashAccountID creates a short anonymized hash of an account identifier
 func hashAccountID(id string) string {
 	h := sha256.Sum256([]byte(id + "pool-salt-2024"))
 	return hex.EncodeToString(h[:])[:12]
 }
 
-// formatPlanWithTier appends the rate limit tier suffix (e.g. "max 20x") if available.
 func formatPlanWithTier(planType, tier string) string {
 	switch tier {
 	case "default_claude_max_20x":
@@ -1731,7 +482,6 @@ func formatPlanWithTier(planType, tier string) string {
 	}
 }
 
-// PoolStats represents anonymized pool statistics
 type PoolStats struct {
 	TotalAccounts    int               `json:"total_accounts"`
 	ActiveAccounts   int               `json:"active_accounts"`
@@ -1828,7 +578,6 @@ type AggregateStats struct {
 	CostByProvider           map[string]ProviderCostSummary `json:"cost_by_provider,omitempty"`
 }
 
-// CapacityAnalysis contains token capacity estimation data for the stats API.
 type CapacityAnalysis struct {
 	TotalSamples int64                       `json:"total_samples"`
 	Plans        map[string]PlanCapacityInfo `json:"plans"`
@@ -1877,6 +626,8 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 	if h.poolUsers != nil {
 		stats.TotalPoolUsers = len(h.poolUsers.List())
 	}
+
+	billingInputs := make([]accountBillingInput, 0, len(accounts))
 
 	var totalInput, totalCached, totalOutput, totalReasoning, totalBillable int64
 	var primarySum, secondarySum float64
@@ -1967,7 +718,7 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			as.ResetCreditExpirations = append(as.ResetCreditExpirations, credit.ExpiresAt.UTC().Format(time.RFC3339Nano))
 		}
 		if acc.Type == AccountTypeAntigravity {
-			as.QuotaWindows = antigravityQuotaWindows(acc.ID, stats.GeneratedAt)
+			as.QuotaWindows = antigravityQuotaWindows(&h.pool.antigravityModels, acc.ID, stats.GeneratedAt)
 		}
 
 		totalInput += acc.Totals.TotalInputTokens
@@ -1984,11 +735,13 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			secondaryCount++
 		}
 
+		billingInputs = append(billingInputs, accountBillingInput{
+			accountID: acc.ID, accountType: acc.Type, plan: billingPlan(acc.PlanType, acc.RateLimitTier), addedAt: acc.AddedAt,
+		})
 		acc.mu.Unlock()
 		stats.Accounts = append(stats.Accounts, as)
 	}
 
-	// Mark the highest-scoring account per provider type as primary
 	highestScore := make(map[string]float64)
 	highestIdx := make(map[string]int)
 	for i, as := range stats.Accounts {
@@ -2028,7 +781,6 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		OverallCacheHitRate:  overallCacheRate,
 	}
 
-	// Load capacity analysis from store
 	if h.store != nil {
 		caps, err := h.store.loadAllPlanCapacity()
 		if err == nil && len(caps) > 0 {
@@ -2071,7 +823,6 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Include last 24h tokens aggregate from hourly buckets
 	if h.store != nil {
 		if hourly, err := h.store.getGlobalHourlyUsage(24); err == nil {
 			for _, hu := range hourly {
@@ -2084,35 +835,22 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Populate cost data from analytics store
 	if h.analyticsStore != nil {
-		// Per-account costs and their measurement periods.
 		allTimeCostStats, _ := h.analyticsStore.getAllTimeAccountCostStats()
 		last30dCosts, _ := h.analyticsStore.getCostByAccount(30)
 
-		// Build account ID -> real ID mapping for cost lookup
-		// (stats use hashed IDs, costs use real IDs)
-		accountIDMap := make(map[string]string) // hashed -> real
-		accountAddedAt := make(map[string]time.Time)
-		for _, acc := range accounts {
-			acc.mu.Lock()
-			accountIDMap[hashAccountID(acc.ID)] = acc.ID
-			accountAddedAt[acc.ID] = acc.AddedAt
-			acc.mu.Unlock()
-		}
-
-		// Update per-account cost fields
 		for i := range stats.Accounts {
 			as := &stats.Accounts[i]
-			realID := accountIDMap[as.ID]
+			billing := billingInputs[i]
+			realID := billing.accountID
 
-			subCost, subLabel := getSubscriptionCost(AccountType(as.Type), accountPlanForSubscription(as.PlanType))
+			subCost, subLabel := getSubscriptionCost(billing.accountType, billing.plan)
 			costStats := allTimeCostStats[realID]
 			as.SubscriptionCostMonthly = subCost
 			as.SubscriptionLabel = subLabel
 			as.APICostEstimate = costStats.CostUSD
 			as.APICostLast30d = last30dCosts[realID]
-			spendStart := accountAddedAt[realID]
+			spendStart := billing.addedAt
 			if spendStart.IsZero() {
 				// Legacy in-memory fixtures can lack an admission timestamp. Keep
 				// historical cost data as their compatibility fallback only.
@@ -2130,7 +868,6 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Provider-level aggregation
 		providerCosts := make(map[string]ProviderCostSummary)
 		for i := range stats.Accounts {
 			as := &stats.Accounts[i]
@@ -2182,7 +919,6 @@ func (h *proxyHandler) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Daily cost trend for chart
 		if dailyCosts, err := h.analyticsStore.getDailyCosts(30); err == nil {
 			stats.DailyCosts = dailyCosts
 		}
@@ -2255,10 +991,7 @@ func (h *proxyHandler) computeCyberPolicyStats(accounts []*Account) CyberPolicyS
 	return out
 }
 
-// accountPlanForSubscription normalizes plan type strings for subscription cost lookup.
 func accountPlanForSubscription(planType string) string {
-	// The plan type from the pool may include tier info like "pro 5x", "pro 20x"
-	// Normalize for subscription lookup
 	pt := strings.ToLower(strings.TrimSpace(planType))
 	switch {
 	case strings.Contains(pt, "20x"):
@@ -2283,7 +1016,7 @@ func (h *proxyHandler) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	var userID string
 	var userType string
 	authHeader := r.Header.Get("Authorization")
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	originID := hashRequestOrigin(r, h.originHashSalt())
 
 	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*)

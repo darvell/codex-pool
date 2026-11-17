@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -200,106 +201,49 @@ func preserveUsageSnapshots(current, loaded []*Account) {
 	}
 }
 
-// setAccountDisabled changes whether an account may receive traffic and
-// persists the state in its provider file.
 func (h *proxyHandler) setAccountDisabled(w http.ResponseWriter, accountID string, disabled bool, responseIDs ...string) {
 	responseID := accountID
 	if len(responseIDs) > 0 {
 		responseID = responseIDs[0]
 	}
-	h.pool.mu.RLock()
-	var target *Account
-	for _, account := range h.pool.accounts {
-		if account.ID == accountID {
-			target = account
-			break
+	state := accountEnabled
+	if disabled {
+		state = accountDisabled
+	}
+	if err := h.pool.setDisabled(accountID, state); err != nil {
+		if errors.Is(err, errAccountNotFound) {
+			respondJSONError(w, http.StatusNotFound, "account not found")
+			return
 		}
-	}
-	h.pool.mu.RUnlock()
-	if target == nil {
-		respondJSONError(w, http.StatusNotFound, "account not found")
-		return
-	}
-
-	target.mu.Lock()
-	previous := target.Disabled
-	target.Disabled = disabled
-	target.mu.Unlock()
-	if err := saveAccount(target); err != nil {
-		target.mu.Lock()
-		target.Disabled = previous
-		target.mu.Unlock()
 		respondJSONError(w, http.StatusInternalServerError, "failed to persist account state")
 		return
 	}
-
-	action := "enabled"
-	if disabled {
-		action = "disabled"
-	}
-	log.Printf("%s account %s", action, accountID)
 	respondJSON(w, map[string]any{"status": "ok", "account": responseID, "disabled": disabled})
 }
 
-// resurrectAccount marks a dead account as alive and resets its penalty.
 func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string, responseIDs ...string) {
 	responseID := accountID
 	if len(responseIDs) > 0 {
 		responseID = responseIDs[0]
 	}
-	h.pool.mu.Lock()
-	defer h.pool.mu.Unlock()
-
-	for _, a := range h.pool.accounts {
-		if a.ID == accountID {
-			a.mu.Lock()
-			wasDead := a.Dead
-			wasRateLimited := !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(time.Now())
-			a.Dead = false
-			a.Penalty = 0
-			a.RateLimitUntil = time.Time{}
-			a.mu.Unlock()
-			log.Printf("resurrected account %s (was_dead=%v, was_rate_limited=%v)", accountID, wasDead, wasRateLimited)
-			w.WriteHeader(http.StatusOK)
-			respondJSON(w, map[string]any{"status": "ok", "account": responseID, "was_dead": wasDead})
-			return
-		}
+	wasDead, err := h.pool.reviveAccount(accountID)
+	if err != nil {
+		respondJSONError(w, http.StatusNotFound, "account not found")
+		return
 	}
-
-	respondJSONError(w, http.StatusNotFound, "account not found")
+	w.WriteHeader(http.StatusOK)
+	respondJSON(w, map[string]any{"status": "ok", "account": responseID, "was_dead": wasDead})
 }
 
-// clearAllRateLimits clears rate limits on all accounts.
 func (h *proxyHandler) clearAllRateLimits(w http.ResponseWriter) {
-	h.pool.mu.Lock()
-	defer h.pool.mu.Unlock()
-
-	now := time.Now()
-	cleared := 0
-	for _, a := range h.pool.accounts {
-		a.mu.Lock()
-		if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
-			a.RateLimitUntil = time.Time{}
-			cleared++
-		}
-		a.mu.Unlock()
-	}
-
+	cleared := h.pool.clearRateLimits()
 	log.Printf("cleared rate limits on %d accounts", cleared)
 	respondJSON(w, map[string]any{"status": "ok", "cleared": cleared})
 }
 
-// purgeAnonymousUsers removes all usage data for users that are not registered pool users.
 func (h *proxyHandler) purgeAnonymousUsers(w http.ResponseWriter, operatorSafe ...bool) {
 	sanitizeErrors := len(operatorSafe) > 0 && operatorSafe[0]
-	allowed := make(map[string]bool)
-	if h.poolUsers != nil {
-		for _, u := range h.poolUsers.List() {
-			allowed[u.ID] = true
-		}
-	}
-
-	deleted, err := h.store.purgeNonPoolUsers(allowed)
+	deleted, kept, err := h.purgeUnregisteredUsage()
 	if err != nil {
 		log.Printf("purge anonymous users failed: %v", err)
 		message := "purge failed: " + err.Error()
@@ -309,14 +253,8 @@ func (h *proxyHandler) purgeAnonymousUsers(w http.ResponseWriter, operatorSafe .
 		respondJSONError(w, http.StatusInternalServerError, message)
 		return
 	}
-
-	log.Printf("purged %d anonymous usage entries (kept %d pool users)", deleted, len(allowed))
-	respondJSON(w, map[string]any{"status": "ok", "deleted": deleted, "kept_users": len(allowed)})
-}
-
-// forceRefreshAccount forces a token refresh for a specific account, bypassing rate limits.
-func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID string, responseIDs ...string) {
-	h.forceRefreshAccountWithSafety(w, accountID, false, responseIDs...)
+	log.Printf("purged %d anonymous usage entries (kept %d pool users)", deleted, kept)
+	respondJSON(w, map[string]any{"status": "ok", "deleted": deleted, "kept_users": kept})
 }
 
 func (h *proxyHandler) forceRefreshAccountWithSafety(w http.ResponseWriter, accountID string, sanitizeErrors bool, responseIDs ...string) {
@@ -324,35 +262,15 @@ func (h *proxyHandler) forceRefreshAccountWithSafety(w http.ResponseWriter, acco
 	if len(responseIDs) > 0 {
 		responseID = responseIDs[0]
 	}
-	h.pool.mu.RLock()
-	var target *Account
-	for _, a := range h.pool.accounts {
-		if a.ID == accountID {
-			target = a
-			break
-		}
-	}
-	h.pool.mu.RUnlock()
-
-	if target == nil {
+	err := h.refreshManagedAccount(context.Background(), accountID)
+	if errors.Is(err, errAccountNotFound) {
 		respondJSONError(w, http.StatusNotFound, "account not found")
 		return
 	}
-
-	// Clear rate limit first
-	target.mu.Lock()
-	target.RateLimitUntil = time.Time{}
-	target.LastRefresh = time.Time{} // Clear last refresh to bypass needsRefresh check
-	hasRefreshToken := target.RefreshToken != ""
-	target.mu.Unlock()
-
-	if !hasRefreshToken {
+	if errors.Is(err, errNoRefreshToken) {
 		respondJSONError(w, http.StatusBadRequest, "account has no refresh token")
 		return
 	}
-
-	// Force refresh
-	err := h.refreshAccountOnce(context.Background(), target)
 	if err != nil {
 		log.Printf("force refresh %s failed: %v", accountID, err)
 		message := "refresh failed: " + err.Error()
@@ -362,7 +280,6 @@ func (h *proxyHandler) forceRefreshAccountWithSafety(w http.ResponseWriter, acco
 		respondJSONError(w, http.StatusInternalServerError, message)
 		return
 	}
-
 	log.Printf("force refresh %s succeeded", accountID)
 	respondJSON(w, map[string]any{"status": "ok", "account": responseID})
 }
@@ -497,7 +414,7 @@ func (h *proxyHandler) serveFakeOAuthToken(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *proxyHandler) handlePoolUserRefresh(w http.ResponseWriter, refreshToken string) {
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	if secret == "" {
 		respondJSONError(w, http.StatusServiceUnavailable, "JWT secret not configured")
 		return

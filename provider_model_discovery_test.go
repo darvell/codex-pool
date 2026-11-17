@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -147,7 +148,7 @@ func TestParseProviderModelsPreservesCapabilities(t *testing.T) {
 		t.Fatalf("daybreak metadata = %#v", daybreak)
 	}
 	k3 := models["k3-256k"]
-	if !k3.Reasoning || !containsString(k3.Modalities, "image") || containsString(k3.Modalities, "video") {
+	if !k3.Reasoning || !slices.Contains(k3.Modalities, "image") || slices.Contains(k3.Modalities, "video") {
 		t.Fatalf("K3-256k capabilities = %#v", k3)
 	}
 }

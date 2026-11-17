@@ -10,24 +10,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
 )
 
-func TestStreamCodexResponsesRequestLargePayloadAndFiltering(t *testing.T) {
+func TestStreamResponsesRequestLargePayloadAndFiltering(t *testing.T) {
 	huge := strings.Repeat("x", 20*1024*1024)
 	src := `{"model":"alias","temperature":0.7,"store":true,"stream":false,` +
 		`"input":[{"content":"` + huge + `","type":"message"},{"payload":"secret","type":"mcp_call"}],` +
 		`"tools":[{"name":"bad","type":"mcp"},{"name":"ok","type":"function"}],` +
 		`"tool_choice":{"server":"bad","type":"mcp"}}`
-	got, err := streamCodexResponsesRequest(strings.NewReader(src), 64*1024*1024, func(model string) string {
+	got, err := streamResponsesRequest(strings.NewReader(src), 64*1024*1024, responsesStreamOptions{rewriteModel: func(model string) string {
 		if model == "alias" {
 			return "gpt-5.6"
 		}
 		return model
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +57,13 @@ func TestStreamCodexResponsesRequestLargePayloadAndFiltering(t *testing.T) {
 	if len(input) != 1 {
 		t.Fatalf("input len=%d", len(input))
 	}
-	if len(input[0].(map[string]any)["content"].(string)) != len(huge) {
+	if input[0].(map[string]any)["content"] != huge {
 		t.Fatal("large payload changed")
 	}
 }
 
-func TestStreamCodexResponsesRequestWrapsStringInput(t *testing.T) {
-	got, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","input":"hello\nworld"}`), 64*1024*1024, nil)
+func TestStreamResponsesRequestWrapsStringInput(t *testing.T) {
+	got, err := streamResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","input":"hello\nworld"}`), 64*1024*1024, responsesStreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +80,10 @@ func TestStreamCodexResponsesRequestWrapsStringInput(t *testing.T) {
 	}
 }
 
-func TestStreamCodexResponsesRequestFindsTypeAfterHugeField(t *testing.T) {
+func TestStreamResponsesRequestFindsTypeAfterHugeField(t *testing.T) {
 	huge := strings.Repeat("z", 10*1024*1024)
 	src := `{"model":"gpt-5.6","input":[{"payload":"` + huge + `","type":"mcp_approval_response"},{"type":"message","content":"ok"}]}`
-	got, err := streamCodexResponsesRequest(strings.NewReader(src), 64*1024*1024, nil)
+	got, err := streamResponsesRequest(strings.NewReader(src), 64*1024*1024, responsesStreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,32 +94,31 @@ func TestStreamCodexResponsesRequestFindsTypeAfterHugeField(t *testing.T) {
 	}
 }
 
-func TestStreamCodexResponsesRequestPreservesDefaultFields(t *testing.T) {
-	got, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"instructions":"hello","custom":{"ok":true}}`), 64*1024*1024, nil)
+func TestStreamResponsesRequestPreservesDefaultFields(t *testing.T) {
+	got, err := streamResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"instructions":"hello","custom":{"ok":true}}`), 64*1024*1024, responsesStreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer got.Close()
 	body, _ := io.ReadAll(got.File)
-	if !json.Valid(body) {
-		t.Fatalf("invalid JSON: %s", body)
-	}
 	var obj map[string]any
-	_ = json.Unmarshal(body, &obj)
-	if obj["instructions"] != "hello" {
-		t.Fatalf("%#v", obj)
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatalf("invalid JSON: %v: %s", err, body)
+	}
+	if obj["instructions"] != "hello" || !reflect.DeepEqual(obj["custom"], map[string]any{"ok": true}) {
+		t.Fatalf("preserved fields changed: %#v", obj)
 	}
 }
 
-func TestStreamCodexResponsesRequestRejectsDuplicateTypeBypass(t *testing.T) {
-	_, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"input":[{"type":"message","type":"mcp_call","payload":"secret"}]}`), 64*1024*1024, nil)
+func TestStreamResponsesRequestRejectsDuplicateTypeBypass(t *testing.T) {
+	_, err := streamResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"input":[{"type":"message","type":"mcp_call","payload":"secret"}]}`), 64*1024*1024, responsesStreamOptions{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate type") {
 		t.Fatalf("err=%v", err)
 	}
 }
 
-func TestStreamCodexResponsesRequestNormalizesToolSchema(t *testing.T) {
-	got, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"tools":[{"type":"function","name":"x","parameters":{"type":"object","properties":{"nested":{"type":"object","required":null}},"required":null}}]}`), 64*1024*1024, nil)
+func TestStreamResponsesRequestNormalizesToolSchema(t *testing.T) {
+	got, err := streamResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"tools":[{"type":"function","name":"x","parameters":{"type":"object","properties":{"nested":{"type":"object","required":null}},"required":null}}]}`), 64*1024*1024, responsesStreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,8 +141,8 @@ func TestStreamCodexResponsesRequestNormalizesToolSchema(t *testing.T) {
 	}
 }
 
-func TestStreamCodexResponsesRequestEnforcesSpoolLimit(t *testing.T) {
-	_, err := streamCodexResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"input":"`+strings.Repeat("x", 2048)+`"}`), 1024, nil)
+func TestStreamResponsesRequestEnforcesSpoolLimit(t *testing.T) {
+	_, err := streamResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","stream":true,"input":"`+strings.Repeat("x", 2048)+`"}`), 1024, responsesStreamOptions{})
 	if !errors.Is(err, errResponsesSpoolTooLarge) {
 		t.Fatalf("err=%v", err)
 	}
@@ -196,7 +196,7 @@ func benchmarkStreamResponses(b *testing.B, size int64) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		r := &repeatedJSONReader{prefix: append([]byte(nil), prefix...), suffix: append([]byte(nil), suffix...), remaining: size}
-		got, err := streamCodexResponsesRequest(r, size+int64(len(prefix)+len(suffix))+1, nil)
+		got, err := streamResponsesRequest(r, size+int64(len(prefix)+len(suffix))+1, responsesStreamOptions{})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestResponsesStreamingCompressionAndIndependentLimits(t *testing.T) {
 	for _, encoding := range []string{"gzip", "zstd"} {
 		t.Run(encoding, func(t *testing.T) {
 			wire := compressedResponsesBody(t, encoding, plain)
-			decoded, err := decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)+1), int64(len(plain)+1024))
+			decoded, err := decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)+1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,11 +244,20 @@ func TestResponsesStreamingCompressionAndIndependentLimits(t *testing.T) {
 			}
 			defer spooled.Close()
 			got, err := io.ReadAll(spooled.File)
-			if err != nil || !bytes.Contains(got, []byte(strings.Repeat("image-like-data", 128))) {
-				t.Fatalf("decoded payload incomplete: bytes=%d err=%v", len(got), err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obj map[string]any
+			if err := json.Unmarshal(got, &obj); err != nil {
+				t.Fatal(err)
+			}
+			input := obj["input"].([]any)[0].(map[string]any)
+			content := input["content"].([]any)[0].(map[string]any)
+			if content["text"] != strings.Repeat("image-like-data", 8192) {
+				t.Fatal("decoded payload changed")
 			}
 
-			decoded, err = decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)-1), int64(len(plain)+1024))
+			decoded, err = decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)-1))
 			if err == nil {
 				_, err = io.ReadAll(decoded)
 				decoded.Close()
@@ -257,7 +266,7 @@ func TestResponsesStreamingCompressionAndIndependentLimits(t *testing.T) {
 				t.Fatalf("wire limit error = %v", err)
 			}
 
-			decoded, err = decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)+1), int64(len(plain)+1024))
+			decoded, err = decodeResponsesRequest(context.Background(), bytes.NewReader(wire), encoding, int64(len(wire)+1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -333,32 +342,77 @@ func TestResponsesLexicalAdmissionBounds(t *testing.T) {
 }
 
 func TestResponsesLexicalValidationAndCleanup(t *testing.T) {
-	before, _ := filepath.Glob(filepath.Join(os.TempDir(), "codex-pool-responses-*.json"))
-	for _, src := range []string{
-		`{"model":"gpt-5.6","input":"bad\x"}`,
-		`{"model":"gpt-5.6","input":` + strings.Repeat("[", maxResponsesJSONDepth+2) + `0` + strings.Repeat("]", maxResponsesJSONDepth+2) + `}`,
-	} {
-		if got, err := streamResponsesRequest(strings.NewReader(src), 1<<20, responsesStreamOptions{}); err == nil {
-			got.Close()
-			t.Fatalf("malformed input accepted")
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	assertEmpty := func(t *testing.T) {
+		t.Helper()
+		entries, err := os.ReadDir(tmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if len(names) != 0 {
+			t.Fatalf("temporary files leaked: %v", names)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	decoded, err := decodeResponsesRequest(ctx, strings.NewReader(`{"model":"gpt-5.6"}`), "", 1<<20, 1<<20)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name, src string
+	}{
+		{"invalid escape", `{"model":"gpt-5.6","input":"bad\x"}`},
+		{"excessive depth", `{"model":"gpt-5.6","input":` + strings.Repeat("[", maxResponsesJSONDepth+2) + `0` + strings.Repeat("]", maxResponsesJSONDepth+2) + `}`},
+		{"invalid tool schema", `{"model":"gpt-5.6","tools":[{"type":"function","parameters":{"type":"object","required":tru}}]}`},
+		{"invalid tool choice", `{"model":"gpt-5.6","tool_choice":{"type":"function","name":"bad\x"}}`},
 	}
-	if got, err := streamResponsesRequest(decoded, 1<<20, responsesStreamOptions{}); !errors.Is(err, context.Canceled) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := streamResponsesRequest(strings.NewReader(tc.src), 1<<20, responsesStreamOptions{})
+			if got != nil {
+				t.Cleanup(got.Close)
+			}
+			if err == nil || got != nil {
+				t.Fatalf("malformed input: result=%v error=%v", got, err)
+			}
+			assertEmpty(t)
+		})
+	}
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		decoded, err := decodeResponsesRequest(ctx, strings.NewReader(`{"model":"gpt-5.6"}`), "", 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer decoded.Close()
+		got, err := streamResponsesRequest(decoded, 1<<20, responsesStreamOptions{})
 		if got != nil {
-			got.Close()
+			t.Cleanup(got.Close)
 		}
-		t.Fatalf("cancel error = %v", err)
-	}
-	after, _ := filepath.Glob(filepath.Join(os.TempDir(), "codex-pool-responses-*.json"))
-	if len(after) != len(before) {
-		t.Fatalf("temporary files leaked: before=%d after=%d", len(before), len(after))
-	}
+		if !errors.Is(err, context.Canceled) || got != nil {
+			t.Fatalf("canceled request: result=%v error=%v", got, err)
+		}
+		assertEmpty(t)
+	})
+	t.Run("close", func(t *testing.T) {
+		got, err := streamResponsesRequest(strings.NewReader(`{"model":"gpt-5.6","input":[{"type":"message","content":"ok"}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"f"}}`), 1<<20, responsesStreamOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(got.Close)
+		entries, err := os.ReadDir(tmp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != filepath.Base(got.File.Name()) {
+			t.Fatalf("unexpected files before Close: %v", entries)
+		}
+		got.Close()
+		assertEmpty(t)
+		got.Close()
+		assertEmpty(t)
+	})
 }
 
 func BenchmarkStreamResponses16MiB(b *testing.B) { benchmarkStreamResponses(b, 16*1024*1024) }

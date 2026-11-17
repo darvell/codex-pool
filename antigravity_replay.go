@@ -58,10 +58,6 @@ func newAntigravityReplayCache(ttl time.Duration, maxEntries int) *antigravityRe
 
 var antigravityNativeReplay = newAntigravityReplayCache(antigravityReplayTTL, antigravityReplayMaxEntries)
 
-func antigravityReplayScopeFromBody(body []byte) antigravityReplayScope {
-	return antigravityReplayScopeFromBodyForTenant(body, "legacy")
-}
-
 func antigravityReplayScopeFromBodyForTenant(body []byte, tenant string) antigravityReplayScope {
 	var root map[string]any
 	if json.Unmarshal(body, &root) != nil {
@@ -104,12 +100,6 @@ func antigravityStableReplaySession(request map[string]any) string {
 		}
 	}
 	return ""
-}
-
-// antigravityApplyNativeReplay restores native Gemini signatures and function
-// call parts before a translated request is sent upstream.
-func antigravityApplyNativeReplay(body []byte) ([]byte, antigravityReplayScope, bool) {
-	return antigravityApplyNativeReplayForTenant(body, "legacy")
 }
 
 func antigravityApplyNativeReplayForTenant(body []byte, tenant string) ([]byte, antigravityReplayScope, bool) {

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestKimiLiveCatalogExports(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"k3.1-pro", "k3.1-pro-highspeed"} {
-		if !containsString(found[id].Modalities, "image") || !containsString(found[id].Modalities, "video") {
+		if !slices.Contains(found[id].Modalities, "image") || !slices.Contains(found[id].Modalities, "video") {
 			t.Errorf("modalities for %s = %v", id, found[id].Modalities)
 		}
 	}

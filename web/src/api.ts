@@ -209,16 +209,6 @@ export async function loadModelCatalog(): Promise<ModelCatalog> {
   return { models: catalog.models ?? [] };
 }
 
-export async function loadLivePiModels(downloadToken: string): Promise<string> {
-  const config = await decode<unknown>(await fetch(`/config/pi/${encodeURIComponent(downloadToken)}`, { cache: "no-store" }));
-  return JSON.stringify(config, null, 2);
-}
-
-export async function loadLiveCuteCodeSettings(downloadToken: string): Promise<string> {
-  const config = await decode<unknown>(await fetch(`/config/cute-code/${encodeURIComponent(downloadToken)}`, { cache: "no-store" }));
-  return JSON.stringify(config, null, 2);
-}
-
 export async function unlockOperator(token: string): Promise<AdminAccount[]> {
   const accounts = await decode<AdminAccount[]>(await fetch("/admin/accounts", {
     headers: { "X-Admin-Token": token },

@@ -9,30 +9,14 @@ import (
 	"strings"
 )
 
-func responseFinishReason(response map[string]any) string {
-	details, _ := response["incomplete_details"].(map[string]any)
-	switch details["reason"] {
-	case "max_output_tokens":
-		return "length"
-	case "content_filter":
-		return "content_filter"
-	default:
-		return "stop"
-	}
-}
-
 type responsesBufferingWriter struct {
-	framer              sseFramer
-	buf                 []byte
+	tools responsesToolCalls
+	sseEventBuffer
 	id                  string
 	model               string
 	contentText         []byte
 	functionCalls       []any
 	imageGenerationCall map[string]any
-	functionCallIndex   int
-	functionCallIDToIdx map[string]int
-	itemIDToCallID      map[string]string
-	callHasArgDelta     map[string]bool
 	inputTokens         int64
 	outputTokens        int64
 	cachedTokens        int64
@@ -47,21 +31,7 @@ type responsesBufferingWriter struct {
 }
 
 func (bw *responsesBufferingWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
-	bw.buf = append(bw.buf, p...)
-	bw.scanEvents()
-	return origLen, nil
-}
-
-func (bw *responsesBufferingWriter) scanEvents() {
-	for {
-		event, advance, ok := bw.framer.next(bw.buf)
-		if !ok {
-			return
-		}
-		bw.buf = bw.buf[advance:]
-		bw.processEvent(event)
-	}
+	return bw.sseEventBuffer.writeEvents(p, bw.processEvent, nil)
 }
 
 func (bw *responsesBufferingWriter) processEvent(event []byte) {
@@ -92,19 +62,14 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 		}
 	case "response.function_call_arguments.delta":
 		if delta, _ := obj["delta"].(string); delta != "" {
-			callID := bw.resolveFunctionCallID(obj)
-			if callID != "" {
-				if bw.callHasArgDelta == nil {
-					bw.callHasArgDelta = map[string]bool{}
-				}
-				bw.callHasArgDelta[callID] = true
-			}
+			callID := bw.tools.eventID(obj)
+			bw.tools.noteDelta(callID)
 			bw.appendFunctionCallArguments(callID, delta)
 		}
 	case "response.function_call_arguments.done":
-		callID := bw.resolveFunctionCallID(obj)
+		callID := bw.tools.eventID(obj)
 		args, _ := obj["arguments"].(string)
-		if args != "" && callID != "" && !bw.callHasArgDelta[callID] {
+		if args != "" && callID != "" && !bw.tools.argDeltas[callID] {
 			bw.setFunctionCallArguments(callID, args)
 		}
 	case "response.output_item.done":
@@ -113,9 +78,9 @@ func (bw *responsesBufferingWriter) processEvent(event []byte) {
 			bw.addImageGenerationCall(item)
 			break
 		}
-		callID := bw.resolveFunctionCallIDFromItem(item)
+		callID := bw.tools.itemID(item)
 		args, _ := item["arguments"].(string)
-		if args != "" && callID != "" && !bw.callHasArgDelta[callID] {
+		if args != "" && callID != "" && !bw.tools.argDeltas[callID] {
 			bw.setFunctionCallArguments(callID, args)
 		}
 	case "response.image_generation_call.partial_image":
@@ -181,12 +146,8 @@ func (bw *responsesBufferingWriter) applyResponse(obj map[string]any) {
 	if created := toInt64(resp["created_at"]); created > 0 {
 		bw.createdAt = created
 	}
-	if usage, _ := resp["usage"].(map[string]any); usage != nil {
-		bw.inputTokens = toInt64(usage["input_tokens"])
-		bw.outputTokens = toInt64(usage["output_tokens"])
-		if details, _ := usage["input_tokens_details"].(map[string]any); details != nil {
-			bw.cachedTokens = toInt64(details["cached_tokens"])
-		}
+	if usage, ok := resp["usage"].(map[string]any); ok {
+		readResponsesUsage(usage).apply(&bw.inputTokens, &bw.outputTokens, &bw.cachedTokens)
 	}
 }
 
@@ -214,7 +175,7 @@ func (bw *responsesBufferingWriter) addFunctionCall(item map[string]any) {
 		callID = itemID
 	}
 	name, _ := item["name"].(string)
-	idx := bw.registerFunctionCall(itemID, callID)
+	idx := bw.tools.register(itemID, callID)
 	for len(bw.functionCalls) <= idx {
 		bw.functionCalls = append(bw.functionCalls, nil)
 	}
@@ -228,62 +189,11 @@ func (bw *responsesBufferingWriter) addFunctionCall(item map[string]any) {
 	}
 }
 
-func (bw *responsesBufferingWriter) registerFunctionCall(itemID, callID string) int {
-	if bw.functionCallIDToIdx == nil {
-		bw.functionCallIDToIdx = map[string]int{}
-	}
-	if bw.itemIDToCallID == nil {
-		bw.itemIDToCallID = map[string]string{}
-	}
-	if callID == "" {
-		callID = itemID
-	}
-	if itemID != "" && callID != "" {
-		bw.itemIDToCallID[itemID] = callID
-	}
-	if callID != "" {
-		if idx, ok := bw.functionCallIDToIdx[callID]; ok {
-			return idx
-		}
-	}
-	idx := bw.functionCallIndex
-	bw.functionCallIndex++
-	if callID != "" {
-		bw.functionCallIDToIdx[callID] = idx
-	}
-	return idx
-}
-
-func (bw *responsesBufferingWriter) resolveFunctionCallID(obj map[string]any) string {
-	callID, _ := obj["call_id"].(string)
-	if callID == "" {
-		callID, _ = obj["item_id"].(string)
-	}
-	if resolved := bw.itemIDToCallID[callID]; resolved != "" {
-		return resolved
-	}
-	return callID
-}
-
-func (bw *responsesBufferingWriter) resolveFunctionCallIDFromItem(item map[string]any) string {
-	if item == nil {
-		return ""
-	}
-	callID, _ := item["call_id"].(string)
-	if callID == "" {
-		callID, _ = item["id"].(string)
-	}
-	if resolved := bw.itemIDToCallID[callID]; resolved != "" {
-		return resolved
-	}
-	return callID
-}
-
 func (bw *responsesBufferingWriter) functionCallIndexForID(callID string) int {
-	if idx, ok := bw.functionCallIDToIdx[callID]; ok {
+	if idx, ok := bw.tools.indices[callID]; ok {
 		return idx
 	}
-	idx := bw.functionCallIndex - 1
+	idx := bw.tools.next - 1
 	if idx < 0 {
 		return 0
 	}
@@ -380,11 +290,10 @@ func (bw *responsesBufferingWriter) Result() []byte {
 }
 
 type responsesToCompletionsWriter struct {
-	framer    sseFramer
+	sseEventBuffer
 	err       error
 	terminal  bool
 	w         io.Writer
-	buf       []byte
 	callback  func([]byte)
 	debug     bool
 	reqID     string
@@ -394,27 +303,7 @@ type responsesToCompletionsWriter struct {
 }
 
 func (rw *responsesToCompletionsWriter) Write(p []byte) (int, error) {
-	if rw.err != nil {
-		return 0, rw.err
-	}
-	rw.buf = append(rw.buf, p...)
-	rw.scanAndTranslate()
-	return len(p), rw.err
-}
-
-func (rw *responsesToCompletionsWriter) scanAndTranslate() {
-	for {
-		if rw.err != nil {
-			rw.buf = nil
-			return
-		}
-		event, advance, ok := rw.framer.next(rw.buf)
-		if !ok {
-			return
-		}
-		rw.buf = rw.buf[advance:]
-		rw.processEvent(event)
-	}
+	return rw.sseEventBuffer.writeEvents(p, rw.processEvent, &rw.err)
 }
 
 func (rw *responsesToCompletionsWriter) processEvent(event []byte) {
@@ -500,8 +389,7 @@ func (rw *responsesToCompletionsWriter) writeRaw(s string) {
 }
 
 type responsesToCompletionsBufferingWriter struct {
-	framer       sseFramer
-	buf          []byte
+	sseEventBuffer
 	callback     func([]byte)
 	debug        bool
 	reqID        string
@@ -517,21 +405,7 @@ type responsesToCompletionsBufferingWriter struct {
 }
 
 func (bw *responsesToCompletionsBufferingWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
-	bw.buf = append(bw.buf, p...)
-	bw.scanEvents()
-	return origLen, nil
-}
-
-func (bw *responsesToCompletionsBufferingWriter) scanEvents() {
-	for {
-		event, advance, ok := bw.framer.next(bw.buf)
-		if !ok {
-			return
-		}
-		bw.buf = bw.buf[advance:]
-		bw.processEvent(event)
-	}
+	return bw.sseEventBuffer.writeEvents(p, bw.processEvent, nil)
 }
 
 func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
@@ -571,12 +445,8 @@ func (bw *responsesToCompletionsBufferingWriter) processEvent(event []byte) {
 			if created := toInt64(resp["created_at"]); created > 0 {
 				bw.createdAt = created
 			}
-			if usage, _ := resp["usage"].(map[string]any); usage != nil {
-				bw.inputTokens = toInt64(usage["input_tokens"])
-				bw.outputTokens = toInt64(usage["output_tokens"])
-				if details, _ := usage["input_tokens_details"].(map[string]any); details != nil {
-					bw.cachedTokens = toInt64(details["cached_tokens"])
-				}
+			if usage, ok := resp["usage"].(map[string]any); ok {
+				readResponsesUsage(usage).apply(&bw.inputTokens, &bw.outputTokens, &bw.cachedTokens)
 			}
 			bw.finishReason = responseFinishReason(resp)
 		}
@@ -637,55 +507,26 @@ func (bw *responsesToCompletionsBufferingWriter) Result() []byte {
 	return b
 }
 
-// responsesToChatCompletionsWriter intercepts upstream Responses API SSE events
-// and translates them to OpenAI Chat Completions streaming format.
 type responsesToChatCompletionsWriter struct {
-	framer   sseFramer
+	tools responsesToolCalls
+	sseEventBuffer
 	err      error
 	terminal bool
 	w        io.Writer
-	buf      []byte
-	callback func([]byte) // called with original event data for usage parsing
+	callback func([]byte)
 	debug    bool
 	reqID    string
 
-	// State tracking
-	id                  string
-	model               string
-	started             bool
-	toolCallIndex       int
-	toolCallIDToIndex   map[string]int
-	itemIDToToolCallID  map[string]string
-	toolCallHasArgDelta map[string]bool
-	inputTokens         int64
-	outputTokens        int64
-	cachedTokens        int64
-	createdAt           int64
+	id           string
+	model        string
+	inputTokens  int64
+	outputTokens int64
+	cachedTokens int64
+	createdAt    int64
 }
 
 func (rw *responsesToChatCompletionsWriter) Write(p []byte) (int, error) {
-	if rw.err != nil {
-		return 0, rw.err
-	}
-	rw.buf = append(rw.buf, p...)
-	rw.scanAndTranslate()
-	return len(p), rw.err
-}
-
-func (rw *responsesToChatCompletionsWriter) scanAndTranslate() {
-	for {
-		if rw.err != nil {
-			rw.buf = nil
-			return
-		}
-		event, advance, ok := rw.framer.next(rw.buf)
-		if !ok {
-			return
-		}
-
-		rw.buf = rw.buf[advance:]
-		rw.processEvent(event)
-	}
+	return rw.sseEventBuffer.writeEvents(p, rw.processEvent, &rw.err)
 }
 
 func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
@@ -694,7 +535,6 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 	}
 	eventType, data := parseSSEEvent(event)
 
-	// Forward original data to usage callback
 	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		rw.callback(data)
 	}
@@ -728,8 +568,6 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 				rw.createdAt = created
 			}
 		}
-		// Emit initial role chunk
-		rw.started = true
 		rw.emitChunk(map[string]any{"role": "assistant", "content": ""}, "", nil)
 
 	case "response.output_item.added":
@@ -746,7 +584,7 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 				callID = itemID
 			}
 			name, _ := item["name"].(string)
-			idx := rw.registerToolCall(itemID, callID)
+			idx := rw.tools.register(itemID, callID)
 			rw.emitChunk(map[string]any{
 				"tool_calls": []any{
 					map[string]any{
@@ -777,14 +615,9 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 	case "response.function_call_arguments.delta":
 		delta, _ := obj["delta"].(string)
 		if delta != "" {
-			callID := rw.resolveToolCallID(obj)
+			callID := rw.tools.eventID(obj)
 			idx := rw.toolCallIndexForID(callID)
-			if callID != "" {
-				if rw.toolCallHasArgDelta == nil {
-					rw.toolCallHasArgDelta = map[string]bool{}
-				}
-				rw.toolCallHasArgDelta[callID] = true
-			}
+			rw.tools.noteDelta(callID)
 			rw.emitChunk(map[string]any{
 				"tool_calls": []any{
 					map[string]any{
@@ -798,9 +631,9 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 		}
 
 	case "response.function_call_arguments.done":
-		callID := rw.resolveToolCallID(obj)
+		callID := rw.tools.eventID(obj)
 		args, _ := obj["arguments"].(string)
-		if args != "" && callID != "" && !rw.toolCallHasArgDelta[callID] {
+		if args != "" && callID != "" && !rw.tools.argDeltas[callID] {
 			rw.emitChunk(map[string]any{
 				"tool_calls": []any{
 					map[string]any{
@@ -815,9 +648,9 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 
 	case "response.output_item.done":
 		item, _ := obj["item"].(map[string]any)
-		callID := rw.resolveToolCallIDFromItem(item)
+		callID := rw.tools.itemID(item)
 		args, _ := item["arguments"].(string)
-		if args != "" && callID != "" && !rw.toolCallHasArgDelta[callID] {
+		if args != "" && callID != "" && !rw.tools.argDeltas[callID] {
 			rw.emitChunk(map[string]any{
 				"tool_calls": []any{
 					map[string]any{
@@ -837,17 +670,13 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 				rw.createdAt = created
 			}
 			if usage, ok := resp["usage"].(map[string]any); ok {
-				rw.inputTokens = toInt64(usage["input_tokens"])
-				rw.outputTokens = toInt64(usage["output_tokens"])
-				if details, _ := usage["input_tokens_details"].(map[string]any); details != nil {
-					rw.cachedTokens = toInt64(details["cached_tokens"])
-				}
+				readResponsesUsage(usage).apply(&rw.inputTokens, &rw.outputTokens, &rw.cachedTokens)
 			}
 		}
 
 		rw.terminal = true
 		finishReason := responseFinishReason(resp)
-		if rw.toolCallIndex > 0 && finishReason == "stop" {
+		if rw.tools.next > 0 && finishReason == "stop" {
 			finishReason = "tool_calls"
 		}
 
@@ -864,23 +693,14 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 
 	case "response.failed":
 		rw.terminal = true
-		// Emit error as a final chunk
 		resp, _ := obj["response"].(map[string]any)
-		errMsg := "response failed"
-		if resp != nil {
-			if e, ok := resp["error"].(map[string]any); ok {
-				if m, ok := e["message"].(string); ok && m != "" {
-					errMsg = m
-				}
-			}
-		}
+		errMsg := responseErrorMessage(resp)
 		rw.emitChunk(map[string]any{"content": "[Error: " + errMsg + "]"}, "stop", nil)
 		rw.writeRaw("data: [DONE]\n\n")
 
 	case "response.output_text.done", "response.content_part.done",
 		"response.content_part.added", "response.reasoning_text.done",
 		"response.reasoning_summary_text.done", "response.in_progress":
-		// Informational events, no action needed
 
 	default:
 		if rw.debug {
@@ -889,65 +709,11 @@ func (rw *responsesToChatCompletionsWriter) processEvent(event []byte) {
 	}
 }
 
-func (rw *responsesToChatCompletionsWriter) registerToolCall(itemID, callID string) int {
-	if rw.toolCallIDToIndex == nil {
-		rw.toolCallIDToIndex = map[string]int{}
-	}
-	if rw.itemIDToToolCallID == nil {
-		rw.itemIDToToolCallID = map[string]string{}
-	}
-	if callID == "" {
-		callID = itemID
-	}
-	if itemID != "" && callID != "" {
-		rw.itemIDToToolCallID[itemID] = callID
-	}
-	if callID != "" {
-		if idx, ok := rw.toolCallIDToIndex[callID]; ok {
-			return idx
-		}
-	}
-	idx := rw.toolCallIndex
-	rw.toolCallIndex++
-	if callID != "" {
-		rw.toolCallIDToIndex[callID] = idx
-	}
-	return idx
-}
-
-func (rw *responsesToChatCompletionsWriter) resolveToolCallID(obj map[string]any) string {
-	callID, _ := obj["call_id"].(string)
-	if callID == "" {
-		callID, _ = obj["item_id"].(string)
-	}
-	if callID == "" {
-		return ""
-	}
-	if resolved := rw.itemIDToToolCallID[callID]; resolved != "" {
-		return resolved
-	}
-	return callID
-}
-
-func (rw *responsesToChatCompletionsWriter) resolveToolCallIDFromItem(item map[string]any) string {
-	if item == nil {
-		return ""
-	}
-	callID, _ := item["call_id"].(string)
-	if callID == "" {
-		callID, _ = item["id"].(string)
-	}
-	if resolved := rw.itemIDToToolCallID[callID]; resolved != "" {
-		return resolved
-	}
-	return callID
-}
-
 func (rw *responsesToChatCompletionsWriter) toolCallIndexForID(callID string) int {
-	if idx, ok := rw.toolCallIDToIndex[callID]; ok {
+	if idx, ok := rw.tools.indices[callID]; ok {
 		return idx
 	}
-	idx := rw.toolCallIndex - 1
+	idx := rw.tools.next - 1
 	if idx < 0 {
 		return 0
 	}
@@ -1000,49 +766,26 @@ func (rw *responsesToChatCompletionsWriter) writeRaw(s string) {
 	}
 }
 
-// responsesToChatCompletionsBufferingWriter is like responsesToChatCompletionsWriter
-// but buffers all SSE events and produces a single non-streaming JSON response.
-// Used when the client sends stream:false but Codex backend requires streaming.
+// The Codex backend requires SSE even when a Chat client requests stream:false.
 type responsesToChatCompletionsBufferingWriter struct {
-	framer   sseFramer
-	buf      []byte
-	callback func([]byte) // usage callback
+	tools responsesToolCalls
+	sseEventBuffer
+	callback func([]byte)
 	debug    bool
 	reqID    string
 
-	// State accumulated from SSE events
-	id                  string
-	model               string
-	contentText         []byte
-	toolCalls           []any
-	toolCallIndex       int
-	toolCallIDToIndex   map[string]int
-	itemIDToToolCallID  map[string]string
-	toolCallHasArgDelta map[string]bool
-	inputTokens         int64
-	outputTokens        int64
-	cachedTokens        int64
-	createdAt           int64
-	finishReason        string
-	errMsg              string
+	id           string
+	model        string
+	contentText  []byte
+	toolCalls    []any
+	inputTokens  int64
+	outputTokens int64
+	finishReason string
+	errMsg       string
 }
 
 func (bw *responsesToChatCompletionsBufferingWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
-	bw.buf = append(bw.buf, p...)
-	bw.scanEvents()
-	return origLen, nil
-}
-
-func (bw *responsesToChatCompletionsBufferingWriter) scanEvents() {
-	for {
-		event, advance, ok := bw.framer.next(bw.buf)
-		if !ok {
-			return
-		}
-		bw.buf = bw.buf[advance:]
-		bw.processEvent(event)
-	}
+	return bw.sseEventBuffer.writeEvents(p, bw.processEvent, nil)
 }
 
 func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) {
@@ -1095,7 +838,7 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 				callID = itemID
 			}
 			name, _ := item["name"].(string)
-			idx := bw.registerToolCall(itemID, callID)
+			idx := bw.tools.register(itemID, callID)
 			bw.toolCalls = append(bw.toolCalls, map[string]any{
 				"id":    callID,
 				"type":  "function",
@@ -1110,23 +853,18 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 	case "response.function_call_arguments.delta":
 		delta, _ := obj["delta"].(string)
 		if delta != "" && len(bw.toolCalls) > 0 {
-			callID := bw.resolveToolCallID(obj)
+			callID := bw.tools.eventID(obj)
 			idx := bw.toolCallIndexForID(callID)
-			if callID != "" {
-				if bw.toolCallHasArgDelta == nil {
-					bw.toolCallHasArgDelta = map[string]bool{}
-				}
-				bw.toolCallHasArgDelta[callID] = true
-			}
+			bw.tools.noteDelta(callID)
 			tc := bw.toolCalls[idx].(map[string]any)
 			fn := tc["function"].(map[string]any)
 			fn["arguments"] = fn["arguments"].(string) + delta
 		}
 
 	case "response.function_call_arguments.done":
-		callID := bw.resolveToolCallID(obj)
+		callID := bw.tools.eventID(obj)
 		args, _ := obj["arguments"].(string)
-		if args != "" && callID != "" && !bw.toolCallHasArgDelta[callID] && len(bw.toolCalls) > 0 {
+		if args != "" && callID != "" && !bw.tools.argDeltas[callID] && len(bw.toolCalls) > 0 {
 			tc := bw.toolCalls[bw.toolCallIndexForID(callID)].(map[string]any)
 			fn := tc["function"].(map[string]any)
 			fn["arguments"] = args
@@ -1134,9 +872,9 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 
 	case "response.output_item.done":
 		item, _ := obj["item"].(map[string]any)
-		callID := bw.resolveToolCallIDFromItem(item)
+		callID := bw.tools.itemID(item)
 		args, _ := item["arguments"].(string)
-		if args != "" && callID != "" && !bw.toolCallHasArgDelta[callID] && len(bw.toolCalls) > 0 {
+		if args != "" && callID != "" && !bw.tools.argDeltas[callID] && len(bw.toolCalls) > 0 {
 			tc := bw.toolCalls[bw.toolCallIndexForID(callID)].(map[string]any)
 			fn := tc["function"].(map[string]any)
 			fn["arguments"] = args
@@ -1146,85 +884,26 @@ func (bw *responsesToChatCompletionsBufferingWriter) processEvent(event []byte) 
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
 			if usage, ok := resp["usage"].(map[string]any); ok {
-				bw.inputTokens = toInt64(usage["input_tokens"])
-				bw.outputTokens = toInt64(usage["output_tokens"])
+				readResponsesUsage(usage).apply(&bw.inputTokens, &bw.outputTokens, nil)
 			}
 		}
 		bw.finishReason = responseFinishReason(resp)
-		if bw.toolCallIndex > 0 && bw.finishReason == "stop" {
+		if bw.tools.next > 0 && bw.finishReason == "stop" {
 			bw.finishReason = "tool_calls"
 		}
 
 	case "response.failed":
 		resp, _ := obj["response"].(map[string]any)
-		bw.errMsg = "response failed"
-		if resp != nil {
-			if e, ok := resp["error"].(map[string]any); ok {
-				if m, ok := e["message"].(string); ok && m != "" {
-					bw.errMsg = m
-				}
-			}
-		}
+		bw.errMsg = responseErrorMessage(resp)
 		bw.finishReason = "stop"
 	}
 }
 
-func (bw *responsesToChatCompletionsBufferingWriter) registerToolCall(itemID, callID string) int {
-	if bw.toolCallIDToIndex == nil {
-		bw.toolCallIDToIndex = map[string]int{}
-	}
-	if bw.itemIDToToolCallID == nil {
-		bw.itemIDToToolCallID = map[string]string{}
-	}
-	if callID == "" {
-		callID = itemID
-	}
-	if itemID != "" && callID != "" {
-		bw.itemIDToToolCallID[itemID] = callID
-	}
-	if callID != "" {
-		if idx, ok := bw.toolCallIDToIndex[callID]; ok {
-			return idx
-		}
-	}
-	idx := bw.toolCallIndex
-	bw.toolCallIndex++
-	if callID != "" {
-		bw.toolCallIDToIndex[callID] = idx
-	}
-	return idx
-}
-
-func (bw *responsesToChatCompletionsBufferingWriter) resolveToolCallID(obj map[string]any) string {
-	callID, _ := obj["call_id"].(string)
-	if callID == "" {
-		callID, _ = obj["item_id"].(string)
-	}
-	if resolved := bw.itemIDToToolCallID[callID]; resolved != "" {
-		return resolved
-	}
-	return callID
-}
-
-func (bw *responsesToChatCompletionsBufferingWriter) resolveToolCallIDFromItem(item map[string]any) string {
-	if item == nil {
-		return ""
-	}
-	callID, _ := item["call_id"].(string)
-	if callID == "" {
-		callID, _ = item["id"].(string)
-	}
-	if resolved := bw.itemIDToToolCallID[callID]; resolved != "" {
-		return resolved
-	}
-	return callID
-}
-
 func (bw *responsesToChatCompletionsBufferingWriter) toolCallIndexForID(callID string) int {
-	if idx, ok := bw.toolCallIDToIndex[callID]; ok {
+	if idx, ok := bw.tools.indices[callID]; ok {
 		return idx
 	}
-	idx := bw.toolCallIndex - 1
+	idx := bw.tools.next - 1
 	if idx < 0 {
 		return 0
 	}
@@ -1234,7 +913,6 @@ func (bw *responsesToChatCompletionsBufferingWriter) toolCallIndexForID(callID s
 	return idx
 }
 
-// Result returns the assembled non-streaming Chat Completions JSON response.
 func (bw *responsesToChatCompletionsBufferingWriter) Result() []byte {
 	id := bw.id
 	if id == "" {
@@ -1288,11 +966,8 @@ func (bw *responsesToChatCompletionsBufferingWriter) Result() []byte {
 	return b
 }
 
-// responsesToClaudeBufferingWriter buffers Responses API SSE events into a
-// non-streaming Claude Messages API response.
 type responsesToClaudeBufferingWriter struct {
-	framer   sseFramer
-	buf      []byte
+	sseEventBuffer
 	callback func([]byte)
 	debug    bool
 	reqID    string
@@ -1310,21 +985,7 @@ type responsesToClaudeBufferingWriter struct {
 }
 
 func (bw *responsesToClaudeBufferingWriter) Write(p []byte) (int, error) {
-	origLen := len(p)
-	bw.buf = append(bw.buf, p...)
-	bw.scanEvents()
-	return origLen, nil
-}
-
-func (bw *responsesToClaudeBufferingWriter) scanEvents() {
-	for {
-		event, advance, ok := bw.framer.next(bw.buf)
-		if !ok {
-			return
-		}
-		bw.buf = bw.buf[advance:]
-		bw.processEvent(event)
-	}
+	return bw.sseEventBuffer.writeEvents(p, bw.processEvent, nil)
 }
 
 func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
@@ -1361,7 +1022,7 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 				bw.model = model
 			}
 			if usage, ok := resp["usage"].(map[string]any); ok {
-				bw.inputTokens = toInt64(usage["input_tokens"])
+				readResponsesUsage(usage).apply(&bw.inputTokens, nil, nil)
 			}
 		}
 	case "response.output_text.delta":
@@ -1414,8 +1075,7 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 				bw.model = model
 			}
 			if usage, ok := resp["usage"].(map[string]any); ok {
-				bw.inputTokens = toInt64(usage["input_tokens"])
-				bw.outputTokens = toInt64(usage["output_tokens"])
+				readResponsesUsage(usage).apply(&bw.inputTokens, &bw.outputTokens, nil)
 			}
 		}
 		bw.stopReason = oaiFinishReasonToClaude(responseFinishReason(resp))
@@ -1424,14 +1084,7 @@ func (bw *responsesToClaudeBufferingWriter) processEvent(event []byte) {
 		}
 	case "response.failed":
 		resp, _ := obj["response"].(map[string]any)
-		bw.errMsg = "response failed"
-		if resp != nil {
-			if e, ok := resp["error"].(map[string]any); ok {
-				if msg, _ := e["message"].(string); msg != "" {
-					bw.errMsg = msg
-				}
-			}
-		}
+		bw.errMsg = responseErrorMessage(resp)
 		bw.stopReason = "end_turn"
 	}
 }
@@ -1525,25 +1178,19 @@ func (bw *responsesToClaudeBufferingWriter) Result() []byte {
 	return b
 }
 
-// claudeToResponsesWriter translates Claude Messages API SSE events
-// to OpenAI Responses API SSE events. Used when Codex CLI sends to /responses
-// with a Claude model.
 type claudeToResponsesWriter struct {
-	framer   sseFramer
+	sseEventBuffer
 	err      error
 	w        io.Writer
-	buf      []byte
 	callback func([]byte)
 	debug    bool
 	reqID    string
 
-	// State
 	id               string
 	model            string
-	started          bool
 	outputIndex      int
 	contentIndex     int
-	currentBlockType string // "text", "thinking", "tool_use"
+	currentBlockType string
 	currentToolID    string
 	currentToolName  string
 	accumulatedText  string
@@ -1551,31 +1198,11 @@ type claudeToResponsesWriter struct {
 	inputTokens      int64
 	outputTokens     int64
 	stopReason       string
-	sentMessageItem  bool // whether we've emitted the message output_item.added
+	sentMessageItem  bool
 }
 
 func (cw *claudeToResponsesWriter) Write(p []byte) (int, error) {
-	if cw.err != nil {
-		return 0, cw.err
-	}
-	cw.buf = append(cw.buf, p...)
-	cw.scanAndTranslate()
-	return len(p), cw.err
-}
-
-func (cw *claudeToResponsesWriter) scanAndTranslate() {
-	for {
-		if cw.err != nil {
-			cw.buf = nil
-			return
-		}
-		event, advance, ok := cw.framer.next(cw.buf)
-		if !ok {
-			return
-		}
-		cw.buf = cw.buf[advance:]
-		cw.processEvent(event)
-	}
+	return cw.sseEventBuffer.writeEvents(p, cw.processEvent, &cw.err)
 }
 
 func (cw *claudeToResponsesWriter) processEvent(event []byte) {
@@ -1614,8 +1241,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 				cw.inputTokens = toInt64(usage["input_tokens"])
 			}
 		}
-		cw.started = true
-		// Emit response.created
 		cw.emitEvent("response.created", map[string]any{
 			"type": "response.created",
 			"response": map[string]any{
@@ -1639,7 +1264,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 		switch blockType {
 		case "text":
 			cw.accumulatedText = ""
-			// Emit output_item.added for the message (only once)
 			if !cw.sentMessageItem {
 				cw.sentMessageItem = true
 				cw.emitEvent("response.output_item.added", map[string]any{
@@ -1653,7 +1277,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 					},
 				})
 			}
-			// Emit content_part.added
 			cw.emitEvent("response.content_part.added", map[string]any{
 				"type":          "response.content_part.added",
 				"output_index":  cw.outputIndex,
@@ -1661,7 +1284,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 				"part":          map[string]any{"type": "output_text", "text": ""},
 			})
 		case "thinking":
-			// Track thinking block, emit reasoning events
 		case "tool_use":
 			id, _ := block["id"].(string)
 			name, _ := block["name"].(string)
@@ -1669,9 +1291,7 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 			cw.currentToolID = id
 			cw.currentToolName = name
 			cw.accumulatedArgs = ""
-			// Close previous message output item if needed
 			if cw.sentMessageItem {
-				// Emit content_part.done and output_item.done for the message
 				cw.emitEvent("response.content_part.done", map[string]any{
 					"type":          "response.content_part.done",
 					"output_index":  cw.outputIndex,
@@ -1694,7 +1314,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 				cw.contentIndex = 0
 				cw.sentMessageItem = false
 			}
-			// Emit output_item.added for the function_call
 			cw.emitEvent("response.output_item.added", map[string]any{
 				"type":         "response.output_item.added",
 				"output_index": cw.outputIndex,
@@ -1759,7 +1378,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 			})
 			cw.contentIndex++
 		case "thinking":
-			// No specific done event needed
 		case "tool_use":
 			cw.emitEvent("response.function_call_arguments.done", map[string]any{
 				"type":         "response.function_call_arguments.done",
@@ -1796,7 +1414,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 		}
 
 	case "message_stop":
-		// Close any open message item
 		if cw.sentMessageItem {
 			cw.emitEvent("response.content_part.done", map[string]any{
 				"type":          "response.content_part.done",
@@ -1817,7 +1434,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 				},
 			})
 		}
-		// Emit response.completed
 		status := "completed"
 		if cw.stopReason == "max_tokens" {
 			status = "incomplete"
@@ -1838,7 +1454,6 @@ func (cw *claudeToResponsesWriter) processEvent(event []byte) {
 		})
 
 	case "ping":
-		// Ignore
 	}
 }
 
@@ -1854,63 +1469,37 @@ func (cw *claudeToResponsesWriter) emitEvent(eventType string, data map[string]a
 	}
 }
 
-// responsesToClaudeWriter translates Responses API SSE events to Claude Messages
-// API SSE events. Used when Claude Code sends /v1/messages with a Codex model,
-// so the Responses API SSE from upstream needs to be converted back to Claude SSE.
 type responsesToClaudeWriter struct {
-	framer   sseFramer
+	sseEventBuffer
 	err      error
 	terminal bool
 	w        io.Writer
-	buf      []byte
 	callback func([]byte)
 	debug    bool
 	reqID    string
 
-	// State
 	id                string
 	model             string
 	started           bool
 	contentBlockIndex int
 	toolCallIndex     int
-	sentText          bool // whether we've emitted a text content_block_start
-	sentThinking      bool // whether we've emitted a thinking content_block_start
-	finishReason      string
+	sentText          bool
+	sentThinking      bool
 	inputTokens       int64
 	outputTokens      int64
 }
 
 func (rw *responsesToClaudeWriter) Write(p []byte) (int, error) {
-	if rw.err != nil {
-		return 0, rw.err
-	}
-	rw.buf = append(rw.buf, p...)
-	rw.scanAndTranslate()
-	return len(p), rw.err
-}
-
-func (rw *responsesToClaudeWriter) scanAndTranslate() {
-	for {
-		if rw.err != nil {
-			rw.buf = nil
-			return
-		}
-		event, advance, ok := rw.framer.next(rw.buf)
-		if !ok {
-			return
-		}
-		rw.buf = rw.buf[advance:]
-		rw.processEvent(event)
-	}
+	return rw.sseEventBuffer.writeEvents(p, rw.processEvent, &rw.err)
 }
 
 func (rw *responsesToClaudeWriter) processEvent(event []byte) {
+	emitter := claudeBlockEmitter{emit: rw.emitClaudeEvent}
 	if rw.terminal {
 		return
 	}
 	eventType, data := parseSSEEvent(event)
 
-	// Forward original data to usage callback
 	if len(data) > 0 && rw.callback != nil && !bytes.Equal(data, []byte("[DONE]")) {
 		rw.callback(data)
 	}
@@ -1948,11 +1537,10 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 				rw.model = m
 			}
 			if usage, ok := resp["usage"].(map[string]any); ok {
-				rw.inputTokens = toInt64(usage["input_tokens"])
+				readResponsesUsage(usage).apply(&rw.inputTokens, nil, nil)
 			}
 		}
 		rw.started = true
-		// Emit message_start
 		rw.emitClaudeMessageStart()
 
 	case "response.output_text.delta":
@@ -1965,19 +1553,13 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 			}
 			if !rw.sentText {
 				rw.sentText = true
-				// Close thinking block if it was open
 				if rw.sentThinking {
-					rw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
-						`{"type":"content_block_stop","index":%d}`, rw.contentBlockIndex))
+					emitter.stop(rw.contentBlockIndex)
 					rw.contentBlockIndex++
 				}
-				rw.emitClaudeEvent("content_block_start", fmt.Sprintf(
-					`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
-					rw.contentBlockIndex))
+				emitter.textStart(rw.contentBlockIndex)
 			}
-			rw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
-				`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
-				rw.contentBlockIndex, mustMarshalString(delta)))
+			emitter.text(rw.contentBlockIndex, delta)
 		}
 
 	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
@@ -1989,13 +1571,9 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 			}
 			if !rw.sentThinking {
 				rw.sentThinking = true
-				rw.emitClaudeEvent("content_block_start", fmt.Sprintf(
-					`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`,
-					rw.contentBlockIndex))
+				emitter.thinkingStart(rw.contentBlockIndex)
 			}
-			rw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
-				`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`,
-				rw.contentBlockIndex, mustMarshalString(delta)))
+			emitter.thinking(rw.contentBlockIndex, delta)
 		}
 
 	case "response.output_item.added":
@@ -2009,36 +1587,29 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 				rw.started = true
 				rw.emitClaudeMessageStart()
 			}
-			// Close previous content block
 			if rw.sentText || rw.sentThinking {
-				rw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
-					`{"type":"content_block_stop","index":%d}`, rw.contentBlockIndex))
+				emitter.stop(rw.contentBlockIndex)
 				rw.contentBlockIndex++
 				rw.sentText = false
 				rw.sentThinking = false
 			}
 			callID, _ := item["call_id"].(string)
 			name, _ := item["name"].(string)
-			rw.emitClaudeEvent("content_block_start", fmt.Sprintf(
-				`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s,"input":{}}}`,
-				rw.contentBlockIndex, mustMarshalString(callID), mustMarshalString(name)))
+			emitter.toolStart(rw.contentBlockIndex, callID, name)
 			rw.toolCallIndex++
 		}
 
 	case "response.function_call_arguments.delta":
 		delta, _ := obj["delta"].(string)
 		if delta != "" {
-			rw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
-				`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
-				rw.contentBlockIndex, mustMarshalString(delta)))
+			emitter.arguments(rw.contentBlockIndex, delta)
 		}
 
 	case "response.output_item.done":
 		item, _ := obj["item"].(map[string]any)
 		if item != nil {
 			if itemType, _ := item["type"].(string); itemType == "function_call" {
-				rw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
-					`{"type":"content_block_stop","index":%d}`, rw.contentBlockIndex))
+				emitter.stop(rw.contentBlockIndex)
 				rw.contentBlockIndex++
 			}
 		}
@@ -2047,14 +1618,11 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 		resp, _ := obj["response"].(map[string]any)
 		if resp != nil {
 			if usage, ok := resp["usage"].(map[string]any); ok {
-				rw.inputTokens = toInt64(usage["input_tokens"])
-				rw.outputTokens = toInt64(usage["output_tokens"])
+				readResponsesUsage(usage).apply(&rw.inputTokens, &rw.outputTokens, nil)
 			}
 		}
-		// Close any open content block
 		if rw.sentText || rw.sentThinking {
-			rw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
-				`{"type":"content_block_stop","index":%d}`, rw.contentBlockIndex))
+			emitter.stop(rw.contentBlockIndex)
 		}
 		rw.terminal = true
 		stopReason := oaiFinishReasonToClaude(responseFinishReason(resp))
@@ -2065,8 +1633,6 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 			rw.started = true
 			rw.emitClaudeMessageStart()
 		}
-		rw.finishReason = stopReason
-		// Emit message_delta and message_stop
 		rw.emitClaudeEvent("message_delta", fmt.Sprintf(
 			`{"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`,
 			mustMarshalString(stopReason), rw.inputTokens, rw.outputTokens))
@@ -2075,26 +1641,13 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 	case "response.failed":
 		rw.terminal = true
 		resp, _ := obj["response"].(map[string]any)
-		errMsg := "response failed"
-		if resp != nil {
-			if e, ok := resp["error"].(map[string]any); ok {
-				if m, ok := e["message"].(string); ok && m != "" {
-					errMsg = m
-				}
-			}
-		}
-		// Emit error as text content
+		errMsg := responseErrorMessage(resp)
 		if !rw.sentText {
 			rw.sentText = true
-			rw.emitClaudeEvent("content_block_start", fmt.Sprintf(
-				`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
-				rw.contentBlockIndex))
+			emitter.textStart(rw.contentBlockIndex)
 		}
-		rw.emitClaudeEvent("content_block_delta", fmt.Sprintf(
-			`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
-			rw.contentBlockIndex, mustMarshalString("[Error: "+errMsg+"]")))
-		rw.emitClaudeEvent("content_block_stop", fmt.Sprintf(
-			`{"type":"content_block_stop","index":%d}`, rw.contentBlockIndex))
+		emitter.text(rw.contentBlockIndex, "[Error: "+errMsg+"]")
+		emitter.stop(rw.contentBlockIndex)
 		rw.emitClaudeEvent("message_delta", fmt.Sprintf(
 			`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}`))
 		rw.emitClaudeEvent("message_stop", `{"type":"message_stop"}`)
@@ -2103,7 +1656,6 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 		"response.content_part.added", "response.reasoning_text.done",
 		"response.reasoning_summary_text.done", "response.function_call_arguments.done",
 		"response.in_progress":
-		// Informational events, no action needed
 
 	default:
 		if rw.debug {
@@ -2113,17 +1665,8 @@ func (rw *responsesToClaudeWriter) processEvent(event []byte) {
 }
 
 func (rw *responsesToClaudeWriter) emitClaudeMessageStart() {
-	model := rw.model
-	if model == "" {
-		model = "unknown"
-	}
-	id := rw.id
-	if id == "" {
-		id = "msg_translated"
-	}
-	msg := fmt.Sprintf(`{"type":"message_start","message":{"id":%s,"type":"message","role":"assistant","model":%s,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":0}}}`,
-		mustMarshalString(id), mustMarshalString(model), rw.inputTokens)
-	rw.emitClaudeEvent("message_start", msg)
+	emitter := claudeBlockEmitter{emit: rw.emitClaudeEvent}
+	emitter.messageStart(rw.id, rw.model, rw.inputTokens)
 }
 
 func (rw *responsesToClaudeWriter) emitClaudeEvent(eventType, data string) {

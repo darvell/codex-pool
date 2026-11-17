@@ -69,18 +69,21 @@ func (p *PassportStore) saveAvatar(principalID string, raw []byte) (*passportAva
 	}
 	sum := sha256.Sum256(pngData)
 	a := &passportAvatar{PNG: pngData, ETag: hex.EncodeToString(sum[:12]), UpdatedAt: time.Now().UTC()}
-	v, _ := json.Marshal(a)
-	if err = p.db.Update(func(tx *bbolt.Tx) error { return tx.Bucket([]byte(bucketPassportAvatars)).Put([]byte(principalID), v) }); err != nil {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	current := p.principals[principalID]
+	if current == nil {
+		return nil, errors.New("principal not found")
+	}
+	updated := *current
+	updated.AvatarUpdatedAt = &a.UpdatedAt
+	err = p.commitLocked(&updated, nil, func(tx *bbolt.Tx) error {
+		return putJSON(tx.Bucket([]byte(bucketPassportAvatars)), principalID, a)
+	})
+	if err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	if pr := p.principals[principalID]; pr != nil {
-		pr.AvatarUpdatedAt = &a.UpdatedAt
-		pv, _ := json.Marshal(pr)
-		err = p.db.Update(func(tx *bbolt.Tx) error { return tx.Bucket([]byte(bucketPrincipals)).Put([]byte(pr.ID), pv) })
-	}
-	p.mu.Unlock()
-	return a, err
+	return a, nil
 }
 func (p *PassportStore) avatar(principalID string) (*passportAvatar, error) {
 	var a passportAvatar
@@ -104,9 +107,9 @@ func (p *PassportStore) updateNickname(principalID, nickname string) error {
 	if pr == nil {
 		return errors.New("principal not found")
 	}
-	pr.DisplayName = nickname
-	v, _ := json.Marshal(pr)
-	return p.db.Update(func(tx *bbolt.Tx) error { return tx.Bucket([]byte(bucketPrincipals)).Put([]byte(pr.ID), v) })
+	updated := *pr
+	updated.DisplayName = nickname
+	return p.commitLocked(&updated, nil, nil)
 }
 
 func (h *proxyHandler) handlePassportProfile(w http.ResponseWriter, r *http.Request) {

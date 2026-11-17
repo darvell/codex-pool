@@ -29,25 +29,10 @@ func (h *proxyHandler) serveZAIAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *proxyHandler) handleZAIAdd(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		APIKey string `json:"api_key"`
-	}
-
-	if r.Header.Get("Content-Type") == "application/json" {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-			return
-		}
-	} else {
-		req.APIKey = r.FormValue("api_key")
-	}
-
-	apiKey := strings.TrimSpace(req.APIKey)
-	if apiKey == "" {
-		respondJSONError(w, http.StatusBadRequest, "api_key is required")
+	apiKey, ok := readAdmissionKey(w, r)
+	if !ok {
 		return
 	}
-
 	validationURL := h.cfg.zaiBase.String() + "/v1/messages"
 	body := map[string]any{
 		"model":      "glm-5.3",
@@ -80,5 +65,5 @@ func (h *proxyHandler) handleZAIAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, r, AccountTypeZAI, "zai", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeZAI, apiKey)
 }

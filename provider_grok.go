@@ -544,10 +544,6 @@ var grokCLIModelCatalog = []grokClientModel{
 	},
 }
 
-func serveGrokModels(w http.ResponseWriter) {
-	respondJSON(w, map[string]any{"object": "list", "data": grokModelsForClient()})
-}
-
 func grokModelsForClient() []grokClientModel {
 	models := append([]grokClientModel(nil), grokCLIModelCatalog...)
 	for _, model := range poolModels {
@@ -569,20 +565,6 @@ func grokModelsForClient() []grokClientModel {
 		})
 	}
 	return models
-}
-
-func grokSetupModelIDs() []string {
-	models := grokSetupModels()
-	ids := make([]string, 0, len(models)+1)
-	seen := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		if _, ok := seen[model.ID]; ok {
-			continue
-		}
-		seen[model.ID] = struct{}{}
-		ids = append(ids, model.ID)
-	}
-	return ids
 }
 
 type grokSetupModel struct {
@@ -712,64 +694,41 @@ func rewriteAndSanitizeGrokRequestBody(body []byte, model string) []byte {
 	return rewritten
 }
 
-func sanitizeGrokRequestBody(body []byte, model string) []byte {
-	if len(body) == 0 {
-		return body
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body
-	}
-	if !sanitizeGrokRequestObject(obj, model) {
-		return body
-	}
-	rewritten, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return rewritten
-}
-
 func sanitizeGrokRequestObject(obj map[string]any, model string) bool {
 	changed := false
-	if _, ok := obj["metadata"]; ok {
-		delete(obj, "metadata")
-		changed = true
-	}
 	if rf, ok := obj["response_format"]; ok {
 		if _, hasText := obj["text"]; !hasText {
 			obj["text"] = map[string]any{"format": rf}
 		}
-		delete(obj, "response_format")
-		changed = true
 	}
+	_, hadTools := obj["tools"].([]any)
 	if sanitizeGrokTools(obj) {
 		changed = true
+	}
+	_, hasTools := obj["tools"]
+	tools := grokToolsUnchanged
+	if hadTools && !hasTools {
+		tools = grokToolsRemoved
 	}
 	if lowerGrokAgentMessages(obj) {
 		changed = true
 	}
-	if sanitizeGrokNestedUnsupportedFields(obj) {
-		changed = true
-	}
-	// Chat Completions uses top-level reasoningEffort; Responses uses reasoning.effort.
-	// Always drop the chat-style field; optionally promote it when the model allows effort.
-	if effortRaw, ok := obj["reasoningEffort"]; ok {
-		if grokModelSupportsReasoningEffort(model) {
-			if _, hasReasoning := obj["reasoning"]; !hasReasoning {
-				if effort, ok := effortRaw.(string); ok && strings.TrimSpace(effort) != "" {
-					obj["reasoning"] = map[string]any{"effort": strings.TrimSpace(effort)}
-				}
+	// Chat Completions uses reasoningEffort; Responses uses reasoning.effort.
+	if effortRaw, ok := obj["reasoningEffort"]; ok && grokModelSupportsReasoningEffort(model) {
+		if _, hasReasoning := obj["reasoning"]; !hasReasoning {
+			if effort, ok := effortRaw.(string); ok && strings.TrimSpace(effort) != "" {
+				obj["reasoning"] = map[string]any{"effort": strings.TrimSpace(effort)}
 			}
 		}
-		delete(obj, "reasoningEffort")
-		changed = true
 	}
-	if !grokModelSupportsReasoningEffort(model) {
-		if _, ok := obj["reasoning"]; ok {
-			delete(obj, "reasoning")
+	for key := range obj {
+		if grokFieldPolicy(key, grokRoot, model, tools) == grokDropField {
+			delete(obj, key)
 			changed = true
 		}
+	}
+	if sanitizeGrokNestedUnsupportedFields(obj) {
+		changed = true
 	}
 	return changed
 }
@@ -814,8 +773,7 @@ func sanitizeGrokTools(obj map[string]any) bool {
 			continue
 		}
 		typeName, _ := tool["type"].(string)
-		switch typeName {
-		case "image_generation":
+		if grokDropsTool(typeName) {
 			changed = true
 			continue
 		}
@@ -829,12 +787,6 @@ func sanitizeGrokTools(obj map[string]any) bool {
 	}
 	if len(tools) == 0 {
 		delete(obj, "tools")
-		if _, ok := obj["tool_choice"]; ok {
-			delete(obj, "tool_choice")
-		}
-		if _, ok := obj["parallel_tool_calls"]; ok {
-			delete(obj, "parallel_tool_calls")
-		}
 		return true
 	}
 	obj["tools"] = tools
@@ -845,13 +797,11 @@ func sanitizeGrokToolSchema(value any) bool {
 	switch v := value.(type) {
 	case map[string]any:
 		changed := false
-		if required, ok := v["required"]; ok && required == nil {
-			// xAI rejects JSON null here; coding clients may emit it for an
-			// optional tool list.
-			v["required"] = []any{}
-			changed = true
-		}
-		for _, child := range v {
+		for key, child := range v {
+			if grokFieldPolicy(key, grokToolSchema, "", grokToolsUnchanged) == grokNullRequired && child == nil {
+				v[key] = []any{}
+				changed = true
+			}
 			if sanitizeGrokToolSchema(child) {
 				changed = true
 			}
@@ -874,11 +824,12 @@ func sanitizeGrokNestedUnsupportedFields(value any) bool {
 	switch v := value.(type) {
 	case map[string]any:
 		changed := false
-		if _, ok := v["external_web_access"]; ok {
-			delete(v, "external_web_access")
-			changed = true
-		}
-		for _, child := range v {
+		for key, child := range v {
+			if grokFieldPolicy(key, grokNested, "", grokToolsUnchanged) == grokDropField {
+				delete(v, key)
+				changed = true
+				continue
+			}
 			if sanitizeGrokNestedUnsupportedFields(child) {
 				changed = true
 			}

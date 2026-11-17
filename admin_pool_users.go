@@ -145,6 +145,34 @@ func (h *proxyHandler) handlePoolUserDelete(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (h *proxyHandler) userForSetup(token string) *PoolUser {
+	if h.passport == nil {
+		if h.poolUsers == nil {
+			return nil
+		}
+		return h.poolUsers.GetByToken(token)
+	}
+
+	client := h.passport.clientByDownloadToken(token)
+	if client == nil {
+		return nil
+	}
+	identity := client.PrincipalID + "-c-" + client.ID
+	principal, client, active := h.passport.credentialState(identity)
+	if !active {
+		return nil
+	}
+
+	issuedAt := time.Now().UTC()
+	if principal.CredentialsValidAfter.After(issuedAt) {
+		issuedAt = principal.CredentialsValidAfter
+	}
+	if client.ValidAfter.After(issuedAt) {
+		issuedAt = client.ValidAfter
+	}
+	return &PoolUser{ID: identity, Token: token, Email: principal.Email, PlanType: principal.PlanType, CreatedAt: client.CreatedAt, credentialIssuedAt: issuedAt}
+}
+
 // Config download endpoints (no auth - token IS the auth)
 
 func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Request) {
@@ -184,25 +212,7 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var user *PoolUser
-	if h.passport != nil {
-		if client := h.passport.clientByDownloadToken(token); client != nil {
-			if principalID, clientID, ok := h.passport.authorizeCredential(client.PrincipalID + "-c-" + client.ID); ok {
-				pr := h.passport.principal(principalID)
-				issuedAt := time.Now().UTC()
-				if pr.CredentialsValidAfter.After(issuedAt) {
-					issuedAt = pr.CredentialsValidAfter
-				}
-				if client.ValidAfter.After(issuedAt) {
-					issuedAt = client.ValidAfter
-				}
-				user = &PoolUser{ID: principalID + "-c-" + clientID, Token: client.DownloadToken, Email: pr.Email, PlanType: pr.PlanType, CreatedAt: client.CreatedAt, credentialIssuedAt: issuedAt}
-			}
-		}
-	}
-	if user == nil && h.poolUsers != nil {
-		user = h.poolUsers.GetByToken(token)
-	}
+	user := h.userForSetup(token)
 	if user == nil {
 		respondJSONError(w, http.StatusNotFound, "invalid or revoked token")
 		return
@@ -212,7 +222,7 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	secret := getPoolJWTSecret()
+	secret := h.cfg.poolJWTSecret()
 	if secret == "" {
 		respondJSONError(w, http.StatusServiceUnavailable, "JWT secret not configured")
 		return

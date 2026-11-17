@@ -504,3 +504,12 @@ func TestSaveAccountPreservesUnknownFields(t *testing.T) {
 		t.Fatalf("expected tokens.extra_token preserved")
 	}
 }
+
+func scoreAccount(a *Account, now time.Time) float64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return scoreAccountLocked(a, now)
+}

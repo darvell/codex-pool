@@ -24,10 +24,6 @@ func unwrapAntigravityResponse(body []byte) ([]byte, error) {
 	return body, nil
 }
 
-func translateAntigravityResponse(body []byte, format antigravityClientFormat, requestModel string) ([]byte, error) {
-	return translateAntigravityResponseWithRequest(body, format, requestModel, nil, nil)
-}
-
 func translateAntigravityResponseWithRequest(body []byte, format antigravityClientFormat, requestModel string, responsesRequest map[string]any, responsesFunctionNames map[string]string) ([]byte, error) {
 	gemini, err := unwrapAntigravityResponse(body)
 	if err != nil {
@@ -161,10 +157,6 @@ func antigravityGeminiToOpenAI(response map[string]any, model string) map[string
 		message["images"] = images
 	}
 	return map[string]any{"id": "chatcmpl-" + uuid.NewString(), "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": antigravityOpenAIFinishReason(r.FinishReason, len(r.Tools) > 0)}}, "usage": antigravityOpenAIUsage(r)}
-}
-
-func antigravityGeminiToResponses(response map[string]any, model string) map[string]any {
-	return antigravityGeminiToResponsesWithRequest(response, model, nil, nil)
 }
 
 func antigravityGeminiToResponsesWithRequest(response map[string]any, model string, request map[string]any, functionNames map[string]string) map[string]any {

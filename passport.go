@@ -7,11 +7,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -97,12 +97,18 @@ type PassportStore struct {
 	passwordWork  chan struct{}
 	aead          cipher.AEAD
 	analyticsSalt string
+	jwtSecret     string
 }
 
-func passportAEAD() (cipher.AEAD, error) {
+type passportOptions struct {
+	jwtSecret           string
+	legacyAnalyticsSalt string
+}
+
+func passportAEAD(jwtSecret string) (cipher.AEAD, error) {
 	secret := os.Getenv("POOL_AUTH_ENCRYPTION_KEY")
 	if secret == "" {
-		secret = getPoolJWTSecret()
+		secret = jwtSecret
 	}
 	if secret == "" {
 		return nil, errors.New("POOL_AUTH_ENCRYPTION_KEY or POOL_JWT_SECRET required")
@@ -115,15 +121,19 @@ func passportAEAD() (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func newPassportStore(db *bbolt.DB, legacy *PoolUserStore, legacyAnalyticsSalt ...string) (*PassportStore, error) {
+func newPassportStore(db *bbolt.DB, legacy *PoolUserStore, options passportOptions) (*PassportStore, error) {
 	if db == nil {
 		return nil, errors.New("passport requires bolt")
 	}
-	aead, err := passportAEAD()
+	jwtSecret := options.jwtSecret
+	if jwtSecret == "" {
+		jwtSecret = getPoolJWTSecret()
+	}
+	aead, err := passportAEAD(jwtSecret)
 	if err != nil {
 		return nil, err
 	}
-	p := &PassportStore{db: db, principals: map[string]*Principal{}, clients: map[string]*ClientCredential{}, passwordWork: make(chan struct{}, 4), aead: aead}
+	p := &PassportStore{db: db, principals: map[string]*Principal{}, clients: map[string]*ClientCredential{}, passwordWork: make(chan struct{}, 4), aead: aead, jwtSecret: jwtSecret}
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		for _, n := range []string{bucketPrincipals, bucketPassportSessions, bucketClientCredentials, bucketOperatorTokens, bucketPassportAvatars, bucketJoinLinks, bucketMemberRecoveryLinks, bucketPassportAudit, bucketWebAuthnCredentials, bucketWebAuthnChallenges} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(n)); err != nil {
@@ -136,9 +146,7 @@ func newPassportStore(db *bbolt.DB, legacy *PoolUserStore, legacyAnalyticsSalt .
 		}
 		salt := string(state.Get([]byte("analytics_salt")))
 		if salt == "" {
-			if len(legacyAnalyticsSalt) > 0 {
-				salt = strings.TrimSpace(legacyAnalyticsSalt[0])
-			}
+			salt = strings.TrimSpace(options.legacyAnalyticsSalt)
 			if salt == "" {
 				var err error
 				salt, err = secureToken(32)
@@ -351,10 +359,8 @@ func (p *PassportStore) principal(id string) *Principal {
 	cp := *x
 	return &cp
 }
-func (p *PassportStore) byEmail(email string) *Principal {
+func (p *PassportStore) byEmailLocked(email string) *Principal {
 	email = strings.ToLower(strings.TrimSpace(email))
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	for _, x := range p.principals {
 		if strings.ToLower(x.Email) == email {
 			cp := *x
@@ -366,42 +372,30 @@ func (p *PassportStore) byEmail(email string) *Principal {
 
 func (p *PassportStore) markCredentialSeen(principalID, clientID string, now time.Time) {
 	now = now.UTC()
-	p.mu.RLock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	principal := p.principals[principalID]
 	client := p.clients[clientID]
-	recent := principal != nil && client != nil && now.Sub(principal.LastSeenAt) < time.Minute && now.Sub(client.LastSeenAt) < time.Minute
-	p.mu.RUnlock()
-	if principal == nil || client == nil || recent {
+	if principal == nil || client == nil || (now.Sub(principal.LastSeenAt) < time.Minute && now.Sub(client.LastSeenAt) < time.Minute) {
 		return
 	}
-
-	var persistedPrincipal Principal
-	var persistedClient ClientCredential
-	if p.db.Update(func(tx *bbolt.Tx) error {
-		principalValue := tx.Bucket([]byte(bucketPrincipals)).Get([]byte(principalID))
-		clientValue := tx.Bucket([]byte(bucketClientCredentials)).Get([]byte(clientID))
-		if principalValue == nil || clientValue == nil || json.Unmarshal(principalValue, &persistedPrincipal) != nil || json.Unmarshal(clientValue, &persistedClient) != nil {
-			return errors.New("credential identity unavailable")
-		}
-		persistedPrincipal.LastSeenAt = now
-		persistedClient.LastSeenAt = now
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &persistedPrincipal); err != nil {
-			return err
-		}
-		return putJSON(tx.Bucket([]byte(bucketClientCredentials)), clientID, &persistedClient)
-	}) != nil {
-		return
+	updatedPrincipal := *principal
+	updatedClient := *client
+	updatedPrincipal.LastSeenAt = now
+	updatedClient.LastSeenAt = now
+	if err := p.commitLocked(&updatedPrincipal, map[string]*ClientCredential{clientID: &updatedClient}, nil); err != nil {
+		log.Printf("passport: credential observation failed: %v", err)
 	}
-	p.mu.Lock()
-	p.principals[principalID] = &persistedPrincipal
-	p.clients[clientID] = &persistedClient
-	p.mu.Unlock()
 }
 
 func (p *PassportStore) byLogin(login string) *Principal {
-	login = strings.ToLower(strings.TrimSpace(login))
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.byLoginLocked(login)
+}
+
+func (p *PassportStore) byLoginLocked(login string) *Principal {
+	login = strings.ToLower(strings.TrimSpace(login))
 	for _, principal := range p.principals {
 		if strings.ToLower(principal.Username) == login || strings.ToLower(principal.Email) == login {
 			copy := *principal
@@ -592,14 +586,14 @@ func (p *PassportStore) createClient(principalID, label string, expires *time.Ti
 	if label == "" || len([]rune(label)) > 80 {
 		return nil, errors.New("label required (max 80 characters)")
 	}
-	p.mu.RLock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	n := 0
 	for _, c := range p.clients {
 		if c.PrincipalID == principalID && c.Status == "active" {
 			n++
 		}
 	}
-	p.mu.RUnlock()
 	if n >= 20 {
 		return nil, errors.New("client credential limit reached")
 	}
@@ -619,17 +613,12 @@ func (p *PassportStore) createClient(principalID, label string, expires *time.Ti
 		return nil, err
 	}
 	c.DownloadCiphertext = sealed
-	v, _ := json.Marshal(c)
-	if err = p.db.Update(func(tx *bbolt.Tx) error { return tx.Bucket([]byte(bucketClientCredentials)).Put([]byte(c.ID), v) }); err != nil {
+	if err = p.commitLocked(nil, map[string]*ClientCredential{c.ID: c}, nil); err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	p.clients[c.ID] = c
-	p.mu.Unlock()
 	return c, nil
 }
 
-func encodeSequence(n uint64) []byte { var b [8]byte; binary.BigEndian.PutUint64(b[:], n); return b[:] }
 func (h *proxyHandler) originHashSalt() string {
 	if h != nil && h.passport != nil && h.passport.analyticsSalt != "" {
 		return h.passport.analyticsSalt
@@ -638,9 +627,4 @@ func (h *proxyHandler) originHashSalt() string {
 		return poolHashSalt(h.cfg.legacyFriendCode)
 	}
 	return poolHashSalt("")
-}
-
-func tokenFingerprint(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:6])
 }

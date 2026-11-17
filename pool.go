@@ -116,8 +116,7 @@ type Account struct {
 	// fileFingerprint detects external credential edits before a state-only save.
 	fileFingerprint string
 
-	// antigravitySnapshot is staged while loading account files. Publishing it
-	// to the live registry is part of the pool commit, never file parsing.
+	// antigravitySnapshot retains loaded and discovered metadata for persistence.
 	antigravitySnapshot *AntigravityAccountSnapshot
 	vibeAccount         *vibeAccountInfo
 
@@ -478,12 +477,6 @@ func applyCommonAccountFileState(account *Account, data []byte) {
 	}
 }
 
-// Note: Individual account loading functions are now in the provider files:
-// - provider_codex.go: CodexProvider.LoadAccount
-// - provider_claude.go: ClaudeProvider.LoadAccount
-// - provider_gemini.go: GeminiProvider.LoadAccount
-
-// poolState wraps accounts with a mutex.
 type poolState struct {
 	// Lock order for Antigravity lifecycle operations is stateMu -> mu ->
 	// Account.mu. Registry locks are taken only while stateMu is held and never
@@ -493,6 +486,7 @@ type poolState struct {
 	stateMu             sync.RWMutex
 	mu                  sync.RWMutex
 	accounts            []*Account
+	antigravityModels   antigravityModelRegistry
 	chatGPTReservations map[string]chatGPTReservation
 	convPin             map[string]string // conversation_id -> account ID
 	debug               bool
@@ -501,13 +495,24 @@ type poolState struct {
 	generation          uint64  // increments on every successful account/registry commit
 }
 
-func newPoolState(accs []*Account, debug bool) *poolState {
-	return &poolState{accounts: accs, convPin: map[string]string{}, debug: debug, tierThreshold: 0.50, generation: 1}
+type poolSettings struct {
+	debug         bool
+	tierThreshold float64
 }
 
-// replace swaps the pool accounts (used on reload). Generic callers retain
-// this behavior; reloadAccounts uses replaceWithAntigravityRegistry so the
-// Antigravity account set and model registry publish as one transaction.
+func (p *poolState) applySettings(settings poolSettings) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.debug = settings.debug
+	p.tierThreshold = settings.tierThreshold
+}
+
+func newPoolState(accs []*Account, debug bool) *poolState {
+	state := antigravityRegistryStateFromAccounts(accs)
+	return &poolState{accounts: accs, antigravityModels: antigravityModelRegistry{accounts: state.accounts, known: state.known}, convPin: map[string]string{}, debug: debug, tierThreshold: 0.50, generation: 1}
+}
+
+// replace publishes account and discovery state under the same lifecycle lock.
 func (p *poolState) replace(accs []*Account) {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
@@ -517,12 +522,7 @@ func (p *poolState) replace(accs []*Account) {
 	p.convPin = map[string]string{}
 	p.rr = 0
 	p.generation++
-}
-
-func (p *poolState) initializeAntigravityRegistry(accounts []*Account) {
-	p.stateMu.Lock()
-	defer p.stateMu.Unlock()
-	antigravityModels.ReplaceAll(antigravityRegistryStateFromAccounts(accounts))
+	p.antigravityModels.ReplaceAll(antigravityRegistryStateFromAccounts(accs))
 }
 
 var errAntigravityReloadChanged = errors.New("Antigravity account files changed while reload was staged")
@@ -581,7 +581,7 @@ func (p *poolState) replaceWithAntigravityRegistry(accs []*Account) error {
 	p.convPin = preservedPins
 	p.rr = 0
 	p.generation++
-	antigravityModels.ReplaceAll(antigravityRegistryStateFromAccounts(accs))
+	p.antigravityModels.ReplaceAll(antigravityRegistryStateFromAccounts(accs))
 	p.mu.Unlock()
 	return nil
 }
@@ -1389,15 +1389,6 @@ func (p *poolState) countByType(accountType AccountType) int {
 	return count
 }
 
-func scoreAccount(a *Account, now time.Time) float64 {
-	if a == nil {
-		return 0
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return scoreAccountLocked(a, now)
-}
-
 type scoreBreakdown struct {
 	Score              float64
 	PrimaryUsed        float64
@@ -1618,10 +1609,6 @@ func scoreTooltipFromBreakdownLocked(a *Account, now time.Time, breakdown scoreB
 
 	lines = append(lines, fmt.Sprintf("Pre-credit headroom: %.2f", breakdown.HeadroomPreCredit))
 	return strings.Join(lines, "\n")
-}
-
-func scoreTooltipLocked(a *Account, now time.Time) string {
-	return scoreTooltipFromBreakdownLocked(a, now, scoreAccountBreakdownLocked(a, now))
 }
 
 func (p *poolState) pin(conversationID, accountID string) {
@@ -2303,19 +2290,6 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 	return results
 }
 
-func earliestReset(a, b time.Time) time.Time {
-	if a.IsZero() {
-		return b
-	}
-	if b.IsZero() {
-		return a
-	}
-	if a.Before(b) {
-		return a
-	}
-	return b
-}
-
 // UsagePoolStats contains aggregate stats about the pool for the usage endpoint.
 type UsagePoolStats struct {
 	TotalCount       int            `json:"total_count"`
@@ -2640,16 +2614,6 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 	}
 
 	return stats
-}
-
-// decayPenalty slowly reduces penalties over time to avoid permanent punishment.
-func decayPenalty(a *Account, now time.Time) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	decayPenaltyLocked(a, now)
 }
 
 func decayPenaltyLocked(a *Account, now time.Time) {

@@ -5,16 +5,12 @@ import (
 	"time"
 )
 
-// requestPacer enforces a minimum time gap between requests for the same session.
-// This prevents burst patterns that could fingerprint the proxy as non-human traffic.
 type requestPacer struct {
 	mu      sync.Mutex
 	lastReq map[string]time.Time
 	minGap  time.Duration
 }
 
-// newRequestPacer creates a pacer with the given minimum gap between requests
-// for the same session ID. If minGap is zero, the pacer is a no-op.
 func newRequestPacer(minGap time.Duration) *requestPacer {
 	return &requestPacer{
 		lastReq: make(map[string]time.Time),
@@ -22,8 +18,6 @@ func newRequestPacer(minGap time.Duration) *requestPacer {
 	}
 }
 
-// wait blocks until at least minGap has elapsed since the last request for the
-// given session ID. If sessionID is empty, this is a no-op.
 func (p *requestPacer) wait(sessionID string) {
 	if p == nil || p.minGap == 0 || sessionID == "" {
 		return
@@ -61,14 +55,4 @@ func (p *requestPacer) cleanup(maxAge time.Duration) {
 			delete(p.lastReq, id)
 		}
 	}
-}
-
-// size returns the number of tracked sessions (for diagnostics).
-func (p *requestPacer) size() int {
-	if p == nil {
-		return 0
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.lastReq)
 }

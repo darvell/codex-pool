@@ -261,10 +261,6 @@ func convertOpenAIResponseFormatToResponses(raw any) map[string]any {
 	}
 }
 
-func normalizeOpenAIToolSchema(schema map[string]any) map[string]any {
-	return prepareCodexJSONSchema(schema)
-}
-
 func normalizeResponsesSchemaBody(body []byte) []byte {
 	var obj map[string]any
 	if len(body) == 0 || json.Unmarshal(body, &obj) != nil {
@@ -577,30 +573,17 @@ func completionsUsageFromResponses(resp map[string]any) map[string]any {
 }
 
 func openAIUsageFromResponsesUsage(u map[string]any) map[string]any {
-	promptTokens := toInt64(u["input_tokens"])
-	completionTokens := toInt64(u["output_tokens"])
-	totalTokens := toInt64(u["total_tokens"])
-	if totalTokens == 0 {
-		totalTokens = promptTokens + completionTokens
-	}
+	facts := readResponsesUsage(u)
 	usage := map[string]any{
-		"prompt_tokens":     promptTokens,
-		"completion_tokens": completionTokens,
-		"total_tokens":      totalTokens,
+		"prompt_tokens":     facts.inputTokens,
+		"completion_tokens": facts.outputTokens,
+		"total_tokens":      facts.totalTokens,
 	}
-	if details, ok := u["input_tokens_details"].(map[string]any); ok {
-		if cached := toInt64(details["cached_tokens"]); cached > 0 {
-			usage["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
-		}
+	if facts.cachedTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": facts.cachedTokens}
 	}
-	if details, ok := u["output_tokens_details"].(map[string]any); ok {
-		outDetails := map[string]any{}
-		if reasoning := toInt64(details["reasoning_tokens"]); reasoning > 0 {
-			outDetails["reasoning_tokens"] = reasoning
-		}
-		if len(outDetails) > 0 {
-			usage["completion_tokens_details"] = outDetails
-		}
+	if facts.reasoningTokens > 0 {
+		usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": facts.reasoningTokens}
 	}
 	return usage
 }
@@ -819,7 +802,7 @@ func translateResponsesToClaudeRequest(body []byte) ([]byte, error) {
 				}
 				msg := map[string]any{"role": role}
 				if content, ok := it["content"].([]any); ok {
-					msg["content"] = convertResponsesContentToClaude(content, role)
+					msg["content"] = convertResponsesContentToClaude(content)
 				} else if content, ok := it["content"].(string); ok {
 					msg["content"] = content
 				}
@@ -1084,7 +1067,7 @@ func claudeContentBlocks(content any) []map[string]any {
 }
 
 // convertResponsesContentToClaude converts Responses API content blocks to Claude content blocks.
-func convertResponsesContentToClaude(content []any, role string) []any {
+func convertResponsesContentToClaude(content []any) []any {
 	var blocks []any
 	for _, part := range content {
 		p, ok := part.(map[string]any)
@@ -1486,17 +1469,6 @@ func normalizeResponsesReasoningEffort(effort string) string {
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""
-	}
-}
-
-func reasoningEffortFromBudget(budget float64) string {
-	switch {
-	case budget >= 10000:
-		return "high"
-	case budget <= 2000:
-		return "low"
-	default:
-		return "medium"
 	}
 }
 

@@ -1037,29 +1037,6 @@ func TestDoSwapRefusesContextToolDelta(t *testing.T) {
 	}
 }
 
-func TestStripPreviousResponseIDLeavesUnrelatedFields(t *testing.T) {
-	in := []byte(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_abc","input":[{"type":"message","role":"user"}]}`)
-	out := stripPreviousResponseID(in)
-	if bytes.Contains(out, []byte(`previous_response_id`)) {
-		t.Fatalf("previous_response_id not stripped: %s", string(out))
-	}
-	if !bytes.Contains(out, []byte(`"model":"gpt-5.5"`)) {
-		t.Fatalf("model field lost: %s", string(out))
-	}
-	if !bytes.Contains(out, []byte(`"type":"response.create"`)) {
-		t.Fatalf("type field lost: %s", string(out))
-	}
-}
-
-func TestStripPreviousResponseIDNoOp(t *testing.T) {
-	in := []byte(`{"type":"response.create","model":"gpt-5.5","input":[]}`)
-	out := stripPreviousResponseID(in)
-	// Pointer-equal: no rewrite when the field is absent.
-	if &in[0] != &out[0] {
-		t.Fatalf("expected no-rewrite for payload without previous_response_id")
-	}
-}
-
 func TestExtractCodexWebSocketRequestedModel(t *testing.T) {
 	t.Parallel()
 	flat := []byte(`{"type":"response.create","model":"grok-4.5","input":"hi"}`)

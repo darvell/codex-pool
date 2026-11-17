@@ -22,9 +22,8 @@ const antigravitySuccessSSE = "data: {\"response\":{\"candidates\":[{\"content\"
 
 func testAntigravityHandler(t *testing.T, transport http.RoundTripper, accounts ...*Account) (*proxyHandler, string) {
 	t.Helper()
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	model := "gemini-3.8-flash-medium"
+	pool := newPoolState(accounts, false)
 	for _, account := range accounts {
 		if account.ModelRateLimits == nil {
 			account.ModelRateLimits = make(map[string]time.Time)
@@ -32,7 +31,7 @@ func testAntigravityHandler(t *testing.T, transport http.RoundTripper, accounts 
 		if account.ModelBackoffLevels == nil {
 			account.ModelBackoffLevels = make(map[string]int)
 		}
-		antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{
+		pool.antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{
 			FetchedAt: time.Now(),
 			Models:    map[string]AntigravityModelInfo{model: {ID: model}},
 		})
@@ -42,7 +41,7 @@ func testAntigravityHandler(t *testing.T, transport http.RoundTripper, accounts 
 	provider := NewAntigravityProvider(daily, production)
 	return &proxyHandler{
 		cfg:                  &config{maxAttempts: len(accounts)},
-		pool:                 newPoolState(accounts, false),
+		pool:                 pool,
 		registry:             NewProviderRegistry(nil, nil, nil, provider),
 		transport:            transport,
 		antigravityTransport: transport,
@@ -242,6 +241,8 @@ func TestAntigravityTerminalBadRequestDoesNotRotate(t *testing.T) {
 }
 
 func TestAntigravityRefreshCoalescesByAccountGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	dir := t.TempDir()
 	account := &Account{
 		Type: AccountTypeAntigravity, ID: "a", File: filepath.Join(dir, "a.json"),
@@ -258,7 +259,11 @@ func TestAntigravityRefreshCoalescesByAccountGeneration(t *testing.T) {
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		once.Do(func() { close(started) })
-		<-proceed
+		select {
+		case <-proceed:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 		return antigravityHTTPResponse(http.StatusOK, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`), nil
 	})
 	daily, _ := url.Parse("https://daily.test")
@@ -271,16 +276,29 @@ func TestAntigravityRefreshCoalescesByAccountGeneration(t *testing.T) {
 	reservationA := &antigravityReservation{Account: account, generation: h.pool.generation}
 	reservationB := &antigravityReservation{Account: account, generation: h.pool.generation}
 	results := make(chan error, 2)
-	go func() { results <- h.refreshAntigravityReservation(context.Background(), reservationA) }()
-	<-started
-	go func() { results <- h.refreshAntigravityReservation(context.Background(), reservationB) }()
-	// Give the second caller time to join the in-flight keyed refresh before the
-	// mocked OAuth response is released.
-	time.Sleep(20 * time.Millisecond)
+	go func() { results <- h.refreshAntigravityReservation(ctx, reservationA) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	joining := &refreshJoinContext{Context: ctx, joined: make(chan struct{})}
+	go func() { results <- h.refreshAntigravityReservation(joining, reservationB) }()
+	// The joining path evaluates Done after finding the active refresh.
+	select {
+	case <-joining.joined:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 	close(proceed)
 	for range 2 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
 		}
 	}
 	if calls.Load() != 1 {
@@ -360,15 +378,13 @@ func TestAntigravityRetryAfterAndTemporaryDiagnostics(t *testing.T) {
 }
 
 func TestAntigravityEligibilityAndReservationFairness(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	model := "gemini-3.8-flash-medium"
 	low, high := 0.2, 0.8
 	a := &Account{Type: AccountTypeAntigravity, ID: "a", ModelRateLimits: map[string]time.Time{}, ModelBackoffLevels: map[string]int{}}
 	b := &Account{Type: AccountTypeAntigravity, ID: "b", ModelRateLimits: map[string]time.Time{}, ModelBackoffLevels: map[string]int{}}
 	pool := newPoolState([]*Account{a, b}, false)
-	antigravityModels.ReplaceAccount("a", AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model, Quota: AntigravityQuotaInfo{RemainingFraction: &low}}}})
-	antigravityModels.ReplaceAccount("b", AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model, Quota: AntigravityQuotaInfo{RemainingFraction: &high}}}})
+	pool.antigravityModels.ReplaceAccount("a", AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model, Quota: AntigravityQuotaInfo{RemainingFraction: &low}}}})
+	pool.antigravityModels.ReplaceAccount("b", AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model, Quota: AntigravityQuotaInfo{RemainingFraction: &high}}}})
 	reservation, _ := pool.reserveAntigravityModel("", nil, model, "")
 	if reservation == nil || reservation.Account != b {
 		t.Fatalf("reservation=%v, want high-headroom b", reservation)
@@ -377,7 +393,7 @@ func TestAntigravityEligibilityAndReservationFairness(t *testing.T) {
 
 	one := 1.0
 	for _, id := range []string{"a", "b"} {
-		antigravityModels.ReplaceAccount(id, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model, Quota: AntigravityQuotaInfo{RemainingFraction: &one}}}})
+		pool.antigravityModels.ReplaceAccount(id, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model, Quota: AntigravityQuotaInfo{RemainingFraction: &one}}}})
 	}
 	first, _ := pool.reserveAntigravityModel("", nil, model, "")
 	second, _ := pool.reserveAntigravityModel("", nil, model, "")
@@ -437,9 +453,8 @@ func TestAntigravityReplayIsTenantScopedAndCrossAccountNeutral(t *testing.T) {
 }
 
 func TestAntigravityFailedLoadPreservesRegistry(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
-	antigravityModels.ReplaceAccount("live", AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-live": {ID: "gemini-live"}}})
+	pool := newPoolState(nil, false)
+	pool.antigravityModels.ReplaceAccount("live", AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-live": {ID: "gemini-live"}}})
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "antigravity"), 0o700); err != nil {
 		t.Fatal(err)
@@ -453,14 +468,12 @@ func TestAntigravityFailedLoadPreservesRegistry(t *testing.T) {
 	if err == nil {
 		t.Fatal("malformed load unexpectedly succeeded")
 	}
-	if snapshot, ok := antigravityModels.AccountSnapshot("live"); !ok || snapshot.Models["gemini-live"].ID == "" {
+	if snapshot, ok := pool.antigravityModels.AccountSnapshot("live"); !ok || snapshot.Models["gemini-live"].ID == "" {
 		t.Fatal("failed staged load mutated live registry")
 	}
 }
 
 func TestAntigravityReloadRejectsCredentialsChangedAfterStaging(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "test-client")
 
 	dir := t.TempDir()
@@ -496,7 +509,6 @@ func TestAntigravityReloadRejectsCredentialsChangedAfterStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := newPoolState(live, false)
-	pool.initializeAntigravityRegistry(live)
 	stagedOld, err := loadPool(dir, registry)
 	if err != nil {
 		t.Fatal(err)
@@ -544,8 +556,6 @@ func TestAntigravityReloadRejectsCredentialsChangedAfterStaging(t *testing.T) {
 }
 
 func TestAntigravityStalePollCannotOverwriteReloadedCredentials(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	dir := t.TempDir()
 	file := filepath.Join(dir, "account.json")
 	old := &Account{Type: AccountTypeAntigravity, ID: "same", File: file, AccessToken: "old", RefreshToken: "old-refresh", ProjectID: "project", ModelRateLimits: map[string]time.Time{}, ModelBackoffLevels: map[string]int{}}
@@ -588,7 +598,7 @@ func TestAntigravityStalePollCannotOverwriteReloadedCredentials(t *testing.T) {
 	if saved["access_token"] != "new" {
 		t.Fatalf("stale poll overwrote credentials: %s", raw)
 	}
-	snapshot, ok := antigravityModels.AccountSnapshot("same")
+	snapshot, ok := pool.antigravityModels.AccountSnapshot("same")
 	if !ok || snapshot.Models["gemini-new"].ID == "" || snapshot.Models["gemini-live"].ID != "" {
 		t.Fatalf("replacement snapshot was overwritten: %#v", snapshot)
 	}
@@ -693,18 +703,16 @@ func TestAntigravityEligibilityReasons(t *testing.T) {
 }
 
 func TestAntigravityConcurrentReservationsBalanceAndRelease(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	model := "gemini-test"
 	accounts := []*Account{
 		{Type: AccountTypeAntigravity, ID: "a", ModelRateLimits: map[string]time.Time{}},
 		{Type: AccountTypeAntigravity, ID: "b", ModelRateLimits: map[string]time.Time{}},
 		{Type: AccountTypeAntigravity, ID: "c", ModelRateLimits: map[string]time.Time{}},
 	}
-	for _, account := range accounts {
-		antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model}}})
-	}
 	pool := newPoolState(accounts, false)
+	for _, account := range accounts {
+		pool.antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model}}})
+	}
 	const requests = 30
 	reservations := make(chan *antigravityReservation, requests)
 	var wg sync.WaitGroup
@@ -718,6 +726,11 @@ func TestAntigravityConcurrentReservationsBalanceAndRelease(t *testing.T) {
 	}
 	wg.Wait()
 	close(reservations)
+	for _, account := range accounts {
+		if got := atomic.LoadInt64(&account.Inflight); got != requests/int64(len(accounts)) {
+			t.Fatalf("account %s reserved %d requests, want %d", account.ID, got, requests/len(accounts))
+		}
+	}
 	counts := map[string]int{}
 	for reservation := range reservations {
 		if reservation == nil {
@@ -730,6 +743,9 @@ func TestAntigravityConcurrentReservationsBalanceAndRelease(t *testing.T) {
 		t.Fatalf("reservations did not use every account: %v", counts)
 	}
 	for _, account := range accounts {
+		if counts[account.ID] != requests/len(accounts) {
+			t.Fatalf("unbalanced reservations: %v", counts)
+		}
 		if account.Inflight != 0 {
 			t.Fatalf("account %s leaked inflight=%d", account.ID, account.Inflight)
 		}
@@ -794,7 +810,7 @@ func TestAntigravityInvalidSignatureClearsReplayAndRetriesSameAccount(t *testing
 	})
 	h, model := testAntigravityHandler(t, transport, account)
 	req, body := antigravityProxyRequest(model)
-	prepared, err := prepareAntigravityRequest(req.URL.Path, body, "antigravity/"+model, "project", "conversation")
+	prepared, err := prepareAntigravityRequest(req.URL.Path, body, "antigravity/"+model, "project", "conversation", &h.pool.antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,25 +852,23 @@ func TestAntigravityReloadReplacesActiveLeaseIdentityAndPreservesValidPin(t *tes
 
 func TestAntigravityLiveRateLimitScopeRequiresKnownBucket(t *testing.T) {
 	model := "gemini-3.8-flash-medium"
-	if got := antigravityRateLimitScope(model, []byte(`{"error":{"status":"RESOURCE_EXHAUSTED"}}`)); got != model {
+	if got := antigravityRateLimitScope(&newPoolState(nil, false).antigravityModels, model, []byte(`{"error":{"status":"RESOURCE_EXHAUSTED"}}`)); got != model {
 		t.Fatalf("generic exhaustion scope=%q, want exact model", got)
 	}
-	if got := antigravityRateLimitScope(model, []byte(`{"metadata":{"quotaId":"gemini-weekly"}}`)); got != "family:gemini" {
+	if got := antigravityRateLimitScope(&newPoolState(nil, false).antigravityModels, model, []byte(`{"metadata":{"quotaId":"gemini-weekly"}}`)); got != "family:gemini" {
 		t.Fatalf("known family scope=%q", got)
 	}
 }
 
 func TestAntigravityCatalogAndRoutingShareAvailability(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	model := "gemini-test"
 	reset := time.Now().Add(time.Minute)
 	account := &Account{Type: AccountTypeAntigravity, ID: "a", ModelRateLimits: map[string]time.Time{model: reset}}
 	pool := newPoolState([]*Account{account}, false)
-	antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model}}})
+	pool.antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{model: {ID: model}}})
 	decisions := pool.antigravityDecisions(nil, model, "", time.Now())
 	report := buildAntigravityReport(decisions)
-	models := antigravityModels.Models(pool)
+	models := pool.antigravityModels.Models(pool)
 	if len(models) != 1 || models[0].AvailableNow || report.Ready != 0 || models[0].NextResetAt.IsZero() || report.NextRetryAt.IsZero() {
 		t.Fatalf("catalog=%+v report=%+v", models, report)
 	}

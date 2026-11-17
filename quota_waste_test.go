@@ -18,7 +18,8 @@ func TestQuotaWasteSnapshotPersistsExplicitZeroAndOpaque(t *testing.T) {
 		{ID: "zero", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsed: 0, RetrievedAt: now, Source: "wham", primarySet: true}},
 		{ID: "opaque", Type: AccountTypeMistral, Usage: UsageSnapshot{RetrievedAt: now, Source: "request"}},
 	}
-	if err := store.recordQuotaWasteObservations(quotaWasteObservationRows(accounts, now)); err != nil {
+	h := &proxyHandler{analyticsStore: store, pool: newPoolState(accounts, false)}
+	if err := h.recordQuotaWasteSnapshot(now); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := store.quotaWasteRows(1)
@@ -28,8 +29,17 @@ func TestQuotaWasteSnapshotPersistsExplicitZeroAndOpaque(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows=%d, want 2", len(rows))
 	}
-	if rows[0].Used == nil && rows[1].Used == nil {
-		t.Fatal("explicit zero was lost")
+	byID := make(map[string]quotaWasteObservation, len(rows))
+	for _, row := range rows {
+		byID[row.AccountID] = row
+	}
+	zero, ok := byID[hashAccountID("zero")]
+	if !ok || zero.Used == nil || *zero.Used != 0 || zero.WindowKey != "primary" || zero.WindowKind != "scheduled" || !zero.Fresh {
+		t.Fatalf("explicit zero observation=%+v", zero)
+	}
+	opaque, ok := byID[hashAccountID("opaque")]
+	if !ok || opaque.Used != nil || opaque.WindowKey != "opaque" || opaque.WindowKind != "opaque" || !opaque.Fresh {
+		t.Fatalf("opaque observation=%+v", opaque)
 	}
 }
 
@@ -55,11 +65,23 @@ func TestQuotaWasteDisplayRowsOnlySummarizeConfirmedClosedWindows(t *testing.T) 
 }
 
 func TestQuotaWasteCandidatesRejectStaleEvidence(t *testing.T) {
-	used := .60
-	accounts := []quotaWasteAccount{{ID: "a", SeatID: "seat-a", Provider: "codex", Plan: "pro", Health: "healthy"}, {ID: "b", SeatID: "seat-b", Provider: "codex", Plan: "pro", Health: "healthy"}}
-	rows := []quotaWasteObservation{{SeatID: "seat-a", Provider: "codex", Plan: "pro", Used: &used, Fresh: false, ObservedAt: "2024-01-01T00:00:00Z"}, {SeatID: "seat-b", Provider: "codex", Plan: "pro", Used: &used, Fresh: true, ObservedAt: "2024-01-01T00:00:00Z"}}
-	for _, candidate := range quotaWasteCandidates(rows, accounts) {
-		if candidate.Eligibility == "modelled_safe" {
+	used := .50
+	accounts := []quotaWasteAccount{
+		{ID: "a", SeatID: "seat-a", Provider: "codex", Plan: "pro", Health: "healthy"},
+		{ID: "b", SeatID: "seat-b", Provider: "codex", Plan: "pro", Health: "healthy"},
+		{ID: "c", SeatID: "seat-c", Provider: "codex", Plan: "pro", Health: "healthy"},
+	}
+	rows := []quotaWasteObservation{
+		{SeatID: "seat-a", Provider: "codex", Plan: "pro", Used: &used, Fresh: false, ObservedAt: "2024-01-01T00:00:00Z"},
+		{SeatID: "seat-b", Provider: "codex", Plan: "pro", Used: &used, Fresh: true, ObservedAt: "2024-01-01T00:00:00Z"},
+		{SeatID: "seat-c", Provider: "codex", Plan: "pro", Used: &used, Fresh: true, ObservedAt: "2024-01-01T00:00:00Z"},
+	}
+	candidates := quotaWasteCandidates(rows, accounts)
+	if len(candidates) != len(accounts) {
+		t.Fatalf("candidates=%+v, want a scenario for each of %d seats", candidates, len(accounts))
+	}
+	for _, candidate := range candidates {
+		if candidate.Eligibility != "insufficient_evidence" || candidate.ProjectedPeakLoad != nil {
 			t.Fatalf("stale evidence passed: %+v", candidate)
 		}
 	}
@@ -92,10 +114,23 @@ func TestQuotaWasteCandidatesAllowOneSeatWhenRemainingReserveHolds(t *testing.T)
 	for _, seat := range []string{"seat-a", "seat-b", "seat-c"} {
 		rows = append(rows, quotaWasteObservation{SeatID: seat, Provider: "codex", Plan: "pro", Used: &used, Fresh: true})
 	}
-	for _, c := range quotaWasteCandidates(rows, accounts) {
-		if c.Eligibility != "modelled_safe" || c.ProjectedPeakLoad == nil || *c.ProjectedPeakLoad != .75 {
+	candidates := quotaWasteCandidates(rows, accounts)
+	if len(candidates) != len(accounts) {
+		t.Fatalf("candidates=%+v, want a scenario for each of %d seats", candidates, len(accounts))
+	}
+	expected := map[string]bool{"a": true, "b": true, "c": true}
+	for _, c := range candidates {
+		if c.Eligibility != "modelled_safe" || c.ProjectedPeakLoad == nil || *c.ProjectedPeakLoad != .75 || !c.Independent || len(c.RemovesAccounts) != 1 {
 			t.Fatalf("candidate=%+v", c)
 		}
+		removed := c.RemovesAccounts[0]
+		if !expected[removed] {
+			t.Fatalf("duplicate or unexpected removal=%s", removed)
+		}
+		delete(expected, removed)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing scenarios=%v", expected)
 	}
 }
 
@@ -109,12 +144,18 @@ func TestQuotaWasteObservationUsesManualSubscriptionLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	seats, err := store.quotaWasteSubscriptionSeats([]*Account{{ID: "login-a"}})
+	h := &proxyHandler{analyticsStore: store, pool: newPoolState([]*Account{{
+		ID: "login-a", Type: AccountTypeCodex,
+		Usage: UsageSnapshot{PrimaryUsed: .2, primarySet: true, RetrievedAt: now},
+	}}, false)}
+	if err := h.recordQuotaWasteSnapshot(now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.quotaWasteRows(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := quotaWasteObservationRowsWithSeats([]*Account{{ID: "login-a", Type: AccountTypeCodex, Usage: UsageSnapshot{PrimaryUsed: .2, primarySet: true}}}, now, seats)
-	if len(rows) != 1 || rows[0].SeatID != hashAccountID("shared-seat") {
+	if len(rows) != 1 || rows[0].AccountID != hashAccountID("login-a") || rows[0].SeatID != hashAccountID("shared-seat") || rows[0].Used == nil || *rows[0].Used != .2 {
 		t.Fatalf("manual seat grouping = %+v", rows)
 	}
 }

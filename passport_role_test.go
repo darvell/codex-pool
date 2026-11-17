@@ -15,7 +15,7 @@ func testPassportWithOperator(t *testing.T) (*PassportStore, *Principal) {
 	t.Helper()
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	s := testUsageStore(t)
-	p, err := newPassportStore(s.db, nil)
+	p, err := newPassportStore(s.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

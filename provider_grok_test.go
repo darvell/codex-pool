@@ -16,24 +16,12 @@ import (
 	"time"
 )
 
-func TestServeGrokModelsReturnsGrokClientCatalog(t *testing.T) {
-	rr := httptest.NewRecorder()
-	serveGrokModels(rr)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d", rr.Code)
+func TestGrokClientModelMetadata(t *testing.T) {
+	models := grokModelsForClient()
+	if len(models) != len(grokCLIModelCatalog)+len(poolModels) {
+		t.Fatalf("catalog models=%d", len(models))
 	}
-	var body struct {
-		Object string            `json:"object"`
-		Data   []grokClientModel `json:"data"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode catalog: %v", err)
-	}
-	if body.Object != "list" || len(body.Data) != len(grokCLIModelCatalog)+len(poolModels) {
-		t.Fatalf("catalog object=%q models=%d", body.Object, len(body.Data))
-	}
-	for _, model := range body.Data {
+	for _, model := range models {
 		if model.ID == "grok-4.5" {
 			if model.Model != "grok-4.5" || model.APIBackend != "responses" || model.ContextWindow != 256000 || !slices.Equal(model.ContextWindows, []int{256000, 500000}) || model.CompactionsRemaining != 1 || len(model.ReasoningEfforts) != 3 {
 				t.Fatalf("grok-4.5 catalog entry = %#v", model)
@@ -86,11 +74,17 @@ func TestGrokClientCatalogIncludesPoolModels(t *testing.T) {
 		t.Fatalf("missing Grok client models: %#v", want)
 	}
 
-	ids := grokSetupModelIDs()
-	for _, id := range []string{"grok-4.5", "gpt-5.6-luna", "claude-sonnet-5"} {
-		if !slices.Contains(ids, id) {
-			t.Fatalf("setup model IDs missing %q", id)
+	wantSetup := map[string]bool{"grok-4.5": true, "gpt-5.6-luna": true, "claude-sonnet-5": true}
+	seenSetup := map[string]bool{}
+	for _, model := range grokSetupModels() {
+		if seenSetup[model.ID] {
+			t.Fatalf("duplicate setup model %q", model.ID)
 		}
+		seenSetup[model.ID] = true
+		delete(wantSetup, model.ID)
+	}
+	if len(wantSetup) != 0 {
+		t.Fatalf("setup models missing %v", wantSetup)
 	}
 }
 
@@ -297,7 +291,7 @@ func TestGrokClientVersionOverride(t *testing.T) {
 
 func TestSanitizeGrokRequestBodyRemovesUnsupportedFields(t *testing.T) {
 	body := []byte(`{"model":"grok-4.5","input":"hello","metadata":{"conversation_id":"c"},"prompt_cache_retention":"24h","external_web_access":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"abc","service_tier":"priority","response_format":{"type":"json_object"},"reasoning":{"effort":"high"},"reasoningEffort":"high","tools":[{"type":"web_search","external_web_access":true},{"type":"function","name":"ok","description":"ok","parameters":{"type":"object","required":null},"strict":true}],"tool_choice":"auto","parallel_tool_calls":true}`)
-	rewritten := sanitizeGrokRequestBody(body, "grok-4.5")
+	rewritten := rewriteAndSanitizeGrokRequestBody(body, "grok-4.5")
 	text := string(rewritten)
 	for _, forbidden := range []string{"metadata", "external_web_access", "response_format", "reasoningEffort"} {
 		if strings.Contains(text, forbidden) {

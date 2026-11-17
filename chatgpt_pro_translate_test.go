@@ -8,18 +8,13 @@ import (
 	"testing"
 )
 
-func proRequest(t *testing.T, input any) map[string]any {
+func proRequest(t *testing.T, input map[string]any) map[string]any {
 	t.Helper()
-	body, _ := json.Marshal(input)
-	out, err := translateChatGPTRequest(body, "gpt-6-pro", "parent-id")
+	prepared, err := prepareChatGPT(input, "gpt-6-pro", "parent-id")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result map[string]any
-	if err := json.Unmarshal(out, &result); err != nil {
-		t.Fatal(err)
-	}
-	return result
+	return prepared.conversation
 }
 func proTools() []any {
 	return []any{map[string]any{"type": "function", "name": "handoff", "description": "Transfer work", "parameters": map[string]any{"type": "object", "properties": map[string]any{"prompt": map[string]any{"type": "string", "description": "Task"}, "reason": map[string]any{"type": "string", "description": "Why"}}, "required": []any{"prompt", "reason"}, "additionalProperties": false}}}
@@ -40,7 +35,12 @@ func TestChatGPTProRequestShape(t *testing.T) {
 	}
 	for i, role := range []string{"system", "user"} {
 		message := messages[i].(map[string]any)
-		if message["id"] == "" || message["recipient"] != "all" || message["author"].(map[string]any)["role"] != role {
+		id, ok := message["id"].(string)
+		if !ok || id == "" || message["recipient"] != "all" || message["author"].(map[string]any)["role"] != role {
+			t.Fatal(message)
+		}
+		text := []string{"Full\nsystem instructions", "Hello"}[i]
+		if !reflect.DeepEqual(message["content"], map[string]any{"content_type": "text", "parts": []string{text}}) {
 			t.Fatal(message)
 		}
 	}
@@ -49,7 +49,7 @@ func TestChatGPTProRequestShape(t *testing.T) {
 	if !reflect.DeepEqual(signature, want) {
 		t.Fatalf("signature = %#v", signature)
 	}
-	if !reflect.DeepEqual(out["local_function_names"], []any{"handoff"}) {
+	if !reflect.DeepEqual(out["local_function_names"], []string{"handoff"}) {
 		t.Fatal(out)
 	}
 	empty := proRequest(t, map[string]any{"input": []any{}})
@@ -62,10 +62,8 @@ func TestChatGPTProNestedSchema(t *testing.T) {
 	tools := []any{map[string]any{"type": "function", "name": "nested", "parameters": schema}}
 	out := proRequest(t, map[string]any{"tools": tools, "input": "Go"})
 	typ := out["local_function_signatures"].([]any)[0].(map[string]any)["params"].([]any)[0].(map[string]any)["type"]
-	original, _ := json.Marshal(schema["properties"].(map[string]any)["items"])
-	got, _ := json.Marshal(typ)
-	if string(original) != string(got) {
-		t.Fatalf("nested schema lost: %s", got)
+	if !reflect.DeepEqual(typ, schema["properties"].(map[string]any)["items"]) {
+		t.Fatalf("nested schema lost: %#v", typ)
 	}
 }
 func TestChatGPTProTwoTurnTools(t *testing.T) {
@@ -117,13 +115,12 @@ func TestChatGPTProRejectRequest(t *testing.T) {
 		{"tools": []any{map[string]any{"type": "function", "name": "bad", "parameters": map[string]any{"type": "object", "properties": map[string]any{}, "oneOf": []any{}}}}},
 	}
 	for i, request := range cases {
-		body, _ := json.Marshal(request)
-		if _, err := translateChatGPTRequest(body, "model", "parent"); err == nil {
+		if _, err := prepareChatGPT(request, "model", "parent"); err == nil {
 			t.Errorf("case %d accepted", i)
 		}
 	}
 	out := proRequest(t, map[string]any{"input": "Hi", "tools": proTools(), "tool_choice": "none"})
-	if len(out["local_function_names"].([]any)) != 0 {
+	if len(out["local_function_names"].([]string)) != 0 {
 		t.Fatal("none still advertises tools")
 	}
 }
@@ -430,18 +427,44 @@ func TestChatGPTProMixedCustomRoundTrip(t *testing.T) {
 	input := []any{map[string]any{"role": "user", "content": "Add hello.txt"}, state.Output[0], state.Output[1],
 		map[string]any{"type": "function_call_output", "call_id": "json-id", "output": "Verified"},
 		map[string]any{"type": "custom_tool_call_output", "call_id": "patch-id", "output": "Success. Updated hello.txt\n"}}
-	out := proRequest(t, map[string]any{"tools": proCustomTools(), "input": input})
-	messages := out["messages"].([]any)
-	callMessage := messages[1].(map[string]any)
-	if callMessage["id"] != "patch-id" || callMessage["recipient"] != "local.apply_patch" || callMessage["content"].(map[string]any)["text"] != args {
-		t.Fatal(callMessage)
-	}
-	var result map[string]any
-	if err := json.Unmarshal([]byte(messages[4].(map[string]any)["content"].(map[string]any)["text"].(string)), &result); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(result, map[string]any{"call_id": "patch-id", "tool": "apply_patch", "result": "Success. Updated hello.txt\n"}) {
-		t.Fatal(result)
+	for _, choice := range []string{"auto", "none"} {
+		t.Run(choice, func(t *testing.T) {
+			prepared, err := prepareChatGPT(map[string]any{"tools": proCustomTools(), "input": input, "tool_choice": choice}, "gpt-6-pro", "parent-id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			messages := prepared.conversation["messages"].([]any)
+			if len(messages) != len(input) {
+				t.Fatal(messages)
+			}
+			callMessage := messages[1].(map[string]any)
+			if callMessage["id"] != "patch-id" || callMessage["recipient"] != "local.apply_patch" || callMessage["content"].(map[string]any)["text"] != args {
+				t.Fatal(callMessage)
+			}
+			var result map[string]any
+			if err := json.Unmarshal([]byte(messages[4].(map[string]any)["content"].(map[string]any)["text"].(string)), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(result, map[string]any{"call_id": "patch-id", "tool": "apply_patch", "result": "Success. Updated hello.txt\n"}) {
+				t.Fatal(result)
+			}
+			if choice == "auto" {
+				if !reflect.DeepEqual(prepared.tools, map[string]bool{"apply_patch": true, "handoff": false}) {
+					t.Fatal(prepared.tools)
+				}
+				return
+			}
+			if len(prepared.conversation["local_function_signatures"].([]any)) != 0 || len(prepared.conversation["local_function_names"].([]string)) != 0 || len(prepared.tools) != 0 {
+				t.Fatal("none still permits new tools", prepared)
+			}
+			for _, name := range []string{"apply_patch", "handoff"} {
+				wire := proFrame(proSnapshot("new-call", "local."+name, "commentary", `{}`, "finished_successfully", false)) + "data: [DONE]\n\n"
+				state, events, err := proDecode(t, wire, true, prepared.tools)
+				if err == nil || state.Completed || len(events) != 0 {
+					t.Fatal("none accepted a new tool call", name, state, events, err)
+				}
+			}
+		})
 	}
 }
 
@@ -471,8 +494,7 @@ func TestChatGPTProCustomFailures(t *testing.T) {
 		{"type": "custom_tool_call", "name": "handoff", "call_id": "a", "input": "text"},
 		{"type": "custom_tool_call_output", "call_id": "absent", "output": "result"},
 	} {
-		body, _ := json.Marshal(map[string]any{"tools": proCustomTools(), "input": []any{item}})
-		if _, err := translateChatGPTRequest(body, "model", "parent"); err == nil {
+		if _, err := prepareChatGPT(map[string]any{"tools": proCustomTools(), "input": []any{item}}, "model", "parent"); err == nil {
 			t.Fatal("invalid history accepted", item)
 		}
 	}

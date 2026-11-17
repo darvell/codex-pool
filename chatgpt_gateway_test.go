@@ -30,7 +30,7 @@ func chatGPTTest(t *testing.T, upstream http.HandlerFunc) *chatGPTFixture {
 	f.upstream = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { f.calls.Add(1); upstream(w, r) }))
 	t.Cleanup(f.upstream.Close)
 	store := testUsageStore(t)
-	passport, err := newPassportStore(store.db, nil)
+	passport, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

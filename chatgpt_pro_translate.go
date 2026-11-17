@@ -14,11 +14,12 @@ import (
 
 const chatGPTEventLimit = 4 << 20
 
-func translateChatGPTRequest(body []byte, model, parentID string) ([]byte, error) {
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, errors.New("invalid Responses request")
-	}
+type chatGPTPrepared struct {
+	conversation map[string]any
+	tools        map[string]bool
+}
+
+func prepareChatGPT(req map[string]any, model, parentID string) (*chatGPTPrepared, error) {
 	if model == "" || parentID == "" {
 		return nil, errors.New("model and parent message ID required")
 	}
@@ -209,7 +210,10 @@ func translateChatGPTRequest(body []byte, model, parentID string) ([]byte, error
 			return nil, errors.New("function history contains an unresolved call")
 		}
 	}
-	return json.Marshal(map[string]any{"action": "next", "model": model, "parent_message_id": parentID, "messages": messages, "local_function_signatures": signatures, "local_function_names": names, "history_and_training_disabled": true, "is_do_not_remember": true, "temporary_chat_requests_personalization": false})
+	if req["tool_choice"] == "none" {
+		custom = map[string]bool{}
+	}
+	return &chatGPTPrepared{conversation: map[string]any{"action": "next", "model": model, "parent_message_id": parentID, "messages": messages, "local_function_signatures": signatures, "local_function_names": names, "history_and_training_disabled": true, "is_do_not_remember": true, "temporary_chat_requests_personalization": false}, tools: custom}, nil
 }
 
 func chatGPTInputText(raw any) (string, error) {

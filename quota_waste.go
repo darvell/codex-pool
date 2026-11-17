@@ -6,6 +6,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -141,13 +142,8 @@ func boolInt(v bool) int {
 	return 0
 }
 
-// quotaWasteObservationRows includes idle, disabled and dead accounts. A missing
-// usage value remains NULL; zero is retained only when the provider explicitly
-// supplied that field.
-func quotaWasteObservationRows(accounts []*Account, now time.Time) []quotaWasteObservation {
-	return quotaWasteObservationRowsWithSeats(accounts, now, nil)
-}
-
+// Missing usage remains NULL; zero is retained only when the provider explicitly
+// supplied that field. Idle, disabled, and dead accounts are included.
 func quotaWasteObservationRowsWithSeats(accounts []*Account, now time.Time, linkedSeats map[string]string) []quotaWasteObservation {
 	at := now.UTC().Format(time.RFC3339Nano)
 	out := make([]quotaWasteObservation, 0, len(accounts)*2)
@@ -216,18 +212,16 @@ func quotaWasteObservationRowsWithSeats(accounts []*Account, now time.Time, link
 	return out
 }
 
-func (h *proxyHandler) recordQuotaWasteSnapshot(now time.Time) {
+func (h *proxyHandler) recordQuotaWasteSnapshot(now time.Time) error {
 	if h == nil || h.analyticsStore == nil || h.pool == nil {
-		return
+		return nil
 	}
 	accounts := h.pool.allAccounts()
-	linkedSeats, err := h.analyticsStore.quotaWasteSubscriptionSeats(accounts)
+	linkedSeats, err := h.analyticsStore.quotaWasteSubscriptionSeats()
 	if err != nil {
-		return
+		return fmt.Errorf("resolve quota subscription seats: %w", err)
 	}
-	if err := h.analyticsStore.recordQuotaWasteObservations(quotaWasteObservationRowsWithSeats(accounts, now, linkedSeats)); err != nil {
-		return
-	}
+	return h.analyticsStore.recordQuotaWasteObservations(quotaWasteObservationRowsWithSeats(accounts, now, linkedSeats))
 }
 
 func (h *proxyHandler) startQuotaWasteObserver() {
@@ -235,11 +229,16 @@ func (h *proxyHandler) startQuotaWasteObserver() {
 		return
 	}
 	go func() {
-		h.recordQuotaWasteSnapshot(time.Now())
+		observe := func(now time.Time) {
+			if err := h.recordQuotaWasteSnapshot(now); err != nil {
+				log.Printf("analytics: quota observation failed: %v", err)
+			}
+		}
+		observe(time.Now())
 		t := time.NewTicker(quotaWasteObservationInterval)
 		defer t.Stop()
 		for now := range t.C {
-			h.recordQuotaWasteSnapshot(now)
+			observe(now)
 		}
 	}()
 }

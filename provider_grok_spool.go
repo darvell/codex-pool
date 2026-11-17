@@ -131,7 +131,7 @@ type grokSpoolRewrite struct {
 	effort     grokJSONSpan
 	hasText    bool
 	hasReason  bool
-	emptyTools bool
+	toolsState grokToolState
 }
 
 func (g *grokSpoolRewrite) plan() error {
@@ -166,18 +166,11 @@ func (g *grokSpoolRewrite) plan() error {
 		return nil
 	}
 	kept, err := g.array(io.Discard, grokTools)
-	g.emptyTools = kept == 0
+	if kept == 0 {
+		g.toolsState = grokToolsRemoved
+	}
 	return err
 }
-
-type grokSpoolContext uint8
-
-const (
-	grokNested grokSpoolContext = iota
-	grokRoot
-	grokTools
-	grokToolSchema
-)
 
 func (g *grokSpoolRewrite) imageTool() (bool, error) {
 	if err := g.probe.reset(g.cursor.pos()); err != nil {
@@ -207,7 +200,7 @@ func (g *grokSpoolRewrite) imageTool() (bool, error) {
 		return false, err
 	}
 	name, err := g.probe.name()
-	return name == "image_generation", err
+	return grokDropsTool(name), err
 }
 
 func (g *grokSpoolRewrite) copySpan(out io.Writer, span grokJSONSpan) error {
@@ -215,7 +208,7 @@ func (g *grokSpoolRewrite) copySpan(out io.Writer, span grokJSONSpan) error {
 	return err
 }
 
-func (g *grokSpoolRewrite) value(out io.Writer, context grokSpoolContext) error {
+func (g *grokSpoolRewrite) value(out io.Writer, context grokSanitizeContext) error {
 	b, err := g.cursor.lex.nonspace()
 	if err != nil {
 		return err
@@ -234,7 +227,7 @@ func (g *grokSpoolRewrite) value(out io.Writer, context grokSpoolContext) error 
 	}
 }
 
-func (g *grokSpoolRewrite) array(out io.Writer, context grokSpoolContext) (int, error) {
+func (g *grokSpoolRewrite) array(out io.Writer, context grokSanitizeContext) (int, error) {
 	if err := writeByte(out, '['); err != nil {
 		return 0, err
 	}
@@ -284,25 +277,14 @@ func (g *grokSpoolRewrite) array(out io.Writer, context grokSpoolContext) (int, 
 	}
 }
 
-func (g *grokSpoolRewrite) drop(key string, context grokSpoolContext) bool {
-	if key == "external_web_access" {
+func (g *grokSpoolRewrite) drop(key string, context grokSanitizeContext) bool {
+	if context == grokRoot && (key == "model" || key == "tools") {
 		return true
 	}
-	if context != grokRoot {
-		return false
-	}
-	switch key {
-	case "model", "metadata", "response_format", "reasoningEffort", "tools":
-		return true
-	case "reasoning":
-		return !grokModelSupportsReasoningEffort(g.model)
-	case "tool_choice", "parallel_tool_calls":
-		return g.emptyTools
-	}
-	return false
+	return grokFieldPolicy(key, context, g.model, g.toolsState) == grokDropField
 }
 
-func (g *grokSpoolRewrite) object(out io.Writer, context grokSpoolContext) error {
+func (g *grokSpoolRewrite) object(out io.Writer, context grokSanitizeContext) error {
 	if err := writeByte(out, '{'); err != nil {
 		return err
 	}
@@ -354,7 +336,7 @@ func (g *grokSpoolRewrite) object(out io.Writer, context grokSpoolContext) error
 		if err := writeByte(out, ':'); err != nil {
 			return err
 		}
-		if context == grokToolSchema && key == "required" {
+		if grokFieldPolicy(key, context, g.model, g.toolsState) == grokNullRequired {
 			replaced, err := g.replaceNullRequired(out)
 			if err != nil {
 				return err
@@ -423,7 +405,7 @@ func (g *grokSpoolRewrite) appendFields(out io.Writer, wrote bool) error {
 	if _, err := out.Write(model); err != nil {
 		return err
 	}
-	if g.tools.end != 0 && !g.emptyTools {
+	if g.tools.end != 0 && g.toolsState != grokToolsRemoved {
 		if err := field("tools"); err != nil {
 			return err
 		}
@@ -550,7 +532,7 @@ func rewriteGrokSpool(s *streamedResponsesRequest) error {
 	committed := false
 	defer func() {
 		if !committed {
-			removeLexTemp(out)
+			closeAndRemoveTemp(out)
 		}
 	}()
 	writer := bufio.NewWriterSize(out, 64*1024)

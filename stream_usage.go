@@ -37,3 +37,14 @@ func (w *streamUsageWriter) Write(p []byte) (int, error) {
 	}
 	return total, nil
 }
+
+// Observe the original upstream events outside translation and filtering. The
+// bounded writer commits observations after each forwarding attempt, including
+// the events in a received chunk after a downstream failure.
+func newUsageStream(w io.Writer, observe func([]byte, func(RequestUsage)), record func(RequestUsage)) io.Writer {
+	usage := &streamUsageWriter{record: record}
+	usage.w = &sseInterceptWriter{w: w, callback: func(data []byte) {
+		observe(data, usage.add)
+	}}
+	return usage
+}

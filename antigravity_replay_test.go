@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +15,7 @@ func TestAntigravityReplayRestoresNativeFunctionCallSignature(t *testing.T) {
 	request := replayTestEnvelope("gemini-3.1-flash-lite", "session-1", []any{
 		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "read the file"}}},
 	})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"default_api:Read","args":{"file_path":"README.md"}},"thoughtSignature":"native-signature-value"}]}}]}}`)
 	if !cache.capture(scope, request, response) {
 		t.Fatal("capture returned false")
@@ -41,7 +43,7 @@ func TestAntigravityReplayRestoresNativeFunctionCallSignature(t *testing.T) {
 func TestAntigravityReplayInsertsMissingFunctionCallBeforeResult(t *testing.T) {
 	cache := newAntigravityReplayCache(time.Hour, 10240)
 	request := replayTestEnvelope("gemini-3.1-flash-lite", "session-2", []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "run it"}}}})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-2","name":"shell","args":{"command":"pwd"}},"thoughtSignature":"native-signature-value"}]}}]}}`)
 	cache.capture(scope, request, response)
 	next := replayTestEnvelope("gemini-3.1-flash-lite", "session-2", []any{
@@ -73,7 +75,7 @@ func TestAntigravityReplayInsertsMissingFunctionCallBeforeResult(t *testing.T) {
 func TestAntigravityReplayRestoresSignatureForCallWithoutID(t *testing.T) {
 	cache := newAntigravityReplayCache(time.Hour, 10240)
 	request := replayTestEnvelope("gemini-3.1-flash-lite", "session-no-id", []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "search"}}}})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"query":"gemini"}},"thoughtSignature":"native-signature-value"}]}}]}}`)
 	cache.capture(scope, request, response)
 	next := replayTestEnvelope("gemini-3.1-flash-lite", "session-no-id", []any{
@@ -95,7 +97,7 @@ func TestAntigravityReplayDoesNotReplaceSyntheticSignatureWithUnsignedParallelCa
 	request := replayTestEnvelope("gemini-3.5-flash", "session-parallel", []any{
 		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "read both"}}},
 	})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-2","name":"default_api:Read","args":{"file_path":"package.json"}}}]}}]}}`)
 	if !cache.capture(scope, request, response) {
 		t.Fatal("unsigned function call was not captured")
@@ -118,35 +120,75 @@ func TestAntigravityReplayDoesNotReplaceSyntheticSignatureWithUnsignedParallelCa
 func TestAntigravityReplayClearsOnlySignatureBadRequests(t *testing.T) {
 	cache := newAntigravityReplayCache(time.Hour, 10240)
 	request := replayTestEnvelope("gemini-3.1-flash-lite", "session-3", []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "go"}}}})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-3","name":"tool","args":{}},"thoughtSignature":"native-signature-value"}]}}]}}`)
-	cache.capture(scope, request, response)
-	if cache.clearForInvalidSignature(scope, http.StatusInternalServerError, []byte("thoughtSignature invalid")) {
-		t.Fatal("cleared on non-400")
+	if !cache.capture(scope, request, response) {
+		t.Fatal("signed function call was not captured")
+	}
+	next := replayTestEnvelope("gemini-3.1-flash-lite", "session-3", []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "go"}}},
+		map[string]any{"role": "user", "parts": []any{map[string]any{"functionResponse": map[string]any{"id": "call-3", "name": "tool", "response": map[string]any{"result": "ok"}}}}},
+	})
+	for _, failure := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusInternalServerError, "thoughtSignature invalid"},
+		{http.StatusBadRequest, "invalid request"},
+	} {
+		if cache.clearForInvalidSignature(scope, failure.status, []byte(failure.body)) {
+			t.Fatalf("cleared on unrelated error: %+v", failure)
+		}
+		updated, changed := cache.apply(scope, next)
+		if !changed || replayTestPart(t, updated, 1, 0)["thoughtSignature"] != "native-signature-value" {
+			t.Fatal("unrelated error discarded signed replay")
+		}
 	}
 	if !cache.clearForInvalidSignature(scope, http.StatusBadRequest, []byte("Function call has invalid thought_signature")) {
 		t.Fatal("did not clear signature 400")
 	}
-	if _, ok := cache.get(scope, time.Now()); ok {
-		t.Fatal("entry remains after clear")
+	if updated, changed := cache.apply(scope, next); changed || !bytes.Equal(updated, next) {
+		t.Fatalf("cleared signature was replayed: %s", updated)
 	}
 }
 
 func TestAntigravityReplayCacheIsConcurrent(t *testing.T) {
 	cache := newAntigravityReplayCache(time.Hour, 10240)
 	request := replayTestEnvelope("gemini-3.1-flash-lite", "session-race", []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "go"}}}})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-race","name":"tool","args":{}},"thoughtSignature":"native-signature-value"}]}}]}}`)
+	next := replayTestEnvelope("gemini-3.1-flash-lite", "session-race", []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "go"}}},
+		map[string]any{"role": "user", "parts": []any{map[string]any{"functionResponse": map[string]any{"id": "call-race", "name": "tool", "response": map[string]any{"result": "ok"}}}}},
+	})
+	const callers = 32
+	replayed := make(chan []byte, callers)
 	var wg sync.WaitGroup
-	for range 32 {
+	for range callers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cache.capture(scope, request, response)
-			cache.apply(scope, request)
+			if !cache.capture(scope, request, response) {
+				t.Error("signed function call was not captured")
+				return
+			}
+			updated, changed := cache.apply(scope, next)
+			if !changed {
+				t.Error("signed function call was not replayed")
+				return
+			}
+			replayed <- updated
 		}()
 	}
 	wg.Wait()
+	close(replayed)
+	for updated := range replayed {
+		part := replayTestPart(t, updated, 1, 0)
+		want := map[string]any{"functionCall": map[string]any{"id": "call-race", "name": "tool", "args": map[string]any{}}, "thoughtSignature": "native-signature-value"}
+		if !reflect.DeepEqual(part, want) {
+			t.Fatalf("replayed part=%#v, want %#v", part, want)
+		}
+	}
 }
 
 func TestAntigravityReplayCacheExpiresSessions(t *testing.T) {
@@ -154,12 +196,21 @@ func TestAntigravityReplayCacheExpiresSessions(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 	cache.now = func() time.Time { return now }
 	request := replayTestEnvelope("gemini-3.1-flash-lite", "session-expiry", []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "go"}}}})
-	scope := antigravityReplayScopeFromBody(request)
+	scope := antigravityReplayScopeFromBodyForTenant(request, "user\x00origin")
 	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-expiry","name":"tool","args":{}},"thoughtSignature":"native-signature-value"}]}}]}}`)
-	cache.capture(scope, request, response)
+	if !cache.capture(scope, request, response) {
+		t.Fatal("signed function call was not captured")
+	}
+	next := replayTestEnvelope("gemini-3.1-flash-lite", "session-expiry", []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "go"}}},
+		map[string]any{"role": "user", "parts": []any{map[string]any{"functionResponse": map[string]any{"id": "call-expiry", "name": "tool", "response": map[string]any{"result": "ok"}}}}},
+	})
+	if updated, changed := cache.apply(scope, next); !changed || replayTestPart(t, updated, 1, 0)["thoughtSignature"] != "native-signature-value" {
+		t.Fatal("unexpired signed function call was not replayed")
+	}
 	now = now.Add(time.Hour + time.Nanosecond)
-	if _, ok := cache.get(scope, now); ok {
-		t.Fatal("expired replay session remained cached")
+	if updated, changed := cache.apply(scope, next); changed || !bytes.Equal(updated, next) {
+		t.Fatalf("expired replay changed the request: %s", updated)
 	}
 }
 

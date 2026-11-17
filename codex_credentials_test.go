@@ -242,25 +242,29 @@ func TestCodexStaleSaveKeepsRetired(t *testing.T) {
 }
 
 func TestCodexRefreshWaiterAdopts(t *testing.T) {
-	_, waiting := codexFixture(t)
-	root, _, err := readCodexFile(waiting.File)
-	if err != nil {
-		t.Fatal(err)
+	fixture := newRefreshFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), refreshTestTimeout)
+	defer cancel()
+	joined := make(chan struct{})
+	waiterContext := &refreshJoinContext{Context: ctx, joined: joined}
+	result := make(chan error, 1)
+	go func() { result <- fixture.handler.refreshAccount(waiterContext, fixture.waiting) }()
+	select {
+	case <-joined:
+	case <-ctx.Done():
+		t.Fatal("second caller did not join the shared refresh")
 	}
-	newAccess := jwtWithExp(time.Now().Add(10 * 24 * time.Hour).Unix())
-	root["tokens"].(map[string]any)["access_token"] = newAccess
-	root["tokens"].(map[string]any)["refresh_token"] = "waiter-fixture-refresh"
-	if err := atomicWriteJSON(waiting.File, root); err != nil {
-		t.Fatal(err)
+	fixture.finish(t)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("refresh waiter did not finish")
 	}
-	pending := &refreshCall{done: make(chan struct{})}
-	close(pending.done)
-	h := &proxyHandler{refreshCalls: map[string]*refreshCall{string(waiting.Type) + ":" + waiting.ID: pending}}
-	if err := h.refreshAccount(context.Background(), waiting); err != nil {
-		t.Fatal(err)
-	}
-	if waiting.AccessToken != newAccess || waiting.RefreshToken != "waiter-fixture-refresh" {
-		t.Fatal("single-flight waiter retained the old credential snapshot")
+	if fixture.waiting.AccessToken != fixture.newAccess || fixture.waiting.RefreshToken != "waiter-fixture-refresh" {
+		t.Fatal("refresh waiter retained the old credential snapshot")
 	}
 }
 

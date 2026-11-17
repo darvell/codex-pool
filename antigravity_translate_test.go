@@ -30,7 +30,7 @@ func TestBuildAntigravityOpenAIRequest(t *testing.T) {
       "tool_choice":{"type":"function","function":{"name":"read file"}},
       "max_completion_tokens":512
     }`)
-	request, err := prepareAntigravityRequest("/v1/chat/completions", body, "gemini-3-flash", "project-1", "")
+	request, err := prepareAntigravityRequest("/v1/chat/completions", body, "gemini-3-flash", "project-1", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestPrepareAntigravityUnwrapsCodeAssistEnvelope(t *testing.T) {
 			"generationConfig":{"temperature":0.2}
 		}
 	}`)
-	request, err := prepareAntigravityRequest("/v1internal:streamGenerateContent", body, "gemini-3.7-flash", "project-1", "conv-1")
+	request, err := prepareAntigravityRequest("/v1internal:streamGenerateContent", body, "gemini-3.7-flash", "project-1", "conv-1", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBuildAntigravityResponsesAndClaudeRequests(t *testing.T) {
 	responses := []byte(`{"model":"gemini-3-flash","instructions":"system","input":[{"type":"reasoning","encrypted_content":"signed","content":[{"type":"output_text","text":"thought"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{\"q\":1}"},{"type":"function_call_output","call_id":"c1","output":"done"}],"tools":[{"type":"web_search_preview"}]}`)
 	var inner map[string]any
 	for _, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
-		req, err := prepareAntigravityRequest(path, responses, "gemini-3-flash", "p", "")
+		req, err := prepareAntigravityRequest(path, responses, "gemini-3-flash", "p", "", &newPoolState(nil, false).antigravityModels)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +139,7 @@ func TestBuildAntigravityResponsesAndClaudeRequests(t *testing.T) {
 	}
 
 	claude := []byte(`{"model":"claude-sonnet-4-6","system":[{"type":"text","text":"system"}],"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"sig"},{"type":"tool_use","id":"t1","name":"find","input":{"x":1}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}],"thinking":{"type":"enabled","budget_tokens":1024},"tools":[{"name":"find","input_schema":{"type":"object"}}]}`)
-	req, err := prepareAntigravityRequest("/v1/messages", claude, "claude-sonnet-4-6", "p", "")
+	req, err := prepareAntigravityRequest("/v1/messages", claude, "claude-sonnet-4-6", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestBuildAntigravityResponsesCleansNestedToolSchemas(t *testing.T) {
 			"additionalProperties":false
 		}}]
 	}`)
-	request, err := prepareAntigravityRequest("/backend-api/codex/responses", body, "gemini-3.1-flash-lite", "p", "")
+	request, err := prepareAntigravityRequest("/backend-api/codex/responses", body, "gemini-3.1-flash-lite", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestBuildAntigravityResponsesCleansNestedToolSchemas(t *testing.T) {
 
 func TestBuildAntigravityResponsesDropsBuiltInToolsBesideFunctions(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.1-flash-lite","input":"hi","tool_choice":"auto","tools":[{"type":"web_search_preview"},{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`)
-	request, err := prepareAntigravityRequest("/backend-api/codex/responses", body, "gemini-3.1-flash-lite", "p", "")
+	request, err := prepareAntigravityRequest("/backend-api/codex/responses", body, "gemini-3.1-flash-lite", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestBuildAntigravityResponsesMapsFunctionNamesDeterministically(t *testing.
 	first := "123:mcp/read file"
 	second := "123:mcp@read file"
 	body := []byte(`{"model":"gemini-3.5-flash","input":[{"type":"function_call","call_id":"c2","name":"` + second + `","arguments":"{}"},{"type":"function_call","call_id":"c1","name":"` + first + `","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"one"},{"type":"function_call_output","call_id":"c2","output":"two"}],"tools":[{"type":"function","name":"` + first + `","parameters":{"type":"object"}},{"type":"function","name":"` + second + `","parameters":{"type":"object"}},{"type":"function","name":"` + first + `","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"` + second + `"}}`)
-	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.5-flash", "p", "")
+	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.5-flash", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestBuildAntigravityResponsesMapsFunctionNamesDeterministically(t *testing.
 
 func TestBuildAntigravityResponsesPreservesNativeReasoningHistory(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.5-flash","input":[{"type":"reasoning","encrypted_content":"gemini#native-signature","summary":[{"type":"summary_text","text":"first "},{"type":"summary_text","text":"second"}]},{"type":"message","role":"user","content":[{"type":"output_text","text":"visible answer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
-	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.5-flash", "p", "")
+	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.5-flash", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestBuildAntigravityResponsesMapsRolesMediaReasoningAndSchema(t *testing.T)
 		"reasoning":{"effort":"auto"},
 		"text":{"format":{"type":"json_schema","schema":{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string","minLength":1}}}}}
 	}`)
-	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.5-flash", "p", "")
+	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.5-flash", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestBuildAntigravityResponsesMapsRolesMediaReasoningAndSchema(t *testing.T)
 
 func TestBuildAntigravityResponsesUsesNamedThinkingLevelAndOrphanOutputName(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.1-flash-lite","input":[{"type":"function_call_output","call_id":"orphan","output":"done"}],"reasoning":{"effort":"high"}}`)
-	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.1-flash-lite", "p", "")
+	request, err := prepareAntigravityRequest("/v1/responses", body, "gemini-3.1-flash-lite", "p", "", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func antigravityFixture() []byte {
 func TestTranslateAntigravityResponses(t *testing.T) {
 	for _, format := range []antigravityClientFormat{antigravityFormatGemini, antigravityFormatChat, antigravityFormatResponses, antigravityFormatAnthropic} {
 		t.Run(format.String(), func(t *testing.T) {
-			out, err := translateAntigravityResponse(antigravityFixture(), format, "gemini-3-flash")
+			out, err := translateAntigravityResponseWithRequest(antigravityFixture(), format, "gemini-3-flash", nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,7 +403,7 @@ func TestTranslateAntigravityResponses(t *testing.T) {
 }
 
 func TestPrepareAntigravityDropsMaxOutputTokensForGemini(t *testing.T) {
-	prepared, err := prepareAntigravityRequest("/v1/responses", []byte(`{"model":"gemini-3.5-flash","input":"hi","max_output_tokens":1024}`), "gemini-3.5-flash", "project", "session")
+	prepared, err := prepareAntigravityRequest("/v1/responses", []byte(`{"model":"gemini-3.5-flash","input":"hi","max_output_tokens":1024}`), "gemini-3.5-flash", "project", "session", &newPoolState(nil, false).antigravityModels)
 	if err != nil {
 		t.Fatal(err)
 	}

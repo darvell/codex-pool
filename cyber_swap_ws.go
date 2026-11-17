@@ -1819,42 +1819,7 @@ func modelRequiresHTTPProviderRoute(model string) bool {
 	if model == "" {
 		return false
 	}
-	return isGrokModel(model) ||
-		isKimiModel(model) ||
-		isMinimaxModel(model) ||
-		isZAIModel(model) ||
-		isXiaomiModel(model) ||
-		isAdverserialModel(model)
-}
-
-// stripPreviousResponseID removes previous_response_id from a
-// response.create payload so a newly dialed upstream accepts the replay.
-// If parsing fails or the field is absent, the original payload is returned
-// unchanged.
-func stripPreviousResponseID(data []byte) []byte {
-	if !bytes.Contains(data, []byte(`"previous_response_id"`)) {
-		return data
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return data
-	}
-	_, changed := obj["previous_response_id"]
-	delete(obj, "previous_response_id")
-	if response, ok := obj["response"].(map[string]any); ok {
-		if _, exists := response["previous_response_id"]; exists {
-			delete(response, "previous_response_id")
-			changed = true
-		}
-	}
-	if !changed {
-		return data
-	}
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return data
-	}
-	return out
+	return externalModelClaimed(model)
 }
 
 // writeWebSocketRejection owns only failed handshake bodies. Successful

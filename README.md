@@ -82,7 +82,10 @@ pool/
 
 ### 2. Run it
 
+Build the frontend before compiling the Go binary, which embeds `web/dist`.
+
 ```bash
+(cd web && npm ci && npm run build)
 go build && ./codex-pool
 ```
 

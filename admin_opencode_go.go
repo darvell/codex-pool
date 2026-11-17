@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,25 +28,10 @@ func (h *proxyHandler) serveOpencodeGoAdmin(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *proxyHandler) handleOpencodeGoAdd(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		APIKey string `json:"api_key"`
-	}
-
-	if r.Header.Get("Content-Type") == "application/json" {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-			return
-		}
-	} else {
-		req.APIKey = r.FormValue("api_key")
-	}
-
-	apiKey := strings.TrimSpace(req.APIKey)
-	if apiKey == "" {
-		respondJSONError(w, http.StatusBadRequest, "api_key is required")
+	apiKey, ok := readAdmissionKey(w, r)
+	if !ok {
 		return
 	}
-
 	// Validate the key against the free /usage endpoint: 200 proves the key
 	// is live, 401/403 means bad key or no Go subscription. No spend.
 	validationURL := strings.TrimRight(h.cfg.opencodeGoBase.String(), "/") + "/usage"
@@ -71,5 +55,5 @@ func (h *proxyHandler) handleOpencodeGoAdd(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, r, AccountTypeOpencodeGo, "opencode_go", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeOpencodeGo, apiKey)
 }

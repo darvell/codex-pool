@@ -72,7 +72,9 @@ func (p *PassportStore) createMemberLink(actorID, email, displayName, purpose st
 		return nil, errors.New("invalid member link purpose")
 	}
 
-	principal := p.byEmail(email)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	principal := p.byEmailLocked(email)
 	if purpose == "onboard" {
 		if principal != nil {
 			return nil, errors.New("an account already uses that email")
@@ -106,12 +108,7 @@ func (p *PassportStore) createMemberLink(actorID, email, displayName, purpose st
 		CreatedAt: now, ExpiresAt: now.Add(30 * time.Minute),
 	}
 
-	err = p.db.Update(func(tx *bbolt.Tx) error {
-		if purpose == "onboard" {
-			if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principal.ID, principal); err != nil {
-				return err
-			}
-		}
+	err = p.commitLocked(principal, nil, func(tx *bbolt.Tx) error {
 		if err := putJSON(tx.Bucket([]byte(bucketMemberRecoveryLinks)), link.ID, &link); err != nil {
 			return err
 		}
@@ -123,11 +120,6 @@ func (p *PassportStore) createMemberLink(actorID, email, displayName, purpose st
 	})
 	if err != nil {
 		return nil, err
-	}
-	if purpose == "onboard" {
-		p.mu.Lock()
-		p.principals[principal.ID] = principal
-		p.mu.Unlock()
 	}
 	return &memberLinkResult{Principal: copyPrincipal(principal), Token: token, ExpiresAt: link.ExpiresAt}, nil
 }
@@ -144,7 +136,8 @@ func (p *PassportStore) redeemMemberLink(token, password string) (*Principal, st
 	var principal Principal
 	var link memberRecoveryLink
 	now := time.Now().UTC()
-	err = p.db.Update(func(tx *bbolt.Tx) error {
+	p.mu.Lock()
+	err = p.commitLocked(&principal, nil, func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(bucketMemberRecoveryLinks))
 		var matchedKey []byte
 		if err := bucket.ForEach(func(key, value []byte) error {
@@ -169,9 +162,6 @@ func (p *PassportStore) redeemMemberLink(token, password string) (*Principal, st
 			return errors.New("member link unavailable")
 		}
 		principal.PasswordHash = passwordHash
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principal.ID, &principal); err != nil {
-			return err
-		}
 		if err := deletePrincipalSessions(tx, principal.ID); err != nil {
 			return err
 		}
@@ -180,12 +170,10 @@ func (p *PassportStore) redeemMemberLink(token, password string) (*Principal, st
 		}
 		return p.audit(tx, principal.ID, "member.password_set", principal.ID, link.Purpose)
 	})
+	p.mu.Unlock()
 	if err != nil {
 		return nil, "", "", err
 	}
-	p.mu.Lock()
-	p.principals[principal.ID] = &principal
-	p.mu.Unlock()
 	sessionToken, csrf, err := p.createSession(principal.ID)
 	if err != nil {
 		return nil, "", "", err
@@ -196,6 +184,10 @@ func (p *PassportStore) redeemMemberLink(token, password string) (*Principal, st
 func (p *PassportStore) hasOperator() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.hasOperatorLocked()
+}
+
+func (p *PassportStore) hasOperatorLocked() bool {
 	for _, principal := range p.principals {
 		if principal.Kind == PrincipalOperator {
 			return true
@@ -228,7 +220,7 @@ func (p *PassportStore) bootstrapOperator(username, email, displayName, password
 
 	var principal *Principal
 	if token := strings.TrimSpace(legacyCredential); token != "" {
-		identity, issuedAt, ok := parseClaudePoolCredential(getPoolJWTSecret(), token)
+		identity, issuedAt, ok := parseClaudePoolCredential(p.jwtSecret, token)
 		if !ok {
 			return nil, errors.New("legacy credential is invalid")
 		}
@@ -245,6 +237,17 @@ func (p *PassportStore) bootstrapOperator(username, email, displayName, password
 		}
 		principal = &Principal{ID: id, Status: PrincipalActive, Source: SourceOperatorBootstrap, CreatedAt: time.Now().UTC()}
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.hasOperatorLocked() {
+		return nil, errors.New("operator already exists")
+	}
+	if p.byLoginLocked(username) != nil {
+		return nil, errors.New("username is already taken")
+	}
+	if current := p.principals[principal.ID]; current != nil {
+		principal = current
+	}
 	updated := *principal
 	updated.Kind = PrincipalOperator
 	updated.Status = PrincipalActive
@@ -256,17 +259,11 @@ func (p *PassportStore) bootstrapOperator(username, email, displayName, password
 	if updated.DisplayName == "" {
 		updated.DisplayName = username
 	}
-	if err := p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), updated.ID, &updated); err != nil {
-			return err
-		}
+	if err := p.commitLocked(&updated, nil, func(tx *bbolt.Tx) error {
 		return p.audit(tx, updated.ID, "operator.bootstrapped", updated.ID, username)
 	}); err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	p.principals[updated.ID] = &updated
-	p.mu.Unlock()
 	return copyPrincipal(&updated), nil
 }
 
@@ -297,9 +294,17 @@ func (p *PassportStore) claimLegacyAccount(username, password, downloadToken str
 		}
 		principal = &Principal{ID: id, Kind: PrincipalMember, Status: PrincipalActive, Source: SourceLegacyCodeSignup, Note: "legacy-code signup", CreatedAt: time.Now().UTC()}
 	}
+	p.mu.Lock()
+	if p.byLoginLocked(username) != nil {
+		p.mu.Unlock()
+		return nil, "", "", errors.New("username is already taken")
+	}
+	if current := p.principals[principal.ID]; current != nil {
+		principal = current
+	}
 	updated := *principal
 	// First legacy signup becomes operator if none exists yet.
-	if !p.hasOperator() {
+	if !p.hasOperatorLocked() {
 		updated.Kind = PrincipalOperator
 	} else {
 		updated.Kind = PrincipalMember
@@ -310,16 +315,12 @@ func (p *PassportStore) claimLegacyAccount(username, password, downloadToken str
 	}
 	updated.PasswordHash = passwordHash
 	updated.Status = PrincipalActive
-	if err := p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), updated.ID, &updated); err != nil {
-			return err
-		}
+	if err := p.commitLocked(&updated, nil, func(tx *bbolt.Tx) error {
 		return p.audit(tx, updated.ID, "member.legacy_signup", updated.ID, username)
 	}); err != nil {
+		p.mu.Unlock()
 		return nil, "", "", err
 	}
-	p.mu.Lock()
-	p.principals[updated.ID] = &updated
 	p.mu.Unlock()
 	sessionToken, csrf, err := p.createSession(updated.ID)
 	if err != nil {

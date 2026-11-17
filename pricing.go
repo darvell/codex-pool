@@ -226,11 +226,7 @@ func (pd *PricingData) startPricingRefresh() {
 	}()
 }
 
-var pricingModelAliases = map[string]string{
-	"gpt-6-astra[1m]":            "gpt-6-astra",
-	"gpt-6-sol[1m]":              "gpt-6-sol",
-	"gpt-6.1-sol[1m]":            "gpt-6.1-sol",
-	"gpt-6-luna[1m]":             "gpt-6-luna",
+var pricingModelAliases = profilePricingAliases(map[string]string{
 	"gpt-6-astra [1m]":           "gpt-6-astra",
 	"gpt-6-astra-none":           "gpt-6-astra",
 	"claude-opus-5-5 [1m]":       "claude-opus-5-5",
@@ -239,9 +235,6 @@ var pricingModelAliases = map[string]string{
 	"claude-opus-5[1m]":          "claude-opus-5",
 	"claude-sonnet-5 [1m]":       "claude-sonnet-5",
 	"claude-sonnet-5[1m]":        "claude-sonnet-5",
-	"gpt-5.6-sol[1m]":            "gpt-5.6-sol",
-	"gpt-5.6-terra[1m]":          "gpt-5.6-terra",
-	"gpt-5.6-luna[1m]":           "gpt-5.6-luna",
 	"gpt-daybreak-blue-latest":   "gpt-5.6-sol",
 	"glm-5.2":                    "glm-5.3",
 	"zai.glm-5.2":                "glm-5.3",
@@ -265,7 +258,7 @@ var pricingModelAliases = map[string]string{
 	"minimax":                    "MiniMax-M3",
 	"minimax-m3":                 "MiniMax-M3",
 	"cyberkimi":                  "lordx64/cyberkimi",
-}
+})
 
 func canonicalPricingModel(model string) string {
 	model = strings.TrimSpace(model)

@@ -15,7 +15,7 @@ const spoolTestSession = "123e4567-e89b-12d3-a456-426614174000"
 
 func contextTestSpool(t *testing.T, body string) *streamedResponsesRequest {
 	t.Helper()
-	spooled, err := streamCodexResponsesRequest(strings.NewReader(body), int64(len(body))+1, nil)
+	spooled, err := streamResponsesRequest(strings.NewReader(body), int64(len(body))+1, responsesStreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestContextSpoolExpand(t *testing.T) {
 func TestContextSpoolControlLimit(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	body := `{"input":[],"client_metadata":{"extra":"` + strings.Repeat("x", contextRequestLimit) + `"}}`
-	if _, err := streamCodexResponsesRequest(strings.NewReader(body), int64(len(body))+1, nil); err == nil {
+	if _, err := streamResponsesRequest(strings.NewReader(body), int64(len(body))+1, responsesStreamOptions{}); err == nil {
 		t.Fatal("oversized metadata accepted")
 	}
 	files, _ := filepath.Glob(filepath.Join(os.TempDir(), "codex-pool-*.json"))
@@ -177,7 +177,7 @@ func BenchmarkContextSpool(b *testing.B) {
 					suffix = `"}]}]}`
 				}
 				reader := &repeatedJSONReader{prefix: []byte(prefix), suffix: []byte(suffix), remaining: size}
-				spooled, err := streamCodexResponsesRequest(reader, size+int64(len(prefix)+len(suffix))+1, nil)
+				spooled, err := streamResponsesRequest(reader, size+int64(len(prefix)+len(suffix))+1, responsesStreamOptions{})
 				if err != nil {
 					b.Fatal(err)
 				}

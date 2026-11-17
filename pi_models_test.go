@@ -37,8 +37,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 	data, err := generatePiModelsJSON(
 		"https://pool.example.com/",
 		"eyJhbGciOiJIUzI1NiJ9.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF90ZXN0In19.sig",
-		"sk-ant-oat01-pool-test",
-	)
+		"sk-ant-oat01-pool-test", nil)
 	if err != nil {
 		t.Fatalf("generatePiModelsJSON error: %v", err)
 	}
@@ -274,7 +273,7 @@ func TestGeneratePiModelsJSON(t *testing.T) {
 func TestGeneratePiModelsJSONUsesVersionedChatCompletionsURLs(t *testing.T) {
 	t.Parallel()
 
-	data, err := generatePiModelsJSON("https://pool.example.com/proxy/", "codex-token", "claude-token")
+	data, err := generatePiModelsJSON("https://pool.example.com/proxy/", "codex-token", "claude-token", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,15 +298,14 @@ func TestGeneratePiModelsJSONUsesVersionedChatCompletionsURLs(t *testing.T) {
 }
 
 func TestGeneratedClientConfigsIncludeDiscoveredAntigravityModels(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
-	antigravityModels.ReplaceAccount("antigravity-test", AntigravityAccountSnapshot{
+	pool := newPoolState([]*Account{{Type: AccountTypeAntigravity, ID: "antigravity-test"}}, false)
+	pool.antigravityModels.ReplaceAccount("antigravity-test", AntigravityAccountSnapshot{
 		FetchedAt: time.Now(),
 		Models: map[string]AntigravityModelInfo{
 			"gemini-live": {ID: "gemini-live", DisplayName: "Gemini Live", MaxTokens: 1000000, MaxOutputTokens: 65536, SupportsThinking: true},
 		},
 	})
-	piJSON, err := generatePiModelsJSON("https://pool.example.com", "codex-token", "claude-token")
+	piJSON, err := generatePiModelsJSON("https://pool.example.com", "codex-token", "claude-token", pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +334,7 @@ func TestGeneratedClientConfigsIncludeDiscoveredAntigravityModels(t *testing.T) 
 	if !ok || string(requiresName) != "true" {
 		t.Fatalf("serialized requiresToolResultName = %s, present = %v", requiresName, ok)
 	}
-	cuteJSON, err := generateCuteCodeSettingsJSON("https://pool.example.com", "pool-token")
+	cuteJSON, err := generateCuteCodeSettingsJSON("https://pool.example.com", "pool-token", pool)
 	if err != nil {
 		t.Fatal(err)
 	}

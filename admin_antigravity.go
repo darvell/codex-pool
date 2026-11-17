@@ -469,7 +469,7 @@ func (h *proxyHandler) fetchAntigravityEmail(ctx context.Context, accessToken st
 
 func (h *proxyHandler) discoverAntigravityProject(ctx context.Context, accessToken string) (string, string, error) {
 	payload := map[string]any{"metadata": map[string]any{"ideType": "ANTIGRAVITY"}}
-	root, err := h.callAntigravityInternal(ctx, accessToken, h.cfg.antigravityProdBase, "/v1internal:loadCodeAssist", payload)
+	root, err := h.callAntigravityInternal(ctx, accessToken, h.cfg.antigravityProdBase, antigravityLoadProfile, payload)
 	if err != nil {
 		return "", "", err
 	}
@@ -489,7 +489,7 @@ func (h *proxyHandler) discoverAntigravityProject(ctx context.Context, accessTok
 				"ide_type": "ANTIGRAVITY", "ide_name": "antigravity", "ide_version": antigravityClientVersion(),
 			},
 		}
-		result, callErr := h.callAntigravityInternal(ctx, accessToken, h.cfg.antigravityOnboardBase, "/v1internal:onboardUser", onboard)
+		result, callErr := h.callAntigravityInternal(ctx, accessToken, h.cfg.antigravityOnboardBase, antigravityOnboardProfile, onboard)
 		if callErr == nil {
 			if projectID = antigravityOnboardProjectID(result); projectID != "" {
 				return projectID, tierID, nil
@@ -504,18 +504,17 @@ func (h *proxyHandler) discoverAntigravityProject(ctx context.Context, accessTok
 	return "", "", errors.New("Google Antigravity project onboarding did not complete")
 }
 
-func (h *proxyHandler) callAntigravityInternal(ctx context.Context, accessToken string, base *url.URL, path string, payload any) (map[string]any, error) {
+func (h *proxyHandler) callAntigravityInternal(ctx context.Context, accessToken string, base *url.URL, profile antigravityInternalProfile, payload any) (map[string]any, error) {
+	path := profile.path
 	body, _ := json.Marshal(payload)
 	u := *base
 	u.Path = singleJoin(u.Path, path)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	if strings.HasSuffix(path, ":onboardUser") {
-		req.Header.Set("User-Agent", antigravityOnboardUserAgent())
-		req.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
-	} else {
-		req.Header.Set("User-Agent", antigravityUserAgent())
+	req.Header.Set("User-Agent", profile.userAgent())
+	if profile.apiClient != "" {
+		req.Header.Set("X-Goog-Api-Client", profile.apiClient)
 	}
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {
@@ -630,7 +629,7 @@ func (h *proxyHandler) handleAntigravityModelSync(w http.ResponseWriter, r *http
 		}
 		results = append(results, entry)
 	}
-	respondJSON(w, map[string]any{"accounts": results, "models": antigravityModels.Models(h.pool)})
+	respondJSON(w, map[string]any{"accounts": results, "models": antigravityCatalog(h.pool)})
 }
 
 func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *http.Request) {
@@ -647,7 +646,7 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		Error     string `json:"error,omitempty"`
 	}
 	requested := strings.TrimSpace(r.URL.Query().Get("model"))
-	models := antigravityModels.Models(h.pool)
+	models := antigravityCatalog(h.pool)
 	results := make([]verification, 0, len(models))
 	for _, model := range models {
 		if requested != "" && requested != model.ID && requested != "antigravity/"+model.ID {
@@ -672,7 +671,7 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		projectID := account.ProjectID
 		account.mu.Unlock()
 		requestBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply with OK."}]}]}`)
-		prepared, err := prepareAntigravityRequest("/v1beta/models/"+model.ID+":generateContent", requestBody, "antigravity/"+model.ID, projectID, "")
+		prepared, err := prepareAntigravityRequest("/v1beta/models/"+model.ID+":generateContent", requestBody, "antigravity/"+model.ID, projectID, "", &h.pool.antigravityModels)
 		if err != nil {
 			entry.Error = err.Error()
 			if operatorAccessFromRequest(r) != nil {
@@ -700,7 +699,7 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			_, _, err = collectAntigravitySSE(resp.Body)
 			_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-				clearAntigravityModelCooldown(current, model.ID)
+				clearAntigravityModelCooldown(&h.pool.antigravityModels, current, model.ID)
 				return nil
 			})
 		} else {
@@ -709,7 +708,7 @@ func (h *proxyHandler) handleAntigravityModelVerify(w http.ResponseWriter, r *ht
 			if resp.StatusCode == http.StatusTooManyRequests {
 				if until, ok := parseAntigravityRetry(body, time.Now()); ok {
 					_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-						setAntigravityModelCooldown(current, model.ID, until)
+						setAntigravityModelCooldown(&h.pool.antigravityModels, current, model.ID, until)
 						return nil
 					})
 				}

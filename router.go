@@ -313,6 +313,9 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeOperatorBearer(w, r) {
 		return
 	}
+	if h.dispatchOperatorRoute(w, r) {
+		return
+	}
 
 	// Profiles may contain request data and runtime internals; require admin auth.
 	if strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
@@ -411,106 +414,17 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/me/avatar":
 		h.handlePassportAvatarUpload(w, r)
 		return
-	case "/api/passes":
-		h.handlePasses(w, r)
-		return
 	case "/api/me/clients":
 		h.handlePassportClients(w, r)
-		return
-	case "/api/me/usage":
-		h.handlePassportUsage(w, r)
 		return
 	case "/api/operator-tokens":
 		h.handleOperatorTokens(w, r)
 		return
-	case "/api/operator/v1", "/api/operator/v1/whoami", "/api/operator/v1/openapi.json", "/api/operator/v1/guide", "/api/operator/v1/models", "/api/operator/v1/config/pi", "/api/operator/v1/accounting/requests":
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.handleOperatorAPI(w, r)
-		return
-	case "/api/console/principals":
-		h.handleConsolePrincipals(w, r)
-		return
-	case "/api/console/members":
-		h.handleConsoleMembers(w, r)
-		return
-	case "/api/console/audit":
-		h.handleConsoleAudit(w, r)
-		return
-	case "/api/console/analytics-health":
-		h.handleConsoleAnalyticsHealth(w, r)
-		return
 	case "/api/setup/operator":
 		h.handleOperatorBootstrap(w, r)
 		return
-	case "/api/pool/failure-insights":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.handlePoolFailureInsights(w, r)
-		return
-	case "/api/pool/stats":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		h.handlePoolStats(w, r)
-		return
-	case "/api/pool/quota-waste":
-		// This endpoint intentionally does not accept member authentication;
-		// operator bearer/session authorization is required for quota economics.
-		if _, ok := h.requireOperatorAPI(w, r); !ok {
-			return
-		}
-		h.handleQuotaWaste(w, r)
-		return
 	case "/api/pool/whoami":
 		h.handleWhoami(w, r)
-		return
-	case "/api/pool/users":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		h.handlePoolUsers(w, r)
-		return
-	case "/api/pool/origins":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		h.handlePoolOrigins(w, r)
-		return
-	case "/api/pool/daily-breakdown":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		h.handleDailyBreakdown(w, r)
-		return
-	case "/api/pool/hourly":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		h.handleGlobalHourly(w, r)
-		return
-	case "/api/pool/signal":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		h.handleSignalAnalytics(w, r)
-		return
-	case "/api/pool/catalog":
-		if !h.checkMemberOrAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		servePoolModels(w, h.pool)
 		return
 	case "/favicon.ico":
 		h.serveFavicon(w, r)
@@ -524,28 +438,6 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.serveOperationalMetrics(w, r)
 		return
-	case "/admin/reload":
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.reloadAccounts()
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-		return
-	case "/admin/accounts":
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.serveAccounts(w, operatorAccessFromRequest(r) != nil)
-		return
 	case "/admin/origins":
 		if !h.checkAdminAuth(w, r) {
 			return
@@ -556,86 +448,10 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleAdminOrigins(w, r)
 		return
-	case "/admin/tokens":
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.serveTokenCapacity(w, operatorAccessFromRequest(r) != nil)
-		return
-	case "/admin/clear-rate-limits":
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.clearAllRateLimits(w)
-		return
-	case "/admin/purge-anonymous":
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.purgeAnonymousUsers(w, operatorAccessFromRequest(r) != nil)
-		return
 	}
 
-	// Account enable/disable: /admin/accounts/:id/{enable,disable}
-	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") &&
-		(strings.HasSuffix(r.URL.Path, "/enable") || strings.HasSuffix(r.URL.Path, "/disable")) {
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-		disabled := strings.HasSuffix(path, "/disable")
-		publicID := strings.TrimSuffix(strings.TrimSuffix(path, "/disable"), "/enable")
-		accountID := h.resolveOperatorAccountID(r, publicID)
-		h.setAccountDisabled(w, accountID, disabled, publicID)
-		return
-	}
-
-	// Account resurrect: /admin/accounts/:id/resurrect
-	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && strings.HasSuffix(r.URL.Path, "/resurrect") {
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		// Extract account ID from path
-		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-		publicID := strings.TrimSuffix(path, "/resurrect")
-		accountID := h.resolveOperatorAccountID(r, publicID)
-		h.resurrectAccount(w, accountID, publicID)
-		return
-	}
-
-	// Account force refresh: /admin/accounts/:id/refresh
-	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && strings.HasSuffix(r.URL.Path, "/refresh") {
-		if !h.checkAdminAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		path := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-		publicID := strings.TrimSuffix(path, "/refresh")
-		accountID := h.resolveOperatorAccountID(r, publicID)
-		h.forceRefreshAccountWithSafety(w, accountID, operatorAccessFromRequest(r) != nil, publicID)
+	if strings.HasPrefix(r.URL.Path, "/admin/accounts/") && (strings.HasSuffix(r.URL.Path, "/enable") || strings.HasSuffix(r.URL.Path, "/disable") || strings.HasSuffix(r.URL.Path, "/resurrect") || strings.HasSuffix(r.URL.Path, "/refresh")) {
+		h.handleAdminAccount(w, r)
 		return
 	}
 

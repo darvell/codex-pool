@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,7 +30,7 @@ func TestPassportMigratesLegacyUserAndClient(t *testing.T) {
 	u := &PoolUser{ID: "0123456789abcdef", Token: "download-old", Email: "friend@pool.local", PlanType: "pro", CreatedAt: time.Now()}
 	legacy.users[u.ID] = u
 	legacy.byTok[u.Token] = u
-	p, err := newPassportStore(s.db, legacy)
+	p, err := newPassportStore(s.db, legacy, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +55,7 @@ func TestPassportMigratesLegacyUserAndClient(t *testing.T) {
 func TestMemberOnboardingAndRecoveryLinksAreSingleUse(t *testing.T) {
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	store := testUsageStore(t)
-	passport, err := newPassportStore(store.db, nil)
+	passport, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +99,7 @@ func TestLegacySignupClaimsExistingPrincipal(t *testing.T) {
 	user := &PoolUser{ID: "legacy-person", Token: "legacy-download-token", Email: "legacy@pool.local", PlanType: "pro", CreatedAt: time.Now()}
 	legacy.users[user.ID] = user
 	legacy.byTok[user.Token] = user
-	passport, err := newPassportStore(store.db, legacy)
+	passport, err := newPassportStore(store.db, legacy, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +132,7 @@ func TestBootstrapOperatorClaimsLegacyCredential(t *testing.T) {
 	user := &PoolUser{ID: "operator-person", Token: "operator-download-token", Email: "operator@pool.local", PlanType: "pro", CreatedAt: time.Now()}
 	legacy.users[user.ID] = user
 	legacy.byTok[user.Token] = user
-	passport, err := newPassportStore(store.db, legacy)
+	passport, err := newPassportStore(store.db, legacy, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +168,7 @@ func TestPasswordRoundTrip(t *testing.T) {
 func TestClientCredentialLimitAndLabel(t *testing.T) {
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	s := testUsageStore(t)
-	p, err := newPassportStore(s.db, nil)
+	p, err := newPassportStore(s.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +188,7 @@ func TestClientCredentialLimitAndLabel(t *testing.T) {
 func TestCredentialCutoffInvalidatesEveryEnvelope(t *testing.T) {
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	s := testUsageStore(t)
-	p, err := newPassportStore(s.db, nil)
+	p, err := newPassportStore(s.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +265,7 @@ func TestCredentialCutoffInvalidatesEveryEnvelope(t *testing.T) {
 func TestSignedAndLegacyRefreshCutoffs(t *testing.T) {
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	s := testUsageStore(t)
-	p, err := newPassportStore(s.db, nil)
+	p, err := newPassportStore(s.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,33 +308,130 @@ func TestDuckAnalyticsOutboxDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	ru := RequestUsage{Timestamp: time.Now(), AccountID: "a", AccountType: AccountTypeCodex, UserID: "p1", ClientCredentialID: "mac", ProxyRequestID: "req-1", InputTokens: 10, OutputTokens: 5, BillableTokens: 15, Model: "gpt-test"}
+	ru := RequestUsage{Timestamp: time.Now().UTC().Truncate(time.Microsecond), AccountID: "a", AccountType: AccountTypeCodex, UserID: "p1", ClientCredentialID: "mac", ProxyRequestID: "req-1", InputTokens: 10, CachedInputTokens: 3, OutputTokens: 5, ReasoningTokens: 2, BillableTokens: 15, Model: "gpt-test"}
+	var ledgerHour time.Time
+	if err := d.db.QueryRow("SELECT CAST(? AS TIMESTAMPTZ) AT TIME ZONE current_setting('TimeZone')", ru.Timestamp).Scan(&ledgerHour); err != nil {
+		t.Fatal(err)
+	}
 	if err = s.recordWithCost(ru, 0.25); err != nil {
 		t.Fatal(err)
 	}
+	var sequence uint64
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		sequence = tx.Bucket([]byte(bucketAnalyticsOutbox)).Sequence()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sequence == 0 {
+		t.Fatal("usage did not enqueue an analytics fact")
+	}
 	d.Notify()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		rows, err := d.UserHourly(context.Background(), "p1", time.Now().Add(-time.Hour))
-		if err == nil && len(rows) == 1 {
-			if rows[0].ClientCredentialID != "mac" || rows[0].BillableTokens != 15 {
-				t.Fatalf("row=%+v", rows[0])
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	var acknowledged uint64
+	var pending int
+	for {
+		rows, err := d.UserHourly(ctx, ru.UserID, ru.Timestamp.Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) > 1 {
+			t.Fatalf("hourly rows=%+v, want one", rows)
+		}
+		if len(rows) == 1 {
+			want := AnalyticsPoint{
+				Hour: ledgerHour.Format("2006-01-02T15"), AccountType: string(ru.AccountType), ClientCredentialID: ru.ClientCredentialID,
+				InputTokens: ru.InputTokens, CachedTokens: ru.CachedInputTokens, OutputTokens: ru.OutputTokens,
+				ReasoningTokens: ru.ReasoningTokens, BillableTokens: ru.BillableTokens, RequestCount: 1, APIEquivalentCostUSD: 0.25,
+			}
+			if rows[0] != want {
+				t.Fatalf("hourly row=%#v, want %#v", rows[0], want)
+			}
+		}
+		if err := s.db.View(func(tx *bbolt.Tx) error {
+			pending = tx.Bucket([]byte(bucketAnalyticsOutbox)).Stats().KeyN
+			ack := tx.Bucket([]byte(bucketAnalyticsState)).Get([]byte(analyticsAckKey))
+			if len(ack) == 8 {
+				acknowledged = binary.BigEndian.Uint64(ack)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 1 && pending == 0 && acknowledged == sequence {
+			var persistedAt time.Time
+			if err := d.db.QueryRowContext(ctx, "SELECT observed_at FROM usage_events WHERE proxy_request_id = ?", ru.ProxyRequestID).Scan(&persistedAt); err != nil {
+				t.Fatal(err)
+			}
+			if !persistedAt.Equal(ru.Timestamp) {
+				t.Fatalf("persisted timestamp=%s, want %s", persistedAt, ru.Timestamp)
 			}
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("worker did not drain and acknowledge fact: rows=%+v pending=%d acknowledged=%d want=%d", rows, pending, acknowledged, sequence)
+		case <-tick.C:
+		}
 	}
-	t.Fatal("fact not drained")
 }
 
 func TestConsoleUsageHoursFollowsQuery(t *testing.T) {
-	request, err := http.NewRequest(http.MethodGet, "/api/console/principals/member/usage?hours=24", nil)
+	h, passport, _, session := testOperatorAPI(t)
+	member := insertTestPrincipal(t, passport, "member", PrincipalMember, "member", "member@example.com")
+	duck, err := newDuckAnalytics(filepath.Join(t.TempDir(), "hours.duckdb"), h.store.db)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = duck.Close() })
+	h.duckAnalytics = duck
+	now := time.Now().UTC()
+	for _, usage := range []RequestUsage{
+		{Timestamp: now.Add(-time.Hour), AccountID: "a", UserID: member.ID, ProxyRequestID: "recent", BillableTokens: 10},
+		{Timestamp: now.Add(-48 * time.Hour), AccountID: "a", UserID: member.ID, ProxyRequestID: "older", BillableTokens: 20},
+	} {
+		if err := h.store.recordWithCost(usage, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := duck.drain(10); err != nil {
+		t.Fatal(err)
+	}
 
-	if got := consoleUsageHours(request); got != 24 {
-		t.Fatalf("hours = %d, want 24", got)
+	for _, test := range []struct {
+		query string
+		rows  int
+		total int64
+	}{
+		{"", 2, 30},
+		{"?hours=24", 1, 10},
+		{"?hours=invalid", 2, 30},
+	} {
+		t.Run(test.query, func(t *testing.T) {
+			request := authorityRequest(http.MethodGet, "/api/console/principals/"+member.ID+"/usage"+test.query, session, "")
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d: %s", response.Code, response.Body.String())
+			}
+			var result struct {
+				Principal Principal        `json:"principal"`
+				Hourly    []AnalyticsPoint `json:"hourly"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			var total int64
+			for _, row := range result.Hourly {
+				total += row.BillableTokens
+			}
+			if result.Principal.ID != member.ID || len(result.Hourly) != test.rows || total != test.total {
+				t.Fatalf("usage=%+v, want %d rows and %d tokens", result, test.rows, test.total)
+			}
+		})
 	}
 }
 
@@ -342,7 +442,7 @@ func TestPrincipalSourceBackfillPreservesMigratedIdentityAfterClaim(t *testing.T
 	user := &PoolUser{ID: "migrated-person", Token: "old-download", Email: "old@pool.local", CreatedAt: time.Now()}
 	legacy.users[user.ID] = user
 	legacy.byTok[user.Token] = user
-	passport, err := newPassportStore(store.db, legacy)
+	passport, err := newPassportStore(store.db, legacy, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +459,7 @@ func TestPrincipalSourceBackfillPreservesMigratedIdentityAfterClaim(t *testing.T
 	if err := store.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketPrincipals)), old.ID, &old) }); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := newPassportStore(store.db, nil)
+	reloaded, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +471,7 @@ func TestPrincipalSourceBackfillPreservesMigratedIdentityAfterClaim(t *testing.T
 func TestPrincipalSourceBackfillDoesNotGuessFromLegacyNote(t *testing.T) {
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	store := testUsageStore(t)
-	_, err := newPassportStore(store.db, nil)
+	_, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +479,7 @@ func TestPrincipalSourceBackfillDoesNotGuessFromLegacyNote(t *testing.T) {
 	if err := store.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketPrincipals)), old.ID, old) }); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := newPassportStore(store.db, nil)
+	reloaded, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

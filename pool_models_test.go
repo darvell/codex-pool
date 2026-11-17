@@ -229,11 +229,8 @@ func TestServePoolModelsOmitsCredentials(t *testing.T) {
 }
 
 func TestServePoolModelsIncludesNativeGeminiProtocol(t *testing.T) {
-	t.Parallel()
-
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
-	antigravityModels.ReplaceAccount("ag-1", AntigravityAccountSnapshot{
+	pool := newPoolState([]*Account{{Type: AccountTypeAntigravity, ID: "ag-1"}}, false)
+	pool.antigravityModels.ReplaceAccount("ag-1", AntigravityAccountSnapshot{
 		FetchedAt: time.Now().UTC(),
 		Models: map[string]AntigravityModelInfo{
 			"gemini-3.8-flash-tiered": {
@@ -250,7 +247,7 @@ func TestServePoolModelsIncludesNativeGeminiProtocol(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	servePoolModels(recorder)
+	servePoolModels(recorder, pool)
 
 	var response struct {
 		Models []struct {
@@ -382,16 +379,15 @@ func TestPoolModelDescriptorsDoNotAdvertiseGrokInternalAlias(t *testing.T) {
 }
 
 func TestPoolModelDescriptorsUseOneCanonicalAntigravityRow(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
-	antigravityModels.ReplaceAccount("antigravity-test", AntigravityAccountSnapshot{
+	pool := newPoolState([]*Account{{Type: AccountTypeAntigravity, ID: "antigravity-test"}}, false)
+	pool.antigravityModels.ReplaceAccount("antigravity-test", AntigravityAccountSnapshot{
 		FetchedAt: time.Now(),
 		Models: map[string]AntigravityModelInfo{
 			"gemini-test": {ID: "gemini-test", DisplayName: "Gemini Test", MaxTokens: 1000, WebSearch: true},
 		},
 	})
 
-	descriptors := poolModelDescriptors(newPoolState([]*Account{{Type: AccountTypeAntigravity, ID: "antigravity-test"}}, false))
+	descriptors := poolModelDescriptors(pool)
 	count := 0
 	for _, descriptor := range descriptors {
 		if descriptor.Provider != string(AccountTypeAntigravity) || descriptor.UpstreamID != "gemini-test" {

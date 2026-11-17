@@ -208,7 +208,7 @@ func TestGrokSpoolFailureKeepsInput(t *testing.T) {
 
 func TestGrokSpoolPipeline(t *testing.T) {
 	body := `{"model":"grok-4.5-build","stream":true,"input":"hello","response_format":{"type":"json_object"},"reasoningEffort":" high ","tools":[{"type":"image_generation"},{"type":"web_search","external_web_access":true}]}`
-	s, err := streamCodexResponsesRequest(strings.NewReader(body), 1024*1024, grokCanonicalModel)
+	s, err := streamResponsesRequest(strings.NewReader(body), 1024*1024, responsesStreamOptions{rewriteModel: grokCanonicalModel})
 	if err != nil {
 		t.Fatal(err)
 	}

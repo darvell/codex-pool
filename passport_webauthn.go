@@ -33,12 +33,20 @@ type passkeyView struct {
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
+type webAuthnPurpose string
+
+const (
+	webAuthnRegister webAuthnPurpose = "register"
+	webAuthnLogin    webAuthnPurpose = "login"
+)
+
 type storedWebAuthnChallenge struct {
-	ID          string         `json:"id"`
-	PrincipalID string         `json:"principal_id,omitempty"`
-	Purpose     string         `json:"purpose"`
-	Session     wa.SessionData `json:"session"`
-	ExpiresAt   time.Time      `json:"expires_at"`
+	ID          string          `json:"id"`
+	PrincipalID string          `json:"principal_id,omitempty"`
+	Purpose     webAuthnPurpose `json:"purpose"`
+	Label       string          `json:"label,omitempty"`
+	Session     wa.SessionData  `json:"session"`
+	ExpiresAt   time.Time       `json:"expires_at"`
 }
 
 type passportWebAuthnUser struct {
@@ -87,10 +95,9 @@ func (p *PassportStore) ensureWebAuthnUserID(principalID string) (*Principal, er
 		}
 		updated := *principal
 		updated.WebAuthnUserID = handle
-		if err := p.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &updated) }); err != nil {
+		if err := p.commitLocked(&updated, nil, nil); err != nil {
 			return nil, err
 		}
-		p.principals[principalID] = &updated
 		principal = &updated
 	}
 	copy := *principal
@@ -177,17 +184,17 @@ func (p *PassportStore) updateWebAuthnCredential(principalID string, credential 
 	return p.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketWebAuthnCredentials)), key, &record) })
 }
 
-func (p *PassportStore) saveWebAuthnChallenge(principalID, purpose string, session *wa.SessionData) (string, error) {
+func (p *PassportStore) saveWebAuthnChallenge(principalID string, purpose webAuthnPurpose, label string, session *wa.SessionData) (string, error) {
 	id, err := secureToken(18)
 	if err != nil {
 		return "", err
 	}
-	record := storedWebAuthnChallenge{ID: id, PrincipalID: principalID, Purpose: purpose, Session: *session, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
+	record := storedWebAuthnChallenge{ID: id, PrincipalID: principalID, Purpose: purpose, Label: label, Session: *session, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
 	err = p.db.Update(func(tx *bbolt.Tx) error { return putJSON(tx.Bucket([]byte(bucketWebAuthnChallenges)), id, &record) })
 	return id, err
 }
 
-func (p *PassportStore) takeWebAuthnChallenge(id, purpose string) (*storedWebAuthnChallenge, error) {
+func (p *PassportStore) takeWebAuthnChallenge(id string, purpose webAuthnPurpose) (*storedWebAuthnChallenge, error) {
 	var record storedWebAuthnChallenge
 	err := p.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(bucketWebAuthnChallenges))
@@ -197,6 +204,11 @@ func (p *PassportStore) takeWebAuthnChallenge(id, purpose string) (*storedWebAut
 		}
 		if err := json.Unmarshal(value, &record); err != nil {
 			return err
+		}
+		// Previously persisted registration labels were appended to purpose.
+		if label, legacy := strings.CutPrefix(string(record.Purpose), "register|"); legacy {
+			record.Purpose = webAuthnRegister
+			record.Label = label
 		}
 		return bucket.Delete([]byte(id))
 	})
@@ -337,7 +349,7 @@ func (h *proxyHandler) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *htt
 		respondJSONError(w, 500, "passkey unavailable")
 		return
 	}
-	challengeID, err := h.passport.saveWebAuthnChallenge(principal.ID, "register|"+strings.TrimSpace(input.Label), data)
+	challengeID, err := h.passport.saveWebAuthnChallenge(principal.ID, webAuthnRegister, strings.TrimSpace(input.Label), data)
 	if err != nil {
 		respondJSONError(w, 500, "passkey unavailable")
 		return
@@ -352,8 +364,8 @@ func (h *proxyHandler) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *ht
 		respondJSONError(w, http.StatusForbidden, "member access required")
 		return
 	}
-	challenge, err := h.passport.takeWebAuthnChallenge(r.Header.Get("X-WebAuthn-Challenge"), "")
-	if err != nil || challenge.PrincipalID != principal.ID || !strings.HasPrefix(challenge.Purpose, "register|") {
+	challenge, err := h.passport.takeWebAuthnChallenge(r.Header.Get("X-WebAuthn-Challenge"), webAuthnRegister)
+	if err != nil || challenge.PrincipalID != principal.ID || challenge.Purpose != webAuthnRegister {
 		respondJSONError(w, http.StatusBadRequest, "passkey challenge unavailable")
 		return
 	}
@@ -372,8 +384,7 @@ func (h *proxyHandler) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *ht
 		respondJSONError(w, http.StatusBadRequest, "passkey registration failed")
 		return
 	}
-	label := strings.TrimPrefix(challenge.Purpose, "register|")
-	if err := h.passport.saveWebAuthnCredential(principal.ID, label, credential); err != nil {
+	if err := h.passport.saveWebAuthnCredential(principal.ID, challenge.Label, credential); err != nil {
 		respondJSONError(w, 500, "passkey store failed")
 		return
 	}
@@ -392,7 +403,7 @@ func (h *proxyHandler) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.R
 		respondJSONError(w, 500, "passkey unavailable")
 		return
 	}
-	challengeID, err := h.passport.saveWebAuthnChallenge("", "login", data)
+	challengeID, err := h.passport.saveWebAuthnChallenge("", webAuthnLogin, "", data)
 	if err != nil {
 		respondJSONError(w, 500, "passkey unavailable")
 		return
@@ -402,7 +413,7 @@ func (h *proxyHandler) handleWebAuthnLoginBegin(w http.ResponseWriter, r *http.R
 
 func (h *proxyHandler) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	challenge, err := h.passport.takeWebAuthnChallenge(r.Header.Get("X-WebAuthn-Challenge"), "login")
+	challenge, err := h.passport.takeWebAuthnChallenge(r.Header.Get("X-WebAuthn-Challenge"), webAuthnLogin)
 	if err != nil {
 		respondJSONError(w, http.StatusBadRequest, "passkey challenge unavailable")
 		return

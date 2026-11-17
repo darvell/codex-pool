@@ -517,44 +517,8 @@ func parsePoolGeminiAPIKey(secret, apiKey string) (string, time.Time, bool) {
 	return parts[0], time.Unix(issuedUnix, 0).UTC(), true
 }
 
-// isPoolGeminiAPIKey preserves the legacy parser contract for existing callers.
-func isPoolGeminiAPIKey(secret, apiKey string) (bool, string, error) {
-	identity, _, ok := parsePoolGeminiAPIKey(secret, apiKey)
-	return ok, identity, nil
-}
-
-// getPoolJWTSecret returns the JWT signing secret from config or env.
 func getPoolJWTSecret() string {
-	if v := os.Getenv("POOL_JWT_SECRET"); v != "" {
-		return v
-	}
-	if globalConfigFile != nil && globalConfigFile.PoolUsers.JWTSecret != "" {
-		return globalConfigFile.PoolUsers.JWTSecret
-	}
-	return ""
-}
-
-// getPoolUsersPath returns the pool users storage path from config or env.
-func getPoolUsersPath() string {
-	if v := os.Getenv("POOL_USERS_PATH"); v != "" {
-		return v
-	}
-	if globalConfigFile != nil && globalConfigFile.PoolUsers.StoragePath != "" {
-		return globalConfigFile.PoolUsers.StoragePath
-	}
-	return "./data/pool_users.json"
-}
-
-// getPublicURL returns the public URL override from config or env.
-// Returns empty string if not configured (use request host instead).
-func getPublicURL() string {
-	if v := os.Getenv("PUBLIC_URL"); v != "" {
-		return strings.TrimSuffix(v, "/")
-	}
-	if globalConfigFile != nil && globalConfigFile.PublicURL != "" {
-		return strings.TrimSuffix(globalConfigFile.PublicURL, "/")
-	}
-	return ""
+	return os.Getenv("POOL_JWT_SECRET")
 }
 
 // PoolUserClaudeAuth matches the Claude Code credentials format for pool users.
@@ -593,12 +557,6 @@ func generateClaudeAuth(secret string, user *PoolUser) (*PoolUserClaudeAuth, err
 const ClaudePoolTokenPrefix = "sk-ant-oat01-pool-"
 
 const ClaudePoolTokenLegacyPrefix = "sk-ant-api-pool-"
-
-// generateClaudePoolToken creates a fake Claude OAuth token with embedded pool user info.
-// Format: sk-ant-oat01-pool-<base64url(userID.timestamp.signature)>
-func generateClaudePoolToken(secret, userID string) string {
-	return generateClaudePoolTokenAt(secret, userID, time.Now().UTC())
-}
 
 func generateClaudePoolTokenAt(secret, userID string, issuedAt time.Time) string {
 	now := issuedAt.Unix()

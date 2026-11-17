@@ -1,25 +1,20 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
-
-// ClaudeAuth provides OAuth functionality for Anthropic Claude accounts.
-// Based on the opencode project's auth implementation.
 
 const (
 	ClaudeOAuthClientID      = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -110,138 +105,10 @@ type ClaudeTokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-// ClaudeExchange exchanges an authorization code for tokens.
-func ClaudeExchange(code, verifier, state string) (*ClaudeTokenResponse, error) {
-	// Manual copy/paste can still provide code#state; prefer the explicit
-	// session state from ClaudeAuthorize, but preserve compatibility.
-	codeOnly := code
-	if idx := indexOf(code, '#'); idx >= 0 {
-		codeOnly = code[:idx]
-		if state == "" {
-			state = code[idx+1:]
-		}
-	}
-
-	body := map[string]string{
-		"code":          codeOnly,
-		"grant_type":    "authorization_code",
-		"client_id":     ClaudeOAuthClientID,
-		"redirect_uri":  ClaudeOAuthRedirectURI,
-		"code_verifier": verifier,
-		"state":         state,
-	}
-
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, ClaudeOAuthTokenURL, bytes.NewReader(bodyJSON))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("exchange failed: %s: %s", resp.Status, string(respBody))
-	}
-
-	var result ClaudeTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	return &result, nil
-}
-
-// ClaudeRefresh refreshes an access token using the refresh token.
-func ClaudeRefresh(refreshToken string) (*ClaudeTokenResponse, error) {
-	body := map[string]string{
-		"grant_type":    "refresh_token",
-		"refresh_token": refreshToken,
-		"client_id":     ClaudeOAuthClientID,
-		"scope":         ClaudeOAuthRefreshScopes,
-	}
-
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, ClaudeOAuthTokenURL, bytes.NewReader(bodyJSON))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("refresh failed: %s: %s", resp.Status, string(respBody))
-	}
-
-	var result ClaudeTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	return &result, nil
-}
-
 // ClaudeProfileInfo contains the plan info extracted from the OAuth profile API.
 type ClaudeProfileInfo struct {
 	SubscriptionType string // "max", "pro", "team", "enterprise", or ""
 	RateLimitTier    string // e.g. "default_claude_max_20x"
-}
-
-// FetchClaudeProfile calls /api/oauth/profile to get the account's plan info.
-func FetchClaudeProfile(accessToken string) (*ClaudeProfileInfo, error) {
-	req, err := http.NewRequest(http.MethodGet, ClaudeOAuthProfileURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("anthropic-version", ccAnthropicVersion)
-	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
-	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
-	req.Header.Set("X-Claude-Code-Session-Id", ccAccountSessionID(accessToken))
-	req.Header.Set("X-App", "cli")
-	req.Header.Set("Accept", "application/json")
-	ccStainlessHeaders(req.Header.Set)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("profile status=%s body=%s", resp.Status, string(body))
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
-	}
-
-	return extractProfileInfo(payload), nil
 }
 
 // extractProfileInfo extracts plan info from the OAuth profile response.
@@ -271,66 +138,7 @@ func extractProfileInfo(profile map[string]any) *ClaudeProfileInfo {
 	return info
 }
 
-// FetchClaudeAccountUUID probes Anthropic's internal bootstrap endpoint to
-// discover the real account UUID for an OAuth token. This UUID is injected
-// into metadata.user_id to match real Claude Code traffic.
-func FetchClaudeAccountUUID(accessToken string, transport http.RoundTripper) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, "https://api.anthropic.com/api/claude_cli/bootstrap", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("anthropic-version", ccAnthropicVersion)
-	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
-	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
-	req.Header.Set("X-Claude-Code-Session-Id", ccAccountSessionID(accessToken))
-	req.Header.Set("X-App", "cli")
-	req.Header.Set("Accept", "application/json")
-	ccStainlessHeaders(req.Header.Set)
-
-	client := &http.Client{Transport: transport}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("bootstrap status=%s body=%s", resp.Status, string(body))
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", err
-	}
-
-	// Try account_uuid at top level
-	if uuid, ok := payload["account_uuid"].(string); ok && uuid != "" {
-		return uuid, nil
-	}
-	// Try user.uuid
-	if user, ok := payload["user"].(map[string]any); ok {
-		if uuid, ok := user["uuid"].(string); ok && uuid != "" {
-			return uuid, nil
-		}
-	}
-	// Try nested account.uuid
-	if account, ok := payload["account"].(map[string]any); ok {
-		if uuid, ok := account["uuid"].(string); ok && uuid != "" {
-			return uuid, nil
-		}
-	}
-
-	return "", fmt.Errorf("account_uuid not found in bootstrap response")
-}
-
-// SaveClaudeAccount saves a Claude OAuth account to the pool directory.
-func SaveClaudeAccount(poolDir, accountID string, tokens *ClaudeTokenResponse) error {
+func (c claudeAuthClient) saveAccount(ctx context.Context, poolDir, accountID string, tokens *ClaudeTokenResponse) error {
 	claudeDir := filepath.Join(poolDir, "claude")
 	if err := os.MkdirAll(claudeDir, 0700); err != nil {
 		return fmt.Errorf("create claude dir: %w", err)
@@ -346,8 +154,7 @@ func SaveClaudeAccount(poolDir, accountID string, tokens *ClaudeTokenResponse) e
 		Scopes:       parseScopes(tokens.Scope),
 	}
 
-	// Fetch plan info from the profile API
-	if profile, err := FetchClaudeProfile(tokens.AccessToken); err == nil && profile != nil {
+	if profile, err := c.profileInfo(ctx, tokens.AccessToken); err == nil && profile != nil {
 		oauthData.SubscriptionType = profile.SubscriptionType
 		oauthData.RateLimitTier = profile.RateLimitTier
 		log.Printf("claude account %s: detected plan=%s tier=%s", accountID, profile.SubscriptionType, profile.RateLimitTier)
@@ -449,13 +256,12 @@ func saveClaudeAccount(a *Account) error {
 	return atomicWriteJSON(a.File, root)
 }
 
-// RefreshClaudeAccountTokens refreshes tokens for a Claude account and updates it.
-func RefreshClaudeAccountTokens(acc *Account) error {
+func (c claudeAuthClient) refreshAccount(ctx context.Context, acc *Account) error {
 	if acc.RefreshToken == "" {
 		return errors.New("no refresh token")
 	}
 
-	tokens, err := ClaudeRefresh(acc.RefreshToken)
+	tokens, err := c.refresh(ctx, acc.RefreshToken)
 	if err != nil {
 		return err
 	}
@@ -470,8 +276,7 @@ func RefreshClaudeAccountTokens(acc *Account) error {
 	acc.Dead = false
 	acc.mu.Unlock()
 
-	// Fetch updated plan info from the profile API
-	if profile, err := FetchClaudeProfile(acc.AccessToken); err == nil && profile != nil {
+	if profile, err := c.profileInfo(ctx, acc.AccessToken); err == nil && profile != nil {
 		acc.mu.Lock()
 		if profile.SubscriptionType != "" {
 			acc.PlanType = profile.SubscriptionType
@@ -485,9 +290,8 @@ func RefreshClaudeAccountTokens(acc *Account) error {
 		log.Printf("claude account %s: failed to fetch profile on refresh: %v", acc.ID, err)
 	}
 
-	// Re-probe account UUID if we don't have one yet
 	if acc.AccountUUID == "" {
-		if uuid, err := FetchClaudeAccountUUID(acc.AccessToken, http.DefaultTransport); err == nil && uuid != "" {
+		if uuid, err := c.accountUUID(ctx, acc.AccessToken); err == nil && uuid != "" {
 			acc.mu.Lock()
 			acc.AccountUUID = uuid
 			acc.mu.Unlock()
@@ -563,7 +367,7 @@ func (h *proxyHandler) probeClaudeAccountUUIDs() {
 		token := acc.AccessToken
 		acc.mu.Unlock()
 
-		uuid, err := FetchClaudeAccountUUID(token, h.transport)
+		uuid, err := newClaudeAuth(h.transport).accountUUID(context.Background(), token)
 		if err != nil {
 			log.Printf("claude account %s: failed to probe account_uuid: %v", acc.ID, err)
 			continue

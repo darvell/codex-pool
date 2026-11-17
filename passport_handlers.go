@@ -59,7 +59,7 @@ func parsePoolCredentialRequest(r *http.Request, secret string) (identity string
 }
 
 func (h *proxyHandler) authorizePoolCredentialRequest(r *http.Request) (identity, principalID, clientID, kind string, allowed bool) {
-	identity, issuedAt, kind, parsed := parsePoolCredentialRequest(r, getPoolJWTSecret())
+	identity, issuedAt, kind, parsed := parsePoolCredentialRequest(r, h.cfg.poolJWTSecret())
 	if !parsed {
 		h.metrics.incPassport("authorization_outcomes", "unrecognized")
 		return "", "", "", "", false

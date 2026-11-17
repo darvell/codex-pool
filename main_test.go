@@ -1168,37 +1168,6 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
-type chunkedReadCloser struct {
-	chunks []string
-	index  int
-}
-
-func (r *chunkedReadCloser) Read(p []byte) (int, error) {
-	if r.index >= len(r.chunks) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.chunks[r.index])
-	r.chunks[r.index] = r.chunks[r.index][n:]
-	if r.chunks[r.index] == "" {
-		r.index++
-	}
-	return n, nil
-}
-
-func (r *chunkedReadCloser) Close() error { return nil }
-
-func TestClaudeToolNameReadCloserRestoresSplitNames(t *testing.T) {
-	body := &chunkedReadCloser{chunks: []string{`{"content":[{"name":"t_123`, `45678"}]}`}}
-	reader := newClaudeToolNameReadCloser(body, map[string]string{"t_12345678": "Bash"})
-	out, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	if strings.Contains(string(out), "t_12345678") || !strings.Contains(string(out), `"name":"Bash"`) {
-		t.Fatalf("tool name was not restored across chunks: %s", out)
-	}
-}
-
 func TestClaudePoolTokenAcceptedViaXAPIKeyPreservesNativeClaudeRequest(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
@@ -1482,7 +1451,7 @@ func TestInjectClaudeModelsAddsMissingCodexFallbackModels(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{"models":[{"slug":"gpt-5.4","display_name":"gpt-5.4","description":"template","context_window":272000,"max_context_window":1000000,"visibility":"list","supported_in_api":true,"supported_reasoning_levels":[{"effort":"high"}]}]}`)
-	out := injectClaudeModels(body)
+	out := injectClaudeModels(body, nil)
 
 	var catalog map[string]any
 	if err := json.Unmarshal(out, &catalog); err != nil {
@@ -1549,7 +1518,7 @@ func TestCodexCatalogRequiredFields(t *testing.T) {
 		var catalog struct {
 			Models []map[string]json.RawMessage `json:"models"`
 		}
-		if err := json.Unmarshal(injectClaudeModels([]byte(body)), &catalog); err != nil {
+		if err := json.Unmarshal(injectClaudeModels([]byte(body), nil), &catalog); err != nil {
 			t.Fatal(err)
 		}
 		for _, row := range catalog.Models {
@@ -1586,7 +1555,7 @@ func TestInjectClaudeModelsDoesNotDuplicateExistingCodexFallbackModels(t *testin
 	t.Parallel()
 
 	body := []byte(`{"models":[{"slug":"gpt-5.5","display_name":"gpt-5.5"}]}`)
-	out := injectClaudeModels(body)
+	out := injectClaudeModels(body, nil)
 
 	var catalog map[string]any
 	if err := json.Unmarshal(out, &catalog); err != nil {
@@ -2257,11 +2226,11 @@ func TestEnsureCodexResponsesInstructionsStripsUnsupportedParams(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{"model":"gpt-5.4-mini","input":"hi","temperature":0,"max_output_tokens":10,"parallel_tool_calls":true,"prompt_cache_key":"pc_client","prompt_cache_scope":"user|origin"}`)
-	out := ensureCodexResponsesInstructions(body)
 	var got map[string]any
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("unmarshal output: %v", err)
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal input: %v", err)
 	}
+	prepareResponsesObject(got)
 	for _, key := range []string{"temperature", "max_output_tokens", "prompt_cache_scope"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("%s should not be forwarded to Codex: %#v", key, got)
@@ -2366,12 +2335,20 @@ func TestTranslateResponsesToImagesGeneration(t *testing.T) {
 func TestRequestHasImageGenerationTool(t *testing.T) {
 	t.Parallel()
 
-	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation"}]}`)
-	if !requestHasImageGenerationTool(body) {
-		t.Fatal("expected image_generation tool to be detected")
-	}
-	if requestHasImageGenerationTool([]byte(`{"tools":[{"type":"function"}]}`)) {
-		t.Fatal("did not expect function tool to be detected as image generation")
+	for _, fixture := range []struct {
+		body string
+		want bool
+	}{
+		{`{"model":"gpt-5.4","tools":[{"type":"image_generation"}]}`, true},
+		{`{"tools":[{"type":"function"}]}`, false},
+	} {
+		var object any
+		if err := json.Unmarshal([]byte(fixture.body), &object); err != nil {
+			t.Fatal(err)
+		}
+		if got := valueHasImageGenerationTool(object); got != fixture.want {
+			t.Fatalf("image-generation detection = %v, want %v for %s", got, fixture.want, fixture.body)
+		}
 	}
 }
 

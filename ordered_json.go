@@ -13,10 +13,6 @@ var claudeBodyKeyOrder = []string{
 	"output_config", "stream",
 }
 
-// orderedMarshal produces JSON from a map with keys emitted in the
-// specified order. Keys in order but absent from m are skipped.
-// Keys in m but not in order are appended alphabetically after the
-// ordered keys.
 func orderedMarshal(m map[string]any, order []string) ([]byte, error) {
 	if m == nil {
 		return []byte("null"), nil
@@ -27,7 +23,6 @@ func orderedMarshal(m map[string]any, order []string) ([]byte, error) {
 	buf = append(buf, '{')
 
 	first := true
-	// Emit keys in specified order
 	for _, key := range order {
 		val, ok := m[key]
 		if !ok {
@@ -48,7 +43,6 @@ func orderedMarshal(m map[string]any, order []string) ([]byte, error) {
 		buf = append(buf, valBytes...)
 	}
 
-	// Emit remaining keys alphabetically
 	remaining := make([]string, 0, len(m)-len(seen))
 	for key := range m {
 		if !seen[key] {
@@ -76,8 +70,6 @@ func orderedMarshal(m map[string]any, order []string) ([]byte, error) {
 	return buf, nil
 }
 
-// claudeOrderedBody is a convenience wrapper for marshaling a Claude
-// request body with the correct key order.
 func claudeOrderedBody(bodyObj map[string]any) ([]byte, error) {
 	return orderedMarshal(bodyObj, claudeBodyKeyOrder)
 }

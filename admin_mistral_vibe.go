@@ -221,7 +221,7 @@ func (h *proxyHandler) advanceVibeSignIn(r *http.Request, session *vibeSignInSes
 	if err != nil {
 		return errors.New("Could not load Mistral models. Sign in again")
 	}
-	id, err := h.writeAPIKeyAccount(AccountTypeMistralVibe, "mistral_vibe", credential.APIKey, map[string]any{"vibe_account": info, "provider_model_snapshot": snapshot})
+	id, err := h.writeAPIKeyAccount(AccountTypeMistralVibe, credential.APIKey, map[string]any{"vibe_account": info, "provider_model_snapshot": snapshot})
 	if err != nil {
 		return errors.New("Could not save this account. Sign in again")
 	}

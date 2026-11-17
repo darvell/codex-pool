@@ -6,7 +6,6 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -74,18 +73,24 @@ func TestFaviconContainsTransparentSizes(t *testing.T) {
 }
 
 func TestAllPageHeadsLinkFavicon(t *testing.T) {
-	for _, path := range []string{
-		"web/index.html", "web/dist/index.html", "templates/local_landing.html",
-		"templates/friend_landing.html", "templates/cute_code_landing.html",
+	h := &proxyHandler{cfg: &config{}}
+	for _, page := range []struct {
+		path  string
+		serve http.HandlerFunc
+	}{
+		{path: "/app", serve: h.servePassportSPA},
+		{path: "/friend", serve: h.serveFriendLanding},
+		{path: "/cute-code", serve: h.serveCuteCodeLanding},
 	} {
-		t.Run(path, func(t *testing.T) {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
+		t.Run(page.path, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			page.serve(rr, httptest.NewRequest(http.MethodGet, "http://example.com"+page.path, nil))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("page status = %d", rr.Code)
 			}
-			head, _, found := strings.Cut(string(data), "</head>")
+			head, _, found := strings.Cut(rr.Body.String(), "</head>")
 			if !found || !strings.Contains(head, `rel="icon" href="/favicon.ico"`) {
-				t.Fatal("page head must link the favicon")
+				t.Fatal("served page head must link the favicon")
 			}
 		})
 	}

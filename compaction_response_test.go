@@ -72,30 +72,43 @@ func TestReadCompactResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, split := range []bool{false, true} {
-				var reader io.Reader = strings.NewReader(tt.sse)
-				if split {
-					reader = iotest.OneByteReader(reader)
+			got, err := readCompactResponse(strings.NewReader(tt.sse))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decode := func(data string) any {
+				t.Helper()
+				decoder := json.NewDecoder(strings.NewReader(data))
+				decoder.UseNumber()
+				var value any
+				if err := decoder.Decode(&value); err != nil {
+					t.Fatal(err)
 				}
-				got, err := readCompactResponse(reader)
-				if err != nil {
-					t.Fatalf("split=%v: %v", split, err)
-				}
-				decode := func(data string) any {
-					t.Helper()
-					decoder := json.NewDecoder(strings.NewReader(data))
-					decoder.UseNumber()
-					var value any
-					if err := decoder.Decode(&value); err != nil {
-						t.Fatal(err)
-					}
-					return value
-				}
-				if !reflect.DeepEqual(decode(string(got)), decode(tt.want)) {
-					t.Fatalf("split=%v: got %s, want %s", split, got, tt.want)
-				}
+				return value
+			}
+			if !reflect.DeepEqual(decode(string(got)), decode(tt.want)) {
+				t.Fatalf("got %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCompactOpaqueOneByteInput(t *testing.T) {
+	item := `{"type":"compaction","encrypted_content":"opaque+/=\n\u0000\u263a","unknown":{"n":9007199254740993}}`
+	input := "data: {\"type\":\"response.output_item.done\",\"item\":" + item + "}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+	got, err := readCompactResponse(iotest.OneByteReader(strings.NewReader(input)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Output []json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(got, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Output) != 1 || !bytes.Equal(result.Output[0], []byte(item)) {
+		t.Fatalf("opaque item changed: %s, want %s", result.Output, item)
 	}
 }
 

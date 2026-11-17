@@ -175,15 +175,6 @@ func appendBoolModality(row map[string]json.RawMessage, modalities *[]string, ke
 	*modalities = append(*modalities, modality)
 }
 
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
 func parseMistralModels(body []byte) (map[string]DiscoveredModel, error) {
 	var response struct {
 		Data []struct {
@@ -229,67 +220,22 @@ func parseMistralModels(body []byte) (map[string]DiscoveredModel, error) {
 }
 
 func providerModelsURL(provider Provider) (*url.URL, bool) {
-	var target url.URL
-	switch typed := provider.(type) {
-	case *CodexProvider:
-		if typed.whamBase == nil {
-			return nil, false
-		}
-		target = *typed.whamBase
-		target.Path = singleJoin(target.Path, "/codex/models")
-		query := target.Query()
-		query.Set("client_version", currentCodexFingerprint().Version)
-		target.RawQuery = query.Encode()
-	case *ClaudeProvider:
-		base := typed.UpstreamURL("/v1/models")
-		if base == nil {
-			return nil, false
-		}
-		target = *base
-		target.Path = singleJoin(target.Path, "/v1/models")
-	case *GrokProvider:
-		base := typed.UpstreamURL("/v1/models")
-		if base == nil {
-			return nil, false
-		}
-		target = *base
-		target.Path = singleJoin(target.Path, "/models")
-	case *KimiProvider, *MinimaxProvider, *ZAIProvider, *MistralProvider, *mistralVibeProvider:
-		base := provider.UpstreamURL("/v1/models")
-		if base == nil {
-			return nil, false
-		}
-		target = *base
-		target.Path = singleJoin(target.Path, "/v1/models")
-	case *OpencodeGoProvider:
-		base := provider.UpstreamURL("/models")
-		if base == nil {
-			return nil, false
-		}
-		target = *base
-		target.Path = singleJoin(target.Path, "/models")
-	default:
+	catalog, err := catalogFor(provider)
+	if err != nil {
 		return nil, false
 	}
-	return &target, true
+	return catalog.endpoint()
 }
 
 func fetchProviderModels(ctx context.Context, transport http.RoundTripper, provider Provider, account *Account) (providerModelSnapshot, error) {
-	target, ok := providerModelsURL(provider)
-	if !ok {
-		return providerModelSnapshot{}, errors.New("provider has no model discovery endpoint")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	catalog, err := catalogFor(provider)
 	if err != nil {
 		return providerModelSnapshot{}, err
 	}
-	provider.SetAuthHeaders(req, account)
-	req.Header.Set("Accept", "application/json")
-	if provider.Type() == AccountTypeClaude {
-		req.Header.Set("Anthropic-Version", "2023-06-01")
-		req.Header.Set("Anthropic-Beta", "oauth-2025-04-20")
+	req, err := catalog.request(ctx, provider, account)
+	if err != nil {
+		return providerModelSnapshot{}, err
 	}
-
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		return providerModelSnapshot{}, err
@@ -299,15 +245,10 @@ func fetchProviderModels(ctx context.Context, transport http.RoundTripper, provi
 	if err != nil {
 		return providerModelSnapshot{}, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return providerModelSnapshot{}, fmt.Errorf("model discovery failed: %s: %s", resp.Status, safeText(body))
 	}
-	var models map[string]DiscoveredModel
-	if isMistralType(provider.Type()) {
-		models, err = parseMistralModels(body)
-	} else {
-		models, err = parseProviderModels(body)
-	}
+	models, err := catalog.parse(body)
 	if err != nil {
 		return providerModelSnapshot{}, err
 	}
@@ -485,52 +426,21 @@ func discoveredModelsForPool(pool *poolState) []poolModelDescriptor {
 	descriptors := make([]poolModelDescriptor, 0, len(keys))
 	for _, key := range keys {
 		entry := aggregates[key]
-		protocol := "anthropic"
-		if entry.provider == AccountTypeCodex || entry.provider == AccountTypeGrok {
-			protocol = "openai"
-		} else if entry.provider == AccountTypeOpencodeGo {
-			// Discovered Go models carry the bare upstream ID, so they need the
-			// same per-endpoint protocol label the catalog entries get. Zen free
-			// models use the OpenCode namespace and the public OpenAI route.
-			if strings.HasPrefix(strings.ToLower(entry.sourceID), "opencode/") {
-				protocol = "openai"
-			} else {
-				protocol = opencodeGoClientProtocol(entry.model.ID)
-			}
-		}
 		publicID := entry.model.ID
-		upstreamID := entry.model.ID
-		aliases := []string(nil)
-		description := entry.model.Description
 		if entry.provider == AccountTypeOpencodeGo && strings.HasPrefix(strings.ToLower(entry.sourceID), "opencode/") {
 			publicID = entry.sourceID
 		}
+		metadata := entry.model
 		if isMistralType(entry.provider) {
 			publicID = mistralPublicID(entry.provider, entry.model.ID)
-			adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
-			if strings.TrimSpace(description) == "" {
-				description = adapter
-			} else {
-				description += ". " + adapter
-			}
+		} else {
+			metadata.Tools = true
 		}
-		tools := true
-		if isMistralType(entry.provider) {
-			protocol = "anthropic"
-			tools = entry.model.Tools
-		}
-		capabilities := map[string]bool{"reasoning": entry.model.Reasoning, "tools": tools}
-		if entry.model.WebSearch {
-			capabilities["web_search"] = true
-		}
-		descriptors = append(descriptors, poolModelDescriptor{
-			ID: publicID, Name: entry.model.DisplayName, Description: description,
-			Protocol: protocol, Protocols: []string{protocol}, Provider: string(entry.provider), UpstreamID: upstreamID,
-			ContextWindow: entry.model.ContextWindow, MaxOutputTokens: entry.model.MaxOutputTokens,
-			Modalities: append([]string(nil), entry.model.Modalities...), Capabilities: capabilities,
-			NativeTools: nativeWebSearchTools(entry.provider, entry.model.WebSearch), Aliases: aliases,
-			SupportingAccounts: entry.supporting, AvailableAccounts: entry.available, AvailableNow: entry.available > 0,
-		})
+		descriptor := projectModel(entry.provider, publicID, entry.model.ID, metadata)
+		descriptor.SupportingAccounts = entry.supporting
+		descriptor.AvailableAccounts = entry.available
+		descriptor.AvailableNow = entry.available > 0
+		descriptors = append(descriptors, descriptor)
 	}
 	return descriptors
 }

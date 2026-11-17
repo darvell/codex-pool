@@ -329,8 +329,6 @@ func saveAntigravityAccount(acc *Account) error {
 	acc.mu.Unlock()
 	if stagedSnapshot != nil {
 		root["model_snapshot"] = stagedSnapshot
-	} else if snapshot, ok := antigravityModels.AccountSnapshot(acc.ID); ok {
-		root["model_snapshot"] = snapshot
 	}
 	if err := os.MkdirAll(filepath.Dir(acc.File), 0o700); err != nil {
 		return err

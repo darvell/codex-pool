@@ -35,25 +35,10 @@ func (h *proxyHandler) serveMinimaxAdmin(w http.ResponseWriter, r *http.Request)
 
 // POST /admin/minimax/add - add a MiniMax API key
 func (h *proxyHandler) handleMinimaxAdd(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		APIKey string `json:"api_key"`
-	}
-
-	if r.Header.Get("Content-Type") == "application/json" {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error())
-			return
-		}
-	} else {
-		req.APIKey = r.FormValue("api_key")
-	}
-
-	apiKey := strings.TrimSpace(req.APIKey)
-	if apiKey == "" {
-		respondJSONError(w, http.StatusBadRequest, "api_key is required")
+	apiKey, ok := readAdmissionKey(w, r)
+	if !ok {
 		return
 	}
-
 	// Validate key by sending a minimal completion request
 	validationURL := h.cfg.minimaxBase.String() + "/v1/messages"
 	body := map[string]any{
@@ -87,5 +72,5 @@ func (h *proxyHandler) handleMinimaxAdd(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h.saveAPIKeyAccountFile(w, r, AccountTypeMinimax, "minimax", apiKey)
+	h.saveAPIKeyAccountFile(w, r, AccountTypeMinimax, apiKey)
 }

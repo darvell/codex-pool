@@ -306,3 +306,9 @@ func TestClaudePoolToken_FormatAndBackwardCompatibility(t *testing.T) {
 		t.Fatalf("legacy isClaudePoolToken failed: ok=%v uid=%q want=%q", ok, uid, userID)
 	}
 }
+
+// generateClaudePoolToken creates a fake Claude OAuth token with embedded pool user info.
+// Format: sk-ant-oat01-pool-<base64url(userID.timestamp.signature)>
+func generateClaudePoolToken(secret, userID string) string {
+	return generateClaudePoolTokenAt(secret, userID, time.Now().UTC())
+}

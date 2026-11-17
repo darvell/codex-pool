@@ -33,7 +33,7 @@ func TestAstraRegistry(t *testing.T) {
 	if !found {
 		t.Fatal("Astra missing from client model export")
 	}
-	body, err := generateCuteCodeSettingsJSON("https://pool.example", "test-key")
+	body, err := generateCuteCodeSettingsJSON("https://pool.example", "test-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

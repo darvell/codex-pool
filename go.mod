@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.5.0
-	github.com/OneOfOne/xxhash v1.2.8
 	github.com/coder/websocket v1.8.14
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/fsnotify/fsnotify v1.9.0

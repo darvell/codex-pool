@@ -531,13 +531,3 @@ func (sw *antigravityStreamWriter) emitRaw(s string) error {
 	_, err := io.WriteString(sw.w, s)
 	return err
 }
-
-func antigravityStreamContentType(format antigravityClientFormat) string {
-	if format == antigravityFormatGemini || format == antigravityFormatChat {
-		return "text/event-stream"
-	}
-	return "text/event-stream; charset=utf-8"
-}
-func isAntigravitySSEContentType(contentType string) bool {
-	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
-}

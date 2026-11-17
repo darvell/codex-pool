@@ -1,3 +1,9 @@
+import { AccountContribution } from "./AccountContribution";
+import { navigationGroups, queryValue, updateURL, type View } from "./navigation";
+import { setupCommands } from "./setupCommands";
+import { accountThroughput, tokenThroughput } from "./throughput";
+import { useSignedCredential } from "./useSignedCredential";
+import { useAppSession } from "./useAppSession";
 import { isUnclaimedLegacy, memberName as accountDisplayName, memberOrigin, memberRole } from "./memberIdentity";
 import { type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { browserSupportsWebAuthn, startAuthentication, startRegistration } from "@simplewebauthn/browser";
@@ -18,24 +24,11 @@ import {
   type DitherColor,
 } from "./components/dither-kit";
 import {
-	  antigravityOAuthStatus,
   clearFriendSession,
-  contributeAPIKey,
-  contributeGrok,
-  exchangeAccountOAuth,
-	  exchangeAntigravityOAuth,
-  loadAdminAccounts,
   legacySignup,
-	loadModelCatalog,
-  loadPoolStats,
-  loadFailureInsights,
-  loadQuotaWaste,
-  loadSignalAnalytics,
   loadPassportMe,
-  exchangeLegacySession,
   passportJoin,
   passportLogin,
-  passportLogout,
   beginPasskeyLogin,
   finishPasskeyLogin,
   beginPasskeyRegistration,
@@ -54,7 +47,6 @@ import {
   createMyClient,
   rotateMyClient,
   revealMyClient,
-  loadClientApiKey,
   revokeMyClient,
   loadPasses,
   createPass,
@@ -68,15 +60,9 @@ import {
   loadConsoleAudit,
   loadAnalyticsHealth,
   setPrincipalStatus,
-  lockOperator,
   mutateAccount,
   reloadAccounts,
-  storedAdminToken,
   storedFriendSession,
-  startAccountOAuth,
-  startVibeLogin,
-  vibeLoginStatus,
-	  startAntigravityOAuth,
   unlockOperator,
   loadAuthConfig,
   operatorBootstrap,
@@ -111,45 +97,15 @@ import type {
 	ModelDailyUsage,
 	ModelDescriptor,
   ModelQuotaEfficiency,
-  OriginWeeklyUsage,
   PoolStats,
   Provider,
   QuotaCapacityPoint,
   ResetObservation,
   SignalAnalytics,
-  VibeLoginSession,
 } from "./types";
 
-type View = "pulse" | "insights" | "quota-waste" | "mine" | "passes" | "console" | "accounts" | "models" | "operator-api" | "setup";
 type InsightMode = "overview" | "capacity" | "flow" | "demand" | "failures";
-type HistoryMode = "push" | "replace";
-
-const VIEWS: View[] = ["pulse", "insights", "quota-waste", "mine", "passes", "console", "accounts", "models", "operator-api", "setup"];
 const INSIGHT_MODES: InsightMode[] = ["overview", "capacity", "flow", "demand", "failures"];
-
-export function viewFromSearch(search: string): View {
-  const candidate = new URLSearchParams(search).get("view") as View | null;
-  return candidate && VIEWS.includes(candidate) ? candidate : "pulse";
-}
-
-function queryValue(name: string) {
-  return new URLSearchParams(window.location.search).get(name);
-}
-
-function updateURL(changes: Record<string, string | null>, mode: HistoryMode = "replace") {
-  const url = new URL(window.location.href);
-  for (const [name, value] of Object.entries(changes)) {
-    if (value) url.searchParams.set(name, value);
-    else url.searchParams.delete(name);
-  }
-  window.history[`${mode}State`](null, "", `${url.pathname}${url.search}${url.hash}`);
-}
-
-function allowedViews(principal: PassportPrincipal): View[] {
-  if (principal.kind === "operator") return VIEWS;
-  if (principal.kind === "guest") return ["mine", "setup"];
-  return ["mine", "setup", "passes"];
-}
 
 const PROVIDERS: Record<Provider, { label: string; color: string; dither: DitherColor; glyph: string }> = {
   codex: { label: "Codex", color: "#39e75f", dither: "green", glyph: "◎" },
@@ -176,18 +132,7 @@ export function poolSurplus(aggregate: Pick<PoolStats["aggregate"], "total_api_c
 }
 
 function formatTokens(value: number) {
-  return compact.format(value || 0).replace("T", "T");
-}
-
-// Burn is account throughput, not API-price-equivalent tokens. Codex-style
-// usage includes cache reads inside input_tokens; Anthropic reports them as a
-// separate field, so only Claude needs the cached count added explicitly.
-function tokenThroughput(row: { account_type: Provider | "unknown"; input_tokens: number; cached_tokens: number; output_tokens: number }) {
-  return row.input_tokens + row.output_tokens + (row.account_type === "claude" ? row.cached_tokens : 0);
-}
-
-function accountThroughput(account: AccountStats) {
-  return account.total_input_tokens + account.total_output_tokens + (account.type === "claude" ? account.total_cached_tokens : 0);
+  return compact.format(value || 0);
 }
 
 function formatReset(minutes: number) {
@@ -195,10 +140,6 @@ function formatReset(minutes: number) {
   const days = Math.floor(minutes / 1440);
   const hours = Math.floor((minutes % 1440) / 60);
   return days ? `${days}d ${hours}h` : `${hours}h ${minutes % 60}m`;
-}
-
-function originHandle(originID: string) {
-  return originID.replace(/^ip_/, "").slice(0, 4).toUpperCase();
 }
 
 function formatAdmission(value?: string) {
@@ -314,174 +255,7 @@ function classNames(...values: Array<string | false | null | undefined>) {
 }
 
 export function App() {
-  const [passport, setPassport] = useState<PassportPrincipal | null>(null);
-  const [booting, setBooting] = useState(true);
-  const [view, setView] = useState<View>(() => viewFromSearch(window.location.search));
-  const [pendingJoin, setPendingJoin] = useState<{ token: string; current: PassportPrincipal } | null>(null);
-  const [recoveryToken, setRecoveryToken] = useState("");
-  const [joinError, setJoinError] = useState("");
-  const [stats, setStats] = useState<PoolStats | null>(null);
-  const [signal, setSignal] = useState<SignalAnalytics | null>(null);
-  const [failureInsights, setFailureInsights] = useState<FailureInsightsResponse | null>(null);
-  const [failureInsightsError, setFailureInsightsError] = useState("");
-  const [quotaWaste, setQuotaWaste] = useState<QuotaWasteResponse | null>(null);
-  const [quotaWasteError, setQuotaWasteError] = useState("");
-  const [quotaWasteDays, setQuotaWasteDays] = useState(30);
-  const quotaWasteRequest = useRef(0);
-	const [models, setModels] = useState<ModelDescriptor[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [operatorToken, setOperatorToken] = useState(storedAdminToken());
-  const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([]);
-  const adminLoadVersion = useRef(0);
-
-  const goToView = useCallback((nextView: View, params: Record<string, string | null> = {}) => {
-    const cleanup: Record<string, string | null> = { account: null, member: null };
-    if (nextView !== "insights") cleanup.insight = null;
-    if (nextView !== "accounts") cleanup.accounts = null;
-    updateURL({ ...cleanup, view: nextView, ...params }, "push");
-    setView(nextView);
-  }, []);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [statsResult, signalResult, failuresResult, catalogResult] = await Promise.allSettled([loadPoolStats(), loadSignalAnalytics(), loadFailureInsights(168, 100), loadModelCatalog()]);
-      if (statsResult.status === "rejected") throw statsResult.reason;
-      if (signalResult.status === "rejected") throw signalResult.reason;
-      if (catalogResult.status === "rejected") throw catalogResult.reason;
-      setStats(statsResult.value);
-      setSignal(signalResult.value);
-      setModels(catalogResult.value.models);
-      if (failuresResult.status === "fulfilled") {
-        setFailureInsights(failuresResult.value);
-        setFailureInsightsError("");
-      } else {
-        setFailureInsights(null);
-        setFailureInsightsError(failuresResult.reason instanceof Error ? failuresResult.reason.message : "Unable to load failure insights. Try again.");
-      }
-      setError("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Unable to refresh pool data. Try again.");
-      return;
-    } finally {
-      setLoading(false);
-    }
-    // Quota waste is operator-only and has its own failure state; it must not
-    // turn a core refresh failure into a misleading pool error.
-    if (passport?.kind !== "operator") {
-      setQuotaWaste(null);
-      setQuotaWasteError("");
-      return;
-    }
-    const requestID = ++quotaWasteRequest.current;
-    try {
-      const value = await loadQuotaWaste(quotaWasteDays);
-      if (requestID !== quotaWasteRequest.current) return;
-      setQuotaWaste(value);
-      setQuotaWasteError("");
-    } catch (cause) {
-      if (requestID !== quotaWasteRequest.current) return;
-      setQuotaWaste(null);
-      setQuotaWasteError(cause instanceof Error ? cause.message : "Unable to load quota-waste insights. Try again.");
-    }
-  }, [passport, quotaWasteDays]);
-
-  useEffect(() => {
-    const boot = async () => {
-      const memberToken = window.location.pathname === "/recover" ? decodeURIComponent(window.location.hash.replace(/^#/, "")) : "";
-      if (memberToken) {
-        window.history.replaceState(null, "", "/recover");
-        setRecoveryToken(memberToken);
-        return;
-      }
-      const joinToken = window.location.pathname === "/join" ? decodeURIComponent(window.location.hash.replace(/^#/, "")) : "";
-      if (joinToken) {
-        window.history.replaceState(null, "", "/");
-        try {
-          const result = await passportJoin(joinToken);
-          if (result.switch_required && result.current) {
-            setPendingJoin({ token: joinToken, current: result.current });
-            return;
-          }
-          if (result.principal) {
-            setPassport(result.principal);
-            setView("mine");
-            if (result.principal.kind !== "guest") await refresh();
-            return;
-          }
-        } catch (cause) {
-          setJoinError(cause instanceof Error ? cause.message : "This pass is unavailable");
-          return;
-        }
-      }
-      try {
-        const principal = await loadPassportMe();
-        setPassport(principal);
-        if (principal.kind === "guest") setView("mine");
-        else await refresh();
-      } catch {
-        const legacy = storedFriendSession();
-        if (legacy?.download_token) {
-          try {
-            const principal = await exchangeLegacySession(legacy.download_token);
-            clearFriendSession();
-            setPassport(principal);
-            setView("mine");
-            return;
-          } catch {
-            clearFriendSession();
-          }
-        }
-      }
-    };
-    boot().finally(() => setBooting(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const restoreView = () => setView(viewFromSearch(window.location.search));
-    window.addEventListener("popstate", restoreView);
-    return () => window.removeEventListener("popstate", restoreView);
-  }, []);
-
-  useEffect(() => {
-    updateURL({ view }, "replace");
-  }, [view]);
-
-  useEffect(() => {
-    if (!passport) return;
-    const permitted = allowedViews(passport);
-    if (permitted.includes(view)) return;
-    const fallback = passport.kind === "operator" ? "pulse" : "mine";
-    setView(fallback);
-    updateURL({ view: fallback, insight: null, account: null, accounts: null, member: null }, "replace");
-  }, [passport, view]);
-
-  useEffect(() => {
-    if (!passport || passport.kind === "guest") return;
-    refresh();
-    const timer = window.setInterval(refresh, 30_000);
-    return () => window.clearInterval(timer);
-  }, [passport, refresh]);
-
-  useEffect(() => {
-    const version = ++adminLoadVersion.current;
-    if (!operatorToken) {
-      setAdminAccounts([]);
-      return;
-    }
-    loadAdminAccounts()
-      .then((accounts) => {
-        if (version === adminLoadVersion.current && storedAdminToken() === operatorToken) setAdminAccounts(accounts);
-      })
-      .catch(() => {
-        if (version !== adminLoadVersion.current) return;
-        lockOperator();
-        setOperatorToken("");
-        setAdminAccounts([]);
-      });
-    return () => { adminLoadVersion.current++; };
-  }, [operatorToken]);
+  const { passport, setPassport, booting, view, setView, pendingJoin, setPendingJoin, recoveryToken, setRecoveryToken, joinError, setJoinError, goToView, refresh, signOut, operatorToken, adminAccounts, lock, unlocked, accountsChanged, stats, signal, failureInsights, failureInsightsError, quotaWaste, quotaWasteError, quotaWasteDays, setQuotaWasteDays, models, loading, error } = useAppSession();
 
   if (booting) return <BootScreen />;
   if (recoveryToken && !passport) return <MemberRecovery token={recoveryToken} onAccess={(next) => { setRecoveryToken(""); setPassport(next); setView("mine"); refresh(); }} />;
@@ -504,24 +278,6 @@ export function App() {
     return joinError ? <JoinUnavailable /> : <AccessGate onAccess={(next) => { setPassport(next); setView(next.kind === "guest" ? "mine" : "pulse"); if (next.kind !== "guest") refresh(); }} />;
   }
 
-  const signOut = async () => {
-    if (passport) await passportLogout().catch(() => undefined);
-    adminLoadVersion.current++;
-    clearFriendSession();
-    lockOperator();
-    setOperatorToken("");
-    setAdminAccounts([]);
-    setPassport(null);
-    setStats(null);
-    setSignal(null);
-    setFailureInsights(null);
-    setFailureInsightsError("");
-    setQuotaWaste(null);
-    setQuotaWasteError("");
-    setModels([]);
-    updateURL({ view: null, insight: null, account: null, accounts: null, member: null }, "replace");
-  };
-
   return (
     <div className="signal-app">
       <Header
@@ -529,7 +285,7 @@ export function App() {
         loading={loading}
         operator={Boolean(operatorToken)}
         onRefresh={passport?.kind === "guest" ? undefined : refresh}
-        onLock={() => { adminLoadVersion.current++; lockOperator(); setOperatorToken(""); setAdminAccounts([]); }}
+        onLock={lock}
       />
       <div className="app-grid">
         <Navigation view={view} principal={passport} onChange={goToView} onSignOut={signOut} />
@@ -546,17 +302,8 @@ export function App() {
               stats={stats}
               adminAccounts={adminAccounts}
               operatorToken={operatorToken}
-              onUnlocked={(token, accounts) => { setOperatorToken(token); setAdminAccounts(accounts); }}
-              onAccountsChanged={async () => {
-                const version = ++adminLoadVersion.current;
-                const token = operatorToken;
-                if (!token) {
-                  await refresh();
-                  return;
-                }
-                const [accounts] = await Promise.all([loadAdminAccounts(), refresh()]);
-                if (version === adminLoadVersion.current && storedAdminToken() === token) setAdminAccounts(accounts);
-              }}
+              onUnlocked={unlocked}
+              onAccountsChanged={accountsChanged}
             />
           )}
 		  {view === "models" && <Models models={models} />}
@@ -568,9 +315,6 @@ export function App() {
   );
 }
 
-// Every unauthenticated screen shares one composition: the crest carries the
-// identity at full size, the panel carries the single task. Boot has no task,
-// so it shows the crest alone rather than an empty panel.
 function Threshold({ title, lede, children }: { title: string; lede?: string; children?: ReactNode }) {
   return (
     <div className="threshold">
@@ -786,7 +530,7 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
   const [passkeyLabel, setPasskeyLabel] = useState("");
   const [setupFor, setSetupFor] = useState<string | null>(null);
   const [setupToken, setSetupToken] = useState("");
-  const [setupPlatform, setSetupPlatform] = useState("codex");
+  const [setupPlatform, setSetupPlatform] = useState("api");
   const [showMint, setShowMint] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [busy, setBusy] = useState("");
@@ -851,17 +595,16 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
     hours.set(key, existing);
     return hours;
   }, new Map<string, { hour: string; tokens: number }>()).values()).sort((a, b) => a.hour.localeCompare(b.hour));
-  const base = window.location.origin;
-  const platforms: Record<string, string> = {
-    codex: `curl -sL "${base}/setup/codex/${setupToken}" | bash`,
-    claude: `source <(curl -sL "${base}/setup/claude/${setupToken}")`,
-    gemini: `curl -sL "${base}/setup/gemini/${setupToken}" | bash`,
-    grok: `curl -sL "${base}/setup/grok/${setupToken}" | bash`,
-    "cute-code": `curl -sL "${base}/setup/cute-code/${setupToken}" | bash`,
-    pi: `curl -sL "${base}/setup/pi/${setupToken}" | bash`,
+  const platforms = Object.fromEntries(Object.entries(setupCommands(window.location.origin, setupToken)).map(([id, tool]) => [id, tool.oneliner]));
+
+  const hideKey = () => {
+    setSetupFor(null);
+    setSetupToken("");
+    setSetupPlatform("api");
   };
 
   const reveal = async (clientID: string) => {
+    hideKey();
     setBusy(`reveal:${clientID}`);
     try {
       const result = await revealMyClient(clientID);
@@ -877,6 +620,7 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
+    hideKey();
     setBusy("create-client");
     try {
       const result = await createMyClient(label);
@@ -895,13 +639,14 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
   const rotate = async (client: ClientCredential) => {
     if (!window.confirm(client.status === "active"
       ? `Replace the key for ${client.label}? Apps using its current key will stop working. This cannot be undone.`
-      : `Restore ${client.label} with a new key? You will need to run setup again.`)) return;
+      : `Restore ${client.label} with a new key? Apps will need the new key.`)) return;
+    hideKey();
     setBusy(`rotate:${client.id}`);
     try {
       const result = await rotateMyClient(client.id);
       setSetupFor(client.id);
       setSetupToken(result.setup_token);
-      setNotice(`${client.label} has a new key. Run setup again on this device.`);
+      setNotice(`${client.label} has a new key. Update apps using this client.`);
       await loadClientsData();
     } catch (cause) {
       setErrors((current) => ({ ...current, clients: cause instanceof Error ? cause.message : "Unable to rotate client" }));
@@ -913,13 +658,10 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
   const revoke = async (client: ClientCredential) => {
     if (!window.confirm(`Revoke ${client.label}? Apps using this key will lose access. This cannot be undone.`)) return;
 
+    hideKey();
     setBusy(`revoke:${client.id}`);
     try {
       await revokeMyClient(client.id);
-      if (setupFor === client.id) {
-        setSetupFor(null);
-        setSetupToken("");
-      }
       await loadClientsData();
     } catch (cause) {
       setErrors((current) => ({ ...current, clients: cause instanceof Error ? cause.message : "Unable to revoke client" }));
@@ -1032,17 +774,24 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
         <div className="client-header">
           <span><strong>{client.label}</strong>{client.status !== "active" && <small>{client.status}</small>}</span>
           <div className="row-actions">
-            <button disabled={Boolean(busy) || client.status !== "active"} onClick={() => setupFor === client.id ? (setSetupFor(null), setSetupToken("")) : reveal(client.id)}>{busy === `reveal:${client.id}` ? "Loading…" : setupFor === client.id ? "Hide setup" : "Show setup"}</button>
+            <button disabled={Boolean(busy) || client.status !== "active"} onClick={() => setupFor === client.id ? hideKey() : reveal(client.id)}>{busy === `reveal:${client.id}` ? "Loading…" : setupFor === client.id ? "Hide key" : "Show key"}</button>
             <button disabled={Boolean(busy)} onClick={() => rotate(client)}>{busy === `rotate:${client.id}` ? "Updating…" : client.status === "active" ? "Replace key" : "Restore"}</button>
             {client.status === "active" && <button className="danger-action" disabled={Boolean(busy)} onClick={() => revoke(client)}>{busy === `revoke:${client.id}` ? "Revoking…" : "Revoke"}</button>}
           </div>
         </div>
-        {setupFor === client.id && setupToken && <div className="setup-secret" role="status">
-          <div className="tabs client-platform-tabs">
-            {Object.keys(platforms).map((platform) => <button key={platform} className={classNames("tab", setupPlatform === platform && "active")} onClick={() => setSetupPlatform(platform)}>{platform}</button>)}
+        {setupFor === client.id && setupToken && <div className="setup-secret">
+          <div className="tabs client-platform-tabs" aria-label="Client credentials">
+            <button className={classNames("tab", setupPlatform === "api" && "active")} aria-pressed={setupPlatform === "api"} onClick={() => setSetupPlatform("api")}>API key</button>
+            <button className={classNames("tab", setupPlatform !== "api" && "active")} aria-pressed={setupPlatform !== "api"} onClick={() => setSetupPlatform("codex")}>CLI installers</button>
           </div>
-          <code>{platforms[setupPlatform]}</code>
-          <CopyButton text={platforms[setupPlatform]} />
+          {setupPlatform === "api" ? <ClientApiKey key={setupToken} setupToken={setupToken} /> : <>
+            <div className="tabs client-platform-tabs" aria-label="CLI installer">
+              {Object.keys(platforms).map((platform) => <button key={platform} className={classNames("tab", setupPlatform === platform && "active")} onClick={() => setSetupPlatform(platform)}>{platform}</button>)}
+            </div>
+            <small>Run this command to configure your CLI.</small>
+            <code>{platforms[setupPlatform]}</code>
+            <CopyButton text={platforms[setupPlatform]} />
+          </>}
         </div>}
       </article>)}
     </section>
@@ -1056,6 +805,21 @@ function PassportMine({ principal, onPrincipal }: { principal: PassportPrincipal
       {usageLoading ? <div className="empty-state">Loading usage…</div> : chartData.length ? <div className="chart-stage medium"><BarChart data={chartData} config={{ tokens: { label: "Tokens", color: "orange" } }} margins={{ left: 52, bottom: 34 }}><Grid horizontal /><Bar dataKey="tokens" variant="hatched" isClickable /><XAxis dataKey="hour" tickFormatter={(value) => String(value).slice(11, 16)} maxTicks={8} /><YAxis tickFormatter={(value) => compact.format(Number(value))} /><Tooltip /></BarChart></div> : <div className="empty-state">No usage in the last 7 days.</div>}
     </SignalPanel>
 
+  </section>;
+}
+
+function ClientApiKey({ setupToken }: { setupToken: string }) {
+  const { apiKey, error, retry } = useSignedCredential(setupToken);
+
+  const baseURL = `${window.location.origin}/v1`;
+  const example = `curl "${baseURL}/models" \\\n  -H "Authorization: Bearer ${apiKey}"`;
+
+  return <section className="client-api-key" aria-label="API credentials">
+    {error ? <div className="signal-error" role="alert">Couldn't load the API key. Try again. <button className="quiet-button" onClick={retry}>Retry API key</button></div> : !apiKey ? <p role="status">Loading API key…</p> : <>
+      <div className="api-card"><div className="api-card-title">API key</div><div className="api-key-value"><code>{apiKey}</code><CopyButton text={apiKey} label="Copy key" /></div></div>
+      <div className="api-card"><div className="api-card-title">OpenAI base URL</div><div className="api-key-value"><code>{baseURL}</code><CopyButton text={baseURL} label="Copy URL" /></div></div>
+      <div className="api-card"><div className="api-card-title">List models</div><div className="code-wrapper"><div className="code-block"><pre>{example}</pre></div><CopyButton className="copy-btn" text={example} /></div></div>
+    </>}
   </section>;
 }
 
@@ -1090,22 +854,9 @@ function SetupPage() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const revealVersion = useRef(0);
-  const [sdkCredential, setSdkCredential] = useState({ token: "", key: "" });
-  const [sdkError, setSdkError] = useState("");
+  const { apiKey, error: sdkFailed } = useSignedCredential(setupToken);
+  const sdkError = sdkFailed ? "Couldn't load the API key. Retry setup." : "";
   const base = window.location.origin;
-
-  useEffect(() => {
-    setSdkError("");
-    if (!setupToken) return;
-
-    const controller = new AbortController();
-    void loadClientApiKey(setupToken, controller.signal).then((key) => {
-      if (!controller.signal.aborted) setSdkCredential({ token: setupToken, key });
-    }).catch(() => {
-      if (!controller.signal.aborted) setSdkError("Couldn't load the API key. Retry setup.");
-    });
-    return () => controller.abort();
-  }, [setupToken]);
 
   const reveal = useCallback(async (id: string) => {
     const version = ++revealVersion.current;
@@ -1161,51 +912,7 @@ function SetupPage() {
   };
 
   const token = setupToken || "…";
-  const cliTools: Record<string, { name: string; install: string; oneliner: string; powershell: string; manual: { file: string; url: string }[] }> = {
-    codex: {
-      name: "Codex",
-      install: "npm install -g @openai/codex    # or: brew install codex",
-      oneliner: `curl -sL "${base}/setup/codex/${token}" | bash`,
-      powershell: `irm "${base}/setup/codex/${token}?shell=powershell" | iex`,
-      manual: [{ file: "~/.codex/auth.json", url: `${base}/config/codex/${token}` }],
-    },
-    claude: {
-      name: "Claude Code",
-      install: "npm install -g @anthropic-ai/claude-code",
-      oneliner: `source <(curl -sL "${base}/setup/claude/${token}")`,
-      powershell: `irm "${base}/setup/claude/${token}?shell=powershell" | iex`,
-      manual: [{ file: "~/.claude/settings.json", url: `${base}/config/claude/${token}` }],
-    },
-    gemini: {
-      name: "Gemini",
-      install: "npm install -g @google/gemini-cli    # or: brew install gemini-cli",
-      oneliner: `curl -sL "${base}/setup/gemini/${token}" | bash`,
-      powershell: `irm "${base}/setup/gemini/${token}?shell=powershell" | iex`,
-      manual: [{ file: "~/.gemini/oauth_creds.json", url: `${base}/config/gemini/${token}` }],
-    },
-    grok: {
-      name: "Grok",
-      install: "npm install -g @xai/grok-cli",
-      oneliner: `curl -sL "${base}/setup/grok/${token}" | bash`,
-      powershell: `irm "${base}/setup/grok/${token}?shell=powershell" | iex`,
-      manual: [{ file: "grok auth", url: `${base}/config/grok/${token}` }],
-    },
-    "cute-code": {
-      name: "Cute Code",
-      install: "curl -fsSL https://git.irrigate.cc/pp/cute-code/raw/branch/main/install.sh | bash",
-      oneliner: `curl -sL "${base}/setup/cute-code/${token}" | bash`,
-      powershell: `irm "${base}/setup/cute-code/${token}?shell=powershell" | iex`,
-      manual: [{ file: "~/.claude/settings.json", url: `${base}/config/cute-code/${token}` }],
-    },
-    pi: {
-      name: "Pi",
-      install: "npm install -g pi-cli",
-      oneliner: `curl -sL "${base}/setup/pi/${token}" | bash`,
-      powershell: `irm "${base}/setup/pi/${token}?shell=powershell" | iex`,
-      manual: [{ file: "pi models.json", url: `${base}/config/pi/${token}` }],
-    },
-  };
-  const apiKey = sdkCredential.token === setupToken ? sdkCredential.key : "";
+  const cliTools = setupCommands(base, token);
   const sdkTools: Record<string, { name: string; summary: string; examples: { label: string; code: string }[] }> = {
     anthropic: {
       name: "Anthropic API",
@@ -1585,7 +1292,6 @@ function Header({ stats, loading, operator, onRefresh, onLock }: {
   );
 }
 
-type NavGroup = { label: string; items: Array<[View, string]> };
 
 export function OperatorAPIKeys() {
   const [tokens, setTokens] = useState<OperatorAPIToken[]>([]);
@@ -1693,18 +1399,7 @@ export function OperatorAPIKeys() {
 }
 
 function Navigation({ view, principal, onChange, onSignOut }: { view: View; principal: PassportPrincipal | null; onChange: (view: View) => void; onSignOut: () => void | Promise<void> }) {
-  const groups: NavGroup[] = principal?.kind === "guest"
-    ? [{ label: "Your access", items: [["mine", "Usage"], ["setup", "Setup"]] }]
-    : principal?.kind === "operator"
-    ? [
-        { label: "Operate", items: [["pulse", "Pool status"], ["insights", "Insights"], ["quota-waste", "Quota waste"], ["models", "Models"]] },
-        { label: "Manage", items: [["accounts", "Accounts"], ["passes", "Guest passes"], ["console", "Members"], ["operator-api", "Operator API"]] },
-        { label: "Personal", items: [["mine", "Your usage"], ["setup", "Setup"]] },
-      ]
-    : [
-        { label: "Personal", items: [["mine", "Your usage"], ["setup", "Setup"]] },
-        { label: "Sharing", items: [["passes", "Guest passes"]] },
-      ];
+  const groups = navigationGroups(principal?.kind ?? "member");
   return (
     <nav className="signal-nav" aria-label="Codex Pool">
       <div className="mobile-nav">
@@ -2002,67 +1697,6 @@ function HeavyAccounts({ onMember }: { onMember: (id: string) => void }) {
   </div>;
 }
 
-function ProviderCapitalChart({ accounts }: { accounts: AccountStats[] }) {
-  const data = Object.keys(PROVIDERS).map((provider) => {
-    const rows = accounts.filter((account) => account.type === provider);
-    return {
-      provider,
-      value: rows.reduce((sum, account) => sum + account.api_cost_estimate, 0),
-      spend: rows.reduce((sum, account) => sum + account.subscription_spend, 0),
-    };
-  }).filter((row) => row.value > 0 || row.spend > 0);
-  if (data.length === 0) return <EmptyChart label="No subscription or API-value history has been recorded yet." />;
-  const config: ChartConfig = {
-    value: { label: "API-equivalent value", color: "gold" },
-    spend: { label: "Matched subscription spend", color: "grey" },
-  };
-  return (
-    <div className="chart-stage medium">
-      <BarChart data={data} config={config} margins={{ left: 52, bottom: 30 }} bloom="low" bloomOnHover>
-        <Grid horizontal />
-        <Bar dataKey="value" variant="hatched" isClickable />
-        <Bar dataKey="spend" variant="dotted" isClickable />
-        <XAxis dataKey="provider" tickFormatter={(value) => String(value).toUpperCase()} maxTicks={8} />
-        <YAxis tickFormatter={(value) => `$${compact.format(value)}`} />
-        <Legend isClickable />
-        <Tooltip labelKey="provider" valueFormatter={(value) => preciseMoney.format(value)} />
-      </BarChart>
-    </div>
-  );
-}
-
-function OriginWeeklyChart({ rows }: { rows: OriginWeeklyUsage[] }) {
-  const totals = new Map<string, number>();
-  for (const row of rows) totals.set(row.origin_id, (totals.get(row.origin_id) ?? 0) + tokenThroughput(row));
-  const origins = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([id]) => id);
-  const weeks = [...new Set(rows.map((row) => row.week_start))].sort();
-  const data = weeks.map((week) => {
-    const point: Record<string, string | number> = { week };
-    for (const origin of origins) point[origin] = 0;
-    for (const row of rows) {
-      if (row.week_start === week && origins.includes(row.origin_id)) {
-        point[row.origin_id] = Number(point[row.origin_id] ?? 0) + tokenThroughput(row);
-      }
-    }
-    return point;
-  });
-  if (data.length === 0 || origins.length === 0) return <EmptyChart label="No origin history has been recorded yet." />;
-  const colors: DitherColor[] = ["gold", "orange", "purple", "cyan", "green", "blue"];
-  const config = Object.fromEntries(origins.map((origin, index) => [origin, { label: originHandle(origin), color: colors[index] }])) as ChartConfig;
-  return (
-    <div className="chart-stage medium">
-      <BarChart data={data} config={config} stackType="stacked" margins={{ left: 48, bottom: 30 }} bloom="low" bloomOnHover>
-        <Grid horizontal />
-        {origins.map((origin, index) => <Bar key={origin} dataKey={origin} variant={index % 2 ? "dotted" : "hatched"} isClickable />)}
-        <XAxis dataKey="week" tickFormatter={(value) => String(value).slice(5)} maxTicks={6} />
-        <YAxis tickFormatter={formatTokens} />
-        <Legend isClickable />
-        <Tooltip labelKey="week" valueFormatter={(value) => `${formatTokens(value)} tok`} />
-      </BarChart>
-    </div>
-  );
-}
-
 function DemandTrendChart({ hourly }: { hourly: HourlyUsage[] }) {
   const data = dailyDemandSeries(hourly);
   if (data.length < 2) return <EmptyChart label="Waiting for two complete days of demand history." />;
@@ -2181,7 +1815,7 @@ function Insights({ stats, signal, failures, failuresError, onAccounts }: { stat
       <div id={`insight-panel-${mode}`} role="tabpanel" aria-labelledby={`insight-tab-${mode}`} tabIndex={0}>
         {mode === "overview" && <InsightsOverview stats={stats} signal={signal} onAccounts={onAccounts} />}
         {mode === "capacity" && <CapacityDashboard stats={stats} signal={signal} onAccounts={onAccounts} />}
-        {mode === "flow" && <FlowDashboard stats={stats} signal={signal} onAccounts={onAccounts} />}
+        {mode === "flow" && <FlowDashboard stats={stats} onAccounts={onAccounts} />}
         {mode === "demand" && <DemandDashboard stats={stats} signal={signal} />}
         {mode === "failures" && <FailureDashboard failures={failures} error={failuresError} />}
       </div>
@@ -2389,7 +2023,7 @@ function AccountFlowTable({ rows }: { rows: AccountFlow[] }) {
   );
 }
 
-function FlowDashboard({ stats, signal, onAccounts }: { stats: PoolStats; signal: SignalAnalytics; onAccounts: () => void }) {
+function FlowDashboard({ stats, onAccounts }: { stats: PoolStats; onAccounts: () => void }) {
   const flows = accountFlow(stats.accounts);
   const stranded = flows.reduce((sum, row) => sum + row.strandedPct / 100, 0);
   const exhausting = flows.filter((row) => row.state === "exhausts");
@@ -2897,298 +2531,6 @@ function Accounts({ stats, adminAccounts, operatorToken, onUnlocked, onAccountsC
       </div>
       {contributing && <AccountContribution onClose={() => setContributing(false)} onAdded={async () => { await onAccountsChanged(); setContributing(false); }} />}
       {unlocking && <OperatorUnlock onClose={() => setUnlocking(false)} onUnlocked={(token, accounts) => { onUnlocked(token, accounts); setUnlocking(false); }} />}
-    </div>
-  );
-}
-
-type ContributableProvider = "codex" | "claude" | "antigravity" | "kimi" | "minimax" | "zai" | "xiaomi" | "grok" | "opencode_go" | "mistral" | "mistral_vibe";
-
-const CONTRIBUTION_PROVIDERS: Array<{ id: ContributableProvider; label: string; mode: "oauth" | "device" | "key" | "json" }> = [
-  { id: "codex", label: "Codex", mode: "oauth" },
-  { id: "claude", label: "Claude", mode: "oauth" },
-	  { id: "antigravity", label: "Google Antigravity", mode: "oauth" },
-  { id: "kimi", label: "Kimi", mode: "key" },
-  { id: "minimax", label: "MiniMax", mode: "key" },
-  { id: "zai", label: "Z.ai", mode: "key" },
-  { id: "xiaomi", label: "Xiaomi", mode: "key" },
-  { id: "grok", label: "Grok", mode: "json" },
-  { id: "opencode_go", label: "OpenCode Go", mode: "key" },
-  { id: "mistral", label: "Mistral API", mode: "key" },
-  { id: "mistral_vibe", label: "Mistral Vibe", mode: "device" },
-];
-
-function oauthCode(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  try {
-    const parsed = new URL(trimmed);
-    return parsed.searchParams.get("code") ?? trimmed;
-  } catch {
-    const match = trimmed.match(/(?:^|[?&])code=([^&]+)/);
-    return match ? decodeURIComponent(match[1]) : trimmed;
-  }
-}
-
-const VIBE_POLL_MS = 3000;
-const VIBE_EXPIRED = "Sign-in expired. Try again.";
-
-export function watchVibeSession(session: VibeLoginSession, onComplete: () => void, onError: (message: string) => void) {
-  const remaining = Date.parse(session.expires_at) - Date.now();
-  if (!Number.isFinite(remaining) || remaining <= 0) {
-    onError(VIBE_EXPIRED);
-    return () => {};
-  }
-
-  const controller = new AbortController();
-  let stopped = false;
-  let inFlight = false;
-  const stop = () => {
-    stopped = true;
-    window.clearInterval(interval);
-    window.clearTimeout(expiry);
-    controller.abort();
-  };
-  const fail = (message: string) => {
-    stop();
-    onError(message);
-  };
-  const interval = window.setInterval(async () => {
-    if (stopped) return;
-    if (Date.now() >= Date.parse(session.expires_at)) { fail(VIBE_EXPIRED); return; }
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      const result = await vibeLoginStatus(session.session_id, controller.signal);
-      if (stopped) return;
-      if (Date.now() >= Date.parse(session.expires_at)) { fail(VIBE_EXPIRED); return; }
-      if (result.status === "pending") return;
-      stop();
-      if (result.status === "complete") { onComplete(); return; }
-      onError(result.status === "expired" ? VIBE_EXPIRED : result.error || (result.status === "denied" ? "Sign-in denied. Try again." : "Couldn't finish sign-in. Try again."));
-    } catch {
-      if (!stopped) fail("Couldn't check sign-in. Try again.");
-    } finally {
-      inFlight = false;
-    }
-  }, VIBE_POLL_MS);
-  const expiry = window.setTimeout(() => fail(VIBE_EXPIRED), remaining);
-  return stop;
-}
-
-function AccountContribution({ onClose, onAdded }: { onClose: () => void; onAdded: () => Promise<void> }) {
-  const [provider, setProvider] = useState<ContributableProvider>("codex");
-  const [credential, setCredential] = useState("");
-	  const [oauth, setOAuth] = useState<{ verifier?: string; sessionID?: string; state?: string; url: string } | null>(null);
-	  const oauthCompleted = useRef(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [verifyURL, setVerifyURL] = useState("");
-  const [vibe, setVibe] = useState<VibeLoginSession | null>(null);
-  const [vibeComplete, setVibeComplete] = useState(false);
-  const vibeStart = useRef<AbortController | null>(null);
-  const vibePopup = useRef<Window | null>(null);
-  const addedRef = useRef(onAdded);
-  addedRef.current = onAdded;
-  const selected = CONTRIBUTION_PROVIDERS.find((candidate) => candidate.id === provider)!;
-
-	  useEffect(() => {
-	    if (provider !== "antigravity" || !oauth?.sessionID) return;
-	    let stopped = false;
-	    const complete = async (verificationURL?: string) => {
-	      if (stopped || oauthCompleted.current) return;
-	      oauthCompleted.current = true;
-	      if (verificationURL) { setVerifyURL(verificationURL); return; }
-	      await onAdded();
-	    };
-	    const onMessage = (event: MessageEvent) => {
-	      if (event.origin !== window.location.origin || event.data?.type !== "codex-pool-antigravity-oauth" || event.data?.session_id !== oauth.sessionID) return;
-	      if (event.data.status === "complete") void complete(event.data.verification_url);
-	      if (event.data.status === "error") setError(event.data.error || "Google sign-in failed");
-	    };
-	    window.addEventListener("message", onMessage);
-	    const timer = window.setInterval(async () => {
-	      try {
-	        const status = await antigravityOAuthStatus(oauth.sessionID!);
-	        if (status.status === "complete") { window.clearInterval(timer); await complete(status.verification_url); }
-	        if (status.status === "error") { window.clearInterval(timer); setError(status.error || "Google sign-in failed"); }
-	      } catch { /* polling is only a fallback for a missed popup message */ }
-	    }, 1200);
-	    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("message", onMessage); };
-	  }, [oauth?.sessionID, onAdded, provider]);
-
-  useEffect(() => () => {
-    vibeStart.current?.abort();
-    vibePopup.current?.close();
-  }, []);
-
-  useEffect(() => {
-    if (provider !== "mistral_vibe" || !vibe) return;
-    return watchVibeSession(vibe, () => {
-      setVibe(null);
-      setVibeComplete(true);
-      void addedRef.current().catch(() => setError("Account added, but the list couldn't refresh. Close and reopen Accounts."));
-    }, (message) => {
-      setVibe(null);
-      setError(message);
-    });
-  }, [provider, vibe]);
-
-	  const choose = (next: ContributableProvider) => {
-    vibeStart.current?.abort();
-    vibePopup.current?.close();
-    setVibe(null);
-    setVibeComplete(false);
-	    oauthCompleted.current = false;
-    setProvider(next);
-    setCredential("");
-    setOAuth(null);
-    setError("");
-    setVerifyURL("");
-  };
-
-  const startOAuth = async () => {
-    // Reserve the tab while the click is still a trusted user gesture. Opening
-    // it after the network response is commonly blocked as a popup.
-    const authorizationWindow = window.open("about:blank", "_blank");
-	    if (authorizationWindow && provider !== "antigravity") authorizationWindow.opener = null;
-    setBusy(true);
-    setError("");
-    try {
-	      const result = provider === "antigravity" ? await startAntigravityOAuth() : await startAccountOAuth(provider as "codex" | "claude");
-	      if (!result.oauth_url || (provider === "antigravity" ? !result.session_id : !result.verifier)) throw new Error("Provider did not return an OAuth session");
-	      oauthCompleted.current = false;
-	      setOAuth({ verifier: result.verifier, sessionID: result.session_id, state: result.state, url: result.oauth_url });
-      authorizationWindow?.location.replace(result.oauth_url);
-    } catch (cause) {
-      authorizationWindow?.close();
-      setError(cause instanceof Error ? cause.message : "Could not start OAuth");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const startVibe = async () => {
-    if (vibeStart.current || vibe || vibeComplete) return;
-    const authorizationWindow = window.open("about:blank", "_blank");
-    if (!authorizationWindow) {
-      setError("Allow popups, then try again.");
-      return;
-    }
-    authorizationWindow.opener = null;
-    vibePopup.current = authorizationWindow;
-    const controller = new AbortController();
-    vibeStart.current = controller;
-    setBusy(true);
-    setError("");
-    try {
-      const session = await startVibeLogin(controller.signal);
-      if (controller.signal.aborted) return;
-      if (!session.session_id || !session.oauth_url || !Number.isFinite(Date.parse(session.expires_at))) {
-        throw new Error("Couldn't start sign-in. Try again.");
-      }
-      if (Date.parse(session.expires_at) <= Date.now()) throw new Error(VIBE_EXPIRED);
-      authorizationWindow.location.replace(session.oauth_url);
-      setVibe(session);
-      vibePopup.current = null;
-    } catch {
-      authorizationWindow.close();
-      if (!controller.signal.aborted) setError("Couldn't start sign-in. Try again.");
-    } finally {
-      if (!controller.signal.aborted) setBusy(false);
-      if (vibeStart.current === controller) vibeStart.current = null;
-      if (vibePopup.current === authorizationWindow) vibePopup.current = null;
-    }
-  };
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (selected.mode === "device") {
-      await startVibe();
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      if (selected.mode === "oauth") {
-        if (!oauth) {
-          await startOAuth();
-          return;
-        }
-	        if (provider === "antigravity") {
-	          if (!oauth.sessionID || !credential.trim()) throw new Error("Paste the authorization code or callback URL");
-	          const result = await exchangeAntigravityOAuth(oauth.sessionID, credential, oauth.state || "");
-	          oauthCompleted.current = true;
-	          if (result.verification_url) { setVerifyURL(result.verification_url); return; }
-	        } else {
-	          const code = oauthCode(credential);
-	          if (!code || !oauth.verifier) throw new Error("Paste the authorization code or callback URL");
-	          await exchangeAccountOAuth(provider as "codex" | "claude", code, oauth.verifier);
-	        }
-      } else if (selected.mode === "json") {
-        await contributeGrok(credential);
-      } else {
-        await contributeAPIKey(provider as "kimi" | "minimax" | "zai" | "xiaomi" | "opencode_go" | "mistral", credential);
-      }
-      await onAdded();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Account contribution failed");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (verifyURL) {
-    return (
-      <div className="operator-backdrop" role="presentation">
-        <div className="operator-dialog contribution-dialog" role="dialog" aria-modal="true" aria-labelledby="contribution-title">
-          <h2 id="contribution-title">Verify this Google account</h2>
-          <p>The account was added, but Google requires verification before it can serve every request. Open the link while signed in to the same Google account.</p>
-          <a className="verification-link" href={verifyURL} target="_blank" rel="noreferrer">Verify Google account</a>
-          <div><button type="button" className="gold-button" onClick={() => void onAdded()}>Done</button></div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="operator-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <form className="operator-dialog contribution-dialog" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="contribution-title">
-        <h2 id="contribution-title">Add a pool account</h2>
-        <p>Other pool members will be able to use this account.</p>
-        <div className="contribution-providers" aria-label="Provider">
-          {CONTRIBUTION_PROVIDERS.map((candidate) => <button type="button" key={candidate.id} className={provider === candidate.id ? "active" : ""} disabled={busy} aria-pressed={provider === candidate.id} onClick={() => choose(candidate.id)}>{candidate.label}</button>)}
-        </div>
-        {selected.mode === "device" ? (
-          <div className="contribution-oauth">
-            <p>Use your Pro or Team account. Disable pay-as-you-go to avoid extra charges.</p>
-            {vibeComplete ? <p role="status">Mistral Vibe account added.</p> : vibe ? (
-              <>
-                <p role="status">Finish signing in to Mistral Vibe in the other tab.</p>
-                <a href={vibe.oauth_url} target="_blank" rel="noreferrer">Open sign-in page</a>
-              </>
-            ) : (
-              <button type="button" className="oauth-launch" disabled={busy} onClick={startVibe}>{busy ? "Opening…" : error ? "Try sign-in again" : "Sign in to Mistral Vibe"}</button>
-            )}
-          </div>
-        ) : selected.mode === "oauth" ? (
-          <div className="contribution-oauth">
-            {!oauth ? (
-              <button type="button" className="oauth-launch" disabled={busy} onClick={startOAuth}>{busy ? "Opening…" : `Sign in to ${selected.label}`}</button>
-            ) : (
-              <>
-                <a href={oauth.url} target="_blank" rel="noreferrer">Open sign-in page</a>
-                <label className="contribution-field"><span>Authorization code or callback URL</span><input value={credential} onChange={(event) => setCredential(event.target.value)} autoFocus autoComplete="off" required /></label>
-              </>
-            )}
-          </div>
-        ) : selected.mode === "json" ? (
-          <label className="contribution-field"><span>Grok auth JSON</span><textarea value={credential} onChange={(event) => setCredential(event.target.value)} autoFocus spellCheck={false} required /></label>
-        ) : (
-          <label className="contribution-field"><span>{selected.id === "mistral" ? "Mistral API key" : `${selected.label} API key`}</span><input type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoFocus autoComplete="off" required /></label>
-        )}
-        {error && <div className="access-error" role="alert">{error}</div>}
-        <div><button type="button" onClick={onClose}>Cancel</button>{selected.mode !== "device" && (selected.mode !== "oauth" || oauth) && <button className="gold-button" disabled={busy}>{busy ? "Adding…" : "Add to pool"}</button>}</div>
-      </form>
     </div>
   );
 }

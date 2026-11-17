@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -667,7 +668,7 @@ func TestParseMistralModelsFiltersNonChatCapableModels(t *testing.T) {
 	if !large.Tools || large.Reasoning || !large.CompletionChat {
 		t.Fatalf("mistral-large-latest capabilities = %#v", large)
 	}
-	if !containsString(large.Modalities, "text") || containsString(large.Modalities, "image") {
+	if !slices.Contains(large.Modalities, "text") || slices.Contains(large.Modalities, "image") {
 		t.Fatalf("mistral-large-latest modalities = %#v, want text only", large.Modalities)
 	}
 
@@ -675,7 +676,7 @@ func TestParseMistralModelsFiltersNonChatCapableModels(t *testing.T) {
 	if !ok {
 		t.Fatal("pixtral-large-latest missing")
 	}
-	if !containsString(pixtral.Modalities, "image") {
+	if !slices.Contains(pixtral.Modalities, "image") {
 		t.Fatalf("pixtral modalities = %#v, want image capability", pixtral.Modalities)
 	}
 	if pixtral.DisplayName != "Pixtral Large" {
@@ -849,7 +850,7 @@ func TestPoolModelDescriptorsOverlayDiscoveredMetadataOntoPinnedMistralEntry(t *
 		if !descriptor.Capabilities["tools"] {
 			t.Fatal("expected discovered function_calling capability to enable tools")
 		}
-		if !containsString(descriptor.Modalities, "image") {
+		if !slices.Contains(descriptor.Modalities, "image") {
 			t.Fatalf("Modalities = %#v, want discovered image modality", descriptor.Modalities)
 		}
 		return
@@ -860,7 +861,7 @@ func TestPoolModelDescriptorsOverlayDiscoveredMetadataOntoPinnedMistralEntry(t *
 func TestMistralPiModelsExportOpenAICompletionsProvider(t *testing.T) {
 	t.Parallel()
 
-	data, err := generatePiModelsJSON("https://pool.example.com", "codex-token", "claude-token")
+	data, err := generatePiModelsJSON("https://pool.example.com", "codex-token", "claude-token", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,7 +892,7 @@ func TestMistralPiModelsExportOpenAICompletionsProvider(t *testing.T) {
 func TestMistralCuteModelsExportAnthropicMessagesBridge(t *testing.T) {
 	t.Parallel()
 
-	data, err := generateCuteCodeSettingsJSON("https://pool.example.com", "pool-token")
+	data, err := generateCuteCodeSettingsJSON("https://pool.example.com", "pool-token", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

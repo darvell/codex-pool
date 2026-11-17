@@ -133,8 +133,6 @@ func TestAntigravityOnboardProjectRequiresCompletion(t *testing.T) {
 }
 
 func TestAntigravityOAuthSurfacesVerificationLink(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	t.Setenv("ANTIGRAVITY_OAUTH_CLIENT_ID", "test-client-id")
 	daily, _ := url.Parse("https://daily.example.test")
 	production, _ := url.Parse("https://prod.example.test")
@@ -185,7 +183,7 @@ func TestSaveAntigravityAccountIsOwnerOnlyAndDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	account := &Account{Type: AccountTypeAntigravity, ID: "account", File: file, AccessToken: "access", RefreshToken: "refresh", Email: "a@example.com", ProjectID: "project", PlanType: "pro", ExpiresAt: time.Now().Add(time.Hour), RateLimitUntil: time.Now().Add(5 * time.Minute), ModelRateLimits: map[string]time.Time{"gemini-test": time.Now().Add(time.Minute)}, ModelBackoffLevels: map[string]int{"gemini-test": 3}}
-	antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-test": {ID: "gemini-test"}}})
+	account.antigravitySnapshot = &AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-test": {ID: "gemini-test"}}}
 	if err := saveAntigravityAccount(account); err != nil {
 		t.Fatal(err)
 	}

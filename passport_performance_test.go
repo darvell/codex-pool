@@ -10,10 +10,8 @@ import (
 	"time"
 )
 
-// BenchmarkAuthorizePrincipal proves the claim in DELIVERY.md that per-request
-// authorization stays on the in-memory path. A regression that opens a Bolt
-// transaction per proxied request shows up here as allocations and microseconds,
-// not as a functional failure.
+// Measure authorization across cached principals to expose per-request database
+// work through its latency and allocations.
 func BenchmarkAuthorizePrincipal(b *testing.B) {
 	b.Setenv("POOL_AUTH_ENCRYPTION_KEY", "bench-passport-encryption-key")
 	store, err := newUsageStore(filepath.Join(b.TempDir(), "proxy.db"), 30)
@@ -21,7 +19,7 @@ func BenchmarkAuthorizePrincipal(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Close() })
-	passport, err := newPassportStore(store.db, nil)
+	passport, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -47,18 +45,10 @@ func BenchmarkAuthorizePrincipal(b *testing.B) {
 	}
 }
 
-// BenchmarkDuckDBUsageQueries proves the console remains usable on long-horizon
-// data. It catches a query shape that scans irrelevant columns or a reader that
-// blocks behind the writer. The row count is set by ANALYTICS_BENCH_ROWS; the
-// contract's 6M-row envelope is exercised by setting it on Linux staging. When
-// ANALYTICS_BENCH_ROWS is unset the benchmark runs only when the host has
-// enough headroom for DuckDB's allocator.
+// Set ANALYTICS_BENCH_ROWS to measure query latency with a staging-sized ledger.
+// The allocator can exceed a development machine's memory budget.
 func BenchmarkDuckDBUsageQueries(b *testing.B) {
 	if os.Getenv("ANALYTICS_BENCH_ROWS") == "" {
-		// DuckDB aggressively reserves memory up to its configured limit.
-		// On a disk-full developer laptop this causes an immediate OOM even
-		// at modest row counts. The 6M-row envelope is exercised on Linux
-		// staging hardware; locally we skip unless explicitly requested.
 		b.Skip("skipped locally; set ANALYTICS_BENCH_ROWS to run on staging hardware")
 	}
 	b.Setenv("POOL_AUTH_ENCRYPTION_KEY", "bench-passport-encryption-key")
@@ -120,9 +110,6 @@ func BenchmarkDuckDBUsageQueries(b *testing.B) {
 	})
 }
 
-// analyticsBenchRows reads the fact count for the DuckDB benchmark. The default
-// keeps the local run fast; the contract's 6M-row envelope is exercised by
-// setting ANALYTICS_BENCH_ROWS on Linux staging hardware.
 func analyticsBenchRows(b *testing.B) int {
 	raw := os.Getenv("ANALYTICS_BENCH_ROWS")
 	if raw == "" {
@@ -142,8 +129,8 @@ func analyticsBenchRows(b *testing.B) int {
 func seedAnalyticsFacts(b *testing.B, a *DuckAnalytics, rows int) {
 	b.Helper()
 	const (
-		principals  = 50
-		batchSize   = 10000
+		principals = 50
+		batchSize  = 10000
 	)
 	providers := []string{"codex", "claude", "gemini", "kimi", "minimax"}
 	models := []string{"gpt-5.6", "claude-opus-5", "gemini-3-pro", "kimi-k2", "minimax-m2"}

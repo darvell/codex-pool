@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// clampNonNegative ensures a value is never negative.
-// This prevents issues where CachedInputTokens > InputTokens produces negative billable tokens.
+// CachedInputTokens can exceed InputTokens in provider observations.
 func clampNonNegative(n int64) int64 {
 	if n < 0 {
 		return 0
@@ -310,6 +309,7 @@ func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 		ru.SecondaryWindowMinutes = a.Usage.SecondaryWindowMinutes
 	}
 	a.mu.Unlock()
+	ru = resolveUsageIdentity(ru)
 	a.applyRequestUsage(ru)
 
 	// Calculate cost before the durable usage transaction so the immutable
@@ -330,9 +330,12 @@ func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 			h.duckAnalytics.Notify()
 		}
 	}
-	// Keep the legacy SQLite store during migration only; DuckDB is canonical.
+	// SQLite keeps a best-effort request-cost projection alongside durable
+	// subscription and quota records; the Bolt outbox is the request ledger.
 	if h.analyticsStore != nil {
-		_ = h.analyticsStore.recordRequest(ru, costUSD)
+		if err := h.analyticsStore.recordRequest(ru, costUSD); err != nil {
+			log.Printf("analytics: request-cost projection failed: %v", err)
+		}
 	}
 
 	if h.cfg.debug.Load() {

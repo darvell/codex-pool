@@ -12,15 +12,14 @@ import (
 // A release can replay a paired backup without opening or changing the live DB.
 func TestReleaseCredentialReplay(t *testing.T) {
 	var passport *PassportStore
+	options := passportOptions{}
 	if source := os.Getenv("POOL_RELEASE_REPLAY_DB"); source != "" {
 		if configPath := os.Getenv("POOL_RELEASE_REPLAY_CONFIG"); configPath != "" {
 			config, err := loadConfigFile(configPath)
 			if err != nil {
 				t.Fatal("release configuration cannot be loaded")
 			}
-			previous := globalConfigFile
-			globalConfigFile = config
-			t.Cleanup(func() { globalConfigFile = previous })
+			options.jwtSecret = getConfigString("POOL_JWT_SECRET", config.PoolUsers.JWTSecret, "")
 		}
 		copyPath := filepath.Join(t.TempDir(), "proxy.db")
 		if err := copyFile(source, copyPath, 0o600); err != nil {
@@ -31,14 +30,14 @@ func TestReleaseCredentialReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
-		passport, err = newPassportStore(db, nil)
+		passport, err = newPassportStore(db, nil, options)
 		if err != nil {
 			t.Fatal(err)
 		}
 	} else {
 		t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "release-fixture-key")
 		var err error
-		passport, err = newPassportStore(testUsageStore(t).db, nil)
+		passport, err = newPassportStore(testUsageStore(t).db, nil, passportOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

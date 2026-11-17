@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -162,11 +163,27 @@ func TestAntigravityCanonicalModelUsesForcedPrefixAndDeprecatedAlias(t *testing.
 func TestAntigravityModelCooldownDoesNotBlockAnotherModel(t *testing.T) {
 	account := &Account{Type: AccountTypeAntigravity, ID: "ag", ModelRateLimits: map[string]time.Time{"gemini-a": time.Now().Add(time.Hour)}}
 	pool := newPoolState([]*Account{account}, false)
-	antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-a": {ID: "gemini-a"}, "gemini-b": {ID: "gemini-b"}}})
-	if got := pool.candidateForAntigravityModel("", nil, "gemini-a", ""); got != nil {
-		t.Fatalf("cooling model selected account %#v", got)
+	pool.antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{FetchedAt: time.Now(), Models: map[string]AntigravityModelInfo{"gemini-a": {ID: "gemini-a"}, "gemini-b": {ID: "gemini-b"}}})
+	reservation, report := pool.reserveAntigravityModel("", nil, "gemini-a", "")
+	if reservation != nil || report.Ready != 0 || report.Reasons[antigravityModelCooldown] != 1 {
+		t.Fatalf("cooling model reservation=%#v report=%+v", reservation, report)
 	}
-	if got := pool.candidateForAntigravityModel("", nil, "gemini-b", ""); got != account {
-		t.Fatalf("unlimited model should use the account, got %#v", got)
+	if got := atomic.LoadInt64(&account.Inflight); got != 0 {
+		t.Fatalf("rejected reservation changed inflight to %d", got)
+	}
+
+	reservation, report = pool.reserveAntigravityModel("", nil, "gemini-b", "")
+	if reservation == nil || reservation.Account != account || report.Ready != 1 {
+		t.Fatalf("unlimited model reservation=%#v report=%+v", reservation, report)
+	}
+	t.Cleanup(reservation.Release)
+	if got := atomic.LoadInt64(&account.Inflight); got != 1 {
+		t.Fatalf("reserved account inflight=%d, want 1", got)
+	}
+	for range 2 {
+		reservation.Release()
+		if got := atomic.LoadInt64(&account.Inflight); got != 0 {
+			t.Fatalf("released account inflight=%d, want 0", got)
+		}
 	}
 }

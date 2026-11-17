@@ -356,24 +356,20 @@ func TestNativeContextHTTPRefresh(t *testing.T) {
 }
 
 func TestNativeContextRefreshWait(t *testing.T) {
-	a := contextTestAccount("a", "user-a")
-	pending := &refreshCall{done: make(chan struct{})}
-	h := &proxyHandler{refreshCalls: map[string]*refreshCall{string(a.Type) + ":" + a.ID: pending}}
+	fixture := newRefreshFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	result := make(chan error, 1)
-	go func() { result <- h.refreshAccount(ctx, a) }()
+	go func() { result <- fixture.handler.refreshAccount(ctx, fixture.waiting) }()
 	select {
 	case err := <-result:
-		close(pending.done)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("refresh wait returned %v", err)
 		}
-	case <-time.After(time.Second):
-		close(pending.done)
-		<-result
-		t.Fatal("cancelled context remained blocked behind shared refresh")
+	case <-time.After(refreshTestTimeout):
+		t.Fatal("cancelled caller remained blocked behind shared refresh")
 	}
+	fixture.finish(t)
 }
 
 func TestNativeContextHTTPInvalidSession(t *testing.T) {

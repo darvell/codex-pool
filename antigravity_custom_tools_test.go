@@ -128,7 +128,7 @@ func TestAgentMessageBecomesUserMessage(t *testing.T) {
 	body := `{"model":"grok-4","input":[{"type":"message","role":"user","content":"start"},{"type":"agent_message","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":"task"}]},{"type":"agent_message","content":[]}]}`
 
 	var grok map[string]any
-	if err := json.Unmarshal(sanitizeGrokRequestBody([]byte(body), "grok-4"), &grok); err != nil {
+	if err := json.Unmarshal(rewriteAndSanitizeGrokRequestBody([]byte(body), "grok-4"), &grok); err != nil {
 		t.Fatal(err)
 	}
 	input := anySlice(grok["input"])

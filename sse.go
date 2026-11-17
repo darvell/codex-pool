@@ -235,18 +235,9 @@ func (fw *flushWriter) stop() error {
 	return err
 }
 
-// sseInterceptWriter wraps a writer and scans the SSE stream for token_count events.
-// It passes all data through to the underlying writer while extracting token data inline.
-//
-// The optional onEvent hook can divert the stream: returning drop=true
-// causes the offending event's bytes to be withheld from the output;
-// returning terminate=true tells the writer to stop forwarding any
-// further upstream bytes (the writer's caller is responsible for
-// emitting any synthetic terminal events directly to the wrapped
-// writer afterwards). When onEvent is set the writer buffers each
-// event boundary before flushing, so a drop decision actually
-// suppresses the bytes rather than chasing them after they're on the
-// wire.
+// Inspectors approve complete events before forwarding. Without an inspector,
+// observation runs after forwarding, including when the downstream write fails.
+// After termination the caller emits final events directly to the wrapped writer.
 const sseInterceptMaxBufferedBytes = 64 * 1024
 
 type sseInterceptWriter struct {
@@ -264,9 +255,6 @@ func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
 		return 0, sw.err
 	}
 	if sw.onEvent == nil {
-		// Legacy mode: write-through, then scan after the fact. This
-		// matches the long-standing behavior used by every non-Codex
-		// caller that just wants usage extraction.
 		n, err := sw.w.Write(p)
 		// Usage describes upstream work even when the client write fails.
 		sw.buf = append(sw.buf, p...)
@@ -280,12 +268,8 @@ func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
 		return n, sw.err
 	}
 
-	// Suppression mode: buffer the bytes first, scan for full event
-	// boundaries, and only forward the bytes the inspector approves.
 	if sw.terminated {
-		// We already decided to stop forwarding; pretend we wrote
-		// everything so the upstream copy loop drains and ends
-		// without back-pressure stalling the relay.
+		// Drain the upstream copy without forwarding any more bytes.
 		return len(p), nil
 	}
 	sw.buf = append(sw.buf, p...)

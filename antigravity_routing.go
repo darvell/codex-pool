@@ -242,8 +242,8 @@ func (p *poolState) withCurrentAntigravityReservation(reservation *antigravityRe
 func (p *poolState) antigravityDecisions(exclude map[string]bool, model, clientIP string, now time.Time) []antigravityAccountEligibility {
 	p.stateMu.RLock()
 	defer p.stateMu.RUnlock()
-	model = antigravityCanonicalModel(model)
-	snapshots := antigravityModels.Snapshots()
+	model = antigravityCanonicalModel(&p.antigravityModels, model)
+	snapshots := p.antigravityModels.Snapshots()
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	decisions := make([]antigravityAccountEligibility, 0)
@@ -264,9 +264,9 @@ func (p *poolState) antigravityDecisions(exclude map[string]bool, model, clientI
 func (p *poolState) reserveAntigravityModel(conversationID string, exclude map[string]bool, model, clientIP string) (*antigravityReservation, antigravityEligibilityReport) {
 	p.stateMu.RLock()
 	defer p.stateMu.RUnlock()
-	model = antigravityCanonicalModel(model)
+	model = antigravityCanonicalModel(&p.antigravityModels, model)
 	now := time.Now()
-	snapshots := antigravityModels.Snapshots()
+	snapshots := p.antigravityModels.Snapshots()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -345,7 +345,7 @@ func (p *poolState) pinAntigravityModel(reservation *antigravityReservation, con
 	}
 	p.stateMu.RLock()
 	defer p.stateMu.RUnlock()
-	model = antigravityCanonicalModel(model)
+	model = antigravityCanonicalModel(&p.antigravityModels, model)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if reservation.generation != p.generation {
@@ -399,8 +399,8 @@ func parseRetryAfterAt(headers http.Header, now time.Time) (time.Duration, bool)
 	return 0, false
 }
 
-func antigravityRateLimitScope(model string, body []byte) string {
-	model = antigravityCanonicalModel(model)
+func antigravityRateLimitScope(registry *antigravityModelRegistry, model string, body []byte) string {
+	model = antigravityCanonicalModel(registry, model)
 	family := antigravityQuotaFamily(model)
 	// Only structured provider-emitted quota/bucket identifiers positively
 	// establish that the live limit is shared. Generic RESOURCE_EXHAUSTED and
@@ -443,11 +443,11 @@ func antigravityBodyIdentifiesQuotaFamily(value any, family string) bool {
 	return false
 }
 
-func applyAntigravityRateLimit(account *Account, model string, headers http.Header, body []byte, now time.Time) time.Time {
+func applyAntigravityRateLimit(registry *antigravityModelRegistry, account *Account, model string, headers http.Header, body []byte, now time.Time) time.Time {
 	if account == nil {
 		return time.Time{}
 	}
-	scope := antigravityRateLimitScope(model, body)
+	scope := antigravityRateLimitScope(registry, model, body)
 	account.mu.Lock()
 	if account.ModelRateLimits == nil {
 		account.ModelRateLimits = make(map[string]time.Time)
@@ -466,11 +466,11 @@ func applyAntigravityRateLimit(account *Account, model string, headers http.Head
 	return until
 }
 
-func clearAntigravityRuntimeState(account *Account, model string) {
+func clearAntigravityRuntimeState(registry *antigravityModelRegistry, account *Account, model string) {
 	if account == nil {
 		return
 	}
-	model = antigravityCanonicalModel(model)
+	model = antigravityCanonicalModel(registry, model)
 	account.mu.Lock()
 	familyKey := "family:" + antigravityQuotaFamily(model)
 	_, cooldown := account.ModelRateLimits[model]

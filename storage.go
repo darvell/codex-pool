@@ -323,13 +323,7 @@ func (s *usageStore) record(u RequestUsage) error {
 }
 
 func (s *usageStore) recordWithCost(u RequestUsage, costUSD float64) error {
-	if u.UserID != "" {
-		principalID, clientID := splitClientIdentity(u.UserID)
-		u.UserID = principalID
-		if u.ClientCredentialID == "" {
-			u.ClientCredentialID = clientID
-		}
-	}
+	u = resolveUsageIdentity(u)
 	if s == nil || s.db == nil {
 		return nil
 	}

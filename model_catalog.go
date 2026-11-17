@@ -20,21 +20,14 @@ type poolModel struct {
 
 // Codex discovery reports a 272K default context for GPT-6. The [1m]
 // profiles advertise a long-context budget and route to the base model IDs.
-var poolModels = []poolModel{
+var poolModels = addContextProfiles([]poolModel{
 	{AccountType: AccountTypeCodex, ID: defaultCodexModel, DisplayName: "GPT-6-Astra", Description: "Frontier model for complex, demanding work.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
-	{AccountType: AccountTypeCodex, ID: "gpt-6-astra[1m]", DisplayName: "GPT-6-Astra (1M)", Description: "This is really fucking expensive.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
 	{AccountType: AccountTypeCodex, ID: "gpt-6-sol", DisplayName: "GPT-6-Sol", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
-	{AccountType: AccountTypeCodex, ID: "gpt-6-sol[1m]", DisplayName: "GPT-6-Sol (1M)", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
 	{AccountType: AccountTypeCodex, ID: "gpt-6.1-sol", DisplayName: "GPT-6.1-Sol", ContextWindow: 500000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
-	{AccountType: AccountTypeCodex, ID: "gpt-6.1-sol[1m]", DisplayName: "GPT-6.1-Sol (1M)", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
 	{AccountType: AccountTypeCodex, ID: "gpt-6-luna", DisplayName: "GPT-6-Luna", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
-	{AccountType: AccountTypeCodex, ID: "gpt-6-luna[1m]", DisplayName: "GPT-6-Luna (1M)", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}, RequiresDiscovery: true},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Description: "Frontier agentic coding model.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}, Aliases: []string{"gpt-5.6"}},
-	{AccountType: AccountTypeCodex, ID: "gpt-5.6-sol[1m]", DisplayName: "GPT-5.6-Sol (1M)", Description: "Frontier agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-terra", DisplayName: "GPT-5.6-Terra", Description: "Balanced agentic coding model for everyday work.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
-	{AccountType: AccountTypeCodex, ID: "gpt-5.6-terra[1m]", DisplayName: "GPT-5.6-Terra (1M)", Description: "Balanced agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.6-luna", DisplayName: "GPT-5.6-Luna", Description: "Fast and affordable agentic coding model.", ContextWindow: 372000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
-	{AccountType: AccountTypeCodex, ID: "gpt-5.6-luna[1m]", DisplayName: "GPT-5.6-Luna (1M)", Description: "Fast and affordable agentic coding model with a 1M context window.", ContextWindow: 1000000, MaxTokens: 128000, Reasoning: true, WebSearch: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.5", DisplayName: "GPT-5.5", Description: "Frontier model for complex coding, research, and real-world work.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.4", DisplayName: "GPT-5.4", Description: "Strong model for everyday coding.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeCodex, ID: "gpt-5.4-mini", DisplayName: "GPT-5.4-Mini", Description: "Small, fast, and cost-efficient model for simpler coding tasks.", ContextWindow: 272000, MaxTokens: 128000, Reasoning: true, Input: []string{"text", "image"}},
@@ -129,7 +122,7 @@ var poolModels = []poolModel{
 	{AccountType: AccountTypeOpencodeGo, ID: "opencode-go/kimi-k2.6", DisplayName: "Kimi K2.6 (Go)", ContextWindow: 262144, MaxTokens: 65536, Reasoning: true, Input: []string{"text"}},
 	{AccountType: AccountTypeOpencodeGo, ID: "opencode-go/deepseek-v4-flash-vision-exp", DisplayName: "DeepSeek V4 Flash Vision Exp (Go)", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text", "image"}},
 	{AccountType: AccountTypeOpencodeGo, ID: "opencode-go/glm-5.3-flash", DisplayName: "GLM-5.3-Flash (Go)", ContextWindow: 1000000, MaxTokens: 131072, Reasoning: true, Input: []string{"text"}},
-}
+})
 
 func modelsForProvider(accountType AccountType) []poolModel {
 	var models []poolModel

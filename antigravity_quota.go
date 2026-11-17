@@ -198,8 +198,8 @@ var antigravityQuotaWindowSpecs = []struct {
 	{antigravityQuotaWindowWeekly, "weekly", 7 * 24 * 60},
 }
 
-func antigravityQuotaWindows(accountID string, now time.Time) []AccountQuotaWindow {
-	snapshot, ok := antigravityModels.AccountSnapshot(accountID)
+func antigravityQuotaWindows(registry *antigravityModelRegistry, accountID string, now time.Time) []AccountQuotaWindow {
+	snapshot, ok := registry.AccountSnapshot(accountID)
 	if !ok || snapshot.Quota == nil {
 		return nil
 	}

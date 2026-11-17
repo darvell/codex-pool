@@ -1370,15 +1370,6 @@ func toInt64(v any) int64 {
 	return 0
 }
 
-// generateToolCallID produces a simple unique-ish ID for tool calls
-// when translating from Claude to OpenAI format.
-var translateCallCounter int64
-
-func generateToolCallID() string {
-	translateCallCounter++
-	return fmt.Sprintf("call_%d", translateCallCounter)
-}
-
 // logTranslation logs format translation at debug level.
 func logTranslation(reqID string, direction TranslateDirection, debug bool) {
 	if !debug {
@@ -1460,7 +1451,7 @@ func codexFallbackModels() []codexCatalogModel {
 
 // injectClaudeModels adds local pool model entries to the Codex model catalog response
 // so the Codex CLI can select models that the pool routes but upstream omits.
-func injectClaudeModels(body []byte) []byte {
+func injectClaudeModels(body []byte, antigravity []AntigravityCatalogModel) []byte {
 	// Decompress gzip if needed (upstream may return compressed data when
 	// client's Accept-Encoding header is forwarded)
 	actualBody := body
@@ -1499,7 +1490,7 @@ func injectClaudeModels(body []byte) []byte {
 			models = append(models, claudeModelEntry(model.ID, model.DisplayName, model.ContextWindow))
 		}
 	}
-	for _, model := range antigravityModels.Models(nil) {
+	for _, model := range antigravity {
 		slug := "antigravity/" + model.ID
 		if !existing[slug] {
 			models = append(models, claudeModelEntry(slug, model.DisplayName, model.MaxTokens))

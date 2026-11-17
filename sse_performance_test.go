@@ -24,15 +24,26 @@ func TestSSESuppressionWriterRejectsUnterminatedOversizedEvent(t *testing.T) {
 
 func TestSSESuppressionWriterAllowsLargeTerminatedEvent(t *testing.T) {
 	var sink bytes.Buffer
+	payload := `{"type":"response.completed","response":{"output_text":"` + strings.Repeat("x", sseInterceptMaxBufferedBytes+1) + `"}}`
+	seen := 0
 	w := &sseInterceptWriter{
-		w:       &sink,
-		onEvent: func([]byte) (bool, bool) { return false, false },
+		w: &sink,
+		onEvent: func(data []byte) (bool, bool) {
+			seen++
+			if string(data) != payload {
+				t.Fatalf("inspection received a different completed event")
+			}
+			return false, false
+		},
 	}
-	frame := []byte("data: " + strings.Repeat("x", sseInterceptMaxBufferedBytes-32) + "\n\n")
-	if _, err := w.Write(frame); err != nil {
-		t.Fatalf("write: %v", err)
+	frame := []byte("data: " + payload + "\n\n")
+	if len(frame) <= sseInterceptMaxBufferedBytes {
+		t.Fatal("completed frame does not exceed the incomplete-event limit")
 	}
-	if !bytes.Equal(sink.Bytes(), frame) {
-		t.Fatalf("forwarded frame mismatch")
+	if n, err := w.Write(frame); err != nil || n != len(frame) {
+		t.Fatalf("write = (%d, %v), want (%d, nil)", n, err, len(frame))
+	}
+	if seen != 1 || !bytes.Equal(sink.Bytes(), frame) {
+		t.Fatalf("completed event: inspected=%d, forwarded=%d bytes, want %d", seen, sink.Len(), len(frame))
 	}
 }

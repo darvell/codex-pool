@@ -101,9 +101,13 @@ func (p *OpencodeGoProvider) UpstreamURLForModel(model string, path string) *url
 	return opencodeGoInferenceBase(p.opencodeZenBase)
 }
 
+type modelUpstreamProvider interface {
+	UpstreamURLForModel(model, path string) *url.URL
+}
+
 func opencodeGoTargetURL(provider Provider, model, path string) *url.URL {
-	if goProvider, ok := provider.(*OpencodeGoProvider); ok {
-		return goProvider.UpstreamURLForModel(model, path)
+	if upstream, ok := provider.(modelUpstreamProvider); ok {
+		return upstream.UpstreamURLForModel(model, path)
 	}
 	return provider.UpstreamURL(path)
 }
@@ -363,8 +367,7 @@ func opencodeGoCatalogID(bare string) string {
 // opencodeGoBareModelTaken reports whether a bare model ID is already claimed
 // by another provider, in which case only the prefixed form routes to Go.
 func opencodeGoBareModelTaken(model string) bool {
-	if isKimiModel(model) || isMinimaxModel(model) || isZAIModel(model) ||
-		isXiaomiModel(model) || isAdverserialModel(model) || isGrokModel(model) {
+	if externalModelClaimed(model) {
 		return true
 	}
 	if isOpenAIModel(model) || isClaudeModel(model) {

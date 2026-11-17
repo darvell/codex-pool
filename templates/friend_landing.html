@@ -2531,62 +2531,22 @@ Before you finish, report exactly which files changed and paste the smoke-test o
   }'`);
         }
 
-        async function setupSuccessState(publicUrl, downloadToken, friendCode, friendEmail = '') {
-            const loginSec = document.getElementById('login-section');
-            const successSec = document.getElementById('success-section');
-            const heroWrapper = document.getElementById('login-hero');
+        function codexRealtime(publicUrl) {
+            return `experimental_realtime_webrtc_call_base_url = "${publicUrl}/v1"
+experimental_realtime_ws_base_url = "${publicUrl}/v1"
+realtime.version = "v3"
+realtime.transport = "webrtc"
+`;
+        }
 
-            // Fetch fresh auth data for returning users
-            let authJson = '# Loading...';
-            let geminiAuthJson = '# Loading...';
-            let geminiApiKey = '';
-            let claudeApiKey = '';
-            let piModelsJson = '# Loading...';
-            let cuteCodeSettingsJson = '# Loading...';
-
-            if (friendCode) {
-                try {
-                    const response = await fetch('/api/friend/claim', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ friend_code: friendCode, user_email: friendEmail })
-                    });
-                    const result = await response.json();
-                    if (!response.ok) {
-                        throw new Error(result.error || 'Saved access is no longer valid');
-                    }
-                    publicUrl = result.public_url || publicUrl;
-                    downloadToken = result.download_token || downloadToken;
-                    authJson = result.auth_json || '# Unable to fetch';
-                    geminiAuthJson = result.gemini_auth_json || '# Unable to fetch';
-                    geminiApiKey = result.gemini_api_key || '';
-                    claudeApiKey = result.claude_api_key || '';
-                    piModelsJson = result.pi_models_json || '# Unable to fetch';
-                    cuteCodeSettingsJson = result.cute_code_settings_json || '# Unable to fetch';
-                    localStorage.setItem('downloadToken', downloadToken);
-                    localStorage.setItem('publicUrl', publicUrl);
-                } catch (error) {
-                    clearSavedAccess();
-                    window.friendCode = '';
-                    const errorDiv = document.getElementById('error-msg');
-                    errorDiv.textContent = 'Saved access expired. Enter the friend code again.';
-                    errorDiv.style.display = 'block';
-                    return;
-                }
-            }
-
-            // Populate Codex
+        function populateSetup({ publicUrl, downloadToken, authJson, geminiApiKey, claudeApiKey, piModelsJson, cuteCodeSettingsJson, mode }) {
             const codexScriptUrl = `${publicUrl}/setup/codex/${downloadToken}`;
             document.getElementById('cmd-one-liner-unix').textContent = `curl -sL "${codexScriptUrl}" | bash`;
             document.getElementById('cmd-one-liner-windows').textContent = `irm "${codexScriptUrl}?shell=powershell" | iex`;
             document.getElementById('code-auth-json').textContent = authJson;
             document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
 chatgpt_base_url = "${publicUrl}/backend-api"
-experimental_realtime_webrtc_call_base_url = "${publicUrl}/v1"
-experimental_realtime_ws_base_url = "${publicUrl}/v1"
-realtime.version = "v3"
-realtime.transport = "webrtc"
-model_catalog_json = "~/.codex/model_catalog.json"
+${mode === 'restored' ? codexRealtime(publicUrl) : ''}model_catalog_json = "~/.codex/model_catalog.json"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
@@ -2602,11 +2562,10 @@ responses_websockets_v2 = true
 command = "bash"
 args = ["~/.codex/model_sync.sh", "${publicUrl}"]`;
 
-            // Populate Gemini (API key mode - bypasses OAuth)
             const geminiScriptUrl = `${publicUrl}/setup/gemini/${downloadToken}`;
             document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
             document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
-            if (geminiApiKey) {
+            if (geminiApiKey || mode === 'fresh') {
                 document.getElementById('gemini-auth-json-unix').textContent = `# 1. Save API key to ~/.gemini/api_key:
 echo "${geminiApiKey}" > ~/.gemini/api_key
 chmod 600 ~/.gemini/api_key
@@ -2658,11 +2617,10 @@ $env:GOOGLE_GEMINI_BASE_URL = "${publicUrl}"
                 document.getElementById('gemini-connect').textContent = `# Run the one-liner above to configure automatically`;
             }
 
-            // Populate Claude
             const claudeScriptUrl = `${publicUrl}/setup/claude/${downloadToken}`;
             document.getElementById('claude-one-liner-unix').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
             document.getElementById('claude-one-liner-windows').textContent = `irm "${claudeScriptUrl}?shell=powershell" | iex`;
-            if (claudeApiKey) {
+            if (claudeApiKey || mode === 'fresh') {
                 document.getElementById('claude-settings-json').textContent = `{
   "env": {
     "ANTHROPIC_BASE_URL": "${publicUrl}",
@@ -2698,7 +2656,53 @@ irm "${publicUrl}/setup/pi/${downloadToken}?shell=powershell" | iex`;
                 document.getElementById('pi-models-json').textContent = `# Log in first to get your Pi models.json`;
             }
 
-            // Show success state
+        }
+
+        async function setupSuccessState(publicUrl, downloadToken, friendCode, friendEmail = '') {
+            const loginSec = document.getElementById('login-section');
+            const successSec = document.getElementById('success-section');
+            const heroWrapper = document.getElementById('login-hero');
+
+            let authJson = '# Loading...';
+            let geminiAuthJson = '# Loading...';
+            let geminiApiKey = '';
+            let claudeApiKey = '';
+            let piModelsJson = '# Loading...';
+            let cuteCodeSettingsJson = '# Loading...';
+
+            if (friendCode) {
+                try {
+                    const response = await fetch('/api/friend/claim', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ friend_code: friendCode, user_email: friendEmail })
+                    });
+                    const result = await response.json();
+                    if (!response.ok) {
+                        throw new Error(result.error || 'Saved access is no longer valid');
+                    }
+                    publicUrl = result.public_url || publicUrl;
+                    downloadToken = result.download_token || downloadToken;
+                    authJson = result.auth_json || '# Unable to fetch';
+                    geminiAuthJson = result.gemini_auth_json || '# Unable to fetch';
+                    geminiApiKey = result.gemini_api_key || '';
+                    claudeApiKey = result.claude_api_key || '';
+                    piModelsJson = result.pi_models_json || '# Unable to fetch';
+                    cuteCodeSettingsJson = result.cute_code_settings_json || '# Unable to fetch';
+                    localStorage.setItem('downloadToken', downloadToken);
+                    localStorage.setItem('publicUrl', publicUrl);
+                } catch (error) {
+                    clearSavedAccess();
+                    window.friendCode = '';
+                    const errorDiv = document.getElementById('error-msg');
+                    errorDiv.textContent = 'Saved access expired. Enter the friend code again.';
+                    errorDiv.style.display = 'block';
+                    return;
+                }
+            }
+
+            populateSetup({ publicUrl, downloadToken, authJson, geminiApiKey, claudeApiKey, piModelsJson, cuteCodeSettingsJson, mode: 'restored' });
+
             document.body.classList.remove('login-mode');
             loginSec.style.display = 'none';
             heroWrapper.style.display = 'none';
@@ -2706,7 +2710,6 @@ irm "${publicUrl}/setup/pi/${downloadToken}?shell=powershell" | iex`;
             ensureStatsRefresh();
         }
 
-        // Form submission
         document.getElementById('access-form').addEventListener('submit', async function(e) {
             e.preventDefault();
 
@@ -2735,7 +2738,6 @@ irm "${publicUrl}/setup/pi/${downloadToken}?shell=powershell" | iex`;
 
                 if (!response.ok) throw new Error(result.error || 'Authentication Failed');
 
-                // Save credentials to localStorage
                 localStorage.setItem('friendCode', data.friend_code);
                 localStorage.setItem('friendEmail', data.user_email || '');
                 localStorage.setItem('downloadToken', result.download_token);
@@ -2743,123 +2745,17 @@ irm "${publicUrl}/setup/pi/${downloadToken}?shell=powershell" | iex`;
 
                 window.friendCode = data.friend_code;
 
-                // Populate and show auth JSON (only on fresh login)
-                document.getElementById('code-auth-json').textContent = result.auth_json;
+                populateSetup({
+                    publicUrl: result.public_url,
+                    downloadToken: result.download_token,
+                    authJson: result.auth_json,
+                    geminiApiKey: result.gemini_api_key || '',
+                    claudeApiKey: result.claude_api_key || '',
+                    piModelsJson: result.pi_models_json || '',
+                    cuteCodeSettingsJson: result.cute_code_settings_json || '',
+                    mode: 'fresh',
+                });
 
-                // Populate Codex
-                const codexScriptUrl = `${result.public_url}/setup/codex/${result.download_token}`;
-                document.getElementById('cmd-one-liner-unix').textContent = `curl -sL "${codexScriptUrl}" | bash`;
-                document.getElementById('cmd-one-liner-windows').textContent = `irm "${codexScriptUrl}?shell=powershell" | iex`;
-
-                document.getElementById('cmd-connect').textContent = `model_provider = "codex-pool"
-chatgpt_base_url = "${result.public_url}/backend-api"
-model_catalog_json = "~/.codex/model_catalog.json"
-
-[model_providers.codex-pool]
-name = "OpenAI via codex-pool proxy"
-base_url = "${result.public_url}"
-wire_api = "responses"
-requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
-
-[mcp_servers.model_sync]
-command = "bash"
-args = ["~/.codex/model_sync.sh", "${result.public_url}"]`;
-
-                // Populate Gemini (API key mode - bypasses OAuth)
-                const geminiApiKey = result.gemini_api_key || '';
-                const piModelsJson = result.pi_models_json || '';
-                const cuteCodeSettingsJson = result.cute_code_settings_json || '';
-                const geminiScriptUrl = `${result.public_url}/setup/gemini/${result.download_token}`;
-                document.getElementById('gemini-one-liner-unix').textContent = `curl -sL "${geminiScriptUrl}" | bash`;
-                document.getElementById('gemini-one-liner-windows').textContent = `irm "${geminiScriptUrl}?shell=powershell" | iex`;
-
-                document.getElementById('gemini-auth-json-unix').textContent = `# 1. Save API key to ~/.gemini/api_key:
-echo "${geminiApiKey}" > ~/.gemini/api_key
-chmod 600 ~/.gemini/api_key
-
-# 2. Add to ~/.zshrc (or ~/.bashrc):
-export GEMINI_API_KEY=$(cat ~/.gemini/api_key 2>/dev/null)
-export GOOGLE_GEMINI_BASE_URL="${result.public_url}"
-
-# 3. Settings file (~/.gemini/settings.json):
-{
-  "codeAssistEndpoint": "${result.public_url}",
-  "security": {
-    "auth": {
-      "selectedType": "gemini-api-key",
-      "useExternal": true
-    }
-  }
-}`;
-                document.getElementById('gemini-auth-json-windows').textContent = `# 1. Save API key to $HOME\\.gemini\\api_key:
-New-Item -ItemType Directory -Force -Path "$HOME\\.gemini" | Out-Null
-Set-Content -Encoding utf8 -Path "$HOME\\.gemini\\api_key" -Value "${geminiApiKey}"
-
-# 2. Add to your PowerShell profile ($PROFILE):
-$env:GEMINI_API_KEY = (Get-Content "$HOME\\.gemini\\api_key" -Raw).Trim()
-$env:GOOGLE_GEMINI_BASE_URL = "${result.public_url}"
-
-# 3. Settings file ($HOME\\.gemini\\settings.json):
-{
-  "codeAssistEndpoint": "${result.public_url}",
-  "security": {
-    "auth": {
-      "selectedType": "gemini-api-key",
-      "useExternal": true
-    }
-  }
-}`;
-
-                document.getElementById('gemini-connect').textContent = `{
-  "codeAssistEndpoint": "${result.public_url}",
-  "security": {
-    "auth": {
-      "selectedType": "gemini-api-key",
-      "useExternal": true
-    }
-  }
-}`;
-
-                // Populate Claude
-                const claudeApiKey = result.claude_api_key || '';
-                const claudeScriptUrl = `${result.public_url}/setup/claude/${result.download_token}`;
-                document.getElementById('claude-one-liner-unix').textContent = `source <(curl -sL "${claudeScriptUrl}")`;
-                document.getElementById('claude-one-liner-windows').textContent = `irm "${claudeScriptUrl}?shell=powershell" | iex`;
-                document.getElementById('claude-settings-json').textContent = `{
-  "env": {
-    "ANTHROPIC_BASE_URL": "${result.public_url}",
-    "CLAUDE_CODE_OAUTH_TOKEN": "${claudeApiKey}"
-  }
-}`;
-                document.getElementById('claude-env-unix').textContent = `export ANTHROPIC_BASE_URL="${result.public_url}"
-export CLAUDE_CODE_OAUTH_TOKEN="${claudeApiKey}"`;
-                document.getElementById('claude-env-windows').textContent = `$env:ANTHROPIC_BASE_URL = "${result.public_url}"
-$env:CLAUDE_CODE_OAUTH_TOKEN = "${claudeApiKey}"`;
-
-                const cuteCodeScriptUrl = `${result.public_url}/setup/cute-code/${result.download_token}`;
-                document.getElementById('cute-code-install-unix').textContent = `curl -sL "${cuteCodeScriptUrl}" | bash`;
-                document.getElementById('cute-code-install-windows').textContent = `irm "${cuteCodeScriptUrl}?shell=powershell" | iex`;
-                document.getElementById('cute-code-settings-json').textContent = cuteCodeSettingsJson;
-
-                populateApiDocs(result.public_url, claudeApiKey || '');
-                if (claudeApiKey) {
-                    document.getElementById('pi-install-unix').textContent = `mkdir -p ~/.pi/agent
-curl -sL "${result.public_url}/setup/pi/${result.download_token}" | bash
-chmod 600 ~/.pi/agent/models.json`;
-                    document.getElementById('pi-install-windows').textContent = `New-Item -ItemType Directory -Force -Path "$HOME\\.pi\\agent" | Out-Null
-irm "${result.public_url}/setup/pi/${result.download_token}?shell=powershell" | iex`;
-                    document.getElementById('pi-models-json').textContent = piModelsJson;
-                } else {
-                    document.getElementById('pi-install-unix').textContent = `# Log in first to get your Pi models.json`;
-                    document.getElementById('pi-install-windows').textContent = `# Log in first to get your Pi models.json`;
-                    document.getElementById('pi-models-json').textContent = `# Log in first to get your Pi models.json`;
-                }
-
-                // Transition with animation
                 loginSec.style.opacity = '0';
                 heroWrapper.style.opacity = '0';
 

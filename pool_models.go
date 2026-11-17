@@ -77,99 +77,55 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 	models := make([]poolModelDescriptor, 0, len(poolModels)+len(grokModelCatalog))
 	for _, model := range poolModels {
 		supportingAccounts, availableAccounts, availableNow := poolModelAvailability(pool, model.AccountType, model.ID)
-		protocol := "anthropic"
-		switch model.AccountType {
-		case AccountTypeCodex:
-			protocol = "openai"
-		case AccountTypeGemini:
-			protocol = "gemini"
-		case AccountTypeOpencodeGo:
-			protocol = opencodeGoClientProtocol(model.ID)
+		metadata := DiscoveredModel{
+			ID: model.ID, DisplayName: model.DisplayName, Description: model.Description,
+			ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxTokens,
+			Reasoning: model.Reasoning, Tools: true, WebSearch: model.WebSearch, Modalities: model.Input,
 		}
-		displayName := model.DisplayName
-		description := model.Description
-		contextWindow := model.ContextWindow
-		maxOutputTokens := model.MaxTokens
-		reasoning := model.Reasoning
-		tools := true
-		modalities := append([]string(nil), model.Input...)
 		upstreamID := model.ID
 		if model.AccountType == AccountTypeKimi {
 			if discovered, ok := discoveredMetadataForPool(pool, model.AccountType, model.ID); ok {
-				displayName = discovered.DisplayName
-				contextWindow = discovered.ContextWindow
-				reasoning = discovered.Reasoning
-				modalities = append([]string(nil), discovered.Modalities...)
+				metadata.DisplayName = discovered.DisplayName
+				metadata.ContextWindow = discovered.ContextWindow
+				metadata.Reasoning = discovered.Reasoning
+				metadata.Modalities = discovered.Modalities
 				if discovered.MaxOutputTokens > 0 {
-					maxOutputTokens = discovered.MaxOutputTokens
+					metadata.MaxOutputTokens = discovered.MaxOutputTokens
 				}
 			}
 		}
 		if isMistralType(model.AccountType) {
 			upstreamID = mistralCanonicalModel(model.ID)
-			tools = false
+			metadata.Tools = false
 			if discovered, ok := discoveredMetadataForPool(pool, model.AccountType, model.ID); ok {
-				displayName = discovered.DisplayName
-				description = discovered.Description
-				contextWindow = discovered.ContextWindow
-				reasoning = discovered.Reasoning
-				tools = discovered.Tools
-				modalities = append([]string(nil), discovered.Modalities...)
-			}
-			adapter := "Mistral Chat Completions through the codex-pool Messages adapter"
-			if strings.TrimSpace(description) == "" {
-				description = adapter
-			} else {
-				description += ". " + adapter
+				metadata.DisplayName = discovered.DisplayName
+				metadata.Description = discovered.Description
+				metadata.ContextWindow = discovered.ContextWindow
+				metadata.Reasoning = discovered.Reasoning
+				metadata.Tools = discovered.Tools
+				metadata.Modalities = discovered.Modalities
 			}
 		}
-		capabilities := map[string]bool{"reasoning": reasoning, "tools": tools}
-		if model.WebSearch {
-			capabilities["web_search"] = true
-		}
-		models = append(models, poolModelDescriptor{
-			ID:                 model.ID,
-			Name:               displayName,
-			Protocol:           protocol,
-			ContextWindow:      contextWindow,
-			Description:        description,
-			Provider:           string(model.AccountType),
-			UpstreamID:         upstreamID,
-			MaxOutputTokens:    maxOutputTokens,
-			Protocols:          []string{protocol},
-			Modalities:         modalities,
-			Capabilities:       capabilities,
-			NativeTools:        nativeWebSearchTools(model.AccountType, model.WebSearch),
-			Aliases:            append([]string(nil), model.Aliases...),
-			SupportingAccounts: supportingAccounts,
-			AvailableAccounts:  availableAccounts,
-			AvailableNow:       availableNow,
-		})
+		descriptor := projectModel(model.AccountType, model.ID, upstreamID, metadata)
+		descriptor.Aliases = append([]string(nil), model.Aliases...)
+		descriptor.SupportingAccounts = supportingAccounts
+		descriptor.AvailableAccounts = availableAccounts
+		descriptor.AvailableNow = availableNow
+		models = append(models, descriptor)
 	}
 	for _, model := range grokModelCatalog {
 		supportingAccounts, availableAccounts, availableNow := poolModelAvailability(pool, AccountTypeGrok)
-		capabilities := map[string]bool{"reasoning": model.Reasoning, "tools": true}
-		if model.WebSearch {
-			capabilities["web_search"] = true
-		}
-		models = append(models, poolModelDescriptor{
-			ID:                 model.ID,
-			Name:               model.Name,
-			Protocol:           "openai",
-			ContextWindow:      model.ContextWindow,
-			Provider:           string(AccountTypeGrok),
-			UpstreamID:         model.ID,
-			MaxOutputTokens:    model.MaxTokens,
-			Protocols:          []string{"openai"},
-			Capabilities:       capabilities,
-			NativeTools:        nativeWebSearchTools(AccountTypeGrok, model.WebSearch),
-			Aliases:            grokPublicAliases(model),
-			SupportingAccounts: supportingAccounts,
-			AvailableAccounts:  availableAccounts,
-			AvailableNow:       availableNow,
+		descriptor := projectModel(AccountTypeGrok, model.ID, model.ID, DiscoveredModel{
+			DisplayName: model.Name, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxTokens,
+			Reasoning: model.Reasoning, Tools: true, WebSearch: model.WebSearch,
 		})
+		descriptor.Aliases = grokPublicAliases(model)
+		descriptor.SupportingAccounts = supportingAccounts
+		descriptor.AvailableAccounts = availableAccounts
+		descriptor.AvailableNow = availableNow
+		models = append(models, descriptor)
 	}
-	for _, model := range antigravityModels.Models(pool) {
+	for _, model := range antigravityCatalog(pool) {
 		modalities := []string{"text"}
 		if model.SupportsImages {
 			modalities = append(modalities, "image")
@@ -327,7 +283,7 @@ func serveUnifiedGeminiModels(w http.ResponseWriter, pool *poolState) {
 			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"},
 		})
 	}
-	for _, model := range antigravityModels.Models(pool) {
+	for _, model := range antigravityCatalog(pool) {
 		methods := []string{"generateContent", "streamGenerateContent", "countTokens"}
 		models = append(models, map[string]any{
 			"name": "models/" + model.ID, "displayName": model.DisplayName,

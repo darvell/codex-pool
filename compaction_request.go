@@ -64,7 +64,7 @@ func prepareCompactRequest(r *http.Request, obj map[string]any) error {
 		return errors.New("compaction request must be a JSON object")
 	}
 
-	// Compaction now runs as a Responses turn, without generation tools or text formatting.
+	// Compaction uses a Responses turn without generation tools or text formatting.
 	for _, key := range []string{"text", "tools", "tool_choice"} {
 		delete(obj, key)
 	}

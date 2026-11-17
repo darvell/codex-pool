@@ -27,22 +27,12 @@ func TestClampAdverserialEffort(t *testing.T) {
 		"HIGH":    "high",
 		"  Max  ": "max",
 		"bogus":   "high",
+		"junk":    "high",
+		"Medium":  "high",
 	}
 	for input, want := range cases {
 		if got := clampAdverserialEffort(input); got != want {
 			t.Errorf("clampAdverserialEffort(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
-func TestClampAdverserialEffortOnlyEmitsSupportedValues(t *testing.T) {
-	supported := map[string]bool{"low": true, "high": true, "max": true}
-	for _, input := range []string{
-		"none", "minimal", "low", "medium", "high", "xhigh", "max",
-		"ultra", "", "junk", "HIGH", "Medium",
-	} {
-		if got := clampAdverserialEffort(input); !supported[got] {
-			t.Fatalf("clampAdverserialEffort(%q) = %q, which upstream rejects", input, got)
 		}
 	}
 }

@@ -21,7 +21,8 @@ func TestCompactUsageDatabaseRewritesLegacyRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Nanosecond)
-	if err := store.record(RequestUsage{Timestamp: now, AccountID: "new", RequestID: "new-request", InputTokens: 1}); err != nil {
+	current := RequestUsage{Timestamp: now, AccountID: "new", RequestID: "new-request", InputTokens: 1}
+	if err := store.record(current); err != nil {
 		t.Fatal(err)
 	}
 	legacy := RequestUsage{Timestamp: now.Add(-time.Hour), AccountID: "legacy", RequestID: "legacy-request", InputTokens: 2}
@@ -64,6 +65,7 @@ func TestCompactUsageDatabaseRewritesLegacyRows(t *testing.T) {
 		if bucket.Sequence() != 42 {
 			t.Fatalf("sequence=%d, want 42", bucket.Sequence())
 		}
+		expected := map[string]RequestUsage{current.RequestID: current, legacy.RequestID: legacy}
 		rows := 0
 		err := bucket.ForEach(func(key, value []byte) error {
 			rows++
@@ -74,13 +76,15 @@ func TestCompactUsageDatabaseRewritesLegacyRows(t *testing.T) {
 			if err := decodeRequestUsage(value, &usage); err != nil {
 				return err
 			}
-			if usage.AccountID != "new" && usage.AccountID != "legacy" {
-				t.Fatalf("unexpected usage: %+v", usage)
+			want, ok := expected[usage.RequestID]
+			if !ok || usage != want {
+				t.Fatalf("compacted usage=%+v, want %+v", usage, want)
 			}
+			delete(expected, usage.RequestID)
 			return nil
 		})
-		if rows != 2 {
-			t.Fatalf("rows=%d, want 2", rows)
+		if rows != 2 || len(expected) != 0 {
+			t.Fatalf("rows=%d, want 2; missing records=%+v", rows, expected)
 		}
 		return err
 	}); err != nil {
@@ -104,5 +108,12 @@ func TestCompactUsageDatabaseRefusesOverwrite(t *testing.T) {
 	}
 	if _, err := compactUsageDatabase(source, output); err == nil {
 		t.Fatal("compaction overwrote an existing output")
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep" {
+		t.Fatalf("refused compaction changed output=%q", data)
 	}
 }

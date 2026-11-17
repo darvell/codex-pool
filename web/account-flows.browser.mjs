@@ -6,6 +6,7 @@ const { puppeteer } = await import(process.env.BROWSER_LIBRARY);
 const origin = process.env.UI_TEST_ORIGIN || 'http://127.0.0.1:5179';
 const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
 const failures = [];
+const clientKey = token => `fixture-signed-api-key-${token}.${'x'.repeat(220)}.fixture-signature`;
 const principal = { id: 'fixture-member', kind: 'operator', status: 'active', display_name: 'Alex Morgan', email: 'alex@example.test' };
 const clients = [{ id: 'laptop', label: 'Work laptop', status: 'active' }, { id: 'server', label: 'Home server', status: 'active' }, { id: 'old', label: 'Old machine', status: 'revoked' }];
 const pass = { id: 'guest', note: 'Sam', display_name: 'Sam', status: 'active', expires_at: '2026-10-12T18:30:00Z', clients: 1, link: '/join#fixture-pass' };
@@ -15,29 +16,56 @@ const open = async (path = '/?view=mine', mode = 'signed-in') => {
   await page.emulateTimezone('America/Los_Angeles');
   await page.setViewport({ width: 1365, height: 1000 });
   const errors = [];
+  let clientRows = ['empty', 'create'].includes(mode) ? [] : clients.map(client => ({ ...client }));
+  let keyUnavailable = mode === 'key-retry';
+  let releaseReveal;
+  let markRevealRequested;
+  const revealRelease = new Promise(resolve => { releaseReveal = resolve; });
+  const revealRequested = new Promise(resolve => { markRevealRequested = resolve; });
+  const waitForReveal = async () => {
+    let timer;
+    try {
+      await Promise.race([revealRequested, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Client reveal was not requested')), page.getDefaultTimeout()); })]);
+    } finally { clearTimeout(timer); }
+  };
   page.on('pageerror', e => errors.push(e.message));
   await page.setRequestInterception(true);
   page.on('request', async request => {
     const url = new URL(request.url());
     if (url.origin !== origin) { await request.abort(); return; }
-    if (!url.pathname.startsWith('/api/')) { await request.continue(); return; }
+    if (!url.pathname.startsWith('/api/') && !url.pathname.startsWith('/config/claude/')) { await request.continue(); return; }
     let body = {};
     let status = 200;
-    if (url.pathname === '/api/auth/me') { body = mode === 'guest' ? { ...principal, kind: 'guest' } : principal; if (mode === 'signed-out') { status = 401; body = { error: 'Sign in required' }; } }
+    if (url.pathname.startsWith('/config/claude/')) {
+      if (keyUnavailable) { status = 503; body = { error: 'Try again' }; }
+      else body = { access_token: clientKey(url.pathname.split('/').pop()) };
+    }
+    else if (url.pathname === '/api/auth/me') { body = mode === 'guest' ? { ...principal, kind: 'guest' } : principal; if (mode === 'signed-out') { status = 401; body = { error: 'Sign in required' }; } }
     else if (url.pathname === '/api/auth/join') body = { switch_required: true, current: principal };
     else if (url.pathname === '/api/auth/config') body = { operator_exists: true, legacy_signup: true };
     else if (url.pathname === '/api/me/clients') {
-      body = ['empty', 'create'].includes(mode) ? [] : clients;
+      body = clientRows;
       if (request.method() === 'POST') {
-        if (mode === 'create') body = { id: 'new-client', label: JSON.parse(request.postData()).label, status: 'active', setup_token: 'fixture-new-client' };
+        if (mode === 'create') {
+          body = { id: 'new-client', label: JSON.parse(request.postData()).label, status: 'active', setup_token: 'fixture-new-client' };
+          clientRows.push(body);
+        }
         else { status = 503; body = { error: 'Unable to create client. Try again.' }; }
       }
     }
     else if (url.pathname.endsWith('/reveal')) {
       const id = url.pathname.split('/')[4];
-      // Hold the older response behind a newer selection.
-      if (id === 'server') await new Promise(resolve => setTimeout(resolve, 250));
+      if (id === 'server' && mode === 'reveal-race') { markRevealRequested(); await revealRelease; }
       body = { setup_token: `fixture-${id}` };
+    }
+    else if (url.pathname.endsWith('/rotate')) {
+      const client = clientRows.find(client => client.id === url.pathname.split('/')[4]);
+      client.status = 'active';
+      body = { ...client, setup_token: `fixture-replaced-${client.id}` };
+    }
+    else if (url.pathname.startsWith('/api/me/clients/') && request.method() === 'DELETE') {
+      clientRows.find(client => client.id === url.pathname.split('/')[4]).status = 'revoked';
+      body = { success: true };
     }
     else if (url.pathname === '/api/me/usage' || url.pathname.endsWith('/usage')) body = { hourly: [] };
     else if (url.pathname === '/api/me/passkeys') body = [];
@@ -54,7 +82,7 @@ const open = async (path = '/?view=mine', mode = 'signed-in') => {
   });
   await page.goto(origin + path);
   await page.waitForSelector('h1');
-  return { page, errors };
+  return { page, errors, releaseReveal, waitForReveal, recoverKey: () => { keyUnavailable = false; } };
 };
 const clickText = async (page, selector, text) => {
   await page.waitForFunction((selector, text) => [...document.querySelectorAll(selector)].some(el => el.textContent.trim() === text), {}, selector, text);
@@ -73,16 +101,72 @@ try {
     assert.equal(await page.$eval('button[type="submit"], .threshold-submit', el => el.disabled), false);
     await page.close();
   });
+  await check('Mine reveals a copyable signed API key, URL and model-list curl by default', async () => {
+    const { page, errors } = await open('/?view=mine');
+    await clickText(page, '.client-card button', 'Show key');
+    await page.waitForFunction(() => document.querySelector('.client-api-key')?.textContent.includes('fixture-signed-api-key-fixture-laptop'));
+    await page.evaluate(() => Object.defineProperty(navigator.clipboard, 'writeText', { value: async text => { window.fixtureClipboard = text; } }));
+    await clickText(page, '.client-api-key button', 'Copy key');
+    assert.equal(await page.evaluate(() => window.fixtureClipboard), clientKey('fixture-laptop'));
+    await clickText(page, '.client-api-key button', 'Copy URL');
+    assert.equal(await page.evaluate(() => window.fixtureClipboard), `${origin}/v1`);
+    assert.ok(await page.$eval('.client-api-key pre', el => el.textContent.includes('/v1/models') && el.textContent.includes('Authorization: Bearer fixture-signed-api-key-fixture-laptop')));
+    for (const width of [1365, 390]) {
+      await page.setViewport({ width, height: 1000 });
+      await page.screenshot({ path: `test-results/account-api-key-${width}.png`, fullPage: true });
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    }
+    await clickText(page, '.client-platform-tabs button', 'CLI installers');
+    assert.ok(await page.$eval('.setup-secret', el => el.textContent.includes('/setup/codex/fixture-laptop')));
+    await clickText(page, '.client-card button', 'Hide key');
+    assert.equal(await page.$('.setup-secret'), null);
+    assert.deepEqual(errors, []);
+    await page.close();
+  });
+  await check('Mine retries key loading, replaces keys, and clears revoked keys', async () => {
+    const { page, recoverKey } = await open('/?view=mine', 'key-retry');
+    page.on('dialog', dialog => dialog.accept());
+    await clickText(page, '.client-card button', 'Show key');
+    await page.waitForSelector('.client-api-key [role=alert]');
+    recoverKey();
+    await clickText(page, '.client-api-key button', 'Retry API key');
+    await page.waitForFunction(() => document.querySelector('.client-api-key')?.textContent.includes('fixture-signed-api-key-fixture-laptop'));
+    await clickText(page, '.client-card button', 'Replace key');
+    await page.waitForFunction(() => document.querySelector('.client-api-key')?.textContent.includes('fixture-signed-api-key-fixture-replaced-laptop'));
+    assert.equal(await page.$eval('.mine-clients', el => el.textContent.includes('fixture-signed-api-key-fixture-laptop')), false);
+    await clickText(page, '.client-card button', 'Revoke');
+    await page.waitForFunction(() => !document.querySelector('.client-api-key'));
+    await page.waitForNetworkIdle();
+    assert.equal(await page.$eval('.client-card button', el => el.disabled), true);
+    await page.close();
+  });
+  await check('Mine opens new client API keys immediately', async () => {
+    const { page } = await open('/?view=mine', 'create');
+    await clickText(page, 'button', 'Create first client');
+    await page.type('.client-create input', 'Travel laptop');
+    await page.click('.client-create .gold-button');
+    await page.waitForFunction(() => document.querySelector('.client-api-key')?.textContent.includes('fixture-signed-api-key-fixture-new-client'));
+    assert.equal(await page.$eval('.client-header strong', el => el.textContent), 'Travel laptop');
+    await page.close();
+  });
   await check('setup keeps the latest selection and excludes revoked credentials', async () => {
-    const { page } = await open('/?view=setup');
+    const { page, releaseReveal, waitForReveal } = await open('/?view=setup', 'reveal-race');
     await page.waitForFunction(() => document.querySelector('.tool-detail')?.textContent.includes('fixture-laptop'));
     await clickText(page, '.setup-clients button', 'Home server');
+    await waitForReveal();
     await clickText(page, '.setup-clients button', 'Work laptop');
+    await page.waitForFunction(() => document.querySelector('.tool-detail')?.textContent.includes('fixture-laptop'));
+    releaseReveal();
     await page.waitForNetworkIdle();
     assert.equal(await page.$eval('.client-pill.active', el => el.textContent), 'Work laptop');
     assert.ok(await page.$eval('.tool-detail', el => el.textContent.includes('fixture-laptop')));
-    const old = await page.$eval('.setup-clients', el => [...el.querySelectorAll('button')].find(button => button.textContent === 'Old machine')?.disabled ?? true);
-    assert.equal(old, true);
+    const old = await page.$$('.setup-clients button');
+    const revoked = [];
+    for (const button of old) {
+      if (await button.evaluate(el => el.textContent === 'Old machine')) revoked.push(button);
+    }
+    assert.equal(revoked.length, 1, 'revoked client remains present');
+    assert.equal(await revoked[0].evaluate(el => el.disabled), true);
     await page.close();
   });
   await check('clipboard rejection does not report success', async () => {

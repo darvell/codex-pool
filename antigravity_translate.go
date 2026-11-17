@@ -64,20 +64,20 @@ type antigravityPreparedRequest struct {
 	ResponsesFunctionNames map[string]string
 }
 
-func shouldRouteAntigravityModel(model string) bool {
+func shouldRouteAntigravityModel(registry *antigravityModelRegistry, model string) bool {
 	model = strings.TrimSpace(model)
 	if strings.HasPrefix(model, "antigravity/") {
 		return true
 	}
-	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude, AccountTypeKimi, AccountTypeMinimax, AccountTypeZAI, AccountTypeXiaomi, AccountTypeAdverserial} {
+	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude} {
 		if _, ok := modelForProvider(provider, model); ok {
 			return false
 		}
 	}
-	if isGrokModel(model) {
+	if externalModelClaimed(model) {
 		return false
 	}
-	return isAntigravityModel(model)
+	return isAntigravityModel(registry, model)
 }
 
 func antigravityModelFromGeminiPath(path string) string {
@@ -106,7 +106,7 @@ func unwrapGeminiClientRequest(root map[string]any) map[string]any {
 	return cloneAnyMap(root)
 }
 
-func prepareAntigravityRequest(path string, body []byte, requestedModel, projectID, conversationID string) (antigravityPreparedRequest, error) {
+func prepareAntigravityRequest(path string, body []byte, requestedModel, projectID, conversationID string, registry *antigravityModelRegistry) (antigravityPreparedRequest, error) {
 	publicModel := strings.TrimSpace(requestedModel)
 	if publicModel == "" {
 		publicModel = antigravityModelFromGeminiPath(path)
@@ -117,7 +117,7 @@ func prepareAntigravityRequest(path string, body []byte, requestedModel, project
 	if strings.TrimSpace(projectID) == "" {
 		return antigravityPreparedRequest{}, errors.New("Antigravity project ID is required")
 	}
-	upstreamModel := antigravityCanonicalModel(publicModel)
+	upstreamModel := antigravityCanonicalModel(registry, publicModel)
 	format := antigravityFormatGemini
 	switch {
 	case strings.HasPrefix(path, "/v1/messages"):
@@ -1335,29 +1335,10 @@ func (h *proxyHandler) refreshAntigravityReservation(ctx context.Context, reserv
 	// never joins an obsolete refresh, while concurrent callers for the same
 	// live account share one refresh-token rotation.
 	key := fmt.Sprintf("%s:%s:%d", AccountTypeAntigravity, reservation.Account.ID, reservation.generation)
-	h.refreshCallsMu.Lock()
-	if h.refreshCalls == nil {
-		h.refreshCalls = map[string]*refreshCall{}
-	}
-	if existing, ok := h.refreshCalls[key]; ok {
-		h.refreshCallsMu.Unlock()
-		select {
-		case <-existing.done:
-			return existing.err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	call := &refreshCall{done: make(chan struct{})}
-	h.refreshCalls[key] = call
-	h.refreshCallsMu.Unlock()
-
-	call.err = h.refreshAntigravityReservationOnce(ctx, reservation)
-	h.refreshCallsMu.Lock()
-	delete(h.refreshCalls, key)
-	close(call.done)
-	h.refreshCallsMu.Unlock()
-	return call.err
+	_, err := h.refreshes.run(ctx, key, func() error {
+		return h.refreshAntigravityReservationOnce(ctx, reservation)
+	})
+	return err
 }
 
 func (h *proxyHandler) refreshAntigravityReservationOnce(ctx context.Context, reservation *antigravityReservation) error {
@@ -1388,10 +1369,10 @@ func (h *proxyHandler) refreshAntigravityReservationOnce(ctx context.Context, re
 }
 
 func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Request, body []byte, requestedModel, conversationID, userID, originID, clientIP, reqID string) bool {
-	if !shouldRouteAntigravityModel(requestedModel) {
+	if !shouldRouteAntigravityModel(&h.pool.antigravityModels, requestedModel) {
 		return false
 	}
-	canonical := antigravityCanonicalModel(requestedModel)
+	canonical := antigravityCanonicalModel(&h.pool.antigravityModels, requestedModel)
 	provider, _ := h.registry.ForType(AccountTypeAntigravity).(*AntigravityProvider)
 	if provider == nil {
 		respondJSONError(w, http.StatusServiceUnavailable, "Antigravity provider is not configured")
@@ -1448,7 +1429,7 @@ func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Req
 		account.mu.Lock()
 		projectID := account.ProjectID
 		account.mu.Unlock()
-		prepared, err := prepareAntigravityRequest(r.URL.Path, body, requestedModel, projectID, conversationID)
+		prepared, err := prepareAntigravityRequest(r.URL.Path, body, requestedModel, projectID, conversationID, &h.pool.antigravityModels)
 		if err != nil {
 			release()
 			respondJSONError(w, http.StatusBadRequest, err.Error())
@@ -1486,54 +1467,20 @@ func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		if resp.StatusCode == http.StatusTooManyRequests {
-			errBody, _ := readAndCloseAntigravityError(resp)
-			antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody)
-			if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-				applyAntigravityRateLimit(current, canonical, resp.Header, errBody, time.Now())
-				return nil
-			}); err != nil {
+		outcome := readAntigravityOutcome(resp)
+		if outcome.kind == antigravityQuotaFailure || outcome.kind == antigravityForbiddenFailure || outcome.kind == antigravityServerFailure {
+			if outcome.kind != antigravityServerFailure {
+				antigravityClearNativeReplayOnError(replayScope, outcome.status, outcome.body)
+			}
+			if err := h.applyAntigravityOutcome(reservation, canonical, outcome, antigravityStartCooldown); err != nil || outcome.kind != antigravityQuotaFailure {
 				sawNonQuotaFailure = true
 			}
 			release()
 			continue
 		}
-		if resp.StatusCode == http.StatusForbidden {
-			errBody, _ := readAndCloseAntigravityError(resp)
-			antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody)
-			if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-				recordAntigravityForbidden(current, errBody)
-				return nil
-			}); err != nil {
-				sawNonQuotaFailure = true
-			}
-			sawNonQuotaFailure = true
-			release()
-			continue
-		}
-		if resp.StatusCode >= 500 {
-			_, _ = readAndCloseAntigravityError(resp)
-			if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-				current.mu.Lock()
-				until := time.Now().Add(backoffDuration(current.BackoffLevel))
-				current.BackoffLevel++
-				if until.After(current.RateLimitUntil) {
-					current.RateLimitUntil = until
-				}
-				current.mu.Unlock()
-				return saveAntigravityAccount(current)
-			}); err != nil {
-				sawNonQuotaFailure = true
-			}
-			sawNonQuotaFailure = true
-			release()
-			continue
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			errBody, _ := readAndCloseAntigravityError(resp)
-			if resp.StatusCode == http.StatusBadRequest && antigravityClearNativeReplayOnError(replayScope, resp.StatusCode, errBody) {
-				// Invalid signed replay is safely classifiable. Retry this account
-				// once with the tenant-scoped replay removed, never across accounts.
+		if outcome.kind == antigravityRejected {
+			if outcome.status == http.StatusBadRequest && antigravityClearNativeReplayOnError(replayScope, outcome.status, outcome.body) {
+				// Retry invalid signed replay on the same account after removing tenant-scoped replay.
 				prepared.Body = bodyWithoutReplay
 				retry, retryErr := h.doAntigravityRequestWithTransientRetry(r.Context(), r.Header, account, provider, prepared)
 				if retryErr != nil || retry == nil {
@@ -1541,38 +1488,24 @@ func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Req
 					release()
 					continue
 				}
-				if retry.StatusCode >= 200 && retry.StatusCode < 300 {
+				retryOutcome := readAntigravityOutcome(retry)
+				switch retryOutcome.kind {
+				case antigravitySuccess:
 					resp = retry
-				} else {
-					retryBody, _ := readAndCloseAntigravityError(retry)
-					switch {
-					case retry.StatusCode == http.StatusTooManyRequests:
-						_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-							applyAntigravityRateLimit(current, canonical, retry.Header, retryBody, time.Now())
-							return nil
-						})
-						release()
-						continue
-					case retry.StatusCode == http.StatusForbidden:
-						_ = h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-							recordAntigravityForbidden(current, retryBody)
-							return nil
-						})
+				case antigravityQuotaFailure, antigravityForbiddenFailure, antigravityServerFailure:
+					_ = h.applyAntigravityOutcome(reservation, canonical, retryOutcome, antigravityKeepCooldown)
+					if retryOutcome.kind != antigravityQuotaFailure {
 						sawNonQuotaFailure = true
-						release()
-						continue
-					case retry.StatusCode >= 500:
-						sawNonQuotaFailure = true
-						release()
-						continue
-					default:
-						antigravityWriteError(w, prepared.Format, retry.StatusCode, retryBody)
-						release()
-						return true
 					}
+					release()
+					continue
+				default:
+					antigravityWriteError(w, prepared.Format, retryOutcome.status, retryOutcome.body)
+					release()
+					return true
 				}
 			} else {
-				antigravityWriteError(w, prepared.Format, resp.StatusCode, errBody)
+				antigravityWriteError(w, prepared.Format, outcome.status, outcome.body)
 				release()
 				return true
 			}
@@ -1583,7 +1516,7 @@ func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Req
 		// suppresses mutations and pinning; it must never trigger duplicate work
 		// on another account or abandon the live response body.
 		if err := h.pool.withCurrentAntigravityReservation(reservation, func(current *Account) error {
-			clearAntigravityRuntimeState(current, canonical)
+			clearAntigravityRuntimeState(&h.pool.antigravityModels, current, canonical)
 			clearAntigravityHealth(current)
 			return nil
 		}); err == nil {
@@ -1981,183 +1914,6 @@ func antigravityResponseParts(response map[string]any) []any {
 func antigravityUsage(response map[string]any) *RequestUsage {
 	provider := &AntigravityProvider{}
 	return provider.ParseUsage(response)
-}
-
-func antigravityNonStreamingResponse(format antigravityClientFormat, model string, response map[string]any) ([]byte, error) {
-	if format == antigravityFormatGemini {
-		return json.Marshal(response)
-	}
-	parts := antigravityResponseParts(response)
-	text := strings.Builder{}
-	toolCalls := []any{}
-	anthropicContent := []any{}
-	responseOutput := []any{}
-	for _, raw := range parts {
-		part, _ := raw.(map[string]any)
-		if value := stringValue(part["text"]); value != "" {
-			if thought, _ := part["thought"].(bool); thought {
-				anthropicContent = append(anthropicContent, map[string]any{"type": "thinking", "thinking": value, "signature": part["thoughtSignature"]})
-				responseOutput = append(responseOutput, map[string]any{"type": "reasoning", "id": "rs_" + uuid.NewString(), "summary": []any{map[string]any{"type": "summary_text", "text": value}}})
-			} else {
-				text.WriteString(value)
-				anthropicContent = append(anthropicContent, map[string]any{"type": "text", "text": value})
-			}
-		}
-		if call, ok := part["functionCall"].(map[string]any); ok {
-			id := stringValue(call["id"])
-			if id == "" {
-				id = "call_" + uuid.NewString()
-			}
-			args, _ := json.Marshal(call["args"])
-			toolCalls = append(toolCalls, map[string]any{"id": id, "type": "function", "function": map[string]any{"name": call["name"], "arguments": string(args)}})
-			anthropicContent = append(anthropicContent, map[string]any{"type": "tool_use", "id": id, "name": call["name"], "input": call["args"]})
-			responseOutput = append(responseOutput, map[string]any{"type": "function_call", "id": "fc_" + uuid.NewString(), "call_id": id, "name": call["name"], "arguments": string(args), "status": "completed"})
-		}
-		if inline, ok := part["inlineData"].(map[string]any); ok {
-			dataURL := "data:" + stringValue(inline["mimeType"]) + ";base64," + stringValue(inline["data"])
-			anthropicContent = append(anthropicContent, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": inline["mimeType"], "data": inline["data"]}})
-			responseOutput = append(responseOutput, map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_image", "image_url": dataURL}}})
-		}
-	}
-	usage := antigravityPublicUsage(response)
-	finish := antigravityFinishReason(response)
-	switch format {
-	case antigravityFormatChat:
-		message := map[string]any{"role": "assistant", "content": text.String()}
-		if len(toolCalls) > 0 {
-			message["tool_calls"] = toolCalls
-		}
-		return json.Marshal(map[string]any{"id": "chatcmpl-" + uuid.NewString(), "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}, "usage": usage})
-	case antigravityFormatAnthropic:
-		return json.Marshal(map[string]any{"id": "msg_" + uuid.NewString(), "type": "message", "role": "assistant", "model": model, "content": anthropicContent, "stop_reason": antigravityAnthropicStop(finish), "stop_sequence": nil, "usage": map[string]any{"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"], "cache_read_input_tokens": usage["cached_tokens"]}})
-	case antigravityFormatResponses:
-		if text.Len() > 0 {
-			responseOutput = append(responseOutput, map[string]any{"type": "message", "id": "msg_" + uuid.NewString(), "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": text.String(), "annotations": []any{}}}})
-		}
-		return json.Marshal(map[string]any{"id": "resp_" + uuid.NewString(), "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": responseOutput, "usage": map[string]any{"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"], "total_tokens": usage["total_tokens"]}})
-	}
-	return nil, fmt.Errorf("unsupported Antigravity response format")
-}
-
-func antigravityPublicUsage(response map[string]any) map[string]any {
-	usage, _ := response["usageMetadata"].(map[string]any)
-	prompt, completion, cached, thoughts := readInt64(usage, "promptTokenCount"), readInt64(usage, "candidatesTokenCount"), readInt64(usage, "cachedContentTokenCount"), readInt64(usage, "thoughtsTokenCount")
-	return map[string]any{"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion, "cached_tokens": cached, "reasoning_tokens": thoughts}
-}
-
-func antigravityFinishReason(response map[string]any) string {
-	candidates, _ := response["candidates"].([]any)
-	if len(candidates) == 0 {
-		return "stop"
-	}
-	candidate, _ := candidates[0].(map[string]any)
-	raw := strings.ToUpper(stringValue(candidate["finishReason"]))
-	switch raw {
-	case "MAX_TOKENS":
-		return "length"
-	case "STOP", "":
-		return "stop"
-	default:
-		return strings.ToLower(raw)
-	}
-}
-func antigravityAnthropicStop(reason string) string {
-	if reason == "length" {
-		return "max_tokens"
-	}
-	if reason == "tool_calls" {
-		return "tool_use"
-	}
-	return "end_turn"
-}
-
-type antigravityStreamState struct {
-	ID, Model            string
-	Started, TextStarted bool
-	Index                int
-	Usage                *RequestUsage
-}
-
-func antigravityStreamingEvents(format antigravityClientFormat, response map[string]any, state *antigravityStreamState) []string {
-	if format == antigravityFormatGemini {
-		data, _ := json.Marshal(response)
-		return []string{"data: " + string(data) + "\n\n"}
-	}
-	events := []string{}
-	parts := antigravityResponseParts(response)
-	for _, raw := range parts {
-		part, _ := raw.(map[string]any)
-		text := stringValue(part["text"])
-		switch format {
-		case antigravityFormatChat:
-			delta := map[string]any{}
-			if !state.Started {
-				delta["role"] = "assistant"
-				state.Started = true
-			}
-			if text != "" {
-				delta["content"] = text
-			}
-			if call, ok := part["functionCall"].(map[string]any); ok {
-				args, _ := json.Marshal(call["args"])
-				delta["tool_calls"] = []any{map[string]any{"index": state.Index, "id": call["id"], "type": "function", "function": map[string]any{"name": call["name"], "arguments": string(args)}}}
-				state.Index++
-			}
-			if len(delta) > 0 {
-				data, _ := json.Marshal(map[string]any{"id": state.ID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": state.Model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}})
-				events = append(events, "data: "+string(data)+"\n\n")
-			}
-		case antigravityFormatAnthropic:
-			if !state.Started {
-				data, _ := json.Marshal(map[string]any{"type": "message_start", "message": map[string]any{"id": state.ID, "type": "message", "role": "assistant", "model": state.Model, "content": []any{}, "stop_reason": nil, "usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
-				events = append(events, "event: message_start\ndata: "+string(data)+"\n\n")
-				state.Started = true
-			}
-			if text != "" {
-				if !state.TextStarted {
-					data, _ := json.Marshal(map[string]any{"type": "content_block_start", "index": state.Index, "content_block": map[string]any{"type": "text", "text": ""}})
-					events = append(events, "event: content_block_start\ndata: "+string(data)+"\n\n")
-					state.TextStarted = true
-				}
-				data, _ := json.Marshal(map[string]any{"type": "content_block_delta", "index": state.Index, "delta": map[string]any{"type": "text_delta", "text": text}})
-				events = append(events, "event: content_block_delta\ndata: "+string(data)+"\n\n")
-			}
-		case antigravityFormatResponses:
-			if !state.Started {
-				data, _ := json.Marshal(map[string]any{"type": "response.created", "response": map[string]any{"id": state.ID, "object": "response", "status": "in_progress", "model": state.Model, "output": []any{}}})
-				events = append(events, "event: response.created\ndata: "+string(data)+"\n\n")
-				state.Started = true
-			}
-			if text != "" {
-				data, _ := json.Marshal(map[string]any{"type": "response.output_text.delta", "item_id": "msg_" + state.ID, "output_index": 0, "content_index": 0, "delta": text})
-				events = append(events, "event: response.output_text.delta\ndata: "+string(data)+"\n\n")
-			}
-		}
-	}
-	return events
-}
-
-func antigravityStreamingTerminal(format antigravityClientFormat, state *antigravityStreamState) []string {
-	switch format {
-	case antigravityFormatGemini:
-		return nil
-	case antigravityFormatChat:
-		data, _ := json.Marshal(map[string]any{"id": state.ID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": state.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
-		return []string{"data: " + string(data) + "\n\ndata: [DONE]\n\n"}
-	case antigravityFormatAnthropic:
-		events := []string{}
-		if state.TextStarted {
-			data, _ := json.Marshal(map[string]any{"type": "content_block_stop", "index": state.Index})
-			events = append(events, "event: content_block_stop\ndata: "+string(data)+"\n\n")
-		}
-		data, _ := json.Marshal(map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 0}})
-		events = append(events, "event: message_delta\ndata: "+string(data)+"\n\n", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
-		return events
-	case antigravityFormatResponses:
-		data, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": state.ID, "object": "response", "status": "completed", "model": state.Model, "output": []any{}}})
-		return []string{"event: response.completed\ndata: " + string(data) + "\n\n"}
-	}
-	return nil
 }
 
 func antigravityWriteError(w http.ResponseWriter, format antigravityClientFormat, status int, body []byte) {

@@ -473,7 +473,7 @@ func (h *proxyHandler) handleChatGPT(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		_, issued, _, ok := parsePoolCredentialRequest(r, getPoolJWTSecret())
+		_, issued, _, ok := parsePoolCredentialRequest(r, h.cfg.poolJWTSecret())
 		if !ok {
 			http.Error(w, "live pool credential required", http.StatusUnauthorized)
 			return

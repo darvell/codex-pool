@@ -73,30 +73,14 @@ func (p *PassportStore) setPrincipalStatus(actorID, principalID string, status P
 	updated.Status = status
 	clientUpdates := make(map[string]*ClientCredential)
 	if status == PrincipalSuspended {
-		cutoff := nextCredentialCutoff(time.Now())
-		updated.CredentialsValidAfter = cutoff
-		for id, existing := range p.clients {
-			if existing.PrincipalID != principalID || existing.Status != "active" {
-				continue
-			}
-			client := *existing
-			client.ValidAfter = cutoff
-			if err := p.rotateClientSecret(&client); err != nil {
-				return nil, err
-			}
-			clientUpdates[id] = &client
+		var err error
+		clientUpdates, err = p.cutoffClientsLocked(&updated)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	err := p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &updated); err != nil {
-			return err
-		}
-		for id, client := range clientUpdates {
-			if err := putJSON(tx.Bucket([]byte(bucketClientCredentials)), id, client); err != nil {
-				return err
-			}
-		}
+	err := p.commitLocked(&updated, clientUpdates, func(tx *bbolt.Tx) error {
 		if status == PrincipalSuspended {
 			if err := deletePrincipalSessions(tx, principalID); err != nil {
 				return err
@@ -107,17 +91,12 @@ func (p *PassportStore) setPrincipalStatus(actorID, principalID string, status P
 	if err != nil {
 		return nil, err
 	}
-	p.principals[principalID] = &updated
-	for id, client := range clientUpdates {
-		p.clients[id] = client
-	}
 	cp := updated
 	return &cp, nil
 }
 
-// setPrincipalKind changes a principal's role. Promoting keeps sessions;
-// removing the operator role drops them so the demotion takes effect
-// immediately. The last operator cannot be demoted.
+// Demotion revokes sessions and operator tokens immediately. The last
+// operator must retain access.
 func (p *PassportStore) setPrincipalKind(actorID, principalID string, kind PrincipalKind) (*Principal, error) {
 	if kind != PrincipalOperator && kind != PrincipalMember && kind != PrincipalGuest {
 		return nil, errors.New("kind must be operator, member, or guest")
@@ -147,10 +126,7 @@ func (p *PassportStore) setPrincipalKind(actorID, principalID string, kind Princ
 	updated := *current
 	updated.Kind = kind
 	demoteOperator := current.Kind == PrincipalOperator
-	err := p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &updated); err != nil {
-			return err
-		}
+	err := p.commitLocked(&updated, nil, func(tx *bbolt.Tx) error {
 		if demoteOperator {
 			if err := revokePrincipalOps(tx, principalID); err != nil {
 				return err
@@ -164,7 +140,6 @@ func (p *PassportStore) setPrincipalKind(actorID, principalID string, kind Princ
 	if err != nil {
 		return nil, err
 	}
-	p.principals[principalID] = &updated
 	cp := updated
 	return &cp, nil
 }
@@ -182,16 +157,12 @@ func (p *PassportStore) rotateClient(actorID, principalID, clientID string) (*Cl
 	if err := p.rotateClientSecret(&updated); err != nil {
 		return nil, err
 	}
-	err := p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketClientCredentials)), clientID, &updated); err != nil {
-			return err
-		}
+	err := p.commitLocked(nil, map[string]*ClientCredential{clientID: &updated}, func(tx *bbolt.Tx) error {
 		return p.audit(tx, actorID, "client.rotated", clientID, updated.Label)
 	})
 	if err != nil {
 		return nil, err
 	}
-	p.clients[clientID] = &updated
 	cp := updated
 	return &cp, nil
 }
@@ -213,16 +184,12 @@ func (p *PassportStore) revokeClient(actorID, principalID, clientID string) erro
 		return err
 	}
 	updated.DownloadToken = ""
-	err := p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketClientCredentials)), clientID, &updated); err != nil {
-			return err
-		}
+	err := p.commitLocked(nil, map[string]*ClientCredential{clientID: &updated}, func(tx *bbolt.Tx) error {
 		return p.audit(tx, actorID, "client.revoked", clientID, updated.Label)
 	})
 	if err != nil {
 		return err
 	}
-	p.clients[clientID] = &updated
 	return nil
 }
 
@@ -255,12 +222,12 @@ func (p *PassportStore) updateGuestPass(actorID, principalID, note, displayName 
 	if len([]rune(strings.TrimSpace(displayName))) > 48 {
 		return nil, errors.New("display name must be 48 characters or fewer")
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	link, err := p.joinLinkForPrincipal(principalID)
 	if err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	current := p.principals[principalID]
 	if current == nil || current.Kind != PrincipalGuest {
 		return nil, errors.New("guest pass not found")
@@ -278,38 +245,26 @@ func (p *PassportStore) updateGuestPass(actorID, principalID, note, displayName 
 			clientUpdates[id] = &client
 		}
 	}
-	err = p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &updated); err != nil {
-			return err
-		}
+	err = p.commitLocked(&updated, clientUpdates, func(tx *bbolt.Tx) error {
 		if err := putJSON(tx.Bucket([]byte(bucketJoinLinks)), link.ID, link); err != nil {
 			return err
-		}
-		for id, client := range clientUpdates {
-			if err := putJSON(tx.Bucket([]byte(bucketClientCredentials)), id, client); err != nil {
-				return err
-			}
 		}
 		return p.audit(tx, actorID, "guest.updated", principalID, note)
 	})
 	if err != nil {
 		return nil, err
 	}
-	p.principals[principalID] = &updated
-	for id, client := range clientUpdates {
-		p.clients[id] = client
-	}
 	cp := updated
 	return &cp, nil
 }
 
 func (p *PassportStore) setGuestPassStatus(actorID, principalID string, active bool) (*Principal, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	link, err := p.joinLinkForPrincipal(principalID)
 	if err != nil {
 		return nil, err
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	current := p.principals[principalID]
 	if current == nil || current.Kind != PrincipalGuest {
 		return nil, errors.New("guest pass not found")
@@ -327,31 +282,15 @@ func (p *PassportStore) setGuestPassStatus(actorID, principalID string, active b
 		action = "guest.revoked"
 		updated.Status = PrincipalSuspended
 		link.Revoked = true
-		cutoff := nextCredentialCutoff(time.Now())
-		updated.CredentialsValidAfter = cutoff
-		for id, existing := range p.clients {
-			if existing.PrincipalID != principalID || existing.Status != "active" {
-				continue
-			}
-			client := *existing
-			client.ValidAfter = cutoff
-			if err := p.rotateClientSecret(&client); err != nil {
-				return nil, err
-			}
-			clientUpdates[id] = &client
+		var err error
+		clientUpdates, err = p.cutoffClientsLocked(&updated)
+		if err != nil {
+			return nil, err
 		}
 	}
-	err = p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), principalID, &updated); err != nil {
-			return err
-		}
+	err = p.commitLocked(&updated, clientUpdates, func(tx *bbolt.Tx) error {
 		if err := putJSON(tx.Bucket([]byte(bucketJoinLinks)), link.ID, link); err != nil {
 			return err
-		}
-		for id, client := range clientUpdates {
-			if err := putJSON(tx.Bucket([]byte(bucketClientCredentials)), id, client); err != nil {
-				return err
-			}
 		}
 		if !active {
 			if err := deletePrincipalSessions(tx, principalID); err != nil {
@@ -363,15 +302,13 @@ func (p *PassportStore) setGuestPassStatus(actorID, principalID string, active b
 	if err != nil {
 		return nil, err
 	}
-	p.principals[principalID] = &updated
-	for id, client := range clientUpdates {
-		p.clients[id] = client
-	}
 	cp := updated
 	return &cp, nil
 }
 
 func (p *PassportStore) rotateGuestLink(actorID, principalID string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	link, err := p.joinLinkForPrincipal(principalID)
 	if err != nil {
 		return "", err

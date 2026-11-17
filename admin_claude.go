@@ -1,10 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,15 +12,11 @@ import (
 	"time"
 )
 
-// Claude account admin handlers - JSON API only
-
-// In-memory store for pending OAuth sessions
 var claudeOAuthSessions = struct {
 	sync.RWMutex
 	sessions map[string]*ClaudeOAuthSession
 }{sessions: make(map[string]*ClaudeOAuthSession)}
 
-// serveClaudeAdmin routes Claude admin requests (auth already checked by router)
 func (h *proxyHandler) serveClaudeAdmin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/admin/claude")
 	if path == "" {
@@ -198,12 +193,11 @@ func (h *proxyHandler) handleClaudePlanProbe(w http.ResponseWriter, r *http.Requ
 		}
 
 		if live && strings.HasPrefix(accessToken, "sk-ant-oat") {
-			profile, err := h.fetchClaudeOAuthProfile(accessToken)
+			profile, err := h.fetchClaudeOAuthProfile(r.Context(), accessToken)
 			if err != nil {
 				entry.LiveError = err.Error()
 			} else {
 				entry.LiveProfile = profile
-				// Extract plan from organization.organization_type (the canonical source)
 				info := extractProfileInfo(profile)
 				entry.LivePlanType = info.SubscriptionType
 				entry.RateLimitTier = info.RateLimitTier
@@ -228,43 +222,10 @@ func (h *proxyHandler) handleClaudePlanProbe(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (h *proxyHandler) fetchClaudeOAuthProfile(accessToken string) (map[string]any, error) {
+func (h *proxyHandler) fetchClaudeOAuthProfile(ctx context.Context, accessToken string) (map[string]any, error) {
 	u := *h.cfg.claudeBase
 	u.Path = singleJoin(u.Path, "/api/oauth/profile")
-
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("anthropic-version", ccAnthropicVersion)
-	req.Header.Set("anthropic-dangerous-direct-browser-access", "true")
-	req.Header.Set("anthropic-beta", ccMinimalBetaHeader())
-	req.Header.Set("User-Agent", ccClaudeCodeUserAgent())
-	req.Header.Set("X-Claude-Code-Session-Id", ccAccountSessionID(accessToken))
-	req.Header.Set("X-App", "cli")
-	req.Header.Set("Accept", "application/json")
-	ccStainlessHeaders(req.Header.Set)
-
-	resp, err := h.transport.RoundTrip(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("profile status=%s body=%s", resp.Status, string(body))
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
-	}
-	return payload, nil
+	return (claudeAuthClient{do: h.transport.RoundTrip}).profile(ctx, u.String(), accessToken)
 }
 
 func decodeJWTClaims(token string) (string, map[string]any, string) {
@@ -292,13 +253,6 @@ func decodeJWTClaims(token string) (string, map[string]any, string) {
 		return "jwt", nil, err.Error()
 	}
 	return "jwt", claims, ""
-}
-
-func normalizeString(v any) string {
-	if s, ok := v.(string); ok {
-		return strings.TrimSpace(s)
-	}
-	return ""
 }
 
 // POST /admin/claude/add - start OAuth flow
@@ -381,7 +335,6 @@ func (h *proxyHandler) handleClaudeExchange(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Look up session
 	claudeOAuthSessions.RLock()
 	session, ok := claudeOAuthSessions.sessions[verifier]
 	claudeOAuthSessions.RUnlock()
@@ -395,26 +348,22 @@ func (h *proxyHandler) handleClaudeExchange(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Exchange code for tokens
-	tokens, err := ClaudeExchange(code, verifier, session.State)
+	tokens, err := newClaudeAuth(h.transport).exchange(r.Context(), code, verifier, session.State)
 	if err != nil {
 		log.Printf("Claude token exchange failed: %v", err)
 		respondJSONError(w, http.StatusInternalServerError, "token exchange failed: "+err.Error())
 		return
 	}
 
-	// Save the account
-	if err := SaveClaudeAccount(h.cfg.poolDir, session.AccountID, tokens); err != nil {
+	if err := newClaudeAuth(h.transport).saveAccount(r.Context(), h.cfg.poolDir, session.AccountID, tokens); err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "failed to save account: "+err.Error())
 		return
 	}
 
-	// Remove session
 	claudeOAuthSessions.Lock()
 	delete(claudeOAuthSessions.sessions, verifier)
 	claudeOAuthSessions.Unlock()
 
-	// Reload accounts
 	h.reloadAccounts()
 	h.auditProviderContribution(r, "claude", session.AccountID)
 
@@ -440,7 +389,7 @@ func (h *proxyHandler) handleClaudeRefresh(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := RefreshClaudeAccountTokens(target); err != nil {
+	if err := newClaudeAuth(h.transport).refreshAccount(r.Context(), target); err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "refresh failed: "+err.Error())
 		return
 	}

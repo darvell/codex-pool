@@ -144,10 +144,8 @@ func (pw *poolWatcher) reloadConfig() {
 	// Only reload safe, non-sensitive fields.
 	newDebug := getConfigBool("DEBUG", cfg.Debug, false)
 	pw.handler.cfg.debug.Store(newDebug)
-	pw.handler.cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", cfg.TierThreshold, 0.15)
-	pw.handler.pool.mu.Lock()
-	pw.handler.pool.debug = newDebug
-	pw.handler.pool.mu.Unlock()
+	newThreshold := getConfigFloat64("TIER_THRESHOLD", cfg.TierThreshold, 0.15)
+	pw.handler.pool.applySettings(poolSettings{debug: newDebug, tierThreshold: newThreshold})
 
 	// Reload model aliases (built-in defaults + optional config overrides).
 	if pw.handler.aliases != nil {
@@ -174,7 +172,7 @@ func (pw *poolWatcher) reloadConfig() {
 	}
 
 	log.Printf("config hot-reload complete (debug=%v, tier_threshold=%.2f)",
-		newDebug, pw.handler.cfg.tierThreshold)
+		newDebug, newThreshold)
 }
 
 func (pw *poolWatcher) close() {

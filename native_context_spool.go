@@ -54,7 +54,7 @@ func (s *nativeContext) prepareSpool(scope, clientIP string, spooled *streamedRe
 	if err != nil {
 		return err
 	}
-	defer func() { removeLexTemp(out) }()
+	defer func() { closeAndRemoveTemp(out) }()
 	writer := bufio.NewWriterSize(out, 64*1024)
 	lex := newJSONLex(io.NewSectionReader(spooled.File, 0, spooled.Size))
 	rewrite := &contextSpoolRewrite{service: s, scope: scope, clientIP: clientIP, metadata: spooled.contextMetadata}
@@ -86,7 +86,7 @@ func (s *nativeContext) prepareSpool(scope, clientIP string, spooled *streamedRe
 	old := spooled.File
 	spooled.File, spooled.Size = out, size
 	out = nil
-	removeLexTemp(old)
+	closeAndRemoveTemp(old)
 	return nil
 }
 
@@ -104,7 +104,7 @@ func (r *contextSpoolRewrite) item(lex *jsonLex, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer removeLexTemp(file)
+	defer closeAndRemoveTemp(file)
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func (r *contextSpoolRewrite) part(lex *jsonLex, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer removeLexTemp(file)
+	defer closeAndRemoveTemp(file)
 	own := false
 	if typ == "encrypted_content" {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {

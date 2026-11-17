@@ -1,3 +1,4 @@
+import { tokenThroughput } from "./throughput";
 import type { AccountStats, HourlyUsage, ModelDailyUsage, OriginWeeklyUsage, Provider } from "./types";
 
 export interface CapacityForecast {
@@ -96,10 +97,6 @@ export interface ModelMixRow {
   share: number;
 }
 
-function throughput(row: Pick<HourlyUsage, "account_type" | "input_tokens" | "cached_tokens" | "output_tokens">) {
-  return row.input_tokens + row.output_tokens + (row.account_type === "claude" ? row.cached_tokens : 0);
-}
-
 export function capacityForecasts(accounts: AccountStats[], bufferRatio = 0.2): CapacityForecast[] {
   const providers = [...new Set(accounts.map((account) => account.type))];
   return providers.flatMap((provider) => {
@@ -134,7 +131,7 @@ export function capacityForecasts(accounts: AccountStats[], bufferRatio = 0.2): 
 
 function hourlyTotals(hourly: HourlyUsage[]) {
   const totals = new Map<string, number>();
-  for (const row of hourly) totals.set(row.hour, (totals.get(row.hour) ?? 0) + throughput(row));
+  for (const row of hourly) totals.set(row.hour, (totals.get(row.hour) ?? 0) + tokenThroughput(row));
   return [...totals.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([hour, total]) => ({ hour, total }));
 }
 
@@ -230,7 +227,7 @@ export function originConcentration(rows: OriginWeeklyUsage[]): OriginConcentrat
   const week = rows.reduce((latest, row) => row.week_start > latest ? row.week_start : latest, "");
   const totals = new Map<string, number>();
   for (const row of rows.filter((item) => item.week_start === week)) {
-    totals.set(row.origin_id, (totals.get(row.origin_id) ?? 0) + throughput(row));
+    totals.set(row.origin_id, (totals.get(row.origin_id) ?? 0) + tokenThroughput(row));
   }
   const values = [...totals.values()].sort((a, b) => b - a);
   const total = values.reduce((sum, value) => sum + value, 0);
@@ -256,7 +253,7 @@ export function modelMix(rows: ModelDailyUsage[], days = 14): ModelMixRow[] {
     const model = row.model || "unknown";
     const key = `${row.account_type}|${model}`;
     const aggregate = models.get(key) ?? { model, provider: row.account_type, tokens: 0, requests: 0, apiValue: 0 };
-    aggregate.tokens += throughput(row);
+    aggregate.tokens += tokenThroughput(row);
     aggregate.requests += row.request_count;
     aggregate.apiValue += row.cost_usd;
     models.set(key, aggregate);

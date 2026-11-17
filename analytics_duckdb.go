@@ -59,11 +59,19 @@ type AnalyticsFact struct {
 	SourceGrain          string    `json:"source_grain"`
 }
 
+const insertUsageFactSQL = `INSERT OR IGNORE INTO usage_events (event_id, proxy_request_id, usage_sequence, upstream_request_id, attempt_number, observed_at, principal_id, client_credential_id, origin_id, account_id, account_type, plan_type, model_reported, model_normalized, normalization_version, input_tokens, cache_read_tokens, cache_creation_tokens, output_tokens, reasoning_tokens, billable_tokens, api_equivalent_cost_usd, pricing_version, usage_completeness, source, source_grain) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+
+func insertUsageFact(stmt *sql.Stmt, f AnalyticsFact) error {
+	_, err := stmt.Exec(f.EventID, f.ProxyRequestID, f.UsageSequence, f.UpstreamRequestID, f.AttemptNumber, f.ObservedAt,
+		f.PrincipalID, f.ClientCredentialID, f.OriginID, f.AccountID, f.AccountType, f.PlanType, f.ModelReported,
+		f.ModelNormalized, f.NormalizationVersion, f.InputTokens, f.CacheReadTokens, f.CacheCreationTokens,
+		f.OutputTokens, f.ReasoningTokens, f.BillableTokens, f.APIEquivalentCostUSD, f.PricingVersion,
+		f.UsageCompleteness, f.Source, f.SourceGrain)
+	return err
+}
+
 func analyticsFactFromUsage(ru RequestUsage, cost float64) AnalyticsFact {
-	clientID := ru.ClientCredentialID
-	if clientID == "" && ru.UserID != "" {
-		clientID = "legacy-default"
-	}
+	ru = resolveUsageIdentity(ru)
 	proxyID := ru.ProxyRequestID
 	if proxyID == "" {
 		proxyID = ru.RequestID
@@ -78,7 +86,7 @@ func analyticsFactFromUsage(ru RequestUsage, cost float64) AnalyticsFact {
 	return AnalyticsFact{
 		EventID: uuid.NewString(), ProxyRequestID: proxyID, UsageSequence: ru.UsageSequence,
 		AttemptNumber: ru.AttemptNumber, ObservedAt: ru.Timestamp.UTC(), PrincipalID: ru.UserID,
-		ClientCredentialID: clientID, OriginID: ru.OriginID, UpstreamRequestID: ru.RequestID,
+		ClientCredentialID: ru.ClientCredentialID, OriginID: ru.OriginID, UpstreamRequestID: ru.RequestID,
 		AccountID: ru.AccountID, AccountType: string(ru.AccountType), PlanType: ru.PlanType,
 		ModelReported: ru.Model, ModelNormalized: ru.Model, NormalizationVersion: "model-id-v1",
 		InputTokens: ru.InputTokens, CacheReadTokens: ru.CachedInputTokens,
@@ -199,20 +207,12 @@ func (a *DuckAnalytics) importLegacyBolt() error {
 	if err != nil {
 		return err
 	}
-	stmt, err := duckTx.Prepare(`INSERT OR IGNORE INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	stmt, err := duckTx.Prepare(insertUsageFactSQL)
 	if err != nil {
 		_ = duckTx.Rollback()
 		return err
 	}
 	defer stmt.Close()
-	insert := func(f AnalyticsFact) error {
-		_, err := stmt.Exec(f.EventID, f.ProxyRequestID, f.UsageSequence, f.UpstreamRequestID, f.AttemptNumber, f.ObservedAt,
-			f.PrincipalID, f.ClientCredentialID, f.OriginID, f.AccountID, f.AccountType, f.PlanType, f.ModelReported,
-			f.ModelNormalized, f.NormalizationVersion, f.InputTokens, f.CacheReadTokens, f.CacheCreationTokens,
-			f.OutputTokens, f.ReasoningTokens, f.BillableTokens, f.APIEquivalentCostUSD, f.PricingVersion,
-			f.UsageCompleteness, f.Source, f.SourceGrain)
-		return err
-	}
 
 	earliestRaw := map[string]time.Time{}
 	rawCount, hourlyCount := 0, 0
@@ -224,7 +224,8 @@ func (a *DuckAnalytics) importLegacyBolt() error {
 				if decodeRequestUsage(value, &usage) != nil || usage.UserID == "" {
 					return nil
 				}
-				principalID, clientID := splitClientIdentity(usage.UserID)
+				usage = resolveUsageIdentity(usage)
+				principalID, clientID := usage.UserID, usage.ClientCredentialID
 				if first, ok := earliestRaw[principalID]; !ok || usage.Timestamp.Before(first) {
 					earliestRaw[principalID] = usage.Timestamp
 				}
@@ -240,7 +241,7 @@ func (a *DuckAnalytics) importLegacyBolt() error {
 					completeness = "complete"
 				}
 				fact := AnalyticsFact{EventID: uuid.NewSHA1(uuid.NameSpaceOID, append([]byte("bolt|"), key...)).String(), ProxyRequestID: proxyID, UsageSequence: usage.UsageSequence, AttemptNumber: usage.AttemptNumber, ObservedAt: usage.Timestamp.UTC(), PrincipalID: principalID, ClientCredentialID: clientID, OriginID: usage.OriginID, UpstreamRequestID: usage.RequestID, AccountID: usage.AccountID, AccountType: string(usage.AccountType), PlanType: usage.PlanType, ModelReported: usage.Model, ModelNormalized: usage.Model, NormalizationVersion: "legacy-v1", InputTokens: usage.InputTokens, CacheReadTokens: usage.CachedInputTokens, CacheCreationTokens: usage.CacheCreationTokens, OutputTokens: usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens, BillableTokens: usage.BillableTokens, PricingVersion: "legacy-unavailable", UsageCompleteness: completeness, Source: "bolt_import", SourceGrain: "request"}
-				if err := insert(fact); err != nil {
+				if err := insertUsageFact(stmt, fact); err != nil {
 					return err
 				}
 				rawCount++
@@ -270,7 +271,7 @@ func (a *DuckAnalytics) importLegacyBolt() error {
 				return nil
 			}
 			fact := AnalyticsFact{EventID: uuid.NewSHA1(uuid.NameSpaceOID, append([]byte("bolt-hour|"), key...)).String(), ProxyRequestID: "legacy-hour:" + string(key), ObservedAt: hour.UTC(), PrincipalID: parts[0], ClientCredentialID: "legacy-" + parts[0], AccountID: "legacy-aggregate", AccountType: parts[2], NormalizationVersion: "legacy-v1", InputTokens: aggregate.InputTokens, CacheReadTokens: aggregate.CachedTokens, OutputTokens: aggregate.OutputTokens, ReasoningTokens: aggregate.ReasoningTokens, BillableTokens: aggregate.BillableTokens, PricingVersion: "legacy-unavailable", UsageCompleteness: "estimated", Source: "bolt_import", SourceGrain: "hour"}
-			if err := insert(fact); err != nil {
+			if err := insertUsageFact(stmt, fact); err != nil {
 				return err
 			}
 			hourlyCount++
@@ -384,7 +385,7 @@ func (a *DuckAnalytics) drain(limit int) error {
 		a.setFault(err)
 		return err
 	}
-	usageStmt, err := tx.Prepare(`INSERT OR IGNORE INTO usage_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	usageStmt, err := tx.Prepare(insertUsageFactSQL)
 	if err != nil {
 		_ = tx.Rollback()
 		a.setFault(err)
@@ -402,12 +403,7 @@ func (a *DuckAnalytics) drain(limit int) error {
 			f := r.failure
 			_, err = failureStmt.Exec(f.EventID, f.RequestID, f.AccountID, f.Provider, f.Model, f.Attempt, f.ObservedAt, f.ErrorClass, f.ErrorDomain, f.ErrorCode, f.HTTPStatus, f.Outcome)
 		} else {
-			f := r.fact
-			_, err = usageStmt.Exec(f.EventID, f.ProxyRequestID, f.UsageSequence, f.UpstreamRequestID, f.AttemptNumber, f.ObservedAt,
-				f.PrincipalID, f.ClientCredentialID, f.OriginID, f.AccountID, f.AccountType, f.PlanType, f.ModelReported,
-				f.ModelNormalized, f.NormalizationVersion, f.InputTokens, f.CacheReadTokens, f.CacheCreationTokens,
-				f.OutputTokens, f.ReasoningTokens, f.BillableTokens, f.APIEquivalentCostUSD, f.PricingVersion,
-				f.UsageCompleteness, f.Source, f.SourceGrain)
+			err = insertUsageFact(usageStmt, r.fact)
 		}
 		if err != nil {
 			break

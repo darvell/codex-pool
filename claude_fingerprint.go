@@ -1,16 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
-	"github.com/OneOfOne/xxhash"
 	"github.com/google/uuid"
 )
 
@@ -58,7 +55,6 @@ const (
 var (
 	ccProcessSessionID = uuid.NewString()
 	ccProcessDeviceID  = hex.EncodeToString([]byte(uuid.New().String() + uuid.New().String()))[:64]
-	ccMetaMu           sync.Mutex
 )
 
 // ccFingerprintSalt is the hardcoded salt from Claude Code's backend validation.
@@ -211,16 +207,11 @@ func ccInjectMetadata(bodyObj map[string]any, accountUUID, userID, sessionID str
 		return
 	}
 
-	ccMetaMu.Lock()
-	defer ccMetaMu.Unlock()
-
 	deviceID := ccUserDeviceID(userID)
 	if sessionID == "" {
 		sessionID = ccUserFallbackSessionID(userID)
 	}
 
-	// Honour an existing metadata.user_id but always carry a session id forward
-	// so we don't ship a metadata blob without one.
 	if existing, ok := bodyObj["metadata"].(map[string]any); ok {
 		if _, hasUser := existing["user_id"]; hasUser {
 			return
@@ -343,23 +334,6 @@ func ccComputeFingerprint(messageText string) string {
 func ccAttributionHeader(messageText string) string {
 	fp := ccComputeFingerprint(messageText)
 	return "x-anthropic-billing-header: cc_version=" + ccVersion + "." + fp + "; cc_entrypoint=cli;"
-}
-
-const ccCCHSeed uint64 = 0x6E52736AC806831E
-const ccCCHMask uint64 = 0xFFFFF
-
-func ccReplaceCCHPlaceholder(body []byte) []byte {
-	const placeholder = "cch=00000"
-	idx := bytes.Index(body, []byte(placeholder))
-	if idx < 0 {
-		return body
-	}
-	cch := fmt.Sprintf("%05x", xxhash.Checksum64S(body, ccCCHSeed)&ccCCHMask)
-	out := make([]byte, 0, len(body))
-	out = append(out, body[:idx]...)
-	out = append(out, []byte("cch="+cch)...)
-	out = append(out, body[idx+len(placeholder):]...)
-	return out
 }
 
 // ccSystemPrefix is the default Claude Code identity prefix.

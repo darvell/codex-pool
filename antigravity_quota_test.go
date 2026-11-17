@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +41,10 @@ func TestAntigravityWeeklyQuotaBlocksWholeModelGroup(t *testing.T) {
 		t.Fatalf("claude should be available, exhausted until %s", got)
 	}
 
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	one := 1.0
 	account := &Account{Type: AccountTypeAntigravity, ID: "ag", ModelRateLimits: map[string]time.Time{}}
-	antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{
+	pool := newPoolState([]*Account{account}, false)
+	pool.antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{
 		FetchedAt: now,
 		Models: map[string]AntigravityModelInfo{
 			"gemini-3.8-flash-high":    {ID: "gemini-3.8-flash-high", Quota: AntigravityQuotaInfo{RemainingFraction: &one}},
@@ -52,15 +52,15 @@ func TestAntigravityWeeklyQuotaBlocksWholeModelGroup(t *testing.T) {
 		},
 		Quota: &summary,
 	})
-	available, reset := antigravityModels.DiscoveryAvailability(account.ID, "gemini-3.8-flash-high", now)
+	available, reset := pool.antigravityModels.DiscoveryAvailability(account.ID, "gemini-3.8-flash-high", now)
 	if available || !reset.Equal(weeklyReset) {
 		t.Fatalf("gemini availability = %v until %s despite per-model fraction 1", available, reset)
 	}
-	if available, _ := antigravityModels.DiscoveryAvailability(account.ID, "claude-opus-4-6-thinking", now); !available {
+	if available, _ := pool.antigravityModels.DiscoveryAvailability(account.ID, "claude-opus-4-6-thinking", now); !available {
 		t.Fatal("claude group still has quota")
 	}
 
-	windows := antigravityQuotaWindows(account.ID, now)
+	windows := antigravityQuotaWindows(&pool.antigravityModels, account.ID, now)
 	labels := make([]string, 0, len(windows))
 	for _, window := range windows {
 		labels = append(labels, window.Label)
@@ -74,14 +74,13 @@ func TestAntigravityWeeklyQuotaBlocksWholeModelGroup(t *testing.T) {
 }
 
 func TestAntigravitySyncTrustsDailyHostForVerification(t *testing.T) {
-	antigravityModels.Reset()
-	t.Cleanup(antigravityModels.Reset)
 	daily, _ := url.Parse("https://daily.example.test")
 	production, _ := url.Parse("https://prod.example.test")
 	file := filepath.Join(t.TempDir(), "ag.json")
 	account := &Account{Type: AccountTypeAntigravity, ID: "ag", File: file, AccessToken: "token", ProjectID: "project", ModelRateLimits: map[string]time.Time{},
 		NeedsVerification: true, VerificationURL: "https://accounts.google.com/verify", HealthError: antigravityVerifyFixture}
 
+	pool := newPoolState([]*Account{account}, false)
 	dailyQuotaStatus := http.StatusOK
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
@@ -96,31 +95,50 @@ func TestAntigravitySyncTrustsDailyHostForVerification(t *testing.T) {
 		}
 	})
 
-	if err := syncAntigravityModels(context.Background(), transport, account, daily, production); err != nil {
+	h := &proxyHandler{pool: pool, transport: transport}
+	generation, _ := pool.generationAndAccounts()
+	if err := h.syncAntigravityModelsGuarded(context.Background(), generation, account, daily, production); err != nil {
 		t.Fatal(err)
 	}
-	if account.NeedsVerification || account.HealthError != "" {
+	if account.NeedsVerification || account.VerificationURL != "" || account.HealthError != "" {
 		t.Fatalf("daily quota success must clear verification: %v %q", account.NeedsVerification, account.HealthError)
 	}
-	snapshot, _ := antigravityModels.AccountSnapshot(account.ID)
+	snapshot, _ := pool.antigravityModels.AccountSnapshot(account.ID)
 	if snapshot.Quota == nil || len(snapshot.Quota.Groups) != 2 {
 		t.Fatalf("quota summary not stored: %#v", snapshot.Quota)
 	}
-	if _, err := os.Stat(file); err != nil {
-		t.Fatalf("account was not persisted: %v", err)
+	assertSaved := func() {
+		t.Helper()
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := (&AntigravityProvider{}).LoadAccount("ag.json", file, raw)
+		if err != nil || loaded == nil {
+			t.Fatalf("reload saved account: account=%#v err=%v", loaded, err)
+		}
+		if loaded.NeedsVerification != account.NeedsVerification || loaded.VerificationURL != account.VerificationURL || loaded.HealthError != account.HealthError {
+			t.Fatalf("saved verification state=%v %q %q", loaded.NeedsVerification, loaded.VerificationURL, loaded.HealthError)
+		}
+		if loaded.antigravitySnapshot == nil || !reflect.DeepEqual(loaded.antigravitySnapshot.Quota, snapshot.Quota) {
+			t.Fatalf("saved quota differs from the published summary: snapshot=%+v", loaded.antigravitySnapshot)
+		}
 	}
+	assertSaved()
+	previousQuota := snapshot.Quota
 
 	dailyQuotaStatus = http.StatusForbidden
-	if err := syncAntigravityModels(context.Background(), transport, account, daily, production); err == nil {
+	if err := h.syncAntigravityModelsGuarded(context.Background(), generation, account, daily, production); err == nil {
 		t.Fatal("daily verification demand must be reported")
 	}
 	if !account.NeedsVerification || account.VerificationURL != "https://accounts.google.com/verify" {
 		t.Fatalf("daily 403 must flag verification: %v %q", account.NeedsVerification, account.VerificationURL)
 	}
-	snapshot, _ = antigravityModels.AccountSnapshot(account.ID)
-	if snapshot.Quota == nil {
-		t.Fatal("previous quota summary must survive a failed quota poll")
+	snapshot, _ = pool.antigravityModels.AccountSnapshot(account.ID)
+	if !reflect.DeepEqual(snapshot.Quota, previousQuota) {
+		t.Fatalf("failed quota poll changed summary: got %+v, want %+v", snapshot.Quota, previousQuota)
 	}
+	assertSaved()
 }
 
 func TestAntigravityProductionForbiddenDoesNotReplaceDailyAnswer(t *testing.T) {

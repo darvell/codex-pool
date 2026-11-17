@@ -344,4 +344,4 @@ Rollback after a security mutation is **not** safe: the old binary cannot enforc
 
 **Retirement.** Not applicable; the pool continues.
 
-**Post-release cleanup.** `templates/friend_landing.html` — 3989 lines, 211KB, embedded at `frontend.go:21` and read by no Go code — is deleted along with its embed entry and the assertion in `provider_xiaomi_test.go:482`.
+**Legacy friend page.** `/friend` serves `templates/friend_landing.html` for legacy setup and enrollment. `/`, `/join`, and `/recover` serve the React app. Keep the friend template and its embed entry while the compatibility route remains enabled.

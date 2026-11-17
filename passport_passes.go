@@ -131,25 +131,17 @@ func (p *PassportStore) createGuest(actorID, note, displayName string, expires *
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	err = p.db.Update(func(tx *bbolt.Tx) error {
-		if err := putJSON(tx.Bucket([]byte(bucketPrincipals)), id, pr); err != nil {
-			return err
-		}
+	p.mu.Lock()
+	err = p.commitLocked(pr, map[string]*ClientCredential{clientID: client}, func(tx *bbolt.Tx) error {
 		if err := putJSON(tx.Bucket([]byte(bucketJoinLinks)), linkID, link); err != nil {
-			return err
-		}
-		if err := putJSON(tx.Bucket([]byte(bucketClientCredentials)), clientID, client); err != nil {
 			return err
 		}
 		return p.audit(tx, actorID, "guest.created", id, note)
 	})
+	p.mu.Unlock()
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	p.mu.Lock()
-	p.principals[id] = pr
-	p.clients[clientID] = client
-	p.mu.Unlock()
 	return pr, link, client, token, nil
 }
 func (p *PassportStore) linkToken(link *JoinLink) (string, error) {

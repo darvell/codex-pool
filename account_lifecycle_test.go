@@ -1,10 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -88,7 +88,11 @@ func TestApplyProxyAuthFailure(t *testing.T) {
 }
 
 func TestRestoreValidatedStaticAccountPersistsHealthyState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "minimax.json")
+	poolDir := t.TempDir()
+	path := filepath.Join(poolDir, "minimax", "minimax.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(`{"api_key":"secret","dead":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +107,22 @@ func TestRestoreValidatedStaticAccountPersistsHealthyState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), `"dead"`) {
-		t.Fatalf("persisted account still dead: %s", data)
+	var persisted struct {
+		APIKey string `json:"api_key"`
+		Dead   bool   `json:"dead"`
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Dead || persisted.APIKey != account.AccessToken {
+		t.Fatalf("persisted account = %+v", persisted)
+	}
+	registry := &ProviderRegistry{byType: map[AccountType]Provider{AccountTypeMinimax: NewMinimaxProvider(nil)}}
+	reloaded, err := loadPool(poolDir, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 1 || reloaded[0].ID != account.ID || reloaded[0].Type != account.Type || reloaded[0].AccessToken != account.AccessToken || reloaded[0].Dead || reloaded[0].Penalty != 0 {
+		t.Fatalf("reloaded account = %+v", reloaded)
 	}
 }

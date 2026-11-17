@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -324,35 +323,6 @@ func (p *PassportStore) markOperatorTokenSeen(id string, now time.Time) {
 	})
 }
 
-type operatorRoute struct{ Method, Pattern, Capability string }
-
-var operatorRoutes = []operatorRoute{
-	{http.MethodGet, "/api/operator/v1", "operator.read"},
-	{http.MethodGet, "/api/operator/v1/whoami", "operator.read"},
-	{http.MethodGet, "/api/operator/v1/openapi.json", "operator.read"},
-	{http.MethodGet, "/api/operator/v1/guide", "operator.read"},
-	{http.MethodGet, "/api/operator/v1/models", "operator.read"},
-	{http.MethodGet, "/api/operator/v1/config/pi", "operator.read"},
-	{http.MethodGet, "/api/operator/v1/accounting/requests", "operator.read"},
-	{http.MethodGet, "/api/pool/stats", "operator.read"}, {http.MethodGet, "/api/pool/quota-waste", "operator.read"}, {http.MethodGet, "/api/pool/users", "operator.read"},
-	{http.MethodGet, "/api/pool/origins", "operator.read"}, {http.MethodGet, "/api/pool/daily-breakdown", "operator.read"},
-	{http.MethodGet, "/api/pool/hourly", "operator.read"}, {http.MethodGet, "/api/pool/signal", "operator.read"}, {http.MethodGet, "/api/pool/failure-insights", "operator.read"},
-	{http.MethodGet, "/api/pool/catalog", "operator.read"}, {http.MethodGet, "/api/me/usage", "operator.read"}, {http.MethodGet, "/api/pool/users/*/daily", "operator.read"},
-	{http.MethodGet, "/api/pool/users/*/hourly", "operator.read"}, {http.MethodGet, "/api/console/principals", "operator.read"},
-	{http.MethodGet, "/api/console/principals/*/usage", "operator.read"}, {http.MethodGet, "/api/console/audit", "operator.read"},
-	{http.MethodGet, "/api/console/analytics-health", "operator.read"}, {http.MethodGet, "/api/passes", "operator.read"},
-	{http.MethodGet, "/admin/accounts", "operator.read"}, {http.MethodGet, "/admin/tokens", "operator.read"},
-	{http.MethodPost, "/admin/reload", "operator.write"}, {http.MethodPost, "/admin/economics", "operator.write"},
-	{http.MethodPost, "/admin/clear-rate-limits", "operator.write"}, {http.MethodPost, "/admin/purge-anonymous", "operator.write"},
-	{http.MethodPost, "/admin/accounts/*/enable", "operator.write"}, {http.MethodPost, "/admin/accounts/*/disable", "operator.write"},
-	{http.MethodPost, "/admin/accounts/*/resurrect", "operator.write"}, {http.MethodPost, "/admin/accounts/*/refresh", "operator.write"},
-	{http.MethodPost, "/admin/antigravity/models/sync", "operator.write"}, {http.MethodPost, "/admin/antigravity/models/verify", "operator.write"},
-	{http.MethodPost, "/api/console/members", "operator.write"}, {http.MethodPost, "/api/passes", "operator.write"},
-	{http.MethodPatch, "/api/passes/*", "operator.write"}, {http.MethodDelete, "/api/passes/*", "operator.write"},
-	{http.MethodPost, "/api/passes/*/restore", "operator.write"}, {http.MethodPost, "/api/passes/*/rotate", "operator.write"},
-	{http.MethodPatch, "/api/principals/*", "operator.write"},
-}
-
 func operatorPathMatches(pattern, path string) bool {
 	p, q := strings.Split(strings.Trim(pattern, "/"), "/"), strings.Split(strings.Trim(path, "/"), "/")
 	if len(p) != len(q) {
@@ -498,14 +468,10 @@ func operatorAdvertisedModelCost(model string, now time.Time) (*piModelCost, boo
 
 func operatorModelManifest(pool *poolState, now time.Time) []operatorModelManifestEntry {
 	piByProviderID := make(map[string]operatorPiModel)
-	if data, err := generatePiModelsJSON("https://configured-public-url.invalid", "CODEX_POOL_MODEL_API_KEY", "CODEX_POOL_MODEL_API_KEY", pool); err == nil {
-		var config piModelsConfig
-		if json.Unmarshal(data, &config) == nil {
-			for providerKey, provider := range config.Providers {
-				for _, model := range provider.Models {
-					piByProviderID[providerKey+"\x00"+model.ID] = operatorPiModel{Model: model, API: provider.API}
-				}
-			}
+	config := preparePiModels("https://configured-public-url.invalid", "CODEX_POOL_MODEL_API_KEY", "CODEX_POOL_MODEL_API_KEY", pool)
+	for providerKey, provider := range config.Providers {
+		for _, model := range provider.Models {
+			piByProviderID[providerKey+"\x00"+model.ID] = operatorPiModel{Model: model, API: provider.API}
 		}
 	}
 	descriptors := poolModelsForClients(pool)
@@ -544,96 +510,6 @@ func operatorCatalogMode(w http.ResponseWriter, r *http.Request, defaultMode str
 		return "", false
 	}
 	return mode, true
-}
-
-func (h *proxyHandler) handleOperatorAPI(w http.ResponseWriter, r *http.Request) {
-	noStore(w)
-	access, ok := h.requireOperatorAPI(w, r)
-	if !ok {
-		return
-	}
-	switch r.URL.Path {
-	case "/api/operator/v1":
-		respondJSON(w, map[string]any{"api_version": operatorAPIVersion, "openapi": "/api/operator/v1/openapi.json", "guide": "/api/operator/v1/guide", "whoami": "/api/operator/v1/whoami", "models": "/api/operator/v1/models", "pi_config": "/api/operator/v1/config/pi", "accounting_requests": "/api/operator/v1/accounting/requests", "quota_waste": "/api/pool/quota-waste"})
-	case "/api/operator/v1/whoami":
-		response := map[string]any{"principal": publicPrincipal(access.Principal), "credential_kind": "browser_session", "permissions": []string{"operator.read", "operator.write"}}
-		if access.Token != nil {
-			response["credential_kind"] = "operator_token"
-			response["token"] = access.Token
-			response["permissions"] = operatorTokenPermissions(access.Token.Scope)
-		}
-		respondJSON(w, response)
-	case "/api/operator/v1/openapi.json":
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(operatorOpenAPI)
-	case "/api/operator/v1/guide":
-		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		_, _ = w.Write(operatorGuide)
-	case "/api/operator/v1/models":
-		now := time.Now().UTC()
-		mode, ok := operatorCatalogMode(w, r, "full")
-		if !ok {
-			return
-		}
-		models := operatorModelManifest(h.pool, now)
-		if mode == "configured" {
-			filtered := models[:0]
-			for _, model := range models {
-				if model.SupportingAccounts > 0 {
-					filtered = append(filtered, model)
-				}
-			}
-			models = filtered
-		}
-		respondJSON(w, map[string]any{"schema_version": poolModelsSchemaVersion, "generated_at": now, "catalog_mode": mode, "catalog_semantics": map[string]any{"full": "all models known to this deployment", "configured": "models with at least one configured supporting account", "supporting_accounts": "configured accounts supporting the model", "available_now": "transient routing readiness; false does not remove a model from the catalog"}, "pricing": map[string]any{"version": analyticsPricingVersion, "as_of": now, "freshness": "current runtime rate hints only; unknown is explicit and these rates are not historical facts"}, "pi_export": map[string]any{"endpoint": "/api/operator/v1/config/pi", "default_catalog": "configured", "credential_environment_variable": "CODEX_POOL_MODEL_API_KEY", "limitations": []string{"A generated Pi provider entry uses one API protocol, so mixed-endpoint OpenCode Go models not assigned to that entry are omitted; Pi itself supports Responses and Messages through other entries."}}, "models": models})
-	case "/api/operator/v1/config/pi":
-		mode, ok := operatorCatalogMode(w, r, "configured")
-		if !ok {
-			return
-		}
-		publicURL := getPublicURL()
-		if publicURL == "" {
-			respondJSONError(w, http.StatusServiceUnavailable, "public_url must be configured for portable exports")
-			return
-		}
-		data, err := generatePiModelsJSON(publicURL, "CODEX_POOL_MODEL_API_KEY", "CODEX_POOL_MODEL_API_KEY", h.pool)
-		if err != nil {
-			respondJSONError(w, 500, "failed to generate Pi configuration")
-			return
-		}
-		if mode == "configured" {
-			configured := map[string]bool{}
-			for _, model := range poolModelsForClients(h.pool) {
-				if model.SupportingAccounts > 0 {
-					configured[piProviderKeyForDescriptor(model.Provider)+"\x00"+model.ID] = true
-				}
-			}
-			var config piModelsConfig
-			if json.Unmarshal(data, &config) == nil {
-				for name, provider := range config.Providers {
-					filtered := provider.Models[:0]
-					for _, model := range provider.Models {
-						if configured[name+"\x00"+model.ID] {
-							filtered = append(filtered, model)
-						}
-					}
-					if len(filtered) == 0 {
-						delete(config.Providers, name)
-						continue
-					}
-					provider.Models = filtered
-					config.Providers[name] = provider
-				}
-				data, _ = json.MarshalIndent(config, "", "  ")
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(data)
-	case "/api/operator/v1/accounting/requests":
-		h.handleOperatorAccountingRequests(w, r)
-	default:
-		http.NotFound(w, r)
-	}
 }
 
 type accountingCursor struct {
@@ -807,50 +683,4 @@ func (h *proxyHandler) handleOperatorTokenItem(w http.ResponseWriter, r *http.Re
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-func validateOperatorOpenAPIRoutes() error {
-	var spec struct {
-		Paths map[string]map[string]json.RawMessage `json:"paths"`
-	}
-	if err := json.Unmarshal(operatorOpenAPI, &spec); err != nil {
-		return err
-	}
-	registered := make(map[string]string, len(operatorRoutes))
-	for _, route := range operatorRoutes {
-		path := strings.ReplaceAll(route.Pattern, "*", "{id}")
-		key := strings.ToLower(route.Method) + " " + path
-		registered[key] = route.Capability
-		raw, ok := spec.Paths[path][strings.ToLower(route.Method)]
-		if !ok {
-			return fmt.Errorf("operator route missing from OpenAPI: %s %s", route.Method, route.Pattern)
-		}
-		var operation struct {
-			Capability string `json:"x-operator-capability"`
-		}
-		if json.Unmarshal(raw, &operation) != nil || operation.Capability != route.Capability {
-			return fmt.Errorf("operator capability mismatch in OpenAPI: %s", key)
-		}
-	}
-	reference := string(operatorReference)
-	if !strings.Contains(reference, "Generated by scripts/render_operator_api_reference.py") {
-		return errors.New("operator API reference is not generated")
-	}
-	for path, item := range spec.Paths {
-		for method := range item {
-			switch method {
-			case "get", "post", "put", "patch", "delete", "head", "options":
-			default:
-				continue
-			}
-			if _, ok := registered[method+" "+path]; !ok {
-				return fmt.Errorf("OpenAPI operation missing from operator registry: %s %s", strings.ToUpper(method), path)
-			}
-			row := "| `" + strings.ToUpper(method) + "` | `" + path + "` |"
-			if !strings.Contains(reference, row) {
-				return fmt.Errorf("generated operator API reference is stale: %s %s", strings.ToUpper(method), path)
-			}
-		}
-	}
-	return nil
 }

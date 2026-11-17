@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -211,14 +212,12 @@ func TestCodexSetupDefaultModel(t *testing.T) {
 }
 
 func TestCodexSetupPreservesModel(t *testing.T) {
+	t.Setenv("PUBLIC_URL", "")
 	h := &proxyHandler{}
 	rr := httptest.NewRecorder()
 	h.serveCodexSetupScript(rr, httptest.NewRequest(http.MethodGet, "http://example.com/setup/codex/token", nil))
-	body := rr.Body.String()
-	start := strings.Index(body, `echo "4. Updating configuration..."`)
-	end := strings.Index(body, "if command -v codex >/dev/null")
-	if start < 0 || end <= start {
-		t.Fatal("configuration section missing")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setup status = %d", rr.Code)
 	}
 
 	for _, tc := range []struct{ name, initial, want string }{
@@ -229,48 +228,86 @@ func TestCodexSetupPreservesModel(t *testing.T) {
 		{"profile only", "[profiles.fast]\nmodel = \"gpt-5.6-luna\"\n", "gpt-6-astra"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			configFile := filepath.Join(dir, "config.toml")
-			if err := os.WriteFile(configFile, []byte(tc.initial), 0o600); err != nil {
+			home := t.TempDir()
+			authDir := filepath.Join(home, ".codex")
+			if err := os.MkdirAll(authDir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			for range 2 {
-				cmd := exec.Command("bash", "-eu")
-				cmd.Stdin = strings.NewReader(body[start:end])
-				cmd.Env = append(os.Environ(), "CONFIG_FILE="+configFile, "BASE_URL=http://example.com", "MODEL_CATALOG="+filepath.Join(dir, "models.json"), "MCP_SCRIPT="+filepath.Join(dir, "sync.sh"))
+			configFile := filepath.Join(authDir, "config.toml")
+			if tc.initial != "" {
+				if err := os.WriteFile(configFile, []byte(tc.initial), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := setupTestEnv(t, home, map[string]string{
+				"http://example.com/config/codex/token":                              `{"tokens":{"access_token":"test-access-token"}}`,
+				"http://example.com/backend-api/codex/models?client_version=0.125.0": `{"models":[]}`,
+			})
+			var firstConfig string
+			for run := range 2 {
+				cmd := exec.Command("bash", "-s")
+				cmd.Stdin = strings.NewReader(rr.Body.String())
+				cmd.Env = env
 				if output, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("configure: %v\n%s", err, output)
 				}
+				data, err := os.ReadFile(configFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				config := string(data)
+				root := strings.SplitN(config, "[", 2)[0]
+				if !strings.Contains(root, `model = "`+tc.want+`"`) || strings.Count(root, "model =") != 1 {
+					t.Fatalf("expected one root model %q:\n%s", tc.want, data)
+				}
+				if tc.initial != "" && !strings.Contains(config, tc.initial) {
+					t.Fatalf("existing configuration changed:\n%s", data)
+				}
+				for _, want := range []string{
+					`model_catalog_json = "` + filepath.Join(authDir, "model_catalog.json") + `"`,
+					`experimental_realtime_webrtc_call_base_url = "http://example.com/v1"`,
+					`experimental_realtime_ws_base_url = "http://example.com/v1"`,
+					`realtime.version = "v3"`, `realtime.transport = "webrtc"`, `[mcp_servers.model_sync]`,
+				} {
+					if !strings.Contains(config, want) {
+						t.Fatalf("installed config missing %q:\n%s", want, data)
+					}
+				}
+				if run == 0 {
+					firstConfig = config
+				} else if config != firstConfig {
+					t.Fatalf("repeated setup changed configuration:\n%s", data)
+				}
 			}
-			data, err := os.ReadFile(configFile)
-			if err != nil {
-				t.Fatal(err)
+			if data, err := os.ReadFile(filepath.Join(authDir, "auth.json")); err != nil || string(data) != `{"tokens":{"access_token":"test-access-token"}}` {
+				t.Fatalf("installed auth = %s, %v", data, err)
 			}
-			root := strings.SplitN(string(data), "[", 2)[0]
-			if !strings.Contains(root, `model = "`+tc.want+`"`) || strings.Count(root, "model =") != 1 {
-				t.Fatalf("expected one root model %q:\n%s", tc.want, data)
+			if data, err := os.ReadFile(filepath.Join(authDir, "model_catalog.json")); err != nil || string(data) != `{"models":[]}` {
+				t.Fatalf("installed catalog = %s, %v", data, err)
 			}
-			if tc.initial != "" && !strings.Contains(string(data), tc.initial) {
-				t.Fatalf("existing configuration changed:\n%s", data)
+			if info, err := os.Stat(filepath.Join(authDir, "model_sync.sh")); err != nil || info.Mode().Perm() != 0o700 {
+				t.Fatalf("MCP sidecar executable missing: %v", err)
 			}
 		})
 	}
 }
 
 func TestSetupExamplesUseAstra(t *testing.T) {
-	for _, path := range []string{"templates/friend_landing.html", "web/src/App.tsx"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
+	h := &proxyHandler{cfg: &config{}}
+	rr := httptest.NewRecorder()
+	h.serveFriendLanding(rr, httptest.NewRequest(http.MethodGet, "http://example.com/friend", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("friend page status = %d", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{`model="gpt-6-astra"`, `"model":"gpt-6-astra"`, "cute-code --model gpt-6-astra"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered onboarding example missing %q", want)
 		}
-		body := string(data)
-		if !strings.Contains(body, "gpt-6-astra") {
-			t.Errorf("%s has no Astra onboarding example", path)
-		}
-		for _, stale := range []string{`model="gpt-5.6-luna"`, `model="gpt-5.6-sol"`, `model: "gpt-5.6-sol"`, `"model":"gpt-5.6-sol"`, "cute-code --model gpt-5.6-sol", "Use gpt-5.6-luna as the first smoke-test model"} {
-			if strings.Contains(body, stale) {
-				t.Errorf("%s retains stale onboarding example %q", path, stale)
-			}
+	}
+	for _, stale := range []string{`model="gpt-5.6-luna"`, `model="gpt-5.6-sol"`, `model: "gpt-5.6-sol"`, `"model":"gpt-5.6-sol"`, "cute-code --model gpt-5.6-sol", "Use gpt-5.6-luna as the first smoke-test model"} {
+		if strings.Contains(body, stale) {
+			t.Errorf("rendered onboarding retains stale example %q", stale)
 		}
 	}
 }
@@ -366,14 +403,17 @@ func TestServeGrokSetupScript_BashPreservesConfigAndIsIdempotent(t *testing.T) {
 }
 
 func TestServePiSetupScriptMergesProviders(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is unavailable")
+	}
+	t.Setenv("PUBLIC_URL", "")
 	h := &proxyHandler{}
 	for _, target := range []string{
 		"http://example.com/setup/pi/testtoken",
 		"http://example.com/setup/pi/testtoken?shell=powershell",
 	} {
-		req := httptest.NewRequest(http.MethodGet, target, nil)
 		rr := httptest.NewRecorder()
-		h.servePiSetupScript(rr, req)
+		h.servePiSetupScript(rr, httptest.NewRequest(http.MethodGet, target, nil))
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s status = %d", target, rr.Code)
 		}
@@ -381,10 +421,57 @@ func TestServePiSetupScriptMergesProviders(t *testing.T) {
 		if !strings.Contains(body, "/config/pi/testtoken") || !strings.Contains(body, "providers") {
 			t.Fatalf("%s did not generate a merging Pi installer", target)
 		}
+		if strings.Contains(target, "powershell") {
+			continue
+		}
+		home := t.TempDir()
+		dir := filepath.Join(home, ".pi", "agent")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		modelsFile := filepath.Join(dir, "models.json")
+		if err := os.WriteFile(modelsFile, []byte(`{"defaultModel":"personal/model","providers":{"personal":{"baseUrl":"https://personal.test","apiKey":"personal-key"},"codex-pool":{"apiKey":"old-pool-key"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		env := setupTestEnv(t, home, map[string]string{
+			"http://example.com/config/pi/testtoken": `{"providers":{"codex-pool":{"apiKey":"new-pool-key","models":[{"id":"gpt-6-astra"}]},"pool-claude":{"apiKey":"claude-key"}}}`,
+		})
+		var first string
+		for run := range 2 {
+			cmd := exec.Command("bash", "-s")
+			cmd.Stdin = strings.NewReader(body)
+			cmd.Env = env
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("merge Pi providers: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(modelsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(`{"defaultModel":"personal/model","providers":{"personal":{"baseUrl":"https://personal.test","apiKey":"personal-key"},"codex-pool":{"apiKey":"new-pool-key","models":[{"id":"gpt-6-astra"}]},"pool-claude":{"apiKey":"claude-key"}}}`), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("merged Pi settings = %s", data)
+			}
+			if run == 0 {
+				first = string(data)
+			} else if string(data) != first {
+				t.Fatalf("repeated Pi setup changed providers: %s", data)
+			}
+		}
+		if info, err := os.Stat(modelsFile); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("Pi models file permissions: %v", err)
+		}
 	}
 }
 
 func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
+	t.Setenv("PUBLIC_URL", "")
 	secret := "test-secret-key-12345678901234567890"
 	t.Setenv("POOL_JWT_SECRET", secret)
 
@@ -406,6 +493,10 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
+	geminiAuth, err := generateGeminiAuth(secret, user)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := &proxyHandler{poolUsers: store}
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/gemini/tok123?shell=powershell", nil)
@@ -422,8 +513,17 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 	if !strings.Contains(body, "$env:CODE_ASSIST_ENDPOINT = $BaseUrl") {
 		t.Fatalf("expected PowerShell env setup in body, got:\n%s", body)
 	}
-	if strings.Contains(body, "`") {
-		t.Fatalf("PowerShell script should not contain backticks (Go raw string safety), got:\n%s", body)
+	for _, want := range []string{
+		"#requires -Version 5.1", "$BaseUrl = 'http://example.com'", "$PoolToken = '" + geminiAuth.AccessToken + "'",
+		"$utf8 = New-Object System.Text.UTF8Encoding($false)",
+		"$env:GOOGLE_GENAI_USE_GCA = '1'", "$env:GOOGLE_CLOUD_ACCESS_TOKEN = $PoolToken",
+		"$profilePath = $PROFILE.CurrentUserAllHosts",
+		"[System.IO.File]::WriteAllText($Path, $Value, $utf8)",
+		"Set-Utf8NoBom -Path $profilePath -Value $updated",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("PowerShell Gemini setup missing %q", want)
+		}
 	}
 }
 
@@ -653,42 +753,110 @@ func TestServeCuteCodeSettingsConfig(t *testing.T) {
 }
 
 func TestServeClaudeSetupScript_BashClearsConflictingClaudeAuth(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
-	t.Setenv("POOL_JWT_SECRET", secret)
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is unavailable")
+	}
+	t.Setenv("POOL_JWT_SECRET", "test-secret-key-12345678901234567890")
 	t.Setenv("PUBLIC_URL", "")
-
-	tmpDir := t.TempDir()
-	usersPath := filepath.Join(tmpDir, "pool_users.json")
-	store, err := newPoolUserStore(usersPath)
-	if err != nil {
-		t.Fatalf("newPoolUserStore: %v", err)
-	}
-
-	user := &PoolUser{ID: "user789", Token: "tok789", Email: "test3@example.com", PlanType: "pro", CreatedAt: time.Now()}
-	if err := store.Create(user); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	h := &proxyHandler{poolUsers: store}
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/claude/tok789", nil)
+	h := &proxyHandler{poolUsers: newTestPoolUserStoreWithUser(t, "tok789")}
 	rr := httptest.NewRecorder()
-	h.serveClaudeSetupScript(rr, req)
-
+	h.serveClaudeSetupScript(rr, httptest.NewRequest(http.MethodGet, "http://example.com/setup/claude/tok789", nil))
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		t.Fatalf("setup status = %d", rr.Code)
 	}
-	body := rr.Body.String()
-	for _, want := range []string{
-		"CONFLICTING_ENV_VARS=(",
-		"unset ANTHROPIC_AUTH_TOKEN",
-		"unset ANTHROPIC_API_KEY",
-		"CLAUDE_DIR=\"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"",
-		"delete settings.apiKeyHelper;",
-		"settings.pop('apiKeyHelper', None)",
+	auth, err := generateClaudeAuth(h.cfg.poolJWTSecret(), h.userForSetup("tok789"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	env := setupTestEnv(t, home, nil)
+	claudeDir := filepath.Join(home, "claude-config")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "ANTHROPIC_UNIX_SOCKET", "CLAUDE_CODE_SIMPLE"}
+	settingsEnv := map[string]string{"KEEP_ME": "kept", "ANTHROPIC_BASE_URL": "https://old.test", "CLAUDE_CODE_OAUTH_TOKEN": "old-token"}
+	profile := "export KEEP_ME=kept\nexport ANTHROPIC_BASE_URL=https://old.test\nexport CLAUDE_CODE_OAUTH_TOKEN=old-token\n"
+	for _, name := range conflicting {
+		settingsEnv[name] = "conflicting-value"
+		profile += "export " + name + "=conflicting-value\n"
+		env = append(env, name+"=conflicting-value")
+	}
+	settingsFile := filepath.Join(claudeDir, "settings.json")
+	settings, err := json.Marshal(map[string]any{"apiKeyHelper": "old-helper", "env": settingsEnv, "theme": "dark"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{
+		settingsFile:                        settings,
+		filepath.Join(home, ".bashrc"):      []byte(profile),
+		filepath.Join(home, ".claude.json"): []byte(`{"hasCompletedOnboarding":false,"theme":"dark"}`),
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("expected bash script to contain %q, got:\n%s", want, body)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
 		}
+	}
+	script := filepath.Join(home, "setup.sh")
+	if err := os.WriteFile(script, rr.Body.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		for _, shell := range []struct{ name, command string }{
+			{"sourced setup", `source "$1" >/dev/null; node -e 'console.log(JSON.stringify(process.env))'`},
+			{"saved profile", `source "$HOME/.bashrc"; node -e 'console.log(JSON.stringify(process.env))'`},
+		} {
+			cmd := exec.Command("bash", "-ec", shell.command, "setup-test", script)
+			cmd.Env = append(env, "KEEP_ME=kept")
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s: %v\n%s", shell.name, err, output)
+			}
+			var current map[string]string
+			if err := json.Unmarshal(output, &current); err != nil {
+				t.Fatalf("%s environment: %v\n%s", shell.name, err, output)
+			}
+			for _, name := range conflicting {
+				if _, exists := current[name]; exists {
+					t.Errorf("%s retains conflicting variable %s", shell.name, name)
+				}
+			}
+			if current["ANTHROPIC_BASE_URL"] != "http://example.com" || current["CLAUDE_CODE_OAUTH_TOKEN"] != auth.AccessToken || current["KEEP_ME"] != "kept" {
+				t.Fatalf("%s lost unrelated settings or did not use pool credentials", shell.name)
+			}
+		}
+		data, err := os.ReadFile(settingsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{"theme": "dark", "env": map[string]any{"KEEP_ME": "kept", "ANTHROPIC_BASE_URL": "http://example.com", "CLAUDE_CODE_OAUTH_TOKEN": auth.AccessToken}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Claude settings do not preserve unrelated values and remove conflicting auth: %s", data)
+		}
+		data, err = os.ReadFile(filepath.Join(home, ".claude.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["hasCompletedOnboarding"] != true || got["theme"] != "dark" {
+			t.Fatalf("Claude onboarding settings = %s", data)
+		}
+		data, err = os.ReadFile(filepath.Join(home, ".bashrc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(data), "export ANTHROPIC_BASE_URL=") != 1 || strings.Count(string(data), "export CLAUDE_CODE_OAUTH_TOKEN=") != 1 || !strings.Contains(string(data), "export KEEP_ME=kept") {
+			t.Fatal("profile must retain unrelated settings and one assignment per pool credential")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("custom CLAUDE_CONFIG_DIR ignored: %v", err)
 	}
 }
 
@@ -717,6 +885,10 @@ func TestServeClaudeSetupScript_PowerShell(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
+	claudeAuth, err := generateClaudeAuth(secret, user)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := &proxyHandler{poolUsers: store}
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/claude/tok456?shell=powershell", nil)
@@ -747,7 +919,16 @@ func TestServeClaudeSetupScript_PowerShell(t *testing.T) {
 	if !strings.Contains(body, "ConvertTo-Json -Depth 10") {
 		t.Fatalf("expected PowerShell JSON update logic in body, got:\n%s", body)
 	}
-	if strings.Contains(body, "`") {
-		t.Fatalf("PowerShell script should not contain backticks (Go raw string safety), got:\n%s", body)
+	for _, want := range []string{
+		"#requires -Version 5.1", "$BaseUrl = 'http://example.com'", "$OAuthToken = '" + claudeAuth.AccessToken + "'",
+		"$utf8 = New-Object System.Text.UTF8Encoding($false)",
+		"$profilePath = $PROFILE.CurrentUserAllHosts",
+		"[System.IO.File]::WriteAllText($Path, $Value, $utf8)",
+		"Set-Utf8NoBom -Path $profilePath -Value $updated",
+		"Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 10)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("PowerShell Claude setup missing %q", want)
+		}
 	}
 }

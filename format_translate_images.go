@@ -184,7 +184,7 @@ func multipartImageDataURL(fh *multipart.FileHeader) (string, error) {
 	return "data:" + ct + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 }
 
-func appendImagesGenerationData(dst []any, body []byte, responseFormat string) ([]any, int64, error) {
+func appendImagesGenerationData(dst []any, body []byte) ([]any, int64, error) {
 	var resp map[string]any
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, 0, fmt.Errorf("parse images response: %w", err)

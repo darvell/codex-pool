@@ -8,21 +8,10 @@ import (
 
 // defaultModelAliases are always registered unless overridden by config.toml
 // [model_aliases]. Keys are matched case-insensitively at resolve time.
-var defaultModelAliases = map[string]string{
-	// GPT-5.6 series short name → Sol (default variant).
-	"gpt-5.6": "gpt-5.6-sol",
-	// Keep the established Sol name pointed at the latest Sol release.
+var defaultModelAliases = profileRequestAliases(map[string]string{
+	"gpt-5.6":   "gpt-5.6-sol",
 	"gpt-6-sol": "gpt-6.1-sol",
-	// The 1M choices are client-facing context profiles. Upstream uses the
-	// corresponding base model ID.
-	"gpt-6-astra[1m]":   "gpt-6-astra",
-	"gpt-6-sol[1m]":     "gpt-6.1-sol",
-	"gpt-6.1-sol[1m]":   "gpt-6.1-sol",
-	"gpt-6-luna[1m]":    "gpt-6-luna",
-	"gpt-5.6-sol[1m]":   "gpt-5.6-sol",
-	"gpt-5.6-terra[1m]": "gpt-5.6-terra",
-	"gpt-5.6-luna[1m]":  "gpt-5.6-luna",
-}
+})
 
 // modelAliases manages model name aliases. Thread-safe for hot-reload.
 type modelAliases struct {

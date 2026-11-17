@@ -81,7 +81,7 @@ func passportContributionRequest(method, path, sessionToken, csrf string, body [
 func TestAccountContributionRequiresCSRFAndBindsOAuthActor(t *testing.T) {
 	t.Setenv("POOL_AUTH_ENCRYPTION_KEY", "test-passport-encryption-key")
 	store := testUsageStore(t)
-	passport, err := newPassportStore(store.db, nil)
+	passport, err := newPassportStore(store.db, nil, passportOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

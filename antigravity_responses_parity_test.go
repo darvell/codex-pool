@@ -131,7 +131,7 @@ func TestAntigravityResponsesNonStreamUsesProviderMetadataAndScaffold(t *testing
 			"finishReason": "STOP",
 		}},
 	}
-	got := antigravityGeminiToResponses(response, "gemini-3.5-flash")
+	got := antigravityGeminiToResponsesWithRequest(response, "gemini-3.5-flash", nil, nil)
 	if got["id"] != "resp_native-id" || int64(got["created_at"].(int64)) != 1784032496 {
 		t.Fatalf("provider metadata lost: %#v", got)
 	}
@@ -215,7 +215,7 @@ func TestAntigravityResponsesNonStreamPreservesPartOrder(t *testing.T) {
 			"finishReason": "STOP",
 		}},
 	}
-	got := antigravityGeminiToResponses(response, "gemini-3.5-flash")
+	got := antigravityGeminiToResponsesWithRequest(response, "gemini-3.5-flash", nil, nil)
 	output := got["output"].([]any)
 	if len(output) != 3 || output[0].(map[string]any)["type"] != "message" || output[1].(map[string]any)["type"] != "function_call" || output[2].(map[string]any)["type"] != "message" {
 		t.Fatalf("output order = %#v", output)

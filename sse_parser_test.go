@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -30,20 +31,20 @@ data: {"type":"response.function_call_arguments.delta","call_id":"call-b","delta
 data: {"type":"response.function_call_arguments.delta","call_id":"call-a","delta":"1}"}`),
 	}
 	for _, event := range events {
-		writer.processEvent(event)
+		if _, err := writer.Write(append(event, '\n', '\n')); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	var result map[string]any
 	if err := json.Unmarshal(writer.Result(), &result); err != nil {
 		t.Fatal(err)
 	}
-	content := result["content"].([]any)
-	first := content[0].(map[string]any)
-	second := content[1].(map[string]any)
-	if first["id"] != "call-a" || first["input"].(map[string]any)["value"] != float64(1) {
-		t.Fatalf("first tool = %#v", first)
+	want := []any{
+		map[string]any{"type": "tool_use", "id": "call-a", "name": "first", "input": map[string]any{"value": float64(1)}},
+		map[string]any{"type": "tool_use", "id": "call-b", "name": "second", "input": map[string]any{"value": float64(2)}},
 	}
-	if second["id"] != "call-b" || second["input"].(map[string]any)["value"] != float64(2) {
-		t.Fatalf("second tool = %#v", second)
+	if !reflect.DeepEqual(result["content"], want) {
+		t.Fatalf("interleaved tools = %#v, want %#v", result["content"], want)
 	}
 }
