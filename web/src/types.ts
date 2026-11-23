@@ -12,6 +12,7 @@ export interface QuotaWasteWindow {
   closed_window_count?: number;
   last_closed_at?: string;
   last_closed_unused_percent?: number;
+  average_closed_unused_percent?: number;
   confidence: string;
   source: string;
 }
@@ -37,11 +38,21 @@ export interface QuotaWasteCandidate {
   independent_scenario: boolean;
   review_burden: number;
 }
+export interface QuotaWasteGroup {
+  provider: string;
+  plan: string;
+  window: string;
+  average_closed_unused_percent?: number;
+  closed_window_count: number;
+  accounts: number;
+}
 export interface QuotaWasteResponse {
   schema_version: number;
   generated_at: string;
   days: number;
   accounts: QuotaWasteAccount[];
+  groups: QuotaWasteGroup[];
+  summary: Record<string, number>;
   candidates: QuotaWasteCandidate[];
   coverage: Record<string, unknown>;
   gaps: string[];

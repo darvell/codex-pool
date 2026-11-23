@@ -47,12 +47,13 @@ type quotaWasteWindow struct {
 	Status         string   `json:"status"`
 	// UnusedPercent is only populated for a confirmed, closed window. The
 	// current window's remaining quota is deliberately not called waste.
-	UnusedPercent           *float64 `json:"unused_percent,omitempty"`
-	ClosedWindowCount       int      `json:"closed_window_count,omitempty"`
-	LastClosedAt            *string  `json:"last_closed_at,omitempty"`
-	LastClosedUnusedPercent *float64 `json:"last_closed_unused_percent,omitempty"`
-	Confidence              string   `json:"confidence"`
-	Source                  string   `json:"source"`
+	UnusedPercent              *float64 `json:"unused_percent,omitempty"`
+	ClosedWindowCount          int      `json:"closed_window_count,omitempty"`
+	LastClosedAt               *string  `json:"last_closed_at,omitempty"`
+	LastClosedUnusedPercent    *float64 `json:"last_closed_unused_percent,omitempty"`
+	AverageClosedUnusedPercent *float64 `json:"average_closed_unused_percent,omitempty"`
+	Confidence                 string   `json:"confidence"`
+	Source                     string   `json:"source"`
 }
 
 type quotaWasteAccount struct {
@@ -79,12 +80,23 @@ type quotaWasteCandidate struct {
 	ReviewBurden       float64  `json:"review_burden"`
 }
 
+type quotaWasteGroup struct {
+	Provider                   string   `json:"provider"`
+	Plan                       string   `json:"plan"`
+	Window                     string   `json:"window"`
+	AverageClosedUnusedPercent *float64 `json:"average_closed_unused_percent,omitempty"`
+	ClosedWindowCount          int      `json:"closed_window_count"`
+	Accounts                   int      `json:"accounts"`
+}
+
 type quotaWasteResponse struct {
 	SchemaVersion int                   `json:"schema_version"`
 	GeneratedAt   time.Time             `json:"generated_at"`
 	Days          int                   `json:"days"`
 	Accounts      []quotaWasteAccount   `json:"accounts"`
+	Groups        []quotaWasteGroup     `json:"groups"`
 	Candidates    []quotaWasteCandidate `json:"candidates"`
+	Summary       map[string]any        `json:"summary"`
 	Coverage      map[string]any        `json:"coverage"`
 	Gaps          []string              `json:"gaps"`
 	Confidence    string                `json:"confidence"`
@@ -270,8 +282,8 @@ func (s *AnalyticsStore) quotaWasteRows(days int) ([]quotaWasteObservation, erro
 	if days < 1 {
 		days = 1
 	}
-	if days > 90 {
-		days = 90
+	if days > quotaWasteRetentionDays {
+		days = quotaWasteRetentionDays
 	}
 	const maxRows = 100000
 	rows, err := s.db.Query(`SELECT observed_at,account_id,seat_id,provider,plan,window_key,window_kind,used_fraction,reset_at,source,source_observed_at,health,fresh FROM quota_waste_observations WHERE observed_at >= datetime('now', ?) ORDER BY observed_at, account_id, window_key LIMIT ?`, fmt.Sprintf("-%d days", days), maxRows)
@@ -311,6 +323,7 @@ func quotaWasteDisplayRows(rows []quotaWasteObservation) []quotaWasteAccount {
 		closed           int
 		lastClosedAt     *string
 		lastClosedUnused *float64
+		closedUnused     []float64
 	}
 	accounts := map[string]*quotaWasteAccount{}
 	history := map[string]*windowHistory{}
@@ -353,6 +366,7 @@ func quotaWasteDisplayRows(rows []quotaWasteObservation) []quotaWasteAccount {
 				bound := (1 - *h.prior.Used) * 100
 				closedAt := r.ObservedAt
 				h.closed++
+				h.closedUnused = append(h.closedUnused, bound)
 				h.lastClosedAt = &closedAt
 				h.lastClosedUnused = &bound
 			}
@@ -366,7 +380,16 @@ func quotaWasteDisplayRows(rows []quotaWasteObservation) []quotaWasteAccount {
 			continue
 		}
 		r := h.latest
-		w := quotaWasteWindow{Key: r.WindowKey, Kind: r.WindowKind, LastObservedAt: r.ObservedAt, Status: "gathering", Confidence: "low", Source: r.Source, ClosedWindowCount: h.closed, LastClosedAt: h.lastClosedAt, LastClosedUnusedPercent: h.lastClosedUnused}
+		var averageClosed *float64
+		if len(h.closedUnused) > 0 {
+			total := 0.0
+			for _, value := range h.closedUnused {
+				total += value
+			}
+			value := total / float64(len(h.closedUnused))
+			averageClosed = &value
+		}
+		w := quotaWasteWindow{Key: r.WindowKey, Kind: r.WindowKind, LastObservedAt: r.ObservedAt, Status: "gathering", Confidence: "low", Source: r.Source, ClosedWindowCount: h.closed, LastClosedAt: h.lastClosedAt, LastClosedUnusedPercent: h.lastClosedUnused, AverageClosedUnusedPercent: averageClosed}
 		if r.Used != nil {
 			v := *r.Used
 			w.UsedFraction = &v
@@ -512,6 +535,57 @@ func quotaWasteCandidates(rows []quotaWasteObservation, accounts []quotaWasteAcc
 	return out
 }
 
+func quotaWasteGroups(accounts []quotaWasteAccount) []quotaWasteGroup {
+	type aggregate struct {
+		total    float64
+		count    int
+		accounts map[string]bool
+	}
+	groups := map[string]*aggregate{}
+	for _, account := range accounts {
+		for _, window := range account.Windows {
+			if window.AverageClosedUnusedPercent == nil || window.ClosedWindowCount == 0 {
+				continue
+			}
+			key := account.Provider + "\x00" + account.Plan + "\x00" + window.Key
+			g := groups[key]
+			if g == nil {
+				g = &aggregate{accounts: map[string]bool{}}
+				groups[key] = g
+			}
+			g.total += *window.AverageClosedUnusedPercent * float64(window.ClosedWindowCount)
+			g.count += window.ClosedWindowCount
+			g.accounts[account.ID] = true
+		}
+	}
+	out := make([]quotaWasteGroup, 0, len(groups))
+	for key, aggregate := range groups {
+		parts := strings.Split(key, "\x00")
+		average := aggregate.total / float64(aggregate.count)
+		out = append(out, quotaWasteGroup{Provider: parts[0], Plan: parts[1], Window: parts[2], AverageClosedUnusedPercent: &average, ClosedWindowCount: aggregate.count, Accounts: len(aggregate.accounts)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].AverageClosedUnusedPercent != nil && (out[j].AverageClosedUnusedPercent == nil || *out[i].AverageClosedUnusedPercent > *out[j].AverageClosedUnusedPercent)
+	})
+	return out
+}
+
+func quotaWasteSummary(accounts []quotaWasteAccount, groups []quotaWasteGroup, candidates []quotaWasteCandidate) map[string]any {
+	closed := 0
+	for _, account := range accounts {
+		for _, window := range account.Windows {
+			closed += window.ClosedWindowCount
+		}
+	}
+	actionable := 0
+	for _, candidate := range candidates {
+		if candidate.Eligibility == "modelled_safe" {
+			actionable++
+		}
+	}
+	return map[string]any{"accounts": len(accounts), "groups": len(groups), "closed_windows": closed, "actionable_scenarios": actionable}
+}
+
 func (h *proxyHandler) handleQuotaWaste(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -524,8 +598,8 @@ func (h *proxyHandler) handleQuotaWaste(w http.ResponseWriter, r *http.Request) 
 	days := 30
 	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > 90 {
-			respondJSONError(w, http.StatusBadRequest, "days must be between 1 and 90")
+		if err != nil || n < 1 || n > quotaWasteRetentionDays {
+			respondJSONError(w, http.StatusBadRequest, "days must be between 1 and 180")
 			return
 		}
 		days = n
@@ -548,23 +622,28 @@ func (h *proxyHandler) handleQuotaWaste(w http.ResponseWriter, r *http.Request) 
 	accounts := quotaWasteDisplayRows(rows)
 	candidates := quotaWasteCandidates(rows, accounts)
 	fresh := 0
-	for _, r := range rows {
-		if r.Fresh {
+	latest := map[string]quotaWasteObservation{}
+	for _, row := range rows {
+		latest[row.AccountID+"\x00"+row.WindowKey] = row
+	}
+	for _, row := range latest {
+		if row.Fresh {
 			fresh++
 		}
 	}
-	coverage := map[string]any{"observations": len(rows), "fresh_observations": fresh, "accounts": len(accounts), "days": days}
+	coverage := map[string]any{"observations": len(rows), "fresh_observations": fresh, "current_windows": len(latest), "accounts": len(accounts), "days": days}
 	gaps := []string{}
 	if len(rows) == 0 {
 		gaps = append(gaps, "history is still gathering; no observations are available")
 	}
-	if fresh < len(rows) {
-		gaps = append(gaps, "some provider snapshots are stale")
+	if fresh < len(latest) {
+		gaps = append(gaps, "some current provider snapshots are stale")
 	}
 	if len(rows) < 2 {
 		gaps = append(gaps, "startup/restart or partial windows are unknown")
 	}
-	respondJSON(w, quotaWasteResponse{SchemaVersion: quotaWasteSchemaVersion, GeneratedAt: time.Now().UTC(), Days: days, Accounts: accounts, Candidates: candidates, Coverage: coverage, Gaps: gaps, Confidence: func() string {
+	groups := quotaWasteGroups(accounts)
+	respondJSON(w, quotaWasteResponse{SchemaVersion: quotaWasteSchemaVersion, GeneratedAt: time.Now().UTC(), Days: days, Accounts: accounts, Groups: groups, Candidates: candidates, Summary: quotaWasteSummary(accounts, groups, candidates), Coverage: coverage, Gaps: gaps, Confidence: func() string {
 		if len(gaps) == 0 {
 			return "medium"
 		}
