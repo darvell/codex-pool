@@ -59,8 +59,20 @@ func TestQuotaWasteDisplayRowsOnlySummarizeConfirmedClosedWindows(t *testing.T) 
 	if window.UnusedPercent != nil {
 		t.Fatalf("open current window was labelled waste: %+v", window)
 	}
-	if window.Status != "open" || window.ClosedWindowCount != 1 || window.LastClosedUnusedPercent == nil || *window.LastClosedUnusedPercent != 40 {
+	if window.Status != "open" || window.ClosedWindowCount != 1 || window.LastClosedUnusedPercent == nil || *window.LastClosedUnusedPercent != 40 || window.AverageClosedUnusedPercent == nil || *window.AverageClosedUnusedPercent != 40 {
 		t.Fatalf("closed evidence=%+v", window)
+	}
+}
+
+func TestQuotaWasteGroupsAggregateClosedWindowsByType(t *testing.T) {
+	first, second := 20.0, 40.0
+	accounts := []quotaWasteAccount{
+		{ID: "a", Provider: "codex", Plan: "pro", Windows: []quotaWasteWindow{{Key: "primary", AverageClosedUnusedPercent: &first, ClosedWindowCount: 2}}},
+		{ID: "b", Provider: "codex", Plan: "pro", Windows: []quotaWasteWindow{{Key: "primary", AverageClosedUnusedPercent: &second, ClosedWindowCount: 1}}},
+	}
+	groups := quotaWasteGroups(accounts)
+	if len(groups) != 1 || groups[0].AverageClosedUnusedPercent == nil || *groups[0].AverageClosedUnusedPercent != 26.666666666666668 || groups[0].ClosedWindowCount != 3 || groups[0].Accounts != 2 {
+		t.Fatalf("groups=%+v", groups)
 	}
 }
 

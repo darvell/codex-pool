@@ -2044,10 +2044,10 @@
     "/api/pool/quota-waste": {
       "get": {
         "summary": "Quota waste observations and independent seat scenarios",
-        "description": "Returns one latest current state per account/window plus bounded closed-window evidence. Raw five-minute observations remain durable but are not returned. Current remaining quota is not labelled as expired waste.",
+        "description": "Returns one latest current state per account/window, historical closed-window waste aggregates grouped by provider, plan, and window, and independent seat scenarios. Raw five-minute observations remain durable but are not returned. Current remaining quota is not labelled as expired waste.",
         "x-operator-capability": "operator.read",
         "parameters": [
-          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 90, "default": 30}}
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 180, "default": 30}}
         ],
         "responses": {
           "200": {"description": "Quota waste insights", "content": {"application/json": {"schema": {"type": "object"}}}},

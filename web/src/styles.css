@@ -1293,16 +1293,42 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 }
 .inspector-backdrop { border: 0; padding: 0; cursor: default; }
 
-.quota-waste-view .quota-waste-heading { align-items: flex-start; }
+.quota-waste-heading { align-items: flex-start; }
+.quota-waste-heading > div:first-child p:last-child { margin: 8px 0 0; }
+.quota-waste-controls { display: flex; align-items: flex-end; gap: 14px; margin-left: auto; }
 .quota-waste-days { display: grid; gap: 5px; color: var(--muted); font-size: .78rem; }
 .quota-waste-days select { min-height: 34px; border: 1px solid var(--rule); background: var(--console-2); color: var(--ink); padding: 0 8px; }
 .quota-waste-warning { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--rule-hot); color: var(--gold-hot); background: rgba(139, 103, 33, .12); }
-.quota-waste-account { align-items: flex-start; }
-.quota-waste-windows { display: grid; gap: 8px; min-width: min(100%, 420px); }
-.quota-waste-window { display: grid; gap: 2px; text-align: right; }
-.quota-waste-window small, .quota-waste-candidate small { color: var(--muted); }
+.quota-waste-summary { margin-top: 8px; }
+.quota-waste-groups { display: grid; gap: 17px; padding: 8px 0 12px; }
+.quota-waste-bar-row { display: grid; gap: 6px; }
+.quota-waste-bar-label, .quota-waste-window-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; font-family: "IBM Plex Mono", monospace; }
+.quota-waste-bar-label strong, .quota-waste-window-heading strong { color: var(--ink); font-size: .72rem; font-weight: 500; }
+.quota-waste-bar-label small, .quota-waste-window-heading b { color: var(--muted); font-size: .61rem; font-weight: 400; }
+.quota-waste-bar { height: 28px; position: relative; overflow: hidden; border: 1px solid var(--rule-hot); background: rgba(87,230,123,.12); }
+.quota-waste-bar i { display: block; height: 100%; background: repeating-linear-gradient(135deg, rgba(255,178,63,.7) 0 4px, rgba(255,178,63,.38) 4px 8px); border-right: 1px solid #ffb23f; }
+.quota-waste-bar span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 9px; font: .61rem "IBM Plex Mono", monospace; }
+.quota-waste-bar b { color: #ffcf72; font-weight: 600; }
+.quota-waste-bar em { color: var(--success); font-style: normal; }
+.quota-waste-bar.unknown { display: grid; place-items: center; border-style: dashed; background: transparent; color: var(--muted); font: .61rem "IBM Plex Mono", monospace; }
+.quota-waste-account-list, .quota-waste-scenarios { display: grid; gap: 10px; }
+.quota-waste-account-card, .quota-waste-scenario { padding: 14px; border: 1px solid var(--rule); background: rgba(11,11,9,.55); }
+.quota-waste-account-card > header, .quota-waste-scenario { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.quota-waste-account-card header strong, .quota-waste-scenario strong { display: block; color: var(--ink); font: 500 .82rem "IBM Plex Sans Condensed", sans-serif; }
+.quota-waste-account-card header small, .quota-waste-scenario small { display: block; margin-top: 4px; color: var(--muted); font: .61rem "IBM Plex Mono", monospace; }
+.quota-waste-account-windows { display: grid; gap: 14px; margin-top: 15px; }
+.quota-waste-window-row { display: grid; gap: 6px; }
+.quota-waste-window-heading b { color: #ffb23f; font: 600 .72rem "IBM Plex Mono", monospace; }
+.quota-waste-advice { padding: 4px 7px; border: 1px solid var(--rule); color: var(--muted); font: .58rem "IBM Plex Mono", monospace; text-transform: capitalize; }
+.quota-waste-advice.modelled_safe { border-color: rgba(87,230,123,.55); color: var(--success); }
+.quota-waste-advice-copy, .quota-waste-scenario p { margin: 12px 0 0; color: var(--muted); font: .7rem/1.45 "IBM Plex Sans Condensed", sans-serif; }
+.quota-waste-scenario > b { color: var(--gold-hot); font: .68rem "IBM Plex Mono", monospace; white-space: nowrap; }
+.quota-waste-scenario.modelled_safe { border-left: 2px solid var(--success); }
+.quota-waste-scenario.insufficient_evidence { border-left: 2px solid #ffb23f; }
+.quota-waste-gap { margin: 10px 0 0; color: var(--muted); font: .68rem "IBM Plex Mono", monospace; }
 @media (max-width: 760px) {
-  .quota-waste-view .quota-waste-heading, .quota-waste-account { display: grid; gap: 12px; }
-  .quota-waste-window { text-align: left; }
-  .quota-waste-windows { min-width: 0; }
+  .quota-waste-heading, .quota-waste-controls, .quota-waste-account-card > header, .quota-waste-scenario { display: grid; gap: 12px; }
+  .quota-waste-controls { margin-left: 0; }
+  .quota-waste-bar-label, .quota-waste-window-heading { display: grid; gap: 4px; }
+  .quota-waste-bar span { font-size: .53rem; }
 }
