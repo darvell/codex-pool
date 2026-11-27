@@ -1358,6 +1358,14 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 			if cand := s.overloadCandidate(turn); cand != nil {
 				return s.replaceTurnUpstream(cand, turn, "overload")
 			}
+			// Still no candidate: replay on this socket below, which needs
+			// turnMu again and the same single pending turn.
+			s.turnMu.Lock()
+			if len(s.turns) != 1 || s.turns[0] != turn {
+				pendingCount := len(s.turns)
+				s.turnMu.Unlock()
+				return fmt.Errorf("cannot retry websocket overload with %d pending responses", pendingCount)
+			}
 		}
 	}
 	turn.responseID = ""

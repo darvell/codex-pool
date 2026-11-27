@@ -220,6 +220,60 @@ func TestCodexRelayOverloadRecoveryCooldownBounded(t *testing.T) {
 	}
 }
 
+// Every other account still cooling after the recovery wait must fall back
+// to the same-socket replay without unlocking turnMu twice.
+func TestCodexRelayOverloadRecoveryWithoutCandidateReplaysInPlace(t *testing.T) {
+	frames := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, data, err := conn.Read(r.Context())
+		if err == nil {
+			frames <- string(data)
+		}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(upstream.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	active := &Account{Type: AccountTypeCodex, ID: "active", AccessToken: "a", PlanType: "promax"}
+	// The other account is still cooling when the retry delay ends, so the
+	// relay waits for it. Its plan cannot serve the turn, so candidate
+	// selection still finds nothing after the wait.
+	retryDelay := websocketOverloadDelay(websocketOverloadSwapAfter)
+	other := &Account{Type: AccountTypeCodex, ID: "other", AccessToken: "b", PlanType: "pro", RateLimitUntil: time.Now().Add(retryDelay + 300*time.Millisecond)}
+	turn := &codexRelayTurn{model: "gpt-5.6-sol", request: []byte(`{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}`)}
+	state := &codexRelayState{
+		ctx:           ctx,
+		h:             &proxyHandler{pool: newPoolState([]*Account{active, other}, false)},
+		opts:          codexCyberSwapOptions{ReqID: "test", RequiredPlan: "promax"},
+		activeAccount: active,
+		upstreamConn:  conn,
+		turns:         []*codexRelayTurn{turn},
+	}
+
+	if err := state.retryOverloadedTurn(&overloadPendingErr{turn: turn, count: websocketOverloadSwapAfter}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	select {
+	case got := <-frames:
+		if !strings.Contains(got, "response.create") {
+			t.Fatalf("replayed frame = %s", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn was not replayed on the same socket")
+	}
+}
+
 func TestCodexRelayOverloadRecoveryDoesNotWaitWithoutAlternate(t *testing.T) {
 	only := &Account{Type: AccountTypeCodex, ID: "only", AccessToken: "only", PlanType: "pro", RateLimitUntil: time.Now().Add(30 * time.Second)}
 	state := &codexRelayState{h: &proxyHandler{pool: newPoolState([]*Account{only}, false)}, activeAccount: only}
