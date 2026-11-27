@@ -93,6 +93,7 @@ type Account struct {
 	LastPenalty             time.Time
 	Dead                    bool
 	LastUsed                time.Time
+	health                  accountHealth
 	RateLimitUntil          time.Time
 	BackoffLevel            int // exponent: cooldown = min(1s * 2^level, 30m)
 	AllowedSourceIPs        []string
@@ -996,6 +997,12 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 							conversationID, id)
 					}
 				}
+				if ok && healthEscapesStickyLocked(a, now) {
+					ok = false
+					if p.debug {
+						log.Printf("unpinning conversation %s from failing or slow account %s", conversationID, id)
+					}
+				}
 				overBudget := accountType == AccountTypeCodex && proMaxOverBudgetLocked(a, now)
 				a.mu.Unlock()
 				if ok && !overBudget {
@@ -1019,6 +1026,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		tier         int
 		secondaryPct float64
 		score        float64
+		health       float64
 		proMax       bool
 		overBudget   bool
 	}
@@ -1069,13 +1077,14 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			continue
 		}
 		tier := accountTier(a.Type, a.PlanType)
-		score := scoreAccountLocked(a, now)
+		health := healthFactorLocked(a, now)
+		score := scoreAccountLocked(a, now) * health
 		proMax := accountType == AccountTypeCodex && normalizeCodexPlanType(a.PlanType) == codexPlanProMax
 		overBudget := proMax && proMaxOverBudgetLocked(a, now)
 		a.mu.Unlock()
 		// Prefer less-loaded accounts
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score, proMax: proMax, overBudget: overBudget})
+		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score, health: health, proMax: proMax, overBudget: overBudget})
 	}
 
 	selectCandidate := func(accounts []scoredAccount) *Account {
@@ -1185,7 +1194,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 				if load < 0 {
 					load = 0
 				}
-				weight := base * routingLoadScale / (1 + int(load))
+				weight := int(float64(base*routingLoadScale) * candidate.health / float64(1+load))
 				if weight < 1 {
 					weight = 1
 				}

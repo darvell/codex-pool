@@ -104,6 +104,76 @@ func TestWebSocketOverloadRetriesOnSameClientConnection(t *testing.T) {
 	}
 }
 
+func TestWebSocketScopesCodexDeviceIdentity(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+	const installation = "5f0c3a52-9d2e-4b8f-a1c7-3e6d9b2f4a10"
+
+	handshake := make(chan http.Header, 1)
+	frames := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshake <- r.Header.Clone()
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, data, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		frames <- string(data)
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.created","response":{"id":"resp-1"}}`))
+		_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"response.completed","response":{"id":"resp-1"}}`))
+	}))
+	defer upstream.Close()
+
+	baseURL, _ := url.Parse(upstream.URL)
+	account := &Account{Type: AccountTypeCodex, ID: "codex", AccessToken: "codex-token", AccountID: "acct", PlanType: "pro"}
+	h := &proxyHandler{
+		cfg:       &config{maxAttempts: 1, websocketReadLimit: 1 << 20, disableRefresh: true},
+		transport: http.DefaultTransport,
+		pool:      newPoolState([]*Account{account}, false),
+		registry:  NewProviderRegistry(NewCodexProvider(baseURL, baseURL, baseURL), NewClaudeProvider(baseURL), NewGeminiProvider(baseURL, baseURL)),
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	wsURL, _ := url.Parse(proxy.URL)
+	wsURL.Scheme = "ws"
+	wsURL.Path = "/responses"
+	headers := http.Header{
+		"Authorization":           {"Bearer " + generateClaudePoolToken("test-secret", "ws-device-user")},
+		"X-Codex-Installation-Id": {installation},
+	}
+	client, _, err := websocket.Dial(context.Background(), wsURL.String(), &websocket.DialOptions{HTTPHeader: headers})
+	if err != nil {
+		t.Fatalf("dial proxy websocket: %v", err)
+	}
+	defer client.CloseNow()
+	frame := `{"type":"response.create","model":"gpt-5.6-sol","input":"hello","client_metadata":{"x-codex-installation-id":"` + installation + `"}}`
+	if err := client.Write(context.Background(), websocket.MessageText, []byte(frame)); err != nil {
+		t.Fatalf("write response.create: %v", err)
+	}
+
+	got := <-handshake
+	sent := <-frames
+	scoped := got.Get("X-Codex-Installation-Id")
+	if scoped == "" || scoped == installation {
+		t.Fatalf("handshake installation id = %q, want a scoped replacement", scoped)
+	}
+	if strings.Contains(sent, installation) || !strings.Contains(sent, scoped) {
+		t.Fatalf("frame = %s, want installation id %s", sent, scoped)
+	}
+	if beta := got.Get("OpenAI-Beta"); beta != codexWebSocketBeta {
+		t.Fatalf("OpenAI-Beta = %q, want %q", beta, codexWebSocketBeta)
+	}
+	if version := got.Get("version"); version != currentCodexFingerprint().Version {
+		t.Fatalf("version = %q, want %q", version, currentCodexFingerprint().Version)
+	}
+}
+
 func TestCodexRelayTransportRetryOnlyBeforeOutput(t *testing.T) {
 	turn := &codexRelayTurn{model: "gpt-5.6-sol"}
 	state := &codexRelayState{turns: []*codexRelayTurn{turn}}

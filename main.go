@@ -135,7 +135,14 @@ func main() {
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   50,
 	}
-	_ = http2.ConfigureTransport(standardTransport)
+	// A pooled HTTP/2 connection that a NAT or middlebox drops silently looks
+	// alive to both ends, and every stream placed on it hangs until TCP gives
+	// up minutes later. Probe idle connections and close the ones that stop
+	// answering.
+	if h2, err := http2.ConfigureTransports(standardTransport); err == nil {
+		h2.ReadIdleTimeout = upstreamHTTP2ReadIdleTimeout
+		h2.PingTimeout = upstreamHTTP2PingTimeout
+	}
 	antigravityTransport := cloneAntigravityHTTP11Transport(standardTransport)
 
 	// Anthropic traffic defaults to the Node.js 24.x uTLS profile used by Claude

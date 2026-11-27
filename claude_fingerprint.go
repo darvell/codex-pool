@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 )
@@ -312,17 +313,29 @@ func ccMinimalBetaHeader() string {
 // [4, 7, 20] from the first user message text, concatenates with a hardcoded
 // salt and version, SHA256 hashes, and takes the first 3 hex chars.
 // See free-code/src/utils/fingerprint.ts computeFingerprint().
+//
+// The positions index JavaScript string units (UTF-16), not bytes, so any
+// non-ASCII text before position 20 must be sampled the same way. Sampled
+// units are decoded together, and an unpaired surrogate becomes U+FFFD,
+// which is how Node encodes it before hashing.
 func ccComputeFingerprint(messageText string) string {
 	indices := [3]int{4, 7, 20}
-	chars := make([]byte, 3)
-	for i, idx := range indices {
-		if idx < len(messageText) {
-			chars[i] = messageText[idx]
-		} else {
-			chars[i] = '0'
+	units := make([]uint16, 0, indices[len(indices)-1]+2)
+	for _, r := range messageText {
+		units = utf16.AppendRune(units, r)
+		if len(units) > indices[len(indices)-1] {
+			break
 		}
 	}
-	input := ccFingerprintSalt + string(chars) + ccVersion
+	chars := make([]uint16, 0, len(indices))
+	for _, idx := range indices {
+		if idx < len(units) {
+			chars = append(chars, units[idx])
+		} else {
+			chars = append(chars, '0')
+		}
+	}
+	input := ccFingerprintSalt + string(utf16.Decode(chars)) + ccVersion
 	h := sha256.Sum256([]byte(input))
 	// hex of first 2 bytes = 4 chars, [:3] = first 3 hex chars of full hash
 	return hex.EncodeToString(h[:2])[:3]

@@ -255,6 +255,7 @@ func codexExchangeCode(code, verifier string) (*CodexTokenResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	applyCodexClientIdentity(req.Header)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

@@ -211,7 +211,6 @@ func (p *GrokProvider) RefreshToken(ctx context.Context, acc *Account, transport
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-pool-proxy")
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {

@@ -182,7 +182,7 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-pool-proxy")
+	applyCodexClientIdentity(req.Header)
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {

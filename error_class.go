@@ -181,7 +181,8 @@ func isServerOverloadedError(body []byte) bool {
 	}
 	if json.Unmarshal(bytes.TrimSpace(body), &envelope) == nil {
 		for _, code := range []string{envelope.Code, envelope.Error.Code, envelope.Response.Error.Code} {
-			if strings.EqualFold(strings.TrimSpace(code), "server_is_overloaded") {
+			code = strings.ToLower(strings.TrimSpace(code))
+			if code == "server_is_overloaded" || code == "slow_down" {
 				return true
 			}
 		}
@@ -197,14 +198,34 @@ func isServerOverloadedError(body []byte) bool {
 			envelope.Error.Message,
 			envelope.Response.Error.Message,
 		} {
-			message = strings.ToLower(message)
-			if strings.Contains(message, "server_is_overloaded") || strings.Contains(message, "server is overloaded") || strings.Contains(message, "servers are currently overloaded") {
+			if isCapacityShedMessage(message) {
 				return true
 			}
 		}
 		return false
 	}
 	return strings.Contains(strings.ToLower(string(body)), "server_is_overloaded")
+}
+
+// isCapacityShedMessage matches the human-readable forms of a capacity shed.
+// The generic "error occurred while processing your request" reply arrives
+// as a 400 but succeeds unchanged on retry, so it belongs here too. Only
+// explicit error fields reach this check: a JSON body may echo request text.
+func isCapacityShedMessage(message string) bool {
+	message = strings.ToLower(message)
+	for _, needle := range []string{
+		"server_is_overloaded",
+		"server is overloaded",
+		"servers are overloaded",
+		"servers are currently overloaded",
+		"selected model is at capacity",
+		"an error occurred while processing your request",
+	} {
+		if strings.Contains(message, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // Retryable returns true if this class should be retried on another account.

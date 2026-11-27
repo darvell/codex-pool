@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -100,29 +102,27 @@ func isPermanentRefreshTokenError(err error) bool {
 	return false
 }
 
-const serverOverloadCooldown = 30 * time.Second
+// maxSameAccountOverloadRetries bounds how often one request retries a
+// capacity shed on the account that returned it before moving elsewhere.
+const maxSameAccountOverloadRetries = 3
 
-func (h *proxyHandler) applyServerOverloadCooldown(account *Account) {
-	if account == nil {
-		return
-	}
-	until := time.Now().Add(serverOverloadCooldown)
-	account.mu.Lock()
-	if account.RateLimitUntil.Before(until) {
-		account.RateLimitUntil = until
-	}
-	account.mu.Unlock()
-}
-
-func serverOverloadRetryDelay(h http.Header, retry int) time.Duration {
+// serverOverloadRetryDelay paces a retry after a capacity shed. The
+// provider's hint wins when present, from the Retry-After or Retry-After-Ms
+// header or the headers it echoes inside the error body; otherwise the delay
+// doubles from 500ms. Either way the wait stays under maxDelay so one shed
+// cannot park a request for minutes.
+func serverOverloadRetryDelay(h http.Header, body []byte, retry int) time.Duration {
 	const (
 		baseDelay = 500 * time.Millisecond
-		maxDelay  = 10 * time.Second
+		maxDelay  = 8 * time.Second
 	)
 	if retry < 1 {
 		retry = 1
 	}
-	if delay, ok := parseRetryAfter(h); ok && delay < maxDelay {
+	if delay, ok := overloadRetryHint(h, body); ok {
+		if delay > maxDelay {
+			return maxDelay
+		}
 		return delay
 	}
 	delay := baseDelay << uint(retry-1)
@@ -130,6 +130,49 @@ func serverOverloadRetryDelay(h http.Header, retry int) time.Duration {
 		return maxDelay
 	}
 	return delay
+}
+
+func overloadRetryHint(h http.Header, body []byte) (time.Duration, bool) {
+	if delay, ok := parseRetryAfter(h); ok {
+		return delay, true
+	}
+	if delay, ok := parseRetryDuration(h.Get("Retry-After-Ms"), time.Millisecond); ok {
+		return delay, true
+	}
+	var envelope struct {
+		Error struct {
+			Headers map[string]any `json:"headers"`
+		} `json:"error"`
+		Response struct {
+			Error struct {
+				Headers map[string]any `json:"headers"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if len(body) == 0 || json.Unmarshal(body, &envelope) != nil {
+		return 0, false
+	}
+	for _, echoed := range []map[string]any{envelope.Error.Headers, envelope.Response.Error.Headers} {
+		if raw, ok := echoed["retry-after"]; ok {
+			if delay, ok := parseRetryDuration(fmt.Sprint(raw), time.Second); ok {
+				return delay, true
+			}
+		}
+		if raw, ok := echoed["retry-after-ms"]; ok {
+			if delay, ok := parseRetryDuration(fmt.Sprint(raw), time.Millisecond); ok {
+				return delay, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseRetryDuration(raw string, unit time.Duration) (time.Duration, bool) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return time.Duration(n * float64(unit)), true
 }
 
 func parseRetryAfter(h http.Header) (time.Duration, bool) {

@@ -674,46 +674,106 @@ func postPoolResponses(t *testing.T, proxy *httptest.Server, body string) (int, 
 	return resp.StatusCode, out
 }
 
-func TestServerOverloadFailsOverToAnotherAccountWithoutBackoff(t *testing.T) {
-	t.Setenv("POOL_JWT_SECRET", "test-secret")
-
-	var busyCalls, freeCalls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// overloadSplitUpstream sheds every request for acct_busy until busyFailures
+// runs out, pacing retries with a short Retry-After-Ms hint.
+func overloadSplitUpstream(busyFailures int32, busyCalls, freeCalls *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("ChatGPT-Account-ID") == "acct_busy" {
-			busyCalls.Add(1)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`))
-			return
+			if busyCalls.Add(1) <= busyFailures {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After-Ms", "20")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`))
+				return
+			}
+		} else {
+			freeCalls.Add(1)
 		}
-		freeCalls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
 	}))
-	defer upstream.Close()
+}
 
+func overloadSplitAccounts() (*Account, *Account) {
 	busy := &Account{Type: AccountTypeCodex, ID: "busy", AccessToken: "busy-token", PlanType: "promax", AccountID: "acct_busy"}
 	free := &Account{Type: AccountTypeCodex, ID: "free", AccessToken: "free-token", PlanType: "pro", AccountID: "acct_free"}
+	return busy, free
+}
+
+func assertNotCooling(t *testing.T, account *Account) {
+	t.Helper()
+	account.mu.Lock()
+	defer account.mu.Unlock()
+	if account.RateLimitUntil.After(time.Now()) {
+		t.Fatalf("account %s cooled down for a request-scoped overload", account.ID)
+	}
+}
+
+func TestServerOverloadRetriesSameAccountFirst(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var busyCalls, freeCalls atomic.Int32
+	upstream := overloadSplitUpstream(2, &busyCalls, &freeCalls)
+	defer upstream.Close()
+	busy, free := overloadSplitAccounts()
 	proxy := newOverloadFailoverHandler(t, upstream, []*Account{busy, free})
 
 	start := time.Now()
 	status, body := postPoolResponses(t, proxy, `{"model":"gpt-5.6-sol","stream":true,"input":"hello"}`)
-	elapsed := time.Since(start)
 	if status != http.StatusOK {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
-	if busyCalls.Load() != 1 || freeCalls.Load() != 1 {
-		t.Fatalf("busy calls=%d free calls=%d, want one each", busyCalls.Load(), freeCalls.Load())
+	if busyCalls.Load() != 3 || freeCalls.Load() != 0 {
+		t.Fatalf("busy calls=%d free calls=%d, want 3 and 0", busyCalls.Load(), freeCalls.Load())
 	}
-	if elapsed > 400*time.Millisecond {
-		t.Fatalf("failover took %s; it must not back off when another account is available", elapsed)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("retries took %s; the Retry-After-Ms hint was not honored", elapsed)
 	}
-	busy.mu.Lock()
-	cooling := busy.RateLimitUntil.After(time.Now())
-	busy.mu.Unlock()
-	if !cooling {
-		t.Fatal("overloaded account was not shed after failing over")
+	assertNotCooling(t, busy)
+}
+
+func TestServerOverloadFailsOverAfterSameAccountBudget(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+
+	var busyCalls, freeCalls atomic.Int32
+	upstream := overloadSplitUpstream(1<<30, &busyCalls, &freeCalls)
+	defer upstream.Close()
+	busy, free := overloadSplitAccounts()
+	proxy := newOverloadFailoverHandler(t, upstream, []*Account{busy, free})
+
+	status, body := postPoolResponses(t, proxy, `{"model":"gpt-5.6-sol","stream":true,"input":"hello"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if want := int32(maxSameAccountOverloadRetries + 1); busyCalls.Load() != want || freeCalls.Load() != 1 {
+		t.Fatalf("busy calls=%d free calls=%d, want %d and 1", busyCalls.Load(), freeCalls.Load(), want)
+	}
+	assertNotCooling(t, busy)
+}
+
+func TestServerOverloadRetryDelayHonorsHints(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		header http.Header
+		body   string
+		want   time.Duration
+	}{
+		{"retry-after seconds", http.Header{"Retry-After": {"2"}}, "", 2 * time.Second},
+		{"retry-after-ms", http.Header{"Retry-After-Ms": {"250"}}, "", 250 * time.Millisecond},
+		{"echoed body seconds", nil, `{"error":{"headers":{"retry-after":"1.5"}}}`, 1500 * time.Millisecond},
+		{"echoed body millis", nil, `{"response":{"error":{"headers":{"retry-after-ms":400}}}}`, 400 * time.Millisecond},
+		{"hint capped", http.Header{"Retry-After": {"120"}}, "", 8 * time.Second},
+		{"backoff without hint", nil, "", 1 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serverOverloadRetryDelay(tc.header, []byte(tc.body), 2); got != tc.want {
+				t.Fatalf("delay=%s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

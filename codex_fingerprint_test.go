@@ -20,6 +20,7 @@ func TestCodexProviderAddsCLIFingerprintHeadersAndCookies(t *testing.T) {
 	req.Header.Set("sec-fetch-site", "cross-site")
 	req.Header.Set("sec-ch-ua", `"Chromium";v="144"`)
 	req.Header.Set("Accept-Language", "fr")
+	req.Header.Set("version", "0.100.0")
 	NewCodexProvider(nil, nil, nil).SetAuthHeaders(req, acc)
 
 	checks := map[string]string{
@@ -27,7 +28,8 @@ func TestCodexProviderAddsCLIFingerprintHeadersAndCookies(t *testing.T) {
 		"ChatGPT-Account-ID":                "acct_123",
 		"originator":                        "codex_cli_rs",
 		"x-openai-internal-codex-residency": "us",
-		"OpenAI-Beta":                       "responses_websockets=2026-02-06",
+		"OpenAI-Beta":                       "responses=experimental",
+		"version":                           currentCodexFingerprint().Version,
 	}
 	for key, want := range checks {
 		if got := req.Header.Get(key); got != want {
@@ -49,6 +51,17 @@ func TestCodexProviderAddsCLIFingerprintHeadersAndCookies(t *testing.T) {
 	cookie := req.Header.Get("Cookie")
 	if !strings.Contains(cookie, "cf_clearance=clear") || !strings.Contains(cookie, "__cf_bm=bm") {
 		t.Fatalf("Cookie = %q, want persisted Cloudflare cookies", cookie)
+	}
+}
+
+func TestCodexWebSocketHandshakeUsesWebSocketBeta(t *testing.T) {
+	req := &http.Request{Header: http.Header{"Upgrade": {"websocket"}}}
+	NewCodexProvider(nil, nil, nil).SetAuthHeaders(req, &Account{Type: AccountTypeCodex, AccessToken: "tok"})
+	if got := req.Header.Get("OpenAI-Beta"); got != "responses_websockets=2026-02-06" {
+		t.Fatalf("OpenAI-Beta = %q, want the websocket beta", got)
+	}
+	if got := req.Header.Get("version"); got != currentCodexFingerprint().Version {
+		t.Fatalf("version = %q, want %q", got, currentCodexFingerprint().Version)
 	}
 }
 

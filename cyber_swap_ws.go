@@ -124,7 +124,9 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 	ctx := clientReq.Context()
 
 	dialCtx, disarmDial := beginFirstByteDeadline(ctx, opts.FirstByteTimeout)
-	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(dialCtx, opts.InitialOutURL, opts.InitialUpstreamHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
+	initialHeaders := cloneHeader(opts.InitialUpstreamHeaders)
+	scopeCodexDeviceHeaders(initialHeaders, opts.InitialAccount, opts.UserID)
+	upstreamConn, upstreamResp, subprotocols, err := dialUpstreamWebSocket(dialCtx, opts.InitialOutURL, initialHeaders, clientReq.Header, opts.ReadLimit, opts.CompressionEnabled)
 	if disarmDial() || errors.Is(err, errUpstreamFirstByteTimeout) || errors.Is(context.Cause(dialCtx), errUpstreamFirstByteTimeout) {
 		if upstreamConn != nil {
 			upstreamConn.CloseNow()
@@ -283,6 +285,16 @@ type codexRelayTurn struct {
 	hasPrevID   bool
 	collector   codexToolReplayCollector
 	completedOK bool
+
+	// sentAt marks when the request last went upstream, so the first reply
+	// yields the account's time to first response.
+	sentAt         time.Time
+	healthObserved bool
+}
+
+func (t *codexRelayTurn) restartHealthClock() {
+	t.sentAt = time.Now()
+	t.healthObserved = false
 }
 
 type codexRelayState struct {
@@ -648,7 +660,13 @@ func (s *codexRelayState) inspectUpstream(data []byte) ([]byte, error) {
 	if turn != nil && isCodexMeaningfulOutput(data) {
 		turn.outputStarted = true
 	}
-	if isServerOverloadedError(data) {
+	overloaded := isServerOverloadedError(data)
+	if turn != nil && !turn.healthObserved && !overloaded {
+		turn.healthObserved = true
+		s.activeAccount.observeHealth(healthSuccess, time.Since(turn.sentAt))
+	}
+	if overloaded {
+		s.activeAccount.observeHealth(healthFailure, 0)
 		turn := s.responseTurn(data)
 		if turn == nil && len(s.turns) == 1 {
 			turn = s.turns[0]
@@ -766,6 +784,7 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 		account:        s.activeAccount,
 		inputItems:     extractInputItems(data),
 		hasPrevID:      hasPreviousResponseID(data),
+		sentAt:         time.Now(),
 	}
 	s.turns = append(s.turns, turn)
 	tier := serviceTierFromJSON(data)
@@ -821,6 +840,7 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if s.activeAccount != nil {
 		s.swapDone = s.activeAccount.CyberAccess
 	}
+	data = scopeCodexDeviceBody(data, s.activeAccount, s.opts.UserID)
 
 	if conversationID == "" {
 		return data, nil
@@ -1133,15 +1153,16 @@ func isCodexMeaningfulOutput(data []byte) bool {
 
 const (
 	websocketOverloadWindow = 30 * time.Second
-	// One same-account retry absorbs a transient blip; a second overload in
-	// the window means the account is being shed, so move the turn.
-	websocketOverloadSwapAfter = 2
+	// A capacity shed is request-scoped, and moving the turn drops the
+	// socket's warm context, so the same account gets the HTTP path's retry
+	// budget before the turn moves.
+	websocketOverloadSwapAfter = maxSameAccountOverloadRetries + 1
 
 	// websocketOverloadRecoveryMax bounds how many times a turn re-enters
-	// the relay after every candidate account is cooling down from overload.
-	// Each round waits for a candidate to leave cooldown, then retries the
-	// previously failed accounts. Overload arrives in waves: a small pool that
-	// fails together should wait out the cooldown rather than end the session.
+	// the relay after the same-account budget is spent and every other
+	// candidate is cooling down. Each round waits for a candidate to leave
+	// cooldown, then retries selection; a small pool should wait rather than
+	// end the session.
 	websocketOverloadRecoveryMax = 3
 
 	// websocketOverloadRecoveryWait caps how long one recovery round blocks.
@@ -1180,9 +1201,6 @@ func (s *codexRelayState) recordOverload(account *Account) int {
 	}
 	kept = append(kept, now)
 	s.overloadTimes[account.ID] = kept
-	if s.h != nil {
-		s.h.applyServerOverloadCooldown(account)
-	}
 	return len(kept)
 }
 
@@ -1255,6 +1273,10 @@ func (s *codexRelayState) retryTransportTurn(pending *transportPendingErr) error
 	if pending == nil || pending.turn == nil {
 		return errors.New("transport retry has no pending turn")
 	}
+	s.turnMu.Lock()
+	failed := s.activeAccount
+	s.turnMu.Unlock()
+	failed.observeHealth(healthFailure, 0)
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
 	select {
@@ -1301,11 +1323,10 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 			s.turnMu.Unlock()
 			return s.replaceTurnUpstream(cand, turn, "overload")
 		}
-		// No candidate is available: every eligible account is inside its
-		// overload cooldown. Overload arrives in waves, so wait out the
-		// nearest cooldown and retry candidate selection rather than ending
-		// the session. Bound the rounds so a permanently failing pool still
-		// fails instead of hanging forever.
+		// No candidate is available: every other eligible account is
+		// cooling down. Wait out the nearest cooldown and retry candidate
+		// selection rather than ending the session. Bound the rounds so a
+		// permanently failing pool still fails instead of hanging forever.
 		if cooldown, ok := s.overloadRecoveryCooldown(turn); ok {
 			s.turnMu.Unlock()
 			log.Printf("[%s] overload recovery %d/%d: waiting %s for account cooldown", s.opts.ReqID, s.overloadRecovery, websocketOverloadRecoveryMax, cooldown)
@@ -1320,9 +1341,10 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 		}
 	}
 	turn.responseID = ""
-	replay := append([]byte(nil), turn.request...)
-	writeErr := s.upstreamConn.Write(s.ctx, websocket.MessageText, replay)
+	turn.restartHealthClock()
 	active := s.activeAccount
+	replay := scopeCodexDeviceBody(append([]byte(nil), turn.request...), active, s.opts.UserID)
+	writeErr := s.upstreamConn.Write(s.ctx, websocket.MessageText, replay)
 	s.turnMu.Unlock()
 	if writeErr == nil {
 		return nil
@@ -1334,8 +1356,8 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 }
 
 // overloadRecoveryCooldown reports whether and how long to wait before
-// retrying candidate selection after every eligible account is cooling down
-// from overload. It returns false once the bounded recovery rounds are
+// retrying candidate selection after every other eligible account is
+// cooling down. It returns false once the bounded recovery rounds are
 // exhausted, which falls through to the same-socket replay. The caller holds
 // turnMu.
 func (s *codexRelayState) overloadRecoveryCooldown(turn *codexRelayTurn) (time.Duration, bool) {
@@ -1422,6 +1444,7 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 			return err
 		}
 	}
+	replay = scopeCodexDeviceBody(replay, cand, s.opts.UserID)
 	if err := newConn.Write(s.ctx, websocket.MessageText, replay); err != nil {
 		newConn.CloseNow()
 		return fmt.Errorf("replay overloaded turn: %w", err)
@@ -1442,6 +1465,7 @@ func (s *codexRelayState) replaceTurnUpstream(cand *Account, turn *codexRelayTur
 	s.contextAccount = authAccount
 	turn.account = cand
 	turn.responseID = ""
+	turn.restartHealthClock()
 	return nil
 }
 
@@ -1503,6 +1527,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 			return err
 		}
 	}
+	replay = scopeCodexDeviceBody(replay, cand, s.opts.UserID)
 	if err := newConn.Write(s.ctx, websocket.MessageText, replay); err != nil {
 		newConn.CloseNow()
 		return fmt.Errorf("replay client request to swap upstream: %w", err)
@@ -1526,6 +1551,7 @@ func (s *codexRelayState) doSwap(cand *Account) error {
 	s.contextAccount = authAccount
 	turn.account = cand
 	turn.responseID = ""
+	turn.restartHealthClock()
 	return nil
 }
 
@@ -1664,6 +1690,7 @@ func (h *proxyHandler) dialSwappedUpstream(
 	// the replayed response.create would otherwise carry a blob this account
 	// did not mint, a contradiction real Codex never produces.
 	h.guardCodexTurnStateEcho(opts.UserID, opts.ConversationID, acc, tmpReq.Header)
+	scopeCodexDeviceHeaders(tmpReq.Header, acc, opts.UserID)
 
 	dialCtx, disarm := beginFirstByteDeadline(ctx, opts.FirstByteTimeout)
 	conn, resp, _, err := dialUpstreamWebSocketWithSubprotocols(dialCtx, opts.InitialOutURL, tmpReq.Header, subprotocols, opts.ReadLimit, opts.CompressionEnabled)

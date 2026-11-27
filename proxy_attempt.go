@@ -134,6 +134,7 @@ func (h *proxyHandler) tryOnce(
 
 		// Use provider's model-specific auth when OpenCode serves a Zen free model.
 		setPoolAuth(outReq, provider, authAccount, requestedModel)
+		scopeCodexDeviceHeaders(outReq.Header, acc, userID)
 		// Native Realtime and GPT Live reject the Codex Responses websocket beta
 		// header. Keep it only on the Responses transport that requires it.
 		if provider.Type() == AccountTypeCodex && isCodexRealtimePath(in.URL.Path) {
@@ -290,10 +291,13 @@ func (h *proxyHandler) tryOnce(
 		}
 
 		if len(bodyBytes) > 0 {
-			outReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			outReq.ContentLength = int64(len(bodyBytes))
+			// buildReq runs again after a refresh, so the scoped copy never
+			// replaces bodyBytes.
+			wireBody := scopeCodexDeviceBody(bodyBytes, acc, userID)
+			outReq.Body = io.NopCloser(bytes.NewReader(wireBody))
+			outReq.ContentLength = int64(len(wireBody))
 			outReq.GetBody = func() (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+				return io.NopCloser(bytes.NewReader(wireBody)), nil
 			}
 			outReq.Header.Del("Content-Length")
 		}

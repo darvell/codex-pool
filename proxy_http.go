@@ -621,36 +621,54 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	const preferredImageCodexAccountID = "neon"
 	const maxServerOverloadRetries = 6
 	serverOverloadRetries := 0
+	sameAccountOverloads := map[string]int{}
+	var overloadRetryAccount *Account
+	firstByteFailedOver := false
 
-	retryOverload := func(acc *Account, header http.Header) bool {
+	// A capacity shed belongs to the request, not the account: the next
+	// account sees the same model capacity, and moving the conversation
+	// throws away its warm prompt cache. Retry the same account first, then
+	// move once its budget is spent. Neither path cools the account down.
+	retryOverload := func(acc *Account, header http.Header, body []byte) bool {
 		if serverOverloadRetries >= maxServerOverloadRetries {
-			h.applyServerOverloadCooldown(acc)
 			return false
 		}
 		serverOverloadRetries++
+		waitOverload := func(delay time.Duration) bool {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+			}
+			return ctx.Err() == nil
+		}
+		if sameAccountOverloads[acc.ID] < maxSameAccountOverloadRetries {
+			sameAccountOverloads[acc.ID]++
+			delay := serverOverloadRetryDelay(header, body, sameAccountOverloads[acc.ID])
+			if h.cfg.debug.Load() {
+				log.Printf("[%s] upstream overloaded on account %s; retrying same account in %s (%d/%d)", reqID, acc.ID, delay, serverOverloadRetries, maxServerOverloadRetries)
+			}
+			overloadRetryAccount = acc
+			return waitOverload(delay)
+		}
 		if h.pool.candidateForTier(conversationID, exclude, accountType, requiredPlan, originIP, requestedModel, requestedTier) != nil {
-			h.applyServerOverloadCooldown(acc)
 			if h.cfg.debug.Load() {
 				log.Printf("[%s] upstream overloaded on account %s; failing over (%d/%d)", reqID, acc.ID, serverOverloadRetries, maxServerOverloadRetries)
 			}
 			return true
 		}
 		exclude = map[string]bool{}
-		delay := serverOverloadRetryDelay(header, serverOverloadRetries)
+		delay := serverOverloadRetryDelay(header, body, serverOverloadRetries)
 		if h.cfg.debug.Load() {
 			log.Printf("[%s] upstream overloaded with no alternate account; retrying in %s (%d/%d)", reqID, delay, serverOverloadRetries, maxServerOverloadRetries)
 		}
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-		}
-		return ctx.Err() == nil
+		return waitOverload(delay)
 	}
 	imageFanoutChild := r.Header.Get("X-Codex-Pool-Image-Fanout") != ""
 	imageFanoutIndex, _ := strconv.Atoi(r.Header.Get("X-Codex-Pool-Image-Fanout-Index"))
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		var acc *Account
+		acc := overloadRetryAccount
+		overloadRetryAccount = nil
 		candidateExclude := h.pool.tierExclusions(exclude, accountType, requestedModel, requestedTier)
 		if imageGenerationRequest {
 			candidateExclude = make(map[string]bool, len(exclude)+h.pool.countByType(accountType))
@@ -723,15 +741,32 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		atomic.AddInt64(&h.inflight, 1)
 
 		prelude.startWait()
+		attemptStart := time.Now()
 		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID, translateDir, requestedModel, userID, originID, conversationID)
+		firstResponseLatency := time.Since(attemptStart)
 		prelude.stopWait()
 
 		atomic.AddInt64(&acc.Inflight, -1)
 		atomic.AddInt64(&h.inflight, -1)
 
 		if err != nil {
+			if !isContextError(err) {
+				acc.observeHealth(healthFailure, 0)
+			}
 			if errors.Is(err, errUpstreamFirstByteTimeout) {
 				h.recordFailureEvent(failureEvent(reqID, acc, string(accountType), requestedModel, attempt, http.StatusGatewayTimeout, err, "upstream_first_byte_timeout"))
+				// A silent upstream is usually one stuck account. One more
+				// deadline on another account still answers well before the
+				// upstream's own proxy timeout would.
+				if !firstByteFailedOver && ctx.Err() == nil && h.pool.candidateForTier(conversationID, exclude, accountType, requiredPlan, originIP, requestedModel, requestedTier) != nil {
+					firstByteFailedOver = true
+					lastErr = err
+					log.Printf("[%s] account %s sent nothing before the first-byte deadline; failing over", reqID, acc.ID)
+					if attempt >= attempts {
+						attempts++
+					}
+					continue
+				}
 				writeUpstreamFirstByteTimeout(w)
 				return
 			}
@@ -865,6 +900,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				acc.mu.Lock()
 				acc.Penalty += 0.3
 				acc.mu.Unlock()
+				acc.observeHealth(healthFailure, 0)
 
 			case ErrorClassNotFound:
 				acc.mu.Lock()
@@ -886,7 +922,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				}
 				h.recent.add(lastErr.Error())
 				if serverOverloaded {
-					if retryOverload(acc, resp.Header) {
+					if retryOverload(acc, resp.Header, errBody) {
 						if attempt >= attempts {
 							attempts++
 						}
@@ -930,6 +966,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		acc.mu.Lock()
 		acc.BackoffLevel = 0
 		acc.mu.Unlock()
+		if resp.StatusCode < http.StatusBadRequest {
+			acc.observeHealth(healthSuccess, firstResponseLatency)
+		}
 
 		provider.ParseUsageHeaders(acc, resp.Header)
 		h.logRateLimitResponseHeaders(reqID, acc.Type, resp.Header)
@@ -1017,9 +1056,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			// An overload delivered inside an HTTP 200 stream has not reached the
 			// client yet, so recover exactly like a pre-stream overload.
 			if bufWriter.overloaded {
+				acc.observeHealth(healthFailure, 0)
 				lastErr = fmt.Errorf("upstream overloaded in stream on account %s", acc.ID)
 				h.recent.add(lastErr.Error())
-				if retryOverload(acc, resp.Header) {
+				if retryOverload(acc, resp.Header, nil) {
 					if attempt >= attempts {
 						attempts++
 					}

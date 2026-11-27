@@ -89,3 +89,19 @@ func TestClaudeCodeOAuthBetasIncludeFullMimicrySet(t *testing.T) {
 		}
 	}
 }
+
+// Expected values come from Claude Code's own algorithm run in Node, which
+// indexes the prompt by UTF-16 unit.
+func TestClaudeCodeFingerprintMatchesJavaScriptIndexing(t *testing.T) {
+	cases := map[string]string{
+		"Hello world, this is a test": "2f6",
+		"héllo wörld 日本語のテキストです more": "802",
+		"ab😀cdefghijklmnopqrstu😀vw":   "dac",
+		"abc":                         "d7b",
+	}
+	for text, want := range cases {
+		if got := ccComputeFingerprint(text); got != want {
+			t.Fatalf("fingerprint(%q) = %q, want %q", text, got, want)
+		}
+	}
+}

@@ -16,6 +16,14 @@ import (
 // timeout. Silence longer than this becomes our error instead of an HTML 524.
 const defaultUpstreamFirstByteTimeout = 30 * time.Second
 
+// HTTP/2 health probing for pooled upstream connections: after this long
+// without a frame the transport sends a PING and closes the connection if no
+// reply arrives within the ping timeout.
+const (
+	upstreamHTTP2ReadIdleTimeout = 15 * time.Second
+	upstreamHTTP2PingTimeout     = 15 * time.Second
+)
+
 // errUpstreamFirstByteTimeout is returned when an upstream connection accepts
 // the dial or request and then produces no response bytes before the deadline.
 // It is not a client cancellation and must be written to the caller before

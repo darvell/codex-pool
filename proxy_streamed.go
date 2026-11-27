@@ -153,6 +153,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	// Register and authenticate with the same credential snapshot.
 	setPoolAuth(outReq, provider, authAccount, requestedModel)
+	scopeCodexDeviceHeaders(outReq.Header, acc, userID)
 
 	outReq.Header.Del("Accept-Encoding")
 
@@ -160,12 +161,17 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] streamed -> %s %s (account=%s)", reqID, outReq.Method, outReq.URL.String(), acc.ID)
 	}
 
+	attemptStart := time.Now()
 	resp, err := h.roundTripWithFirstByteDeadline(outReq)
+	firstResponseLatency := time.Since(attemptStart)
 	captureCodexResponseState(acc, resp, reqID)
 	if provider.Type() == AccountTypeCodex && upstreamTokenRevoked(resp) {
 		persistDeadAccount(acc, "upstream token revoked")
 	}
 	if err != nil {
+		if !isContextError(err) {
+			acc.observeHealth(healthFailure, 0)
+		}
 		acc.mu.Lock()
 		acc.Penalty += 0.2
 		acc.mu.Unlock()
@@ -246,6 +252,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		acc.mu.Lock()
 		acc.Penalty += 0.3
 		acc.mu.Unlock()
+		acc.observeHealth(healthFailure, 0)
+	} else if resp.StatusCode < http.StatusBadRequest {
+		acc.observeHealth(healthSuccess, firstResponseLatency)
 	}
 
 	provider.ParseUsageHeaders(acc, resp.Header)

@@ -22,6 +22,10 @@ func TestIsServerOverloadedError(t *testing.T) {
 		{"message", `{"error":{"message":"Our servers are currently overloaded. Please try again later."}}`, true},
 		{"response failed", `{"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}`, true},
 		{"service unavailable", `{"error":{"type":"service_unavailable_error"}}`, true},
+		{"slow down", `{"error":{"code":"slow_down","message":"Please slow down."}}`, true},
+		{"servers overloaded", `{"error":{"message":"The servers are overloaded right now."}}`, true},
+		{"model at capacity", `{"error":{"message":"Selected model is at capacity. Please try a different model."}}`, true},
+		{"processing error", `{"error":{"message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID abc in your message."}}`, true},
 		{"other", `{"error":{"code":"invalid_request_error"}}`, false},
 		{"assistant text", `{"type":"response.output_text.delta","delta":"servers are currently overloaded is a phrase"}`, false},
 	}

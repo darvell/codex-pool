@@ -362,6 +362,7 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 		if chatgptHeaderID != "" {
 			req.Header.Set("ChatGPT-Account-ID", chatgptHeaderID)
 		}
+		applyCodexClientIdentity(req.Header)
 		return h.transport.RoundTrip(req)
 	}
 

@@ -29,6 +29,8 @@ const (
 	codexDefaultResidency      = "us"
 	codexCLIReleaseURL         = "https://registry.npmjs.org/@openai/codex/latest"
 	codexFingerprintPollPeriod = 24 * time.Hour
+	codexHTTPBeta              = "responses=experimental"
+	codexWebSocketBeta         = "responses_websockets=2026-02-06"
 )
 
 var codexCLIVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
@@ -118,13 +120,20 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 	}
 
 	fp := currentCodexFingerprint()
-	req.Header.Set("originator", codexDefaultOriginator)
+	applyCodexClientIdentity(req.Header)
+	// The inference backend checks that version agrees with the User-Agent
+	// and rejects versions it considers too old, so a client's own value
+	// never passes through.
+	req.Header.Set("version", fp.Version)
 	req.Header.Set("x-openai-internal-codex-residency", getenv("CODEX_RESIDENCY", codexDefaultResidency))
 	if req.Header.Get("x-client-request-id") == "" {
 		req.Header.Set("x-client-request-id", uuid.NewString())
 	}
-	req.Header.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
-	req.Header.Set("User-Agent", codexCLIUserAgent(fp))
+	if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		req.Header.Set("OpenAI-Beta", codexWebSocketBeta)
+	} else {
+		req.Header.Set("OpenAI-Beta", codexHTTPBeta)
+	}
 	// The CLI is not a browser. Drop any client hints a downstream client
 	// supplied so the request does not pair a CLI identity with browser
 	// headers.
@@ -138,6 +147,14 @@ func applyCodexRequestFingerprint(req *http.Request, acc *Account) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	applyCodexCookies(req, acc)
+}
+
+// applyCodexClientIdentity sets the paired originator and User-Agent the CLI
+// sends on every request it makes, including token refresh and usage
+// lookups that carry no inference headers.
+func applyCodexClientIdentity(h http.Header) {
+	h.Set("originator", codexDefaultOriginator)
+	h.Set("User-Agent", codexCLIUserAgent(currentCodexFingerprint()))
 }
 
 func applyCodexCookies(req *http.Request, acc *Account) {

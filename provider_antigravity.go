@@ -129,12 +129,16 @@ func decodeAntigravityPublicOAuthValue(encoded []byte) string {
 	return string(decoded)
 }
 
+// googleNodeClientUserAgent is the token-client identity Google's Node
+// libraries send, shared by the Gemini CLI and Antigravity onboarding.
+const googleNodeClientUserAgent = "google-api-nodejs-client/10.3.0"
+
 func antigravityUserAgent() string {
 	return fmt.Sprintf("antigravity/hub/%s darwin/arm64", antigravityClientVersion())
 }
 
 func antigravityOnboardUserAgent() string {
-	return antigravityUserAgent() + " google-api-nodejs-client/10.3.0"
+	return antigravityUserAgent() + " " + googleNodeClientUserAgent
 }
 
 func antigravityClientVersion() string {
