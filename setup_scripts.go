@@ -10,6 +10,10 @@ type setupScriptData struct {
 	publicURL   string
 	accessToken string
 	models      string
+	// codexVersion is the CLI version the pool currently presents upstream.
+	// The Codex script falls back to it when the installed CLI cannot report
+	// its own version.
+	codexVersion string
 }
 
 func renderSetupScript(source string, data setupScriptData) string {
@@ -18,6 +22,7 @@ func renderSetupScript(source string, data setupScriptData) string {
 		"{{public_url}}", data.publicURL,
 		"{{access_token}}", data.accessToken,
 		"{{models}}", data.models,
+		"{{codex_version}}", data.codexVersion,
 	).Replace(source)
 }
 

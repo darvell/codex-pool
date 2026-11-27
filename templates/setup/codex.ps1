@@ -63,7 +63,16 @@ if ($auth -and (Has-Property $auth 'tokens') -and (Has-Property $auth.tokens 'ac
 if ([string]::IsNullOrWhiteSpace($accessToken)) {
   throw 'Pool credentials are missing. Generate a new setup command from the pool page.'
 }
-$modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
+# The catalog lists only models the requesting client version supports, so
+# ask with the installed CLI's version. Without a CLI, use the current release.
+function Get-CodexClientVersion {
+  try {
+    $reported = (& codex --version 2>$null | Out-String)
+    if ($reported -match '\d+\.\d+\.\d+') { return $Matches[0] }
+  } catch {}
+  return '{{codex_version}}'
+}
+$modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=' + (Get-CodexClientVersion)
 $headers = @{ Authorization = "Bearer $accessToken" }
 $tmp = [System.IO.Path]::GetTempFileName()
 try {
@@ -104,6 +113,14 @@ function ConvertFrom-JsonCompat {
   }
 }
 
+function Get-CodexClientVersion {
+  try {
+    $reported = (& codex --version 2>$null | Out-String)
+    if ($reported -match '\d+\.\d+\.\d+') { return $Matches[0] }
+  } catch {}
+  return '{{codex_version}}'
+}
+
 function Refresh-ModelCatalog {
   param([string]$Url)
   if ([string]::IsNullOrWhiteSpace($Url)) { return }
@@ -124,7 +141,7 @@ function Refresh-ModelCatalog {
   }
   if ([string]::IsNullOrWhiteSpace($token)) { return }
 
-  $modelsUrl = $Url.TrimEnd('/') + '/backend-api/codex/models?client_version=0.125.0'
+  $modelsUrl = $Url.TrimEnd('/') + '/backend-api/codex/models?client_version=' + (Get-CodexClientVersion)
   $headers = @{ Authorization = "Bearer $token" }
 
   try {

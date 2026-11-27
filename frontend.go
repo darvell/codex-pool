@@ -355,14 +355,14 @@ func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Requ
 	publicURL := h.getEffectivePublicURL(r)
 
 	if wantsPowerShell(r) {
-		script := renderSetupScript(codexPowerShell, setupScriptData{token: token, publicURL: publicURL})
+		script := renderSetupScript(codexPowerShell, setupScriptData{token: token, publicURL: publicURL, codexVersion: currentCodexFingerprint().Version})
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
 		return
 	}
 
-	script := renderSetupScript(codexBash, setupScriptData{token: token, publicURL: publicURL})
+	script := renderSetupScript(codexBash, setupScriptData{token: token, publicURL: publicURL, codexVersion: currentCodexFingerprint().Version})
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))

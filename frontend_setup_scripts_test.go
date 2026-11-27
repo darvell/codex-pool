@@ -211,6 +211,39 @@ func TestCodexSetupDefaultModel(t *testing.T) {
 	}
 }
 
+func TestCodexSetupRequestsCatalogForInstalledVersion(t *testing.T) {
+	t.Setenv("PUBLIC_URL", "")
+	h := &proxyHandler{}
+	rr := httptest.NewRecorder()
+	h.serveCodexSetupScript(rr, httptest.NewRequest(http.MethodGet, "http://example.com/setup/codex/token", nil))
+
+	home := t.TempDir()
+	env := setupTestEnv(t, home, map[string]string{
+		"http://example.com/config/codex/token":                              `{"tokens":{"access_token":"test-access-token"}}`,
+		"http://example.com/backend-api/codex/models?client_version=0.170.1": `{"models":[{"slug":"gpt-6.2-sol"}]}`,
+	})
+	installed := t.TempDir()
+	if err := os.WriteFile(filepath.Join(installed, "codex"), []byte("#!/bin/sh\necho 'codex-cli 0.170.1'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i, value := range env {
+		if strings.HasPrefix(value, "PATH=") {
+			env[i] = "PATH=" + installed + ":" + strings.TrimPrefix(value, "PATH=")
+		}
+	}
+
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(rr.Body.String())
+	cmd.Env = env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("configure: %v\n%s", err, output)
+	}
+	catalog, err := os.ReadFile(filepath.Join(home, ".codex", "model_catalog.json"))
+	if err != nil || !strings.Contains(string(catalog), "gpt-6.2-sol") {
+		t.Fatalf("catalog = %s, %v; want the installed version's catalog", catalog, err)
+	}
+}
+
 func TestCodexSetupPreservesModel(t *testing.T) {
 	t.Setenv("PUBLIC_URL", "")
 	h := &proxyHandler{}
@@ -240,8 +273,8 @@ func TestCodexSetupPreservesModel(t *testing.T) {
 				}
 			}
 			env := setupTestEnv(t, home, map[string]string{
-				"http://example.com/config/codex/token":                              `{"tokens":{"access_token":"test-access-token"}}`,
-				"http://example.com/backend-api/codex/models?client_version=0.125.0": `{"models":[]}`,
+				"http://example.com/config/codex/token":                                                           `{"tokens":{"access_token":"test-access-token"}}`,
+				"http://example.com/backend-api/codex/models?client_version=" + currentCodexFingerprint().Version: `{"models":[]}`,
 			})
 			var firstConfig string
 			for run := range 2 {

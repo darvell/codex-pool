@@ -8,6 +8,14 @@ AUTH_FILE="$AUTH_DIR/auth.json"
 MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
 MCP_SCRIPT="$AUTH_DIR/model_sync.sh"
 
+# The catalog lists only models the requesting client version supports, so
+# ask with the installed CLI's version. Without a CLI, use the current release.
+codex_client_version() {
+    local version
+    version=$(codex --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+    printf '%s' "${version:-{{codex_version}}}"
+}
+
 echo "Initializing Codex Pool setup..."
 mkdir -p "$AUTH_DIR"
 
@@ -24,7 +32,7 @@ fi
 CATALOG_TMP=$(mktemp "${MODEL_CATALOG}.tmp.XXXXXX")
 if ! curl --connect-timeout 5 --max-time 10 -fsSL \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
-    "$BASE_URL/backend-api/codex/models?client_version=0.125.0" \
+    "$BASE_URL/backend-api/codex/models?client_version=$(codex_client_version)" \
     -o "$CATALOG_TMP"; then
     rm -f "$CATALOG_TMP"
     echo "Model catalog download failed. Check your connection and rerun setup." >&2
@@ -42,7 +50,12 @@ BASE_URL="${1:-}"
 AUTH_DIR="${HOME}/.codex"
 AUTH_FILE="$AUTH_DIR/auth.json"
 MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
-CLIENT_VERSION="0.125.0"
+
+codex_client_version() {
+    local version
+    version=$(codex --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+    printf '%s' "${version:-{{codex_version}}}"
+}
 
 refresh_model_catalog() {
     if [ -z "$BASE_URL" ] || [ ! -f "$AUTH_FILE" ]; then
@@ -58,7 +71,7 @@ refresh_model_catalog() {
     local tmp_file
     tmp_file=$(mktemp "${MODEL_CATALOG}.tmp.XXXXXX")
     if curl --connect-timeout 2 --max-time 5 -fsSL -H "Authorization: Bearer $token" \
-        "${BASE_URL%/}/backend-api/codex/models?client_version=${CLIENT_VERSION}" \
+        "${BASE_URL%/}/backend-api/codex/models?client_version=$(codex_client_version)" \
         -o "$tmp_file"; then
         mv "$tmp_file" "$MODEL_CATALOG"
         chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
