@@ -24,7 +24,7 @@ const (
 	// mismatched or legacy identities more aggressively and can return
 	// server_is_overloaded before producing output.
 	codexDefaultOriginator     = "codex_cli_rs"
-	codexDefaultCLIVersion     = "0.166.0"
+	codexDefaultCLIVersion     = "0.172.0"
 	codexDefaultTerminal       = "xterm-256color"
 	codexDefaultResidency      = "us"
 	codexCLIReleaseURL         = "https://registry.npmjs.org/@openai/codex/latest"

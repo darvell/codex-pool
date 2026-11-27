@@ -67,8 +67,8 @@ func TestCodexWebSocketHandshakeUsesWebSocketBeta(t *testing.T) {
 
 func TestCodexCLIUserAgentDefaultShape(t *testing.T) {
 	t.Setenv("CODEX_USER_AGENT", "")
-	got := codexCLIUserAgent(codexFingerprintState{Version: "0.166.0", Platform: "Ubuntu 24.4.0", Arch: "x86_64", Terminal: "xterm-256color"})
-	want := "codex_cli_rs/0.166.0 (Ubuntu 24.4.0; x86_64) xterm-256color"
+	got := codexCLIUserAgent(codexFingerprintState{Version: "0.172.0", Platform: "Ubuntu 24.4.0", Arch: "x86_64", Terminal: "xterm-256color"})
+	want := "codex_cli_rs/0.172.0 (Ubuntu 24.4.0; x86_64) xterm-256color"
 	if got != want {
 		t.Fatalf("User-Agent = %q, want %q", got, want)
 	}
@@ -76,8 +76,8 @@ func TestCodexCLIUserAgentDefaultShape(t *testing.T) {
 
 func TestCodexIdentityNormalizesTUIToCLI(t *testing.T) {
 	t.Setenv("CODEX_USER_AGENT", "codex-tui/0.140.2 (Mac OS X 14.0; arm64) iTerm (codex-tui; 0.140.2)")
-	got := codexCLIUserAgent(codexFingerprintState{Version: "0.166.0"})
-	want := "codex_cli_rs/0.166.0 (Mac OS X 14.0; arm64) iTerm"
+	got := codexCLIUserAgent(codexFingerprintState{Version: "0.172.0"})
+	want := "codex_cli_rs/0.172.0 (Mac OS X 14.0; arm64) iTerm"
 	if got != want {
 		t.Fatalf("normalized User-Agent = %q, want %q", got, want)
 	}
@@ -85,8 +85,8 @@ func TestCodexIdentityNormalizesTUIToCLI(t *testing.T) {
 
 func TestCodexIdentityRewritesStaleVersion(t *testing.T) {
 	t.Setenv("CODEX_USER_AGENT", "Codex Desktop/26.318.11754 (darwin; arm64)")
-	got := codexCLIUserAgent(codexFingerprintState{Version: "0.166.0"})
-	want := "codex_cli_rs/0.166.0 (darwin; arm64)"
+	got := codexCLIUserAgent(codexFingerprintState{Version: "0.172.0"})
+	want := "codex_cli_rs/0.172.0 (darwin; arm64)"
 	if got != want {
 		t.Fatalf("canonical User-Agent = %q, want %q", got, want)
 	}
