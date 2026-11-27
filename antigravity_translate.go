@@ -1369,6 +1369,7 @@ func (h *proxyHandler) refreshAntigravityReservationOnce(ctx context.Context, re
 }
 
 func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Request, body []byte, requestedModel, conversationID, userID, originID, clientIP, reqID string) bool {
+	requestedModel = h.pool.antigravityModels.resolveEffortTier(requestedModel, requestReasoningEffort(body))
 	if !shouldRouteAntigravityModel(&h.pool.antigravityModels, requestedModel) {
 		return false
 	}

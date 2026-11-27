@@ -55,6 +55,11 @@ type AntigravityCatalogModel struct {
 	AvailableNow       bool      `json:"available_now"`
 	Stale              bool      `json:"stale"`
 	NextResetAt        time.Time `json:"next_reset_at,omitempty"`
+
+	// ReasoningLevels lists the effort tiers a family entry stands for; a
+	// request picks one with its reasoning effort.
+	ReasoningLevels       []string `json:"reasoning_levels,omitempty"`
+	DefaultReasoningLevel string   `json:"default_reasoning_level,omitempty"`
 }
 
 type antigravityModelRegistry struct {
@@ -208,6 +213,11 @@ func (r *antigravityModelRegistry) Canonical(model string) (string, bool) {
 		if fallback.ID == model {
 			return model, true
 		}
+	}
+	// A family without an effort resolves to its default tier, so routing
+	// still recognizes it. Requests resolve their effort before this.
+	if tiers := r.antigravityFamilyTiersLocked(model); tiers != nil {
+		return model + "-" + pickAntigravityEffortTier(tiers, antigravityDefaultEffortTier), true
 	}
 	return model, false
 }

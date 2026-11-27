@@ -125,7 +125,7 @@ func poolModelDescriptors(pools ...*poolState) []poolModelDescriptor {
 		descriptor.AvailableNow = availableNow
 		models = append(models, descriptor)
 	}
-	for _, model := range antigravityCatalog(pool) {
+	for _, model := range antigravityListedCatalog(pool) {
 		modalities := []string{"text"}
 		if model.SupportsImages {
 			modalities = append(modalities, "image")
@@ -283,7 +283,7 @@ func serveUnifiedGeminiModels(w http.ResponseWriter, pool *poolState) {
 			"supportedGenerationMethods": []string{"generateContent", "streamGenerateContent", "countTokens"},
 		})
 	}
-	for _, model := range antigravityCatalog(pool) {
+	for _, model := range antigravityListedCatalog(pool) {
 		methods := []string{"generateContent", "streamGenerateContent", "countTokens"}
 		models = append(models, map[string]any{
 			"name": "models/antigravity/" + model.ID, "displayName": model.DisplayName,

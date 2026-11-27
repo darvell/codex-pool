@@ -89,7 +89,7 @@ func preparePiModels(publicURL, codexAPIKey, anthropicAPIKey string, pool *poolS
 				BaseURL: baseURL + "/v1",
 				APIKey:  codexAPIKey,
 				API:     "openai-completions",
-				Models:  antigravityPiModels(antigravityCatalog(pool)),
+				Models:  antigravityPiModels(antigravityListedCatalog(pool)),
 			},
 			"kimi": {
 				BaseURL: baseURL,
@@ -171,7 +171,7 @@ func generateCuteCodeSettingsJSON(publicURL, apiKey string, pool *poolState) ([]
 	settings.CustomModels = append(settings.CustomModels, opencodeGoCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, mistralCuteModels(baseURL, apiKey, pool)...)
 	settings.CustomModels = append(settings.CustomModels, grokCuteModels(baseURL, apiKey)...)
-	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey, antigravityCatalog(pool))...)
+	settings.CustomModels = append(settings.CustomModels, antigravityCuteModels(baseURL, apiKey, antigravityListedCatalog(pool))...)
 	return json.MarshalIndent(settings, "", "  ")
 }
 

@@ -1492,9 +1492,19 @@ func injectClaudeModels(body []byte, antigravity []AntigravityCatalogModel) []by
 	}
 	for _, model := range antigravity {
 		slug := "antigravity/" + model.ID
-		if !existing[slug] {
-			models = append(models, claudeModelEntry(slug, model.DisplayName, model.MaxTokens))
+		if existing[slug] {
+			continue
 		}
+		entry := claudeModelEntry(slug, model.DisplayName, model.MaxTokens)
+		if len(model.ReasoningLevels) > 0 {
+			levels := make([]map[string]string, 0, len(model.ReasoningLevels))
+			for _, level := range model.ReasoningLevels {
+				levels = append(levels, map[string]string{"effort": level, "description": reasoningLevelDescriptions[level]})
+			}
+			entry["supported_reasoning_levels"] = levels
+			entry["default_reasoning_level"] = model.DefaultReasoningLevel
+		}
+		models = append(models, entry)
 	}
 	catalog["models"] = models
 
@@ -1539,15 +1549,21 @@ func injectMissingCodexCatalogModels(models []any) []any {
 	return models
 }
 
+var reasoningLevelDescriptions = map[string]string{
+	"low":    "Fast responses with lighter reasoning",
+	"medium": "Balances speed and reasoning depth",
+	"high":   "Greater reasoning depth for complex problems",
+	"xhigh":  "Extra high reasoning depth for complex problems",
+	"max":    "Maximum reasoning depth for the hardest problems",
+}
+
 func codexCatalogFallbackEntry(model codexCatalogModel, template map[string]any) map[string]any {
 	entry := claudeModelEntry(model.slug, model.displayName, model.contextWindow)
-	entry["supported_reasoning_levels"] = []map[string]string{
-		{"effort": "low", "description": "Fast responses with lighter reasoning"},
-		{"effort": "medium", "description": "Balances speed and reasoning depth"},
-		{"effort": "high", "description": "Greater reasoning depth for complex problems"},
-		{"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
-		{"effort": "max", "description": "Maximum reasoning depth for the hardest problems"},
+	levels := make([]map[string]string, 0, 5)
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+		levels = append(levels, map[string]string{"effort": effort, "description": reasoningLevelDescriptions[effort]})
 	}
+	entry["supported_reasoning_levels"] = levels
 	for key, value := range cloneCatalogEntry(template) {
 		entry[key] = value
 	}

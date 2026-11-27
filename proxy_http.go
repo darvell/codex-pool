@@ -990,7 +990,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			respBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr == nil {
-				modified := mergeCodexServiceTiers(injectClaudeModels(respBody, antigravityCatalog(h.pool)), h.pool)
+				modified := mergeCodexServiceTiers(injectClaudeModels(respBody, antigravityListedCatalog(h.pool)), h.pool)
 				w.WriteHeader(resp.StatusCode)
 				w.Write(modified)
 			} else {
