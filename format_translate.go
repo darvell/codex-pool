@@ -1294,6 +1294,12 @@ func claudeCanonicalModel(model string) string {
 	has1M := strings.Contains(lower, "[1m]")
 	baseRaw := strings.TrimSpace(strings.ReplaceAll(raw, "[1m]", ""))
 	baseLower := strings.TrimSpace(strings.ReplaceAll(lower, "[1m]", ""))
+	if base, _, ok := modelEffortSuffix(baseLower); ok {
+		if owned, yes := modelForProvider(AccountTypeClaude, base); yes {
+			baseRaw = owned.ID
+			baseLower = strings.ToLower(owned.ID)
+		}
+	}
 
 	var canonical string
 	if baseLower == "claude-opus-5" || baseLower == "opus" {
@@ -1317,6 +1323,42 @@ func claudeCanonicalModel(model string) string {
 		return canonical + " [1m]"
 	}
 	return canonical
+}
+
+func claudeRoutedModel(model string) (string, string) {
+	canonical := claudeCanonicalModel(model)
+	lower := strings.ToLower(strings.TrimSpace(model))
+	lower = strings.TrimSpace(strings.ReplaceAll(lower, "[1m]", ""))
+	if idx := strings.LastIndex(lower, "("); idx > 0 && strings.HasSuffix(lower, ")") {
+		lower = strings.TrimSpace(lower[:idx])
+	}
+	_, tier, ok := modelEffortSuffix(lower)
+	if !ok || canonical == strings.TrimSpace(model) {
+		return canonical, ""
+	}
+	return canonical, tier
+}
+
+func ensureClaudeEffort(body []byte, effort string) []byte {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" || len(body) == 0 || requestReasoningEffort(body) != "" {
+		return body
+	}
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return body
+	}
+	cfg, _ := obj["output_config"].(map[string]any)
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	cfg["effort"] = effort
+	obj["output_config"] = cfg
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func isClaudeModel(model string) bool {

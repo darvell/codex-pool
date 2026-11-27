@@ -116,7 +116,15 @@ func (h *proxyHandler) modelRouteOverride(path, model string, body []byte) (Prov
 	}
 	if isClaudeModel(model) && !isCodexToClaudeModelOverridePath(path) {
 		if provider := h.registry.ForType(AccountTypeClaude); provider != nil {
-			return provider, provider.UpstreamURL(path), rewriteModelInBody(body, claudeCanonicalModel(model))
+			canonical, effort := claudeRoutedModel(model)
+			rewritten := rewriteModelInBody(body, canonical)
+			if effort == "" {
+				return provider, provider.UpstreamURL(path), rewritten
+			}
+			if rewritten == nil {
+				rewritten = body
+			}
+			return provider, provider.UpstreamURL(path), ensureClaudeEffort(rewritten, effort)
 		}
 	}
 	return nil, nil, nil

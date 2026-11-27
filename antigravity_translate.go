@@ -69,15 +69,31 @@ func shouldRouteAntigravityModel(registry *antigravityModelRegistry, model strin
 	if strings.HasPrefix(model, "antigravity/") {
 		return true
 	}
-	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude} {
-		if _, ok := modelForProvider(provider, model); ok {
-			return false
-		}
-	}
-	if externalModelClaimed(model) {
+	// Claude and Codex keep their own ids, including an effort suffix such as
+	// claude-opus-5-5-high. Clients ask for Antigravity's copy with the prefix.
+	if nativeProviderClaims(model) || externalModelClaimed(model) {
 		return false
 	}
 	return isAntigravityModel(registry, model)
+}
+
+func nativeProviderClaims(model string) bool {
+	model = strings.TrimSpace(strings.TrimPrefix(model, "antigravity/"))
+	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude} {
+		if _, ok := modelForProvider(provider, model); ok {
+			return true
+		}
+	}
+	base, _, ok := modelEffortSuffix(model)
+	if !ok {
+		return false
+	}
+	for _, provider := range []AccountType{AccountTypeCodex, AccountTypeClaude} {
+		if _, owned := modelForProvider(provider, base); owned {
+			return true
+		}
+	}
+	return false
 }
 
 func antigravityModelFromGeminiPath(path string) string {
@@ -1369,10 +1385,10 @@ func (h *proxyHandler) refreshAntigravityReservationOnce(ctx context.Context, re
 }
 
 func (h *proxyHandler) handleAntigravityProxy(w http.ResponseWriter, r *http.Request, body []byte, requestedModel, conversationID, userID, originID, clientIP, reqID string) bool {
-	requestedModel = h.pool.antigravityModels.resolveEffortTier(requestedModel, requestReasoningEffort(body))
 	if !shouldRouteAntigravityModel(&h.pool.antigravityModels, requestedModel) {
 		return false
 	}
+	requestedModel = h.pool.antigravityModels.resolveEffortTier(requestedModel, requestReasoningEffort(body))
 	canonical := antigravityCanonicalModel(&h.pool.antigravityModels, requestedModel)
 	provider, _ := h.registry.ForType(AccountTypeAntigravity).(*AntigravityProvider)
 	if provider == nil {

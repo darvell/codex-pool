@@ -22,7 +22,20 @@ const antigravityDefaultEffortTier = "medium"
 // for a family.
 const minAntigravityFamilyTiers = 2
 
+func isGoogleAntigravityModelID(id string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "gemini")
+}
+
 func splitAntigravityEffortTier(id string) (string, string, bool) {
+	base, tier, ok := modelEffortSuffix(id)
+	if !ok || !isGoogleAntigravityModelID(base) {
+		return "", "", false
+	}
+	return base, tier, true
+}
+
+func modelEffortSuffix(id string) (string, string, bool) {
+	id = strings.ToLower(strings.TrimSpace(id))
 	for _, tier := range antigravityEffortTiers {
 		if base, ok := strings.CutSuffix(id, "-"+tier); ok && base != "" {
 			return base, tier, true
@@ -72,6 +85,9 @@ func (r *antigravityModelRegistry) resolveEffortTier(model, effort string) strin
 	base := strings.TrimSpace(model)
 	if trimmed, ok := strings.CutPrefix(base, "antigravity/"); ok {
 		prefix, base = "antigravity/", trimmed
+	}
+	if prefix == "" && nativeProviderClaims(base) {
+		return model
 	}
 	r.mu.RLock()
 	tiers := r.antigravityFamilyTiersLocked(base)
@@ -223,8 +239,11 @@ func antigravityFamilyEntry(base string, tiers []AntigravityCatalogModel) Antigr
 // tier's name, as in "Gemini 4 Neon (Medium)".
 func antigravityFamilyDisplayName(name string) string {
 	if open := strings.LastIndex(name, " ("); open > 0 && strings.HasSuffix(name, ")") {
-		if _, _, ok := splitAntigravityEffortTier("x-" + strings.ToLower(name[open+2:len(name)-1])); ok {
-			return name[:open]
+		suffix := strings.ToLower(name[open+2 : len(name)-1])
+		for _, tier := range antigravityEffortTiers {
+			if suffix == tier {
+				return name[:open]
+			}
 		}
 	}
 	return name

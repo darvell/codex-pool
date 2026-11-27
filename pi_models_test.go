@@ -11,17 +11,19 @@ func TestClaudeCanonicalModelHandlesShortOneMillionAliases(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"sonnet":              "claude-sonnet-5",
-		"sonnet[1m]":          "claude-sonnet-5 [1m]",
-		"sonnet [1m]":         "claude-sonnet-5 [1m]",
-		"opus":                "claude-opus-5-5",
-		"opus[1m]":            "claude-opus-5-5 [1m]",
-		"opus [1m]":           "claude-opus-5-5 [1m]",
-		"claude-opus-5":       "claude-opus-5-5",
-		"claude-opus-5[1m]":   "claude-opus-5-5 [1m]",
-		"claude-opus-5(high)": "claude-opus-5-5",
-		"fable":               "claude-fable-5-1",
-		"haiku":               "claude-haiku-4-5-20251001",
+		"sonnet":                "claude-sonnet-5",
+		"sonnet[1m]":            "claude-sonnet-5 [1m]",
+		"sonnet [1m]":           "claude-sonnet-5 [1m]",
+		"opus":                  "claude-opus-5-5",
+		"opus[1m]":              "claude-opus-5-5 [1m]",
+		"opus [1m]":             "claude-opus-5-5 [1m]",
+		"claude-opus-5":         "claude-opus-5-5",
+		"claude-opus-5[1m]":     "claude-opus-5-5 [1m]",
+		"claude-opus-5(high)":   "claude-opus-5-5",
+		"claude-opus-5-5-high":  "claude-opus-5-5",
+		"claude-opus-5-5-xhigh": "claude-opus-5-5",
+		"fable":                 "claude-fable-5-1",
+		"haiku":                 "claude-haiku-4-5-20251001",
 	}
 
 	for input, want := range tests {
