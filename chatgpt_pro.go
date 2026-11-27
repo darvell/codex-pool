@@ -370,6 +370,10 @@ func proModel(model string) string {
 	return chatGPTProModels[strings.ToLower(strings.TrimSpace(model))]
 }
 
+func isProModel(model string) bool {
+	return proModel(model) != ""
+}
+
 func (h *proxyHandler) handleSpooledPro(w http.ResponseWriter, r *http.Request, spooled *streamedResponsesRequest) bool {
 	if proModel(spooled.Model) == "" {
 		return false

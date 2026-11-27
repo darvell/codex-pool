@@ -261,6 +261,21 @@ func (h *proxyHandler) relayCodexWithCyberSwap(
 			state.session.setActive(state.turnsActive())
 		})
 		defer state.proWS.Close()
+		state.providerWS = newProviderRoutedWS(relayCtx, h, clientReq, func(ctx context.Context, data []byte) error {
+			if err := state.clientWriter.Write(ctx, websocket.MessageText, data); err != nil {
+				return err
+			}
+			select {
+			case state.activityCh <- struct{}{}:
+			default:
+			}
+			return nil
+		}, opts.ReadLimit, func() {
+			state.turnMu.Lock()
+			defer state.turnMu.Unlock()
+			state.session.setActive(state.turnsActive())
+		})
+		defer state.providerWS.Close()
 	}
 
 	statusCode, relayErr := state.run()
@@ -319,6 +334,7 @@ type codexRelayState struct {
 	sawUpstreamResponse atomic.Bool
 	session             *trackedWebSocketSession
 	proWS               *chatGPTProWS
+	providerWS          *chatGPTProWS
 	activityCh          chan struct{}
 
 	// swapDone covers both "we already swapped" and "we tried and gave
@@ -595,7 +611,7 @@ func pumpFrames(
 }
 
 func (s *codexRelayState) turnsActive() bool {
-	return len(s.turns) != 0 || s.proWS != nil && s.proWS.Active()
+	return len(s.turns) != 0 || s.proWS != nil && s.proWS.Active() || s.providerWS != nil && s.providerWS.Active()
 }
 
 func (s *codexRelayState) markClientForwarded(data []byte) {
@@ -763,8 +779,11 @@ func (s *codexRelayState) inspectClient(data []byte) ([]byte, error) {
 	if changed {
 		data = filtered
 	}
-	if s.contextEnabled() && s.proWS != nil {
-		handled, err := s.proWS.Handle(data)
+	for _, bridge := range []*chatGPTProWS{s.proWS, s.providerWS} {
+		if !s.contextEnabled() || bridge == nil {
+			continue
+		}
+		handled, err := bridge.Handle(data)
 		if handled {
 			if s.session != nil {
 				s.session.setActive(s.turnsActive())

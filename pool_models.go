@@ -265,7 +265,7 @@ func serveUnifiedOpenAIModels(w http.ResponseWriter, pools ...*poolState) {
 	data := make([]map[string]any, 0, len(descriptors))
 	seen := make(map[string]bool)
 	for _, model := range descriptors {
-		if model.Protocol == "gemini" || seen[model.ID] {
+		if seen[model.ID] || (model.Protocol == "gemini" && model.Provider != string(AccountTypeAntigravity)) {
 			continue
 		}
 		seen[model.ID] = true
@@ -286,7 +286,7 @@ func serveUnifiedGeminiModels(w http.ResponseWriter, pool *poolState) {
 	for _, model := range antigravityCatalog(pool) {
 		methods := []string{"generateContent", "streamGenerateContent", "countTokens"}
 		models = append(models, map[string]any{
-			"name": "models/" + model.ID, "displayName": model.DisplayName,
+			"name": "models/antigravity/" + model.ID, "displayName": model.DisplayName,
 			"inputTokenLimit": model.MaxTokens, "outputTokenLimit": model.MaxOutputTokens,
 			"supportedGenerationMethods": methods,
 		})

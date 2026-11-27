@@ -131,6 +131,7 @@ type chatGPTProWS struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	request *http.Request
+	claims  func(model string) bool
 	handle  proWSHandler
 	write   proWSWrite
 	limit   int64
@@ -144,7 +145,7 @@ type chatGPTProWS struct {
 
 func newChatGPTProWS(ctx context.Context, r *http.Request, handle proWSHandler, write proWSWrite, limit int64, onDone func()) *chatGPTProWS {
 	ctx, cancel := context.WithCancel(ctx)
-	return &chatGPTProWS{ctx: ctx, cancel: cancel, request: r, handle: handle, write: write, limit: effectiveWebSocketReadLimit(AccountTypeCodex, limit), onDone: onDone}
+	return &chatGPTProWS{ctx: ctx, cancel: cancel, request: r, claims: isProModel, handle: handle, write: write, limit: effectiveWebSocketReadLimit(AccountTypeCodex, limit), onDone: onDone}
 }
 
 // Handle returns false without modifying ordinary Codex frames. A handled frame
@@ -153,7 +154,7 @@ func (b *chatGPTProWS) Handle(frame []byte) (bool, error) {
 	if int64(len(frame)) > b.limit {
 		return true, b.writeError(http.StatusBadRequest, "Request exceeds WebSocket read limit")
 	}
-	if !isCodexResponseCreate(frame) || proModel(extractCodexWebSocketRequestedModel(frame)) == "" {
+	if !isCodexResponseCreate(frame) || !b.claims(extractCodexWebSocketRequestedModel(frame)) {
 		return false, nil
 	}
 	body, model, err := proWSRequest(frame, b.limit)

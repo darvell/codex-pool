@@ -196,6 +196,105 @@ func TestUnifiedGeminiCatalogIncludesGeminiAccounts(t *testing.T) {
 	t.Fatal("Gemini OAuth catalog is absent from the native models endpoint")
 }
 
+func TestAntigravityGeminiCatalogsUseQualifiedID(t *testing.T) {
+	const id = "gemini-3.7-flash"
+	const qualifiedID = "antigravity/" + id
+	t.Setenv("POOL_JWT_SECRET", "test-secret")
+	auth, err := generateClaudeAuth("test-secret", &PoolUser{ID: "model-user", Token: "download-token", CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := &Account{ID: "antigravity", Type: AccountTypeAntigravity, AccessToken: "ag-access", ProjectID: "ag-project"}
+	upstreamCalls := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		var body struct {
+			Model   string `json:"model"`
+			Project string `json:"project"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if req.URL.Host != "daily.test" || req.Header.Get("Authorization") != "Bearer ag-access" || body.Model != id || body.Project != "ag-project" {
+			t.Fatalf("wrong upstream route: host=%s request=%+v", req.URL.Host, body)
+		}
+		return antigravityHTTPResponse(http.StatusOK, antigravitySuccessSSE), nil
+	})
+	h, _ := testAntigravityHandler(t, transport, account)
+	ag := h.registry.ForType(AccountTypeAntigravity).(*AntigravityProvider)
+	base := ag.DailyURL()
+	h.registry = NewProviderRegistry(NewCodexProvider(base, base, nil), nil, NewGeminiProvider(base, base), ag)
+	h.cfg.maxInMemoryBodyBytes = 1 << 20
+	h.pool.antigravityModels.ReplaceAccount(account.ID, AntigravityAccountSnapshot{
+		Models: map[string]AntigravityModelInfo{id: {ID: id, DisplayName: "Antigravity Flash"}},
+	})
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+auth.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		h.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s %s: status=%d body=%s", method, path, recorder.Code, recorder.Body.String())
+		}
+		return recorder
+	}
+
+	t.Run("OpenAI", func(t *testing.T) {
+		recorder := request(http.MethodGet, "/v1/models", "")
+		var body struct {
+			Data []struct {
+				ID      string `json:"id"`
+				OwnedBy string `json:"owned_by"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, model := range body.Data {
+			if model.ID == qualifiedID && model.OwnedBy == string(AccountTypeAntigravity) {
+				response := request(http.MethodPost, "/v1/chat/completions", `{"model":"`+model.ID+`","messages":[{"role":"user","content":"hello"}]}`)
+				if !strings.Contains(response.Body.String(), `"content":"ok"`) {
+					t.Fatalf("Chat Completions response = %s", response.Body.String())
+				}
+				response = request(http.MethodPost, "/v1/responses", `{"model":"`+model.ID+`","input":"hello"}`)
+				if !strings.Contains(response.Body.String(), `"text":"ok"`) {
+					t.Fatalf("Responses response = %s", response.Body.String())
+				}
+				return
+			}
+		}
+		t.Fatalf("%s is missing from /v1/models", qualifiedID)
+	})
+
+	t.Run("Gemini", func(t *testing.T) {
+		recorder := request(http.MethodGet, "/v1beta/models", "")
+		var body struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		names := make(map[string]int)
+		for _, model := range body.Models {
+			names[model.Name]++
+		}
+		name := "models/" + qualifiedID
+		if names["models/"+id] != 1 || names[name] != 1 {
+			t.Fatalf("Gemini catalog names = %v", names)
+		}
+		response := request(http.MethodPost, "/v1beta/"+name+":generateContent", `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+		if !strings.Contains(response.Body.String(), `"text":"ok"`) {
+			t.Fatalf("Gemini response = %s", response.Body.String())
+		}
+	})
+	if upstreamCalls != 3 {
+		t.Fatalf("Antigravity upstream called %d times, want 3", upstreamCalls)
+	}
+}
+
 func TestServePoolModelsOmitsCredentials(t *testing.T) {
 	t.Parallel()
 

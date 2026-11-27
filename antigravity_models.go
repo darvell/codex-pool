@@ -343,6 +343,10 @@ var antigravityFallbackModels = []AntigravityCatalogModel{
 	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-medium", DisplayName: "Gemini 3.8 Flash (Medium)", SupportsThinking: true, SupportsTools: true}},
 	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-low", DisplayName: "Gemini 3.8 Flash (Low)", SupportsThinking: true, SupportsTools: true}},
 	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-3.8-flash-tiered", DisplayName: "Gemini 3.8 Flash (Tiered)", SupportsThinking: true, SupportsTools: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-4-neon-low", DisplayName: "Gemini 4 Neon (Low)", MaxTokens: antigravityNeonContextWindow, MaxOutputTokens: antigravityNeonMaxOutput, SupportsImages: true, SupportsThinking: true, SupportsTools: true, WebSearch: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-4-neon-medium", DisplayName: "Gemini 4 Neon (Medium)", MaxTokens: antigravityNeonContextWindow, MaxOutputTokens: antigravityNeonMaxOutput, SupportsImages: true, SupportsThinking: true, SupportsTools: true, WebSearch: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-4-neon-high", DisplayName: "Gemini 4 Neon (High)", MaxTokens: antigravityNeonContextWindow, MaxOutputTokens: antigravityNeonMaxOutput, SupportsImages: true, SupportsThinking: true, SupportsTools: true, WebSearch: true}},
+	{AntigravityModelInfo: AntigravityModelInfo{ID: "gemini-4-neon-xhigh", DisplayName: "Gemini 4 Neon (XHigh)", MaxTokens: antigravityNeonContextWindow, MaxOutputTokens: antigravityNeonMaxOutput, SupportsImages: true, SupportsThinking: true, SupportsTools: true, WebSearch: true}},
 }
 
 func parseAntigravityModelSnapshot(body []byte, fetchedAt time.Time) (AntigravityAccountSnapshot, error) {
@@ -380,6 +384,11 @@ func parseAntigravityModelSnapshot(body []byte, fetchedAt time.Time) (Antigravit
 			continue
 		}
 		if antigravityHiddenModelIDs[id] {
+			continue
+		}
+		var disabled bool
+		decodeRaw(raw, "disabled", &disabled)
+		if disabled {
 			continue
 		}
 		model := AntigravityModelInfo{ID: id, Raw: raw, WebSearch: webSearch[id], SupportsTools: true}
@@ -479,22 +488,37 @@ func decodeRaw(raw map[string]json.RawMessage, key string, target any) {
 	}
 }
 
+const (
+	antigravityModelFetchAttempts = 2
+	antigravityNeonContextWindow  = 1048576
+	antigravityNeonMaxOutput      = 65536
+)
+
 func fetchAntigravityModels(ctx context.Context, transport http.RoundTripper, account *Account, bases ...*url.URL) (AntigravityAccountSnapshot, error) {
 	var lastErr error
 	for _, base := range bases {
 		if base == nil {
 			continue
 		}
-		status, responseBody, err := postAntigravityInternal(ctx, transport, account, base, "fetchAvailableModels", []byte(`{}`))
-		if err != nil {
+		for attempt := 0; attempt < antigravityModelFetchAttempts; attempt++ {
+			status, responseBody, err := postAntigravityInternal(ctx, transport, account, base, "fetchAvailableModels", []byte(`{}`))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if status < 200 || status >= 300 {
+				lastErr = fmt.Errorf("fetchAvailableModels failed: %d: %s", status, safeText(responseBody))
+				if status != http.StatusTooManyRequests && status < 500 {
+					break
+				}
+				continue
+			}
+			snapshot, err := parseAntigravityModelSnapshot(responseBody, time.Now())
+			if err == nil {
+				return snapshot, nil
+			}
 			lastErr = err
-			continue
 		}
-		if status < 200 || status >= 300 {
-			lastErr = fmt.Errorf("fetchAvailableModels failed: %d: %s", status, safeText(responseBody))
-			continue
-		}
-		return parseAntigravityModelSnapshot(responseBody, time.Now())
 	}
 	if lastErr == nil {
 		lastErr = errors.New("fetchAvailableModels has no configured upstream")

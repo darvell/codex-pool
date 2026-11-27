@@ -94,6 +94,36 @@ func TestParseAntigravityModelSnapshotHidesInternalAndRetiredModels(t *testing.T
 	}
 }
 
+func TestParseAntigravityModelSnapshotOmitsDisabledModels(t *testing.T) {
+	body := []byte(`{"models":{
+		"gemini-4-neon-xhigh":{"displayName":"Gemini 4 Neon (XHigh)"},
+		"gemini-4-neon-disabled":{"displayName":"Gemini 4 Neon (Disabled)","disabled":true}
+	}}`)
+	snapshot, err := parseAntigravityModelSnapshot(body, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snapshot.Models["gemini-4-neon-xhigh"]; !ok {
+		t.Fatal("enabled Neon model was omitted")
+	}
+	if _, ok := snapshot.Models["gemini-4-neon-disabled"]; ok {
+		t.Fatal("disabled Neon model was advertised")
+	}
+}
+
+func TestAntigravityFallbackModelsIncludeNeonVariants(t *testing.T) {
+	registry := &antigravityModelRegistry{accounts: make(map[string]AntigravityAccountSnapshot)}
+	for _, id := range []string{"gemini-4-neon-low", "gemini-4-neon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh"} {
+		if _, ok := registry.Canonical(id); !ok {
+			t.Fatalf("fallback model %q was not routable", id)
+		}
+	}
+	fallback := antigravityFallbackModels[len(antigravityFallbackModels)-1]
+	if fallback.MaxTokens != antigravityNeonContextWindow || fallback.MaxOutputTokens != antigravityNeonMaxOutput || !fallback.SupportsImages || !fallback.WebSearch {
+		t.Fatalf("Neon fallback metadata = %#v", fallback)
+	}
+}
+
 func TestParseAntigravityModelSnapshotRepairsKnownMetadataGaps(t *testing.T) {
 	body := []byte(`{"models":{
 		"gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image","supportsImages":true},
@@ -140,8 +170,27 @@ func TestFetchAntigravityModelsUsesDailyThenProductionAndEmptyBody(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(hosts, ",") != "daily.example.test,prod.example.test" || snapshot.Models["gemini-live"].DisplayName != "Gemini Live" {
+	if strings.Join(hosts, ",") != "daily.example.test,daily.example.test,prod.example.test" || snapshot.Models["gemini-live"].DisplayName != "Gemini Live" {
 		t.Fatalf("hosts=%v snapshot=%#v", hosts, snapshot)
+	}
+}
+
+func TestFetchAntigravityModelsRetriesTransientFailure(t *testing.T) {
+	daily, _ := url.Parse("https://daily.example.test")
+	attempts := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{StatusCode: http.StatusBadGateway, Status: "502 Bad Gateway", Body: io.NopCloser(strings.NewReader("temporary")), Header: make(http.Header)}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(`{"models":{"gemini-4-neon-xhigh":{"displayName":"Gemini 4 Neon (XHigh)"}}}`)), Header: make(http.Header)}, nil
+	})
+	snapshot, err := fetchAntigravityModels(context.Background(), transport, &Account{AccessToken: "token"}, daily)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || snapshot.Models["gemini-4-neon-xhigh"].DisplayName != "Gemini 4 Neon (XHigh)" {
+		t.Fatalf("attempts=%d snapshot=%#v", attempts, snapshot)
 	}
 }
 
