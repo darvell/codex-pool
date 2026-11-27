@@ -701,20 +701,17 @@ func overloadSplitAccounts() (*Account, *Account) {
 	return busy, free
 }
 
-func assertNotCooling(t *testing.T, account *Account) {
-	t.Helper()
+func accountCooling(account *Account) bool {
 	account.mu.Lock()
 	defer account.mu.Unlock()
-	if account.RateLimitUntil.After(time.Now()) {
-		t.Fatalf("account %s cooled down for a request-scoped overload", account.ID)
-	}
+	return account.RateLimitUntil.After(time.Now())
 }
 
-func TestServerOverloadRetriesSameAccountFirst(t *testing.T) {
+func TestServerOverloadRetriesSameAccountOnce(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	var busyCalls, freeCalls atomic.Int32
-	upstream := overloadSplitUpstream(2, &busyCalls, &freeCalls)
+	upstream := overloadSplitUpstream(1, &busyCalls, &freeCalls)
 	defer upstream.Close()
 	busy, free := overloadSplitAccounts()
 	proxy := newOverloadFailoverHandler(t, upstream, []*Account{busy, free})
@@ -724,16 +721,18 @@ func TestServerOverloadRetriesSameAccountFirst(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
-	if busyCalls.Load() != 3 || freeCalls.Load() != 0 {
-		t.Fatalf("busy calls=%d free calls=%d, want 3 and 0", busyCalls.Load(), freeCalls.Load())
+	if busyCalls.Load() != 2 || freeCalls.Load() != 0 {
+		t.Fatalf("busy calls=%d free calls=%d, want 2 and 0", busyCalls.Load(), freeCalls.Load())
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("retries took %s; the Retry-After-Ms hint was not honored", elapsed)
+		t.Fatalf("retry took %s; the Retry-After-Ms hint was not honored", elapsed)
 	}
-	assertNotCooling(t, busy)
+	if accountCooling(busy) {
+		t.Fatal("a single shed cooled the account down")
+	}
 }
 
-func TestServerOverloadFailsOverAfterSameAccountBudget(t *testing.T) {
+func TestServerOverloadRepeatMovesAndCoolsAccount(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret")
 
 	var busyCalls, freeCalls atomic.Int32
@@ -749,7 +748,9 @@ func TestServerOverloadFailsOverAfterSameAccountBudget(t *testing.T) {
 	if want := int32(maxSameAccountOverloadRetries + 1); busyCalls.Load() != want || freeCalls.Load() != 1 {
 		t.Fatalf("busy calls=%d free calls=%d, want %d and 1", busyCalls.Load(), freeCalls.Load(), want)
 	}
-	assertNotCooling(t, busy)
+	if !accountCooling(busy) {
+		t.Fatal("an account that shed the request twice was not cooled down")
+	}
 }
 
 func TestServerOverloadRetryDelayHonorsHints(t *testing.T) {

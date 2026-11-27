@@ -625,10 +625,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	var overloadRetryAccount *Account
 	firstByteFailedOver := false
 
-	// A capacity shed belongs to the request, not the account: the next
-	// account sees the same model capacity, and moving the conversation
-	// throws away its warm prompt cache. Retry the same account first, then
-	// move once its budget is spent. Neither path cools the account down.
+	// Retry a shed once on the same account, then move and cool it down.
 	retryOverload := func(acc *Account, header http.Header, body []byte) bool {
 		if serverOverloadRetries >= maxServerOverloadRetries {
 			return false
@@ -651,6 +648,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			return waitOverload(delay)
 		}
 		if h.pool.candidateForTier(conversationID, exclude, accountType, requiredPlan, originIP, requestedModel, requestedTier) != nil {
+			applyServerOverloadCooldown(acc)
 			if h.cfg.debug.Load() {
 				log.Printf("[%s] upstream overloaded on account %s; failing over (%d/%d)", reqID, acc.ID, serverOverloadRetries, maxServerOverloadRetries)
 			}

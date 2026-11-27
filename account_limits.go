@@ -103,8 +103,27 @@ func isPermanentRefreshTokenError(err error) bool {
 }
 
 // maxSameAccountOverloadRetries bounds how often one request retries a
-// capacity shed on the account that returned it before moving elsewhere.
-const maxSameAccountOverloadRetries = 3
+// capacity shed on the account that returned it before moving elsewhere. A
+// single shed is often a blip, and retrying in place keeps the warm prompt
+// cache. A repeat usually means upstream is shedding that account for
+// minutes, so the request moves and the account cools down.
+const maxSameAccountOverloadRetries = 1
+
+// serverOverloadCooldown keeps new requests off an account that shed the
+// same request twice.
+const serverOverloadCooldown = 30 * time.Second
+
+func applyServerOverloadCooldown(account *Account) {
+	if account == nil {
+		return
+	}
+	until := time.Now().Add(serverOverloadCooldown)
+	account.mu.Lock()
+	if account.RateLimitUntil.Before(until) {
+		account.RateLimitUntil = until
+	}
+	account.mu.Unlock()
+}
 
 // serverOverloadRetryDelay paces a retry after a capacity shed. The
 // provider's hint wins when present, from the Retry-After or Retry-After-Ms

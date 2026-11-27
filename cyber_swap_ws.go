@@ -1153,16 +1153,14 @@ func isCodexMeaningfulOutput(data []byte) bool {
 
 const (
 	websocketOverloadWindow = 30 * time.Second
-	// A capacity shed is request-scoped, and moving the turn drops the
-	// socket's warm context, so the same account gets the HTTP path's retry
-	// budget before the turn moves.
+	// The same account gets the HTTP path's retry budget before the turn
+	// moves and the account cools down.
 	websocketOverloadSwapAfter = maxSameAccountOverloadRetries + 1
 
 	// websocketOverloadRecoveryMax bounds how many times a turn re-enters
-	// the relay after the same-account budget is spent and every other
-	// candidate is cooling down. Each round waits for a candidate to leave
-	// cooldown, then retries selection; a small pool should wait rather than
-	// end the session.
+	// the relay after every other candidate is cooling down from overload.
+	// Each round waits for a candidate to leave cooldown, then retries
+	// selection; a small pool should wait rather than end the session.
 	websocketOverloadRecoveryMax = 3
 
 	// websocketOverloadRecoveryWait caps how long one recovery round blocks.
@@ -1201,6 +1199,9 @@ func (s *codexRelayState) recordOverload(account *Account) int {
 	}
 	kept = append(kept, now)
 	s.overloadTimes[account.ID] = kept
+	if len(kept) >= websocketOverloadSwapAfter {
+		applyServerOverloadCooldown(account)
+	}
 	return len(kept)
 }
 
@@ -1324,9 +1325,9 @@ func (s *codexRelayState) retryOverloadedTurn(pending *overloadPendingErr) error
 			return s.replaceTurnUpstream(cand, turn, "overload")
 		}
 		// No candidate is available: every other eligible account is
-		// cooling down. Wait out the nearest cooldown and retry candidate
-		// selection rather than ending the session. Bound the rounds so a
-		// permanently failing pool still fails instead of hanging forever.
+		// cooling down from overload. Wait out the nearest cooldown and retry
+		// candidate selection rather than ending the session. Bound the rounds
+		// so a permanently failing pool still fails instead of hanging forever.
 		if cooldown, ok := s.overloadRecoveryCooldown(turn); ok {
 			s.turnMu.Unlock()
 			log.Printf("[%s] overload recovery %d/%d: waiting %s for account cooldown", s.opts.ReqID, s.overloadRecovery, websocketOverloadRecoveryMax, cooldown)
